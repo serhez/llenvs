@@ -1,0 +1,583 @@
+"""Tests for text segmentation and segmented environments."""
+
+import pytest
+from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
+from env_evals.core.reward import RewardSignal, RewardBundle, RewardType
+from env_evals.core.segmentation import (
+    Segmenter,
+    SentenceSegmenter,
+    LineSegmenter,
+    PatternSegmenter,
+    CompositeSegmenter,
+    SemanticSegmenter,
+)
+from env_evals.core.segmented_environment import (
+    SegmentedEnvironment,
+    SegmentedHidden,
+)
+
+
+class TestSentenceSegmenter:
+    """Tests for SentenceSegmenter."""
+
+    def test_basic_sentences(self):
+        """Test splitting basic sentences."""
+        segmenter = SentenceSegmenter()
+        text = "First sentence. Second sentence. Third sentence."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+        assert segments[0] == "First sentence."
+        assert segments[1] == "Second sentence."
+        assert segments[2] == "Third sentence."
+
+    def test_question_and_exclamation(self):
+        """Test splitting on ? and !"""
+        segmenter = SentenceSegmenter()
+        text = "What is this? It's amazing! Yes, it is."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+        assert segments[0] == "What is this?"
+        assert segments[1] == "It's amazing!"
+        assert segments[2] == "Yes, it is."
+
+    def test_abbreviations(self):
+        """Test that common abbreviations don't cause splits."""
+        segmenter = SentenceSegmenter()
+        text = "Dr. Smith went to the store. Mr. Jones stayed home."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 2
+        assert "Dr. Smith" in segments[0]
+        assert "Mr. Jones" in segments[1]
+
+    def test_empty_text(self):
+        """Test empty text returns empty list."""
+        segmenter = SentenceSegmenter()
+
+        assert segmenter.segment("") == []
+        assert segmenter.segment("   ") == []
+
+    def test_single_sentence(self):
+        """Test single sentence without trailing punctuation."""
+        segmenter = SentenceSegmenter()
+        text = "This is a single sentence"
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 1
+        assert segments[0] == "This is a single sentence"
+
+    def test_find_boundary_basic(self):
+        """Test find_boundary finds first sentence end."""
+        segmenter = SentenceSegmenter()
+        text = "First sentence. Second sentence."
+
+        boundary = segmenter.find_boundary(text)
+
+        assert boundary == 16  # After ". "
+
+    def test_find_boundary_no_boundary(self):
+        """Test find_boundary returns None when no boundary."""
+        segmenter = SentenceSegmenter()
+        text = "No boundary here"
+
+        assert segmenter.find_boundary(text) is None
+
+    def test_find_boundary_abbreviation(self):
+        """Test find_boundary skips abbreviations."""
+        segmenter = SentenceSegmenter()
+        text = "Dr. Smith is here. Next sentence."
+
+        boundary = segmenter.find_boundary(text)
+
+        # Should find boundary after "here." not after "Dr."
+        assert boundary > 4
+
+
+class TestLineSegmenter:
+    """Tests for LineSegmenter."""
+
+    def test_single_newline(self):
+        """Test splitting on single newlines."""
+        segmenter = LineSegmenter(delimiter="\n")
+        text = "Line one\nLine two\nLine three"
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+        assert segments[0] == "Line one"
+        assert segments[1] == "Line two"
+        assert segments[2] == "Line three"
+
+    def test_double_newline(self):
+        """Test splitting on double newlines (paragraphs)."""
+        segmenter = LineSegmenter(delimiter="\n\n")
+        text = "Paragraph one.\n\nParagraph two.\n\nParagraph three."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+
+    def test_empty_lines_excluded(self):
+        """Test that empty lines are excluded."""
+        segmenter = LineSegmenter()
+        text = "Line one\n\n\nLine two"
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 2
+
+    def test_find_boundary(self):
+        """Test find_boundary finds first newline."""
+        segmenter = LineSegmenter()
+        text = "First line\nSecond line"
+
+        boundary = segmenter.find_boundary(text)
+
+        assert boundary == 11  # After "First line\n"
+
+
+class TestPatternSegmenter:
+    """Tests for PatternSegmenter."""
+
+    def test_numbered_steps(self):
+        """Test splitting on numbered steps."""
+        segmenter = PatternSegmenter()
+        # Use cleaner text that separates numbered steps clearly
+        text = "Introduction. 1. First part. 2. Second part. 3. Third part."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 4
+        assert segments[0] == "Introduction."
+        assert segments[1].startswith("1.")
+        assert segments[2].startswith("2.")
+        assert segments[3].startswith("3.")
+
+    def test_step_prefix(self):
+        """Test splitting on 'Step N:' format."""
+        segmenter = PatternSegmenter()
+        text = "Step 1: Do this Step 2: Do that Step 3: Done"
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+
+    def test_transition_words(self):
+        """Test splitting on transition words."""
+        segmenter = PatternSegmenter()
+        # Use clear text without numbers that could match patterns
+        text = "We computed the sum. Therefore, the answer is eight."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 2
+        assert "Therefore" in segments[1]
+
+    def test_ordinal_words(self):
+        """Test splitting on First, Second, etc."""
+        segmenter = PatternSegmenter()
+        text = "First, we add the numbers. Second, we subtract. Finally, we multiply."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+
+    def test_no_patterns(self):
+        """Test text with no patterns returns single segment."""
+        segmenter = PatternSegmenter()
+        text = "Just some regular text without any step markers."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 1
+
+    def test_find_boundary(self):
+        """Test find_boundary finds first pattern."""
+        segmenter = PatternSegmenter()
+        text = "Introduction 1. First step 2. Second step"
+
+        boundary = segmenter.find_boundary(text)
+
+        assert boundary == 13  # Before "1. First"
+
+
+class TestCompositeSegmenter:
+    """Tests for CompositeSegmenter."""
+
+    def test_combine_sentence_and_line(self):
+        """Test combining sentence and line segmenters."""
+        segmenter = CompositeSegmenter(
+            segmenters=(LineSegmenter(), SentenceSegmenter())
+        )
+        text = "Line one. Line one continued.\nLine two. Line two end."
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 4
+
+    def test_find_boundary_earliest(self):
+        """Test find_boundary returns earliest boundary."""
+        segmenter = CompositeSegmenter(
+            segmenters=(LineSegmenter(), SentenceSegmenter())
+        )
+        text = "Short.\nLonger sentence here."
+
+        boundary = segmenter.find_boundary(text)
+
+        # Sentence boundary (7) comes before newline boundary
+        assert boundary == 7
+
+
+class TestSegmentedHidden:
+    """Tests for SegmentedHidden."""
+
+    def test_creation(self):
+        """Test creating segmented hidden state."""
+        base_hidden = {"expected_answer": "42"}
+        hidden = SegmentedHidden(
+            base_hidden=base_hidden,
+            accumulated_text="Step 1.",
+            segment_index=1,
+            segments=("Step 1.",),
+            total_segments=3,
+        )
+
+        assert hidden.base_hidden == base_hidden
+        assert hidden.accumulated_text == "Step 1."
+        assert hidden.segment_index == 1
+        assert len(hidden.segments) == 1
+        assert hidden.total_segments == 3
+
+    def test_immutability(self):
+        """Test that hidden state is frozen."""
+        hidden = SegmentedHidden(base_hidden={})
+        with pytest.raises(AttributeError):
+            hidden.accumulated_text = "new text"  # type: ignore
+
+
+class TestSegmentedEnvironment:
+    """Tests for SegmentedEnvironment."""
+
+    def test_creation(self, mock_dataset):
+        """Test creating segmented environment."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        segmenter = SentenceSegmenter()
+
+        env = SegmentedEnvironment(base_env, segmenter)
+
+        assert env.spec.is_multi_turn is True
+        assert "segmented" in env.spec.name
+        assert env.segmenter is segmenter
+        assert env.base_env is base_env
+
+    def test_spec_properties(self, mock_dataset):
+        """Test segmented environment spec."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        spec = env.spec
+        assert spec.is_multi_turn is True
+        assert spec.max_steps is None  # Variable based on response
+        assert "base_environment" in spec.metadata
+
+    def test_reset(self, mock_dataset):
+        """Test environment reset."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, info = env.reset(options={"task_index": 0})
+
+        assert isinstance(state.hidden, SegmentedHidden)
+        assert state.hidden.accumulated_text == ""
+        assert state.hidden.segment_index == 0
+        assert state.hidden.segments == ()
+        assert state.metadata.is_terminal is False
+
+    def test_step_intermediate(self, mock_dataset):
+        """Test intermediate step (not final segment)."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Set total_segments to indicate we're in replay mode with more segments coming
+        state = State(
+            observation=state.observation,
+            hidden=SegmentedHidden(
+                base_hidden=state.hidden.base_hidden,
+                accumulated_text="",
+                segment_index=0,
+                segments=(),
+                total_segments=3,  # 3 segments total, so first 2 are intermediate
+            ),
+            metadata=state.metadata,
+        )
+
+        result = env.step(state, TextAction(text="First segment. "))
+
+        assert result.terminated is False
+        assert result.next_state.metadata.is_terminal is False
+        assert result.next_state.hidden.segment_index == 1
+        assert result.next_state.hidden.accumulated_text == "First segment. "
+        assert result.info["is_intermediate"] is True
+
+    def test_step_final(self, mock_dataset):
+        """Test final step triggers underlying env."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Set up state for final segment (segment_index=1 means we've done 1 segment,
+        # and total_segments=2 means this next step will be the final one)
+        state = State(
+            observation=state.observation,
+            hidden=SegmentedHidden(
+                base_hidden=state.hidden.base_hidden,
+                accumulated_text="<answer>",
+                segment_index=1,  # Already processed 1 segment
+                segments=("<answer>",),
+                total_segments=2,  # 2 total, so next step (index becomes 2) finalizes
+            ),
+            metadata=state.metadata,
+        )
+
+        result = env.step(state, TextAction(text="4</answer>"))
+
+        assert result.terminated is True
+        assert result.next_state.metadata.is_terminal is True
+        assert result.info["is_intermediate"] is False
+
+    def test_finalize(self, mock_dataset):
+        """Test explicit finalization."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Add some accumulated text
+        state = State(
+            observation=state.observation,
+            hidden=SegmentedHidden(
+                base_hidden=state.hidden.base_hidden,
+                accumulated_text="<answer>4</answer>",
+                segment_index=1,
+                segments=("<answer>4</answer>",),
+                total_segments=None,  # Unknown in generation mode
+            ),
+            metadata=state.metadata,
+        )
+
+        result = env.finalize(state)
+
+        assert result.terminated is True
+        assert result.next_state.metadata.is_terminal is True
+
+    def test_replay_full_response(self, mock_dataset):
+        """Test replay with a full response."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        full_response = "First, I need to add. The result is 4. <answer>4</answer>"
+        results = env.replay(state, full_response)
+
+        # Should have multiple steps
+        assert len(results) >= 2
+
+        # Last result should be terminal
+        assert results[-1].next_state.metadata.is_terminal is True
+        assert results[-1].terminated is True
+
+        # Intermediate results should not be terminal
+        for result in results[:-1]:
+            assert result.terminated is False
+
+    def test_replay_correct_answer(self, mock_dataset):
+        """Test replay gives correct reward for right answer."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        # Task 0 expects answer "4"
+        state, _ = env.reset(options={"task_index": 0})
+
+        full_response = "Let me calculate. The answer is <answer>4</answer>"
+        results = env.replay(state, full_response)
+
+        # Final result should have correctness reward
+        final_result = results[-1]
+        correctness = final_result.rewards.by_name("correctness")
+        assert correctness is not None
+        assert correctness.value == 1.0
+
+    def test_replay_incorrect_answer(self, mock_dataset):
+        """Test replay gives zero reward for wrong answer."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        full_response = "Let me calculate. The answer is <answer>5</answer>"
+        results = env.replay(state, full_response)
+
+        final_result = results[-1]
+        correctness = final_result.rewards.by_name("correctness")
+        assert correctness is not None
+        assert correctness.value == 0.0
+
+    def test_replay_empty_response(self, mock_dataset):
+        """Test replay handles empty response."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        results = env.replay(state, "")
+
+        assert len(results) == 1
+        assert results[0].terminated is True
+
+    def test_replay_single_segment(self, mock_dataset):
+        """Test replay with response that doesn't split."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        # No sentence boundary
+        full_response = "<answer>4</answer>"
+        results = env.replay(state, full_response)
+
+        assert len(results) == 1
+        assert results[0].terminated is True
+
+    def test_len(self, mock_dataset):
+        """Test __len__ delegates to underlying env."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        assert len(env) == len(mock_dataset)
+
+    def test_replay_with_pattern_segmenter(self, mock_dataset):
+        """Test replay with PatternSegmenter for numbered steps."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, PatternSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Use clear step markers without embedded numbers that could confuse the pattern
+        full_response = "Step 1: Add the numbers Step 2: Get result Step 3: <answer>4</answer>"
+        results = env.replay(state, full_response)
+
+        assert len(results) == 3
+
+    def test_state_immutability(self, mock_dataset):
+        """Test that step doesn't mutate input state."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Set up state with total_segments
+        state = State(
+            observation=state.observation,
+            hidden=SegmentedHidden(
+                base_hidden=state.hidden.base_hidden,
+                accumulated_text="",
+                segment_index=0,
+                segments=(),
+                total_segments=2,
+            ),
+            metadata=state.metadata,
+        )
+
+        original_accumulated = state.hidden.accumulated_text
+        original_index = state.hidden.segment_index
+
+        env.step(state, TextAction(text="Segment one. "))
+
+        # Original state should be unchanged
+        assert state.hidden.accumulated_text == original_accumulated
+        assert state.hidden.segment_index == original_index
+
+
+class TestSegmentedEnvironmentWithLineSegmenter:
+    """Tests for SegmentedEnvironment with LineSegmenter."""
+
+    def test_replay_line_by_line(self, mock_dataset):
+        """Test replay segments by lines."""
+        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+
+        base_env = ReasoningGymEnvironment(dataset=mock_dataset)
+        env = SegmentedEnvironment(base_env, LineSegmenter())
+
+        state, _ = env.reset(options={"task_index": 0})
+
+        full_response = "Line 1: Think about it\nLine 2: Calculate\nLine 3: <answer>4</answer>"
+        results = env.replay(state, full_response)
+
+        assert len(results) == 3
+
+
+class TestSegmenterProtocol:
+    """Tests for Segmenter protocol compliance."""
+
+    def test_sentence_segmenter_is_segmenter(self):
+        """Test SentenceSegmenter implements Segmenter."""
+        segmenter = SentenceSegmenter()
+        assert isinstance(segmenter, Segmenter)
+
+    def test_line_segmenter_is_segmenter(self):
+        """Test LineSegmenter implements Segmenter."""
+        segmenter = LineSegmenter()
+        assert isinstance(segmenter, Segmenter)
+
+    def test_pattern_segmenter_is_segmenter(self):
+        """Test PatternSegmenter implements Segmenter."""
+        segmenter = PatternSegmenter()
+        assert isinstance(segmenter, Segmenter)
+
+    def test_composite_segmenter_is_segmenter(self):
+        """Test CompositeSegmenter implements Segmenter."""
+        segmenter = CompositeSegmenter(segmenters=(SentenceSegmenter(),))
+        assert isinstance(segmenter, Segmenter)
+
+    def test_semantic_segmenter_is_segmenter(self):
+        """Test SemanticSegmenter implements Segmenter."""
+        segmenter = SemanticSegmenter()
+        assert isinstance(segmenter, Segmenter)

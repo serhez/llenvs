@@ -1,0 +1,864 @@
+"""HuggingFace datasets adapter - wraps HF datasets as MDP environments.
+
+Provides access to thousands of datasets on the HuggingFace Hub through
+a common interface. Most HF datasets are single-turn (question -> answer).
+"""
+
+from dataclasses import dataclass, field
+from typing import Any, Callable, Literal
+import re
+import uuid
+
+from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
+from env_evals.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from env_evals.core.environment import Environment, StepResult, EnvironmentSpec
+from env_evals.core.extraction import AnswerExtractor, TagBasedExtractor
+
+
+# Type alias for scoring functions
+ScoringFunction = Callable[[str, str], float]
+
+
+def extract_boxed_answer(text: str) -> str | None:
+    """Extract answer from LaTeX \\boxed{...} format.
+
+    Handles nested braces correctly.
+
+    Args:
+        text: Text containing \\boxed{answer}.
+
+    Returns:
+        Extracted answer or None if not found.
+    """
+    # Find \boxed{ and then match balanced braces
+    pattern = r'\\boxed\s*\{'
+    match = re.search(pattern, text)
+    if not match:
+        return None
+
+    start = match.end()
+    depth = 1
+    pos = start
+
+    while pos < len(text) and depth > 0:
+        if text[pos] == '{':
+            depth += 1
+        elif text[pos] == '}':
+            depth -= 1
+        pos += 1
+
+    if depth == 0:
+        return text[start:pos-1].strip()
+    return None
+
+
+def extract_numeric_answer(text: str) -> str | None:
+    """Extract numeric answer (last number in text).
+
+    Handles integers, decimals, and negative numbers.
+    Removes commas from numbers like 1,234.
+
+    Args:
+        text: Text containing numeric answer.
+
+    Returns:
+        Extracted number as string or None.
+    """
+    # Find all numbers (including negative, decimals, with commas)
+    pattern = r'-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?'
+    matches = re.findall(pattern, text)
+    if matches:
+        # Return last number, remove commas
+        return matches[-1].replace(',', '')
+    return None
+
+
+def extract_last_line(text: str) -> str | None:
+    """Extract last non-empty line as answer.
+
+    Args:
+        text: Text to extract from.
+
+    Returns:
+        Last non-empty line or None.
+    """
+    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
+    return lines[-1] if lines else None
+
+
+def normalize_numeric(value: str) -> str | None:
+    """Normalize a numeric string for comparison.
+
+    Handles integers, floats, removes trailing zeros.
+
+    Args:
+        value: String that may contain a number.
+
+    Returns:
+        Normalized numeric string or None if not numeric.
+    """
+    try:
+        # Try to parse as float
+        num = float(value.replace(',', ''))
+        # If it's an integer, return as int string
+        if num == int(num):
+            return str(int(num))
+        # Otherwise return float with reasonable precision
+        return f"{num:.10g}"
+    except (ValueError, TypeError):
+        return None
+
+
+def score_exact_match(predicted: str, expected: str) -> float:
+    """Score based on exact string match (case-insensitive).
+
+    Args:
+        predicted: Model's predicted answer.
+        expected: Expected answer.
+
+    Returns:
+        1.0 if match, 0.0 otherwise.
+    """
+    return 1.0 if predicted.strip().lower() == expected.strip().lower() else 0.0
+
+
+def score_numeric(predicted: str, expected: str) -> float:
+    """Score based on numeric equivalence.
+
+    Args:
+        predicted: Model's predicted answer.
+        expected: Expected answer.
+
+    Returns:
+        1.0 if numerically equivalent, 0.0 otherwise.
+    """
+    pred_norm = normalize_numeric(predicted)
+    exp_norm = normalize_numeric(expected)
+
+    if pred_norm is None or exp_norm is None:
+        return 0.0
+
+    return 1.0 if pred_norm == exp_norm else 0.0
+
+
+def score_numeric_tolerance(predicted: str, expected: str, rtol: float = 1e-5) -> float:
+    """Score based on numeric equivalence with tolerance.
+
+    Args:
+        predicted: Model's predicted answer.
+        expected: Expected answer.
+        rtol: Relative tolerance for comparison.
+
+    Returns:
+        1.0 if within tolerance, 0.0 otherwise.
+    """
+    try:
+        pred_val = float(predicted.replace(',', ''))
+        exp_val = float(expected.replace(',', ''))
+
+        if exp_val == 0:
+            return 1.0 if abs(pred_val) < rtol else 0.0
+
+        return 1.0 if abs(pred_val - exp_val) / abs(exp_val) < rtol else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+# Built-in answer extraction strategies
+ANSWER_EXTRACTORS: dict[str, Callable[[str], str | None]] = {
+    "boxed": extract_boxed_answer,
+    "numeric": extract_numeric_answer,
+    "last_line": extract_last_line,
+    "direct": lambda x: x.strip() if x else None,
+}
+
+# Built-in scoring functions
+SCORING_FUNCTIONS: dict[str, ScoringFunction] = {
+    "exact": score_exact_match,
+    "numeric": score_numeric,
+    "numeric_tolerance": score_numeric_tolerance,
+}
+
+
+@dataclass(frozen=True)
+class HuggingFaceHidden:
+    """Hidden state for HuggingFace dataset environments.
+
+    Attributes:
+        entry: The original dataset entry dict.
+        expected_answer: The expected answer string.
+        task_index: Index in the dataset.
+        dataset_name: Full HuggingFace dataset name.
+        split: Dataset split this came from.
+    """
+    entry: dict[str, Any]
+    expected_answer: str
+    task_index: int
+    dataset_name: str
+    split: str
+
+
+@dataclass
+class HuggingFaceCorrectnessReward:
+    """Reward function for HuggingFace dataset correctness."""
+
+    _name: str = "correctness"
+    _reward_type: RewardType = RewardType.OUTCOME
+
+    def __init__(
+        self,
+        extractor: AnswerExtractor,
+        answer_extraction: Callable[[str], str | None],
+        scoring_fn: ScoringFunction,
+    ) -> None:
+        """Initialize reward function.
+
+        Args:
+            extractor: Extractor for model responses.
+            answer_extraction: Function to extract answer from expected solution.
+            scoring_fn: Function to score predicted vs expected.
+        """
+        self._extractor = extractor
+        self._answer_extraction = answer_extraction
+        self._scoring_fn = scoring_fn
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def reward_type(self) -> RewardType:
+        return self._reward_type
+
+    def compute(
+        self,
+        state: State[TextObservation, HuggingFaceHidden],
+        action: TextAction,
+        next_state: State[TextObservation, HuggingFaceHidden],
+    ) -> RewardSignal:
+        """Compute correctness reward."""
+        # Extract answer from model response
+        extracted, extraction_meta = self._extractor.extract(action.text)
+
+        if extracted is None:
+            return RewardSignal(
+                value=0.0,
+                name=self.name,
+                reward_type=self.reward_type,
+                metadata={"extracted": None, "extraction": extraction_meta},
+            )
+
+        # Get expected answer
+        expected = state.hidden.expected_answer
+
+        # Score
+        score = self._scoring_fn(extracted, expected)
+
+        return RewardSignal(
+            value=float(score),
+            name=self.name,
+            reward_type=self.reward_type,
+            metadata={
+                "extracted": extracted,
+                "expected": expected,
+                "extraction": extraction_meta,
+            },
+        )
+
+
+@dataclass
+class HuggingFaceFormatReward:
+    """Reward function for checking answer format compliance."""
+
+    _name: str = "format"
+    _reward_type: RewardType = RewardType.FORMAT
+
+    def __init__(self, extractor: AnswerExtractor) -> None:
+        self._extractor = extractor
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def reward_type(self) -> RewardType:
+        return self._reward_type
+
+    def compute(
+        self,
+        state: State[TextObservation, HuggingFaceHidden],
+        action: TextAction,
+        next_state: State[TextObservation, HuggingFaceHidden],
+    ) -> RewardSignal:
+        """Compute format reward."""
+        extracted, extraction_meta = self._extractor.extract(action.text)
+
+        return RewardSignal(
+            value=1.0 if extracted is not None else 0.0,
+            name=self.name,
+            reward_type=self.reward_type,
+            metadata={"extraction": extraction_meta},
+        )
+
+
+class HuggingFaceEnvironment:
+    """MDP wrapper for HuggingFace datasets.
+
+    Converts HuggingFace datasets to the Environment protocol.
+    Each episode corresponds to a single example from the dataset.
+
+    Attributes:
+        dataset: The HuggingFace Dataset object.
+        question_column: Column name for questions/problems.
+        answer_column: Column name for answers/solutions.
+    """
+
+    def __init__(
+        self,
+        dataset: Any,  # datasets.Dataset
+        dataset_name: str,
+        split: str,
+        question_column: str = "problem",
+        answer_column: str = "solution",
+        answer_extraction: str | Callable[[str], str | None] = "boxed",
+        scoring: str | ScoringFunction = "numeric",
+        extractor: AnswerExtractor | None = None,
+        include_format_reward: bool = True,
+        metadata_columns: list[str] | None = None,
+    ) -> None:
+        """Initialize the environment.
+
+        Args:
+            dataset: HuggingFace Dataset object.
+            dataset_name: Full dataset name (e.g., "hendrycks/competition_math").
+            split: Dataset split (e.g., "train", "test").
+            question_column: Column containing the question/problem.
+            answer_column: Column containing the answer/solution.
+            answer_extraction: How to extract final answer from answer_column.
+                Either a string key ("boxed", "numeric", "last_line", "direct")
+                or a custom function.
+            scoring: How to score answers. Either a string key
+                ("exact", "numeric", "numeric_tolerance") or a custom function.
+            extractor: Extractor for model responses. Defaults to TagBasedExtractor.
+            include_format_reward: Whether to include format checking reward.
+            metadata_columns: Additional columns to include in state metadata.
+        """
+        self._dataset = dataset
+        self._dataset_name = dataset_name
+        self._split = split
+        self._question_column = question_column
+        self._answer_column = answer_column
+        self._metadata_columns = metadata_columns or []
+
+        # Set up answer extraction
+        if isinstance(answer_extraction, str):
+            if answer_extraction not in ANSWER_EXTRACTORS:
+                raise ValueError(
+                    f"Unknown answer_extraction: {answer_extraction}. "
+                    f"Available: {list(ANSWER_EXTRACTORS.keys())}"
+                )
+            self._answer_extraction = ANSWER_EXTRACTORS[answer_extraction]
+        else:
+            self._answer_extraction = answer_extraction
+
+        # Set up scoring
+        if isinstance(scoring, str):
+            if scoring not in SCORING_FUNCTIONS:
+                raise ValueError(
+                    f"Unknown scoring: {scoring}. "
+                    f"Available: {list(SCORING_FUNCTIONS.keys())}"
+                )
+            self._scoring_fn = SCORING_FUNCTIONS[scoring]
+        else:
+            self._scoring_fn = scoring
+
+        # Set up extractor for model responses
+        self._extractor = extractor or TagBasedExtractor()
+        self._include_format_reward = include_format_reward
+
+        # Build reward functions
+        self._correctness_reward = HuggingFaceCorrectnessReward(
+            extractor=self._extractor,
+            answer_extraction=self._answer_extraction,
+            scoring_fn=self._scoring_fn,
+        )
+        self._format_reward = HuggingFaceFormatReward(self._extractor)
+
+    @property
+    def spec(self) -> EnvironmentSpec:
+        """Get environment specification."""
+        return EnvironmentSpec(
+            name=self._dataset_name,
+            adapter="huggingface",
+            max_steps=1,
+            observation_type=TextObservation,
+            action_type=TextAction,
+            is_multi_turn=False,
+            metadata={
+                "dataset_size": len(self._dataset),
+                "split": self._split,
+                "question_column": self._question_column,
+                "answer_column": self._answer_column,
+            },
+        )
+
+    @property
+    def reward_functions(
+        self,
+    ) -> tuple[RewardFunction[TextObservation, HuggingFaceHidden, TextAction], ...]:
+        """Get reward functions used by this environment."""
+        if self._include_format_reward:
+            return (self._correctness_reward, self._format_reward)
+        return (self._correctness_reward,)
+
+    @property
+    def dataset(self) -> Any:
+        """Access the underlying HuggingFace dataset."""
+        return self._dataset
+
+    def reset(
+        self,
+        *,
+        seed: int | None = None,
+        options: dict[str, Any] | None = None,
+    ) -> tuple[State[TextObservation, HuggingFaceHidden], dict[str, Any]]:
+        """Reset environment and return initial state.
+
+        Args:
+            seed: Random seed (not used, dataset is deterministic by index).
+            options: Must contain "task_index" to select which task.
+                Optional "episode_id" to override the generated ID.
+
+        Returns:
+            Tuple of (initial_state, info_dict).
+
+        Raises:
+            ValueError: If task_index is not provided or out of bounds.
+        """
+        options = options or {}
+
+        if "task_index" not in options:
+            raise ValueError("options must contain 'task_index'")
+
+        task_index = options["task_index"]
+        if task_index < 0 or task_index >= len(self._dataset):
+            raise ValueError(
+                f"task_index {task_index} out of bounds [0, {len(self._dataset)})"
+            )
+
+        # Get the dataset entry
+        entry = self._dataset[task_index]
+
+        # Extract question
+        if self._question_column not in entry:
+            raise ValueError(
+                f"Question column '{self._question_column}' not found in dataset. "
+                f"Available columns: {list(entry.keys())}"
+            )
+        question = entry[self._question_column]
+
+        # Extract and process expected answer
+        if self._answer_column not in entry:
+            raise ValueError(
+                f"Answer column '{self._answer_column}' not found in dataset. "
+                f"Available columns: {list(entry.keys())}"
+            )
+        raw_answer = entry[self._answer_column]
+
+        # Apply answer extraction to get final answer
+        expected_answer = self._answer_extraction(str(raw_answer))
+        if expected_answer is None:
+            # Fall back to raw answer if extraction fails
+            expected_answer = str(raw_answer).strip()
+
+        # Create observation
+        observation = TextObservation(prompt=question)
+
+        # Create hidden state
+        hidden = HuggingFaceHidden(
+            entry=dict(entry),
+            expected_answer=expected_answer,
+            task_index=task_index,
+            dataset_name=self._dataset_name,
+            split=self._split,
+        )
+
+        # Create metadata
+        episode_id = options.get("episode_id", str(uuid.uuid4()))
+        info_dict: dict[str, Any] = {"task_index": task_index}
+
+        # Add metadata columns
+        for col in self._metadata_columns:
+            if col in entry:
+                info_dict[col] = entry[col]
+
+        metadata = StateMetadata(
+            step=0,
+            episode_id=episode_id,
+            is_terminal=False,
+            info=info_dict,
+        )
+
+        state = State(observation=observation, hidden=hidden, metadata=metadata)
+
+        info = {
+            "task_index": task_index,
+            "dataset_name": self._dataset_name,
+            "split": self._split,
+            "question": question,
+            **{col: entry.get(col) for col in self._metadata_columns if col in entry},
+        }
+
+        return state, info
+
+    def step(
+        self,
+        state: State[TextObservation, HuggingFaceHidden],
+        action: TextAction,
+    ) -> StepResult[TextObservation, HuggingFaceHidden]:
+        """Take an action (model response) and return result.
+
+        For HuggingFace datasets, a single step always terminates the episode.
+
+        Args:
+            state: Current state.
+            action: Model's response.
+
+        Returns:
+            StepResult with next state, rewards, and done flag.
+        """
+        # Compute rewards
+        rewards = self.compute_rewards(state, action, state)
+
+        # Create terminal state
+        next_metadata = StateMetadata(
+            step=state.metadata.step + 1,
+            episode_id=state.metadata.episode_id,
+            is_terminal=True,
+            info={
+                **state.metadata.info,
+                "response": action.text,
+            },
+        )
+
+        next_state = State(
+            observation=state.observation,
+            hidden=state.hidden,
+            metadata=next_metadata,
+        )
+
+        # Extract answer for info
+        extracted, extraction_meta = self._extractor.extract(action.text)
+
+        return StepResult(
+            next_state=next_state,
+            rewards=rewards,
+            terminated=True,
+            truncated=False,
+            info={
+                "extracted_answer": extracted,
+                "expected_answer": state.hidden.expected_answer,
+                "extraction_metadata": extraction_meta,
+            },
+        )
+
+    def compute_rewards(
+        self,
+        state: State[TextObservation, HuggingFaceHidden],
+        action: TextAction,
+        next_state: State[TextObservation, HuggingFaceHidden],
+    ) -> RewardBundle:
+        """Compute rewards for a transition."""
+        signals = []
+
+        for reward_fn in self.reward_functions:
+            signal = reward_fn.compute(state, action, next_state)
+            signals.append(signal)
+
+        return RewardBundle(signals=tuple(signals))
+
+    def __len__(self) -> int:
+        """Number of examples in the dataset."""
+        return len(self._dataset)
+
+
+class HuggingFaceAdapter:
+    """Adapter for HuggingFace datasets.
+
+    Provides access to datasets on the HuggingFace Hub through
+    the common Adapter interface.
+
+    Example:
+        adapter = HuggingFaceAdapter()
+        env = adapter.get_environment(
+            "hendrycks/competition_math",
+            split="test",
+            question_column="problem",
+            answer_column="solution",
+            answer_extraction="boxed",
+            scoring="numeric",
+        )
+    """
+
+    def __init__(self, cache_dir: str | None = None) -> None:
+        """Initialize the adapter.
+
+        Args:
+            cache_dir: Optional custom cache directory for datasets.
+        """
+        self._cache_dir = cache_dir
+        self._loaded_datasets: dict[str, Any] = {}
+
+    @property
+    def name(self) -> str:
+        """Adapter identifier."""
+        return "huggingface"
+
+    def _get_datasets_library(self) -> Any:
+        """Import and return the datasets module."""
+        try:
+            import datasets
+            return datasets
+        except ImportError as e:
+            raise ImportError(
+                "The 'datasets' library is required for HuggingFaceAdapter. "
+                "Install with: pip install datasets"
+            ) from e
+
+    def list_environments(self) -> list[str]:
+        """List commonly used dataset names.
+
+        Note: HuggingFace has thousands of datasets. This returns
+        a curated list of popular math/reasoning datasets that have
+        been tested with this adapter.
+
+        Returns:
+            List of popular dataset names.
+        """
+        return [
+            # Math datasets with presets
+            "HuggingFaceH4/aime_2024",
+            "MathArena/aime_2025",
+            "di-zhang-fdu/AIME_1983_2024",
+            "gsm8k",
+            # Other popular datasets (may need custom column config)
+            "allenai/ai2_arc",
+            "Rowan/hellaswag",
+            "cais/mmlu",
+            "truthful_qa",
+            "trivia_qa",
+        ]
+
+    def get_environment(
+        self,
+        name: str,
+        split: str = "test",
+        subset: str | None = None,
+        question_column: str = "problem",
+        answer_column: str = "solution",
+        answer_extraction: str | Callable[[str], str | None] = "boxed",
+        scoring: str | ScoringFunction = "numeric",
+        extractor: AnswerExtractor | None = None,
+        include_format_reward: bool = True,
+        metadata_columns: list[str] | None = None,
+        size: int | None = None,
+        seed: int | None = None,
+        streaming: bool = False,
+        trust_remote_code: bool = False,
+        **kwargs: Any,
+    ) -> HuggingFaceEnvironment:
+        """Create an environment from a HuggingFace dataset.
+
+        Args:
+            name: Dataset name (e.g., "hendrycks/competition_math").
+            split: Dataset split to use (e.g., "train", "test").
+            subset: Dataset subset/config name if applicable.
+            question_column: Column containing questions.
+            answer_column: Column containing answers.
+            answer_extraction: How to extract final answer from answer_column.
+            scoring: How to score predicted vs expected answers.
+            extractor: Extractor for model responses.
+            include_format_reward: Whether to include format reward.
+            metadata_columns: Additional columns to include in metadata.
+            size: Limit dataset to first N examples.
+            seed: Random seed for shuffling (if size is set).
+            streaming: Whether to use streaming mode.
+            trust_remote_code: Whether to trust remote code in datasets.
+            **kwargs: Additional arguments passed to load_dataset.
+
+        Returns:
+            Configured HuggingFaceEnvironment.
+
+        Raises:
+            ImportError: If datasets library is not installed.
+            ValueError: If dataset or columns not found.
+        """
+        datasets = self._get_datasets_library()
+
+        # Build cache key
+        cache_key = f"{name}:{subset or 'default'}:{split}"
+
+        # Load dataset
+        if cache_key not in self._loaded_datasets:
+            load_kwargs: dict[str, Any] = {
+                "split": split,
+                "trust_remote_code": trust_remote_code,
+                **kwargs,
+            }
+
+            if subset:
+                load_kwargs["name"] = subset
+
+            if self._cache_dir:
+                load_kwargs["cache_dir"] = self._cache_dir
+
+            if streaming:
+                load_kwargs["streaming"] = True
+
+            dataset = datasets.load_dataset(name, **load_kwargs)
+
+            # Handle streaming datasets differently
+            if not streaming:
+                self._loaded_datasets[cache_key] = dataset
+        else:
+            dataset = self._loaded_datasets[cache_key]
+
+        # Apply size limit if specified
+        if size is not None and not streaming:
+            if seed is not None:
+                dataset = dataset.shuffle(seed=seed)
+            dataset = dataset.select(range(min(size, len(dataset))))
+
+        return HuggingFaceEnvironment(
+            dataset=dataset,
+            dataset_name=name,
+            split=split,
+            question_column=question_column,
+            answer_column=answer_column,
+            answer_extraction=answer_extraction,
+            scoring=scoring,
+            extractor=extractor,
+            include_format_reward=include_format_reward,
+            metadata_columns=metadata_columns,
+        )
+
+    def get_environment_info(self, name: str) -> dict[str, Any]:
+        """Get metadata about a dataset without loading it.
+
+        Args:
+            name: Dataset name.
+
+        Returns:
+            Dictionary with dataset metadata.
+        """
+        return {
+            "name": name,
+            "adapter": self.name,
+            "type": "single_turn",
+            "description": f"HuggingFace dataset: {name}",
+            "url": f"https://huggingface.co/datasets/{name}",
+        }
+
+    def get_dataset_info(self, name: str) -> dict[str, Any]:
+        """Get detailed information about a dataset from HuggingFace.
+
+        Args:
+            name: Dataset name.
+
+        Returns:
+            Dataset info from HuggingFace Hub.
+        """
+        try:
+            from huggingface_hub import dataset_info
+            info = dataset_info(name)
+            return {
+                "name": name,
+                "description": info.description,
+                "citation": info.citation,
+                "license": info.license,
+                "tags": info.tags,
+                "downloads": info.downloads,
+            }
+        except Exception:
+            return self.get_environment_info(name)
+
+
+# Preset configurations for common datasets
+DATASET_PRESETS: dict[str, dict[str, Any]] = {
+    # AIME datasets
+    "HuggingFaceH4/aime_2024": {
+        "split": "train",  # This dataset only has train split
+        "question_column": "problem",
+        "answer_column": "answer",
+        "answer_extraction": "direct",
+        "scoring": "numeric",
+        "metadata_columns": ["id", "year", "url"],
+    },
+    "MathArena/aime_2025": {
+        "split": "train",
+        "question_column": "problem",
+        "answer_column": "answer",
+        "answer_extraction": "direct",
+        "scoring": "numeric",
+    },
+    "di-zhang-fdu/AIME_1983_2024": {
+        "split": "train",
+        "question_column": "Question",
+        "answer_column": "Answer",
+        "answer_extraction": "direct",
+        "scoring": "numeric",
+        "metadata_columns": ["Year", "Problem Number"],
+    },
+    # GSM8K
+    "gsm8k": {
+        "subset": "main",
+        "question_column": "question",
+        "answer_column": "answer",
+        "answer_extraction": "numeric",
+        "scoring": "numeric",
+    },
+    # OpenAI simple-evals MATH (if available)
+    "openai/gsm8k": {
+        "question_column": "question",
+        "answer_column": "answer",
+        "answer_extraction": "numeric",
+        "scoring": "numeric",
+    },
+}
+
+
+def create_huggingface_environment(
+    dataset_name: str,
+    split: str | None = None,
+    preset: bool = True,
+    **kwargs: Any,
+) -> HuggingFaceEnvironment:
+    """Factory function to create a HuggingFaceEnvironment.
+
+    Args:
+        dataset_name: Name of the HuggingFace dataset.
+        split: Dataset split to use. If None, uses preset default or "test".
+        preset: Whether to use preset configuration if available.
+        **kwargs: Override any preset or default parameters.
+
+    Returns:
+        Configured HuggingFaceEnvironment.
+
+    Raises:
+        ImportError: If datasets library is not installed.
+    """
+    adapter = HuggingFaceAdapter()
+
+    # Merge preset config if available and requested
+    if preset and dataset_name in DATASET_PRESETS:
+        config = {**DATASET_PRESETS[dataset_name], **kwargs}
+    else:
+        config = kwargs
+
+    # Only override split if explicitly provided
+    if split is not None:
+        config["split"] = split
+    elif "split" not in config:
+        config["split"] = "test"
+
+    return adapter.get_environment(dataset_name, **config)

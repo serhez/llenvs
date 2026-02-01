@@ -1,0 +1,153 @@
+# WebShop Adapter
+
+[WebShop](https://github.com/princeton-nlp/WebShop) (Yao et al., NeurIPS 2022) is a simulated e-commerce environment with 1.18M real products and 12K instructions. Agents navigate a website to find and purchase products matching natural language instructions.
+
+## Installation
+
+```bash
+pip install webshop
+# Then run setup to download product data and build search index
+# See: https://github.com/princeton-nlp/WebShop#setup
+```
+
+## Quick Start
+
+```python
+from env_evals.adapters import create_webshop_environment
+from env_evals.core import TextAction
+
+# Create environment (use num_products=1000 for fast preview)
+env = create_webshop_environment(
+    observation_mode="text_rich",
+    max_steps=15,
+    num_products=1000,
+)
+
+# Reset with a specific task
+state, info = env.reset(options={"task_index": 0})
+print(f"Instruction: {info['instruction']}")
+# "Find a red wireless headphone under $50"
+
+# Search for products
+action = TextAction(text="search[red wireless headphones]")
+result = env.step(state, action)
+print(result.next_state.observation.prompt)
+# Shows search results with clickable products
+
+# Click on a product
+action = TextAction(text="click[Product 1 - Red Headphones $45]")
+result = env.step(result.next_state, action)
+# Shows product details
+
+# Complete purchase
+action = TextAction(text="click[Buy Now]")
+result = env.step(result.next_state, action)
+print(f"Reward: {result.info['webshop_reward']}")
+# Reward based on how well purchase matches instruction
+```
+
+## Action Format
+
+WebShop uses text-based actions (not structured tool calls):
+
+| Action | Description | Example |
+|--------|-------------|---------|
+| `search[keywords]` | Search for products | `search[red wireless headphones]` |
+| `click[element]` | Click on a page element | `click[Buy Now]` |
+
+## Observation Modes
+
+| Mode | Description | Best For |
+|------|-------------|----------|
+| `text_rich` | Tagged buttons `[button]...[button_]` and clickables | LLM agents (recommended) |
+| `text` | Simple text with `[SEP]` separators | Simpler models |
+| `html` | Raw HTML | Web-aware models |
+
+## Using the Adapter Directly
+
+```python
+from env_evals.adapters import WebShopAdapter
+
+adapter = WebShopAdapter()
+
+# Get environment with custom configuration
+env = adapter.get_environment(
+    name="webshop:text_rich",
+    observation_mode="text_rich",
+    max_steps=15,
+    num_products=None,  # Use full dataset
+    human_goals=True,   # Use human-written goals
+)
+
+# Check environment info
+info = adapter.get_environment_info("webshop:text_rich")
+print(info)
+# {"name": "webshop:text_rich", "adapter": "webshop", "type": "multi_turn"}
+```
+
+## Running with EpisodeRunner
+
+```python
+from env_evals.adapters import create_webshop_environment
+from env_evals.inference.backends import OpenAIBackend
+from env_evals.evaluation import EpisodeRunner
+from env_evals.inference import SamplingParams
+
+env = create_webshop_environment(max_steps=15)
+backend = OpenAIBackend(model="gpt-4o")
+
+runner = EpisodeRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=SamplingParams(temperature=0.0, max_tokens=256),
+    system_prompt="""You are a shopping assistant. Navigate the website to find
+and purchase products matching the given instruction.
+
+Use these actions:
+- search[keywords] to search for products
+- click[element] to click on buttons, products, or options
+
+Always click "Buy Now" when you find a matching product.""",
+)
+
+result = runner.run_episode(task_index=0)
+print(f"Success: {result.success}")
+print(f"Reward: {result.total_reward}")
+```
+
+## Rewards
+
+WebShop provides a graded reward based on attribute matching:
+
+| Reward | Description |
+|--------|-------------|
+| `webshop_reward` | 0.0-1.0 based on how well the purchased product matches the instruction |
+
+The reward considers:
+- Price constraints
+- Category match
+- Required attributes (color, size, etc.)
+- Option selections
+
+## Hidden State
+
+```python
+@dataclass(frozen=True)
+class WebShopHidden:
+    instruction: str              # Shopping instruction
+    session_id: str              # WebShop session ID
+    task_index: int
+    episode_step: int
+    last_action: str | None      # Last action taken
+    available_actions: tuple[str, ...]  # Valid actions
+```
+
+## Multi-Turn Nature
+
+WebShop is a multi-turn environment. After each action, the agent receives updated observations reflecting the current page state:
+
+1. **Search results page**: Shows product list
+2. **Product page**: Shows product details and options
+3. **Purchase confirmation**: Shows reward
+
+The agent must navigate multiple pages to complete the task.

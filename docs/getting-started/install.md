@@ -1,0 +1,220 @@
+# Installation & Setup
+
+## Installation
+
+### Using pip
+
+```bash
+# Basic installation
+pip install llenvs
+
+# With specific backends/adapters
+pip install llenvs[huggingface]    # HuggingFace datasets (AIME, GSM8K, etc.)
+pip install llenvs[reasoning-gym]  # reasoning-gym datasets
+pip install llenvs[vllm]           # Local inference with vLLM
+pip install llenvs[openai]         # OpenAI API
+pip install llenvs[anthropic]      # Anthropic API
+
+# Everything
+pip install llenvs[all]
+```
+
+### Using uv
+
+```bash
+# Create virtual environment
+uv venv
+source .venv/bin/activate
+
+# Install with extras
+uv pip install llenvs[openai,reasoning-gym]
+
+# Or install from source
+uv pip install -e ".[all]"
+```
+
+### From Source
+
+```bash
+git clone https://github.com/example/llenvs.git
+cd llenvs
+
+# With pip
+pip install -e ".[dev]"
+
+# With uv
+uv pip install -e ".[dev]"
+```
+
+---
+
+## Dependencies
+
+### Core Dependencies
+
+The base package only requires:
+
+- `pyyaml>=6.0` - Configuration file parsing
+
+### Optional Dependencies
+
+| Extra | Package | Purpose |
+|-------|---------|---------|
+| `huggingface` | `datasets>=2.14`, `huggingface-hub>=0.20` | HuggingFace datasets (AIME, GSM8K, MATH) |
+| `reasoning-gym` | `reasoning-gym>=0.1` | reasoning-gym dataset access |
+| `vllm` | `vllm>=0.4` | Local GPU inference |
+| `openai` | `openai>=1.0` | OpenAI API access |
+| `anthropic` | `anthropic>=0.20` | Anthropic API access |
+| `dev` | pytest, mypy, ruff | Development tools |
+
+---
+
+## Environment Variables
+
+### API Keys
+
+Set these environment variables for API backends:
+
+```bash
+# OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# Anthropic
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# OpenRouter
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Or pass keys directly in code:
+
+```python
+from env_evals.inference.backends import OpenAIBackend
+
+backend = OpenAIBackend(
+    model="gpt-4o",
+    api_key="sk-...",  # Explicit key
+)
+```
+
+### vLLM Requirements
+
+For local inference with vLLM:
+
+- CUDA-compatible GPU with sufficient VRAM
+- CUDA toolkit installed
+- For multi-GPU: `tensor_parallel_size` parameter
+
+```python
+from env_evals.inference.backends import VLLMBackend
+
+backend = VLLMBackend(
+    model_path="meta-llama/Llama-3.1-8B-Instruct",
+    tensor_parallel_size=2,  # Use 2 GPUs
+    gpu_memory_utilization=0.9,
+)
+```
+
+---
+
+## Verifying Installation
+
+```python
+# Test core imports
+from env_evals import State, Environment, Trajectory
+print("Core imports: OK")
+
+# Test tool imports
+from env_evals.core import (
+    ToolDefinition, ToolParameter, ToolParameterType,
+    ToolCall, ToolResult, AgentObservation, AgentAction,
+    SimpleToolExecutor, AsyncToolExecutor,
+    MCPToolExecutor, MCPServerConfig,
+)
+print("Tool imports: OK")
+
+# Test extraction
+from env_evals.core.extraction import TagBasedExtractor
+extractor = TagBasedExtractor()
+answer, _ = extractor.extract("<answer>42</answer>")
+assert answer == "42"
+print("Extraction: OK")
+
+# Test backend (if installed)
+try:
+    from env_evals.inference.backends import OpenAIBackend
+    print("OpenAI backend: OK")
+except ImportError:
+    print("OpenAI backend: Not installed")
+
+# Test HuggingFace adapter (if installed)
+try:
+    from env_evals.adapters import create_huggingface_environment
+    print("HuggingFace adapter: OK")
+except ImportError:
+    print("HuggingFace adapter: Not installed")
+
+# Test reasoning-gym adapter (if installed)
+try:
+    from env_evals.adapters import create_reasoning_gym_environment
+    print("reasoning-gym adapter: OK")
+except ImportError:
+    print("reasoning-gym adapter: Not installed")
+```
+
+---
+
+## Project Structure
+
+After installation, the package provides:
+
+```
+env_evals/
+├── core/           # Core abstractions
+│   ├── state.py            # State, TextObservation, AgentObservation, AgentAction
+│   ├── environment.py      # Environment protocol
+│   ├── tools.py            # ToolDefinition, ToolCall, ToolResult, SimpleToolExecutor
+│   ├── async_executor.py   # AsyncToolExecutor for parallel execution
+│   ├── mcp_executor.py     # MCPToolExecutor for MCP server integration
+│   ├── tool_environment.py # ToolEnvironment protocol, BaseToolEnvironment
+│   ├── tool_rewards.py     # ToolValidityReward, ToolEfficiencyReward
+│   ├── adapter.py
+│   ├── trajectory.py
+│   ├── reward.py
+│   ├── extraction.py
+│   ├── registry.py
+│   └── config.py
+├── adapters/       # Environment adapters
+│   ├── reasoning_gym.py   # reasoning-gym datasets
+│   ├── huggingface.py     # HuggingFace Hub datasets
+│   └── gem.py             # GEM environments
+├── inference/      # Model backends
+│   ├── protocol.py        # ModelBackend, ChatMessage, GenerationResult
+│   ├── prompting.py
+│   └── backends/
+│       ├── vllm.py
+│       └── api.py         # OpenAI, Anthropic, OpenRouter (with tool support)
+├── evaluation/     # Evaluation tools
+│   ├── runner.py          # EpisodeRunner, ToolEpisodeRunner
+│   ├── metrics.py
+│   └── results.py
+└── cli/            # Command-line interface
+    └── run.py
+```
+
+---
+
+## CLI Setup
+
+After installation, the `llenvs` command is available:
+
+```bash
+# Verify CLI
+llenvs --help
+
+# List available commands
+llenvs list
+
+# Run evaluation
+llenvs run config.yaml
+```
