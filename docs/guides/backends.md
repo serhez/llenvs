@@ -1,12 +1,13 @@
 # Inference Backends
 
-llenvs supports multiple inference backends with a unified interface.
+`llenvs` supports multiple inference backends with a unified interface.
 
 ## Available Backends
 
 | Backend | Package | Features |
 |---------|---------|----------|
-| vLLM | `vllm` | Logprobs, batching, prefix continuation |
+| vLLM | `vllm` | Logprobs, batching, prefix continuation, streaming |
+| HuggingFace | `transformers` | Logprobs, batching, prefix continuation, chat templates |
 | OpenAI | `openai` | Logprobs, streaming, function calling |
 | Anthropic | `anthropic` | Prefix continuation (prefill), streaming |
 | OpenRouter | - | Access to multiple models |
@@ -44,6 +45,100 @@ for token_lp in results[0].token_logprobs:
     print(f"{token_lp.token}: {token_lp.logprob:.3f}")
 ```
 
+## HuggingFace Transformers (Local Inference)
+
+A lightweight alternative to vLLM for running HuggingFace models directly with the `transformers` library.
+
+```python
+from llenvs.inference import SamplingParams
+from llenvs.inference.backends import HuggingFaceBackend
+
+backend = HuggingFaceBackend(
+    model_path="gpt2",  # or any HuggingFace model
+    device="auto",  # "cuda", "mps", "cpu", or "auto"
+    dtype="auto",  # "float16", "bfloat16", "float32", or "auto"
+)
+
+# Basic generation
+results = backend.generate(
+    ["Hello, world!"],
+    SamplingParams(max_tokens=50, temperature=0.7),
+)
+print(results[0].text)
+
+# With logprobs
+results = backend.generate_with_logprobs(
+    ["The capital of France is"],
+    SamplingParams(temperature=0.0),
+    num_logprobs=5,
+)
+for token_lp in results[0].token_logprobs:
+    print(f"{token_lp.token}: {token_lp.logprob:.3f}")
+```
+
+### Advanced Options
+
+```python
+# Multi-GPU with device_map
+backend = HuggingFaceBackend(
+    model_path="meta-llama/Llama-3.1-8B-Instruct",
+    device_map="auto",  # Automatically distribute across GPUs
+    dtype="bfloat16",
+)
+
+# With torch.compile optimization
+backend = HuggingFaceBackend(
+    model_path="gpt2",
+    torch_compile=True,  # Enable torch.compile for faster inference
+)
+
+# Pass additional kwargs to from_pretrained
+backend = HuggingFaceBackend(
+    model_path="gpt2",
+    trust_remote_code=True,
+    revision="main",
+)
+```
+
+### Chat Generation
+
+```python
+from llenvs.inference import ChatMessage
+
+# Uses tokenizer.apply_chat_template() internally
+result = backend.generate_chat(
+    [
+        ChatMessage(role="system", content="You are helpful."),
+        ChatMessage(role="user", content="Hello!"),
+    ],
+    SamplingParams(temperature=0.7),
+)
+```
+
+### Prefix Continuation
+
+```python
+# Generate multiple continuations from a prefix
+continuations = backend.continue_from_prefix(
+    prefix="Once upon a time",
+    params=SamplingParams(temperature=0.8, max_tokens=100),
+    num_continuations=3,
+)
+for i, cont in enumerate(continuations):
+    print(f"Continuation {i + 1}: {cont.text}")
+```
+
+### Capabilities
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| logprobs | ✓ | Via `output_scores=True` |
+| prefix_continuation | ✓ | Native support |
+| batching | ✓ | With attention masks |
+| streaming | ✗ | Would require TextIteratorStreamer |
+| chat | ✓ | Via `tokenizer.apply_chat_template()` |
+| function_calling | ✗ | Not directly supported |
+
 ## OpenAI
 
 ```python
@@ -61,6 +156,7 @@ backend = OpenAIBackend(
 
 # Chat generation
 from llenvs.inference import ChatMessage
+
 result = backend.generate_chat(
     [
         ChatMessage(role="system", content="You are helpful."),
@@ -133,18 +229,20 @@ print(f"Function calling: {caps.supports_function_calling}")
 
 ```python
 from llenvs.inference.prompting import (
-    SystemPromptInjector,
-    FewShotInjector,
-    ChainOfThoughtWrapper,
     AnswerFormatInjector,
+    ChainOfThoughtWrapper,
+    FewShotInjector,
+    SystemPromptInjector,
 )
 
 # Compose with >> operator
 pipeline = (
     SystemPromptInjector("You are an expert mathematician.")
-    >> FewShotInjector([
-        ("What is 2+3?", "2 + 3 = 5\n<answer>5</answer>"),
-    ])
+    >> FewShotInjector(
+        [
+            ("What is 2+3?", "2 + 3 = 5\n<answer>5</answer>"),
+        ]
+    )
     >> ChainOfThoughtWrapper("think_step_by_step")
     >> AnswerFormatInjector("xml_answer", tag_name="answer")
 )
@@ -207,11 +305,11 @@ AnswerFormatInjector("gsm8k")
 
 ```python
 from llenvs.core.extraction import (
-    TagBasedExtractor,
-    RegexExtractor,
+    CompositeExtractor,
     GSM8KExtractor,
     MultipleChoiceExtractor,
-    CompositeExtractor,
+    RegexExtractor,
+    TagBasedExtractor,
 )
 
 # XML tags
@@ -230,11 +328,13 @@ answer, _ = extractor.extract("The answer is (B)")
 # answer = "B"
 
 # Try multiple extractors
-extractor = CompositeExtractor(extractors=[
-    TagBasedExtractor(tag_name="answer"),
-    GSM8KExtractor(),
-    RegexExtractor(pattern=r"(\d+)$"),
-])
+extractor = CompositeExtractor(
+    extractors=[
+        TagBasedExtractor(tag_name="answer"),
+        GSM8KExtractor(),
+        RegexExtractor(pattern=r"(\d+)$"),
+    ]
+)
 ```
 
 ### Custom Extractor
@@ -243,6 +343,7 @@ extractor = CompositeExtractor(extractors=[
 class JsonExtractor:
     def extract(self, response: str) -> tuple[str | None, dict]:
         import json
+
         try:
             data = json.loads(response)
             return str(data.get("answer")), {"parsed": True}

@@ -11,6 +11,24 @@ resolution-markers = [
 ]
 
 [[package]]
+name = "accelerate"
+version = "1.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "huggingface-hub" },
+    { name = "numpy" },
+    { name = "packaging" },
+    { name = "psutil" },
+    { name = "pyyaml" },
+    { name = "safetensors" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/4a/8e/ac2a9566747a93f8be36ee08532eb0160558b07630a081a6056a9f89bf1d/accelerate-1.12.0.tar.gz", hash = "sha256:70988c352feb481887077d2ab845125024b2a137a5090d6d7a32b57d03a45df6", size = 398399, upload-time = "2025-11-21T11:27:46.973Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/d2/c581486aa6c4fbd7394c23c47b83fa1a919d34194e16944241daf9e762dd/accelerate-1.12.0-py3-none-any.whl", hash = "sha256:3e2091cd341423207e2f084a6654b1efcd250dc326f2a37d6dde446e07cabb11", size = 380935, upload-time = "2025-11-21T11:27:44.522Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -898,68 +916,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/f5/22/900cb125c76b7aaa4
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/15/545e2b6cf2e3be84bc1ed85613edd75b8aea69807a71c26f4ca6a9258e82/email_validator-2.3.0-py3-none-any.whl", hash = "sha256:80f13f623413e6b197ae73bb10bf4eb0908faf509ad8362c5edeb0be7fd450b4", size = 35604, upload-time = "2025-08-26T13:09:05.858Z" },
 ]
-
-[[package]]
-name = "llenvs"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "pyyaml" },
-]
-
-[package.optional-dependencies]
-all = [
-    { name = "anthropic" },
-    { name = "datasets" },
-    { name = "gem-llm" },
-    { name = "huggingface-hub" },
-    { name = "openai" },
-    { name = "reasoning-gym" },
-    { name = "vllm" },
-]
-anthropic = [
-    { name = "anthropic" },
-]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-gem = [
-    { name = "gem-llm" },
-]
-huggingface = [
-    { name = "datasets" },
-    { name = "huggingface-hub" },
-]
-openai = [
-    { name = "openai" },
-]
-reasoning-gym = [
-    { name = "reasoning-gym" },
-]
-vllm = [
-    { name = "vllm" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.20" },
-    { name = "datasets", marker = "extra == 'huggingface'", specifier = ">=2.14" },
-    { name = "llenvs", extras = ["reasoning-gym", "huggingface", "gem", "vllm", "openai", "anthropic"], marker = "extra == 'all'" },
-    { name = "gem-llm", marker = "extra == 'gem'", specifier = ">=0.1.0" },
-    { name = "huggingface-hub", marker = "extra == 'huggingface'", specifier = ">=0.20" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
-    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "reasoning-gym", marker = "extra == 'reasoning-gym'", specifier = ">=0.1" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1" },
-    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.4" },
-]
-provides-extras = ["reasoning-gym", "huggingface", "gem", "vllm", "openai", "anthropic", "all", "dev"]
 
 [[package]]
 name = "fastapi"
@@ -1860,6 +1816,79 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/24/d4/7e4be20993dc6a782639625bd2f97f3c66125c7aa80c82426956811cfccf/librt-0.7.8-cp314-cp314t-win_amd64.whl", hash = "sha256:445b7304145e24c60288a2f172b5ce2ca35c0f81605f5299f3fa567e189d2e32", size = 47668, upload-time = "2026-01-14T12:56:00.261Z" },
     { url = "https://files.pythonhosted.org/packages/fc/85/69f92b2a7b3c0f88ffe107c86b952b397004b5b8ea5a81da3d9c04c04422/librt-0.7.8-cp314-cp314t-win_arm64.whl", hash = "sha256:8766ece9de08527deabcd7cb1b4f1a967a385d26e33e536d6d8913db6ef74f06", size = 40550, upload-time = "2026-01-14T12:56:01.542Z" },
 ]
+
+[[package]]
+name = "llenvs"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "accelerate" },
+    { name = "anthropic" },
+    { name = "datasets" },
+    { name = "gem-llm" },
+    { name = "huggingface-hub" },
+    { name = "openai" },
+    { name = "reasoning-gym" },
+    { name = "torch" },
+    { name = "transformers" },
+    { name = "vllm" },
+]
+anthropic = [
+    { name = "anthropic" },
+]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+gem = [
+    { name = "gem-llm" },
+]
+huggingface = [
+    { name = "datasets" },
+    { name = "huggingface-hub" },
+]
+openai = [
+    { name = "openai" },
+]
+reasoning-gym = [
+    { name = "reasoning-gym" },
+]
+transformers = [
+    { name = "accelerate" },
+    { name = "torch" },
+    { name = "transformers" },
+]
+vllm = [
+    { name = "vllm" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'transformers'", specifier = ">=0.25" },
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.20" },
+    { name = "datasets", marker = "extra == 'huggingface'", specifier = ">=2.14" },
+    { name = "gem-llm", marker = "extra == 'gem'", specifier = ">=0.1.0" },
+    { name = "huggingface-hub", marker = "extra == 'huggingface'", specifier = ">=0.20" },
+    { name = "llenvs", extras = ["reasoning-gym", "huggingface", "gem", "vllm", "openai", "anthropic", "transformers"], marker = "extra == 'all'" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "reasoning-gym", marker = "extra == 'reasoning-gym'", specifier = ">=0.1" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1" },
+    { name = "torch", marker = "extra == 'transformers'", specifier = ">=2.0" },
+    { name = "transformers", marker = "extra == 'transformers'", specifier = ">=4.36" },
+    { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.4" },
+]
+provides-extras = ["reasoning-gym", "huggingface", "gem", "vllm", "transformers", "openai", "anthropic", "all", "dev"]
 
 [[package]]
 name = "llguidance"

@@ -12,6 +12,7 @@ pip install llenvs
 pip install llenvs[huggingface]    # HuggingFace datasets (AIME, GSM8K, etc.)
 pip install llenvs[reasoning-gym]  # reasoning-gym datasets
 pip install llenvs[vllm]           # Local inference with vLLM
+pip install llenvs[transformers]   # Local inference with HuggingFace Transformers
 pip install llenvs[openai]         # OpenAI API
 pip install llenvs[anthropic]      # Anthropic API
 
@@ -62,7 +63,8 @@ The base package only requires:
 |-------|---------|---------|
 | `huggingface` | `datasets>=2.14`, `huggingface-hub>=0.20` | HuggingFace datasets (AIME, GSM8K, MATH) |
 | `reasoning-gym` | `reasoning-gym>=0.1` | reasoning-gym dataset access |
-| `vllm` | `vllm>=0.4` | Local GPU inference |
+| `vllm` | `vllm>=0.4` | Local GPU inference with vLLM |
+| `transformers` | `transformers>=4.36`, `torch>=2.0`, `accelerate>=0.25` | Local inference with HuggingFace Transformers |
 | `openai` | `openai>=1.0` | OpenAI API access |
 | `anthropic` | `anthropic>=0.20` | Anthropic API access |
 | `dev` | pytest, mypy, ruff | Development tools |
@@ -115,6 +117,30 @@ backend = VLLMBackend(
 )
 ```
 
+### HuggingFace Transformers Requirements
+
+For local inference with HuggingFace Transformers:
+
+- PyTorch installed (CPU, CUDA, or MPS)
+- For multi-GPU: use `device_map="auto"` (requires `accelerate`)
+
+```python
+from llenvs.inference.backends import HuggingFaceBackend
+
+# Auto-detect device (CUDA > MPS > CPU)
+backend = HuggingFaceBackend(
+    model_path="meta-llama/Llama-3.1-8B-Instruct",
+    device="auto",
+    dtype="bfloat16",
+)
+
+# Multi-GPU with accelerate
+backend = HuggingFaceBackend(
+    model_path="meta-llama/Llama-3.1-70B-Instruct",
+    device_map="auto",  # Distribute across GPUs
+)
+```
+
 ---
 
 ## Verifying Installation
@@ -140,12 +166,18 @@ answer, _ = extractor.extract("<answer>42</answer>")
 assert answer == "42"
 print("Extraction: OK")
 
-# Test backend (if installed)
+# Test backends (if installed)
 try:
     from llenvs.inference.backends import OpenAIBackend
     print("OpenAI backend: OK")
 except ImportError:
     print("OpenAI backend: Not installed")
+
+try:
+    from llenvs.inference.backends import HuggingFaceBackend
+    print("HuggingFace Transformers backend: OK")
+except ImportError:
+    print("HuggingFace Transformers backend: Not installed")
 
 # Test HuggingFace adapter (if installed)
 try:
@@ -192,7 +224,8 @@ llenvs/
 │   ├── protocol.py        # ModelBackend, ChatMessage, GenerationResult
 │   ├── prompting.py
 │   └── backends/
-│       ├── vllm.py
+│       ├── vllm.py        # vLLM backend
+│       ├── huggingface.py # HuggingFace Transformers backend
 │       └── api.py         # OpenAI, Anthropic, OpenRouter (with tool support)
 ├── evaluation/     # Evaluation tools
 │   ├── runner.py          # EpisodeRunner, ToolEpisodeRunner
