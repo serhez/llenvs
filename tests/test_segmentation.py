@@ -1,9 +1,9 @@
 """Tests for text segmentation and segmented environments."""
 
 import pytest
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardSignal, RewardBundle, RewardType
-from env_evals.core.segmentation import (
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
+from llenvs.core.segmentation import (
     Segmenter,
     SentenceSegmenter,
     LineSegmenter,
@@ -11,7 +11,7 @@ from env_evals.core.segmentation import (
     CompositeSegmenter,
     SemanticSegmenter,
 )
-from env_evals.core.segmented_environment import (
+from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
     SegmentedHidden,
 )
@@ -266,7 +266,7 @@ class TestSegmentedEnvironment:
 
     def test_creation(self, mock_dataset):
         """Test creating segmented environment."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         segmenter = SentenceSegmenter()
@@ -280,7 +280,7 @@ class TestSegmentedEnvironment:
 
     def test_spec_properties(self, mock_dataset):
         """Test segmented environment spec."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -292,7 +292,7 @@ class TestSegmentedEnvironment:
 
     def test_reset(self, mock_dataset):
         """Test environment reset."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -307,7 +307,7 @@ class TestSegmentedEnvironment:
 
     def test_step_intermediate(self, mock_dataset):
         """Test intermediate step (not final segment)."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -337,7 +337,7 @@ class TestSegmentedEnvironment:
 
     def test_step_final(self, mock_dataset):
         """Test final step triggers underlying env."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -366,7 +366,7 @@ class TestSegmentedEnvironment:
 
     def test_finalize(self, mock_dataset):
         """Test explicit finalization."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -393,7 +393,7 @@ class TestSegmentedEnvironment:
 
     def test_replay_full_response(self, mock_dataset):
         """Test replay with a full response."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -416,7 +416,7 @@ class TestSegmentedEnvironment:
 
     def test_replay_correct_answer(self, mock_dataset):
         """Test replay gives correct reward for right answer."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -435,7 +435,7 @@ class TestSegmentedEnvironment:
 
     def test_replay_incorrect_answer(self, mock_dataset):
         """Test replay gives zero reward for wrong answer."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -452,7 +452,7 @@ class TestSegmentedEnvironment:
 
     def test_replay_empty_response(self, mock_dataset):
         """Test replay handles empty response."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -466,7 +466,7 @@ class TestSegmentedEnvironment:
 
     def test_replay_single_segment(self, mock_dataset):
         """Test replay with response that doesn't split."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -482,7 +482,7 @@ class TestSegmentedEnvironment:
 
     def test_len(self, mock_dataset):
         """Test __len__ delegates to underlying env."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -491,7 +491,7 @@ class TestSegmentedEnvironment:
 
     def test_replay_with_pattern_segmenter(self, mock_dataset):
         """Test replay with PatternSegmenter for numbered steps."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, PatternSegmenter())
@@ -506,7 +506,7 @@ class TestSegmentedEnvironment:
 
     def test_state_immutability(self, mock_dataset):
         """Test that step doesn't mutate input state."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -541,7 +541,7 @@ class TestSegmentedEnvironmentWithLineSegmenter:
 
     def test_replay_line_by_line(self, mock_dataset):
         """Test replay segments by lines."""
-        from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+        from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
 
         base_env = ReasoningGymEnvironment(dataset=mock_dataset)
         env = SegmentedEnvironment(base_env, LineSegmenter())

@@ -9,10 +9,10 @@ from typing import Any, Callable, Literal
 import re
 import uuid
 
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from env_evals.core.environment import Environment, StepResult, EnvironmentSpec
-from env_evals.core.extraction import AnswerExtractor, TagBasedExtractor
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
 
 
 # Type alias for scoring functions

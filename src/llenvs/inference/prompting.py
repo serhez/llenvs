@@ -8,7 +8,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from env_evals.inference.protocol import ChatMessage
+from llenvs.inference.protocol import ChatMessage
 
 
 @runtime_checkable

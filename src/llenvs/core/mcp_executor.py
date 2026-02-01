@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from env_evals.core.tools import (
+from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
     ToolParameter,

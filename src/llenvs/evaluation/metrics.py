@@ -8,7 +8,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from env_evals.evaluation.runner import EpisodeResult, BatchResult
+from llenvs.evaluation.runner import EpisodeResult, BatchResult
 
 
 @dataclass(frozen=True)

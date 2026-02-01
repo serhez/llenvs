@@ -9,7 +9,7 @@ our common environment interface. Each adapter knows how to:
 
 from typing import Any, Protocol, runtime_checkable
 
-from env_evals.core.environment import Environment
+from llenvs.core.environment import Environment
 
 
 @runtime_checkable

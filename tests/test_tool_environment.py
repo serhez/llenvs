@@ -4,10 +4,10 @@ import pytest
 from typing import Any
 from dataclasses import dataclass, field
 
-from env_evals.core.state import State, StateMetadata, AgentObservation, AgentAction
-from env_evals.core.environment import StepResult, EnvironmentSpec
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from env_evals.core.tools import (
+from llenvs.core.state import State, StateMetadata, AgentObservation, AgentAction
+from llenvs.core.environment import StepResult, EnvironmentSpec
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.tools import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
@@ -16,7 +16,7 @@ from env_evals.core.tools import (
     ToolResultStatus,
     SimpleToolExecutor,
 )
-from env_evals.core.tool_environment import BaseToolEnvironment
+from llenvs.core.tool_environment import BaseToolEnvironment
 
 
 @dataclass

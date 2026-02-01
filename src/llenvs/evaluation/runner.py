@@ -8,18 +8,18 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 import logging
 
-from env_evals.core.state import State, TextObservation, TextAction, AgentObservation, AgentAction
-from env_evals.core.environment import Environment, StepResult
-from env_evals.core.tool_environment import ToolEnvironment
-from env_evals.core.trajectory import Trajectory, Transition
-from env_evals.core.reward import RewardBundle
-from env_evals.inference.protocol import (
+from llenvs.core.state import State, TextObservation, TextAction, AgentObservation, AgentAction
+from llenvs.core.environment import Environment, StepResult
+from llenvs.core.tool_environment import ToolEnvironment
+from llenvs.core.trajectory import Trajectory, Transition
+from llenvs.core.reward import RewardBundle
+from llenvs.inference.protocol import (
     ModelBackend,
     SamplingParams,
     ChatMessage,
     GenerationResult,
 )
-from env_evals.inference.prompting import PromptPipeline
+from llenvs.inference.prompting import PromptPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ class EpisodeRunner:
 
     def _dummy_metadata(self, task_index: int) -> Any:
         """Create dummy metadata for error cases."""
-        from env_evals.core.state import StateMetadata
+        from llenvs.core.state import StateMetadata
 
         return StateMetadata(
             step=0,
@@ -380,7 +380,7 @@ class ToolEpisodeRunner:
                     # Check for tool calls
                     tool_calls_data = msg.get("tool_calls", [])
                     if tool_calls_data:
-                        from env_evals.core.tools import ToolCall
+                        from llenvs.core.tools import ToolCall
 
                         tool_calls = tuple(
                             ToolCall(
@@ -552,7 +552,7 @@ class ToolEpisodeRunner:
             except Exception as e:
                 logger.error(f"Error running task {task_index}: {e}")
                 # Create failed result
-                from env_evals.core.tools import ToolResult
+                from llenvs.core.tools import ToolResult
 
                 episode_results.append(
                     EpisodeResult(
@@ -592,7 +592,7 @@ class ToolEpisodeRunner:
 
     def _dummy_metadata(self, task_index: int) -> Any:
         """Create dummy metadata for error cases."""
-        from env_evals.core.state import StateMetadata
+        from llenvs.core.state import StateMetadata
 
         return StateMetadata(
             step=0,

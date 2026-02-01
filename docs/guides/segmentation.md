@@ -12,8 +12,8 @@ The segmentation system turns single-step environments into multi-step environme
 Segment a complete response and analyze per-step:
 
 ```python
-from env_evals.adapters import create_reasoning_gym_environment
-from env_evals.core import SegmentedEnvironment, SentenceSegmenter
+from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core import SegmentedEnvironment, SentenceSegmenter
 
 # Create single-step environment
 base_env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
@@ -75,7 +75,7 @@ print(f"Final reward: {result.rewards.total}")
 Splits on sentence boundaries (.!? + whitespace). Handles common abbreviations:
 
 ```python
-from env_evals.core import SentenceSegmenter
+from llenvs.core import SentenceSegmenter
 
 segmenter = SentenceSegmenter()
 segments = segmenter.segment("First step. Second step! Third?")
@@ -87,7 +87,7 @@ segments = segmenter.segment("First step. Second step! Third?")
 Splits on newlines:
 
 ```python
-from env_evals.core import LineSegmenter
+from llenvs.core import LineSegmenter
 
 # Single newlines
 segmenter = LineSegmenter(delimiter="\n")
@@ -101,7 +101,7 @@ segmenter = LineSegmenter(delimiter="\n\n")
 Splits on regex patterns:
 
 ```python
-from env_evals.core import PatternSegmenter
+from llenvs.core import PatternSegmenter
 
 # Default patterns: numbered steps, transition words
 segmenter = PatternSegmenter()
@@ -119,7 +119,7 @@ segmenter = PatternSegmenter(patterns=(
 Combine multiple segmenters:
 
 ```python
-from env_evals.core import CompositeSegmenter
+from llenvs.core import CompositeSegmenter
 
 segmenter = CompositeSegmenter(segmenters=(
     LineSegmenter(),
@@ -132,7 +132,7 @@ segmenter = CompositeSegmenter(segmenters=(
 Add custom per-step rewards:
 
 ```python
-from env_evals.core import RewardSignal, RewardType
+from llenvs.core import RewardSignal, RewardType
 
 class PRMRewardFunction:
     """Process Reward Model for intermediate step quality."""
@@ -184,8 +184,8 @@ class SegmentedHidden(Generic[HiddenT]):
 ## Example: AIME with Step Analysis
 
 ```python
-from env_evals.adapters import create_huggingface_environment
-from env_evals.core import SegmentedEnvironment, PatternSegmenter
+from llenvs.adapters import create_huggingface_environment
+from llenvs.core import SegmentedEnvironment, PatternSegmenter
 
 # Load AIME problems
 base_env = create_huggingface_environment("HuggingFaceH4/aime_2024")

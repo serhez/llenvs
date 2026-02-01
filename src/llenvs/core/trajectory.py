@@ -11,8 +11,8 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 import uuid
 
-from env_evals.core.state import State
-from env_evals.core.reward import RewardBundle
+from llenvs.core.state import State
+from llenvs.core.reward import RewardBundle
 
 ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")

@@ -8,10 +8,10 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 import copy
 
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from env_evals.core.environment import Environment, StepResult, EnvironmentSpec
-from env_evals.core.segmentation import Segmenter
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.segmentation import Segmenter
 
 ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")

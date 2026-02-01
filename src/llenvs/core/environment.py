@@ -8,8 +8,8 @@ internal state, enabling branching and parallel exploration.
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from env_evals.core.state import State
-from env_evals.core.reward import RewardBundle, RewardFunction
+from llenvs.core.state import State
+from llenvs.core.reward import RewardBundle, RewardFunction
 
 ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")

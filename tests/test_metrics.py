@@ -1,11 +1,11 @@
 """Tests for metric computation."""
 
 import pytest
-from env_evals.core.state import State, StateMetadata, TextObservation
-from env_evals.core.trajectory import Trajectory, Transition
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType
-from env_evals.evaluation.runner import EpisodeResult, BatchResult
-from env_evals.evaluation.metrics import (
+from llenvs.core.state import State, StateMetadata, TextObservation
+from llenvs.core.trajectory import Trajectory, Transition
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.evaluation.runner import EpisodeResult, BatchResult
+from llenvs.evaluation.metrics import (
     compute_accuracy,
     compute_mean_reward,
     compute_pass_at_k,

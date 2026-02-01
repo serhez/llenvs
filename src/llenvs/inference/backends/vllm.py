@@ -9,7 +9,7 @@ vLLM provides full feature support including:
 
 from typing import Any
 
-from env_evals.inference.protocol import (
+from llenvs.inference.protocol import (
     ModelBackend,
     BackendCapabilities,
     SamplingParams,

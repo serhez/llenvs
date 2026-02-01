@@ -3,10 +3,10 @@
 import pytest
 from typing import Any
 
-from env_evals.core.state import TextObservation, TextAction
-from env_evals.core.reward import RewardType
-from env_evals.core.extraction import TagBasedExtractor, RegexExtractor
-from env_evals.adapters.huggingface import (
+from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.reward import RewardType
+from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
+from llenvs.adapters.huggingface import (
     HuggingFaceEnvironment,
     HuggingFaceHidden,
     HuggingFaceAdapter,
@@ -21,7 +21,7 @@ from env_evals.adapters.huggingface import (
     score_numeric_tolerance,
     DATASET_PRESETS,
 )
-from env_evals.core.registry import EnvironmentRegistry
+from llenvs.core.registry import EnvironmentRegistry
 
 
 class MockHFDataset:

@@ -8,7 +8,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from env_evals.core.tools import (
+from llenvs.core.tools import (
     ToolCall,
     ToolResult,
     ToolResultStatus,

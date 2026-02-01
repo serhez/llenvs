@@ -12,7 +12,7 @@ class State(Generic[ObsT, HiddenT]):
     metadata: StateMetadata
 ```
 
-**Location**: `env_evals/core/state.py`
+**Location**: `llenvs/core/state.py`
 
 States are immutable (frozen dataclass). The generic type parameters allow environments to define their own observation and hidden state types.
 
@@ -105,7 +105,7 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
     ) -> RewardBundle: ...
 ```
 
-**Location**: `env_evals/core/environment.py`
+**Location**: `llenvs/core/environment.py`
 
 | Method | Description |
 |--------|-------------|
@@ -145,7 +145,7 @@ class EnvironmentSpec:
 
 ## Rewards
 
-**Location**: `env_evals/core/reward.py`
+**Location**: `llenvs/core/reward.py`
 
 ### RewardType
 
@@ -214,7 +214,7 @@ class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
 
 ## Trajectory
 
-**Location**: `env_evals/core/trajectory.py`
+**Location**: `llenvs/core/trajectory.py`
 
 ```python
 @dataclass
@@ -271,7 +271,7 @@ class Checkpoint(Generic[ObsT, HiddenT, ActionT]):
 
 ## Answer Extraction
 
-**Location**: `env_evals/core/extraction.py`
+**Location**: `llenvs/core/extraction.py`
 
 ```python
 class AnswerExtractor(Protocol):
@@ -316,10 +316,10 @@ extractor = CompositeExtractor(extractors=[
 
 ## Registry
 
-**Location**: `env_evals/core/registry.py`
+**Location**: `llenvs/core/registry.py`
 
 ```python
-from env_evals.core.registry import environment_registry
+from llenvs.core.registry import environment_registry
 
 # List all registered adapters
 adapters = environment_registry.list_adapters()

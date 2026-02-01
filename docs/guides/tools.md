@@ -13,7 +13,7 @@ Tool calling allows models to:
 ## Defining Tools
 
 ```python
-from env_evals.core import (
+from llenvs.core import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
@@ -57,8 +57,8 @@ anthropic_schema = weather_tool.to_anthropic_schema()
 ## Using generate_with_tools
 
 ```python
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.inference import ChatMessage, SamplingParams
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.inference import ChatMessage, SamplingParams
 
 backend = OpenAIBackend(model="gpt-4o")
 
@@ -84,8 +84,8 @@ else:
 ## Handling Tool Results
 
 ```python
-from env_evals.core import ToolCall, ToolResult
-from env_evals.inference import ChatMessage
+from llenvs.core import ToolCall, ToolResult
+from llenvs.inference import ChatMessage
 
 # After receiving tool calls
 call = result.tool_calls[0]
@@ -122,7 +122,7 @@ final_result = backend.generate_with_tools(messages, tools, params)
 For synchronous Python functions:
 
 ```python
-from env_evals.core import SimpleToolExecutor, ToolCall
+from llenvs.core import SimpleToolExecutor, ToolCall
 
 executor = SimpleToolExecutor({
     "add": lambda a, b: str(a + b),
@@ -139,7 +139,7 @@ print(result.output)  # "8"
 For I/O-bound tools with parallel execution:
 
 ```python
-from env_evals.core import AsyncToolExecutor
+from llenvs.core import AsyncToolExecutor
 import asyncio
 
 async def fetch_weather(city: str) -> str:
@@ -168,7 +168,7 @@ results = asyncio.run(executor.execute_batch_async(calls))
 Connect to MCP (Model Context Protocol) servers:
 
 ```python
-from env_evals.core import MCPToolExecutor, MCPServerConfig
+from llenvs.core import MCPToolExecutor, MCPServerConfig
 
 config = MCPServerConfig(
     command="npx",
@@ -191,8 +191,8 @@ async with MCPToolExecutor(config) as executor:
 For environments with built-in tools, use `ToolEnvironment`:
 
 ```python
-from env_evals.adapters import create_gem_tool_environment
-from env_evals.core import AgentAction, ToolCall
+from llenvs.adapters import create_gem_tool_environment
+from llenvs.core import AgentAction, ToolCall
 
 # Create tool-enabled environment
 env = create_gem_tool_environment(
@@ -216,7 +216,7 @@ print(f"Output: {result.info['tool_results'][0].output}")
 ## Tool-Specific Rewards
 
 ```python
-from env_evals.core import ToolValidityReward, ToolEfficiencyReward
+from llenvs.core import ToolValidityReward, ToolEfficiencyReward
 
 # Reward for valid tool calls (1.0 if all valid)
 validity_reward = ToolValidityReward()
@@ -234,7 +234,7 @@ efficiency_reward = ToolEfficiencyReward(
 For running tool-enabled evaluations:
 
 ```python
-from env_evals.evaluation import ToolEpisodeRunner
+from llenvs.evaluation import ToolEpisodeRunner
 
 env = create_gem_tool_environment("math:GSM8K")
 backend = OpenAIBackend(model="gpt-4o")

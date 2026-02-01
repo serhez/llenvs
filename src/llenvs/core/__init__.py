@@ -1,6 +1,6 @@
 """Core abstractions for MDP-style environments."""
 
-from env_evals.core.state import (
+from llenvs.core.state import (
     State,
     StateMetadata,
     TextObservation,
@@ -8,7 +8,7 @@ from env_evals.core.state import (
     AgentObservation,
     AgentAction,
 )
-from env_evals.core.tools import (
+from llenvs.core.tools import (
     ToolDefinition,
     ToolParameter,
     ToolParameterType,
@@ -18,14 +18,14 @@ from env_evals.core.tools import (
     ToolExecutor,
     SimpleToolExecutor,
 )
-from env_evals.core.async_executor import AsyncToolExecutor
-from env_evals.core.mcp_executor import MCPToolExecutor, MCPServerConfig, MCPConnectionError
-from env_evals.core.tool_environment import ToolEnvironment, BaseToolEnvironment
-from env_evals.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
-from env_evals.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
-from env_evals.core.trajectory import Trajectory, Transition, Checkpoint
-from env_evals.core.environment import Environment, StepResult, EnvironmentSpec
-from env_evals.core.extraction import (
+from llenvs.core.async_executor import AsyncToolExecutor
+from llenvs.core.mcp_executor import MCPToolExecutor, MCPServerConfig, MCPConnectionError
+from llenvs.core.tool_environment import ToolEnvironment, BaseToolEnvironment
+from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
+from llenvs.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
+from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.extraction import (
     AnswerExtractor,
     TagBasedExtractor,
     RegexExtractor,
@@ -34,13 +34,13 @@ from env_evals.core.extraction import (
     CompositeExtractor,
     FallbackExtractor,
 )
-from env_evals.core.registry import (
+from llenvs.core.registry import (
     Registry,
     environment_registry,
     extractor_registry,
     backend_registry,
 )
-from env_evals.core.config import (
+from llenvs.core.config import (
     EvalConfig,
     EnvironmentConfig,
     ModelConfig,
@@ -48,7 +48,7 @@ from env_evals.core.config import (
     EnvironmentFactory,
     BackendFactory,
 )
-from env_evals.core.segmentation import (
+from llenvs.core.segmentation import (
     Segmenter,
     SentenceSegmenter,
     LineSegmenter,
@@ -56,7 +56,7 @@ from env_evals.core.segmentation import (
     CompositeSegmenter,
     SemanticSegmenter,
 )
-from env_evals.core.segmented_environment import (
+from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
     SegmentedHidden,
 )

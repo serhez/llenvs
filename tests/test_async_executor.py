@@ -4,8 +4,8 @@ import asyncio
 import pytest
 from unittest.mock import MagicMock
 
-from env_evals.core.async_executor import AsyncToolExecutor
-from env_evals.core.tools import ToolCall, ToolResultStatus
+from llenvs.core.async_executor import AsyncToolExecutor
+from llenvs.core.tools import ToolCall, ToolResultStatus
 
 
 class TestAsyncToolExecutor:

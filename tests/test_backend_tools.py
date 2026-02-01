@@ -8,8 +8,8 @@ import pytest
 from unittest.mock import MagicMock, patch
 from typing import Any
 
-from env_evals.core.tools import ToolCall, ToolDefinition, ToolParameter, ToolParameterType
-from env_evals.inference.protocol import (
+from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameter, ToolParameterType
+from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     SamplingParams,
@@ -154,7 +154,7 @@ class TestChatMessageToolSupport:
 
     def test_tool_result_message(self):
         """Test creating a tool result message."""
-        from env_evals.core.tools import ToolResult
+        from llenvs.core.tools import ToolResult
 
         result = ToolResult.success("call_1", "search", "Found 10 results")
         msg = ChatMessage.tool_result(result)
@@ -166,7 +166,7 @@ class TestChatMessageToolSupport:
 
     def test_tool_result_message_error(self):
         """Test creating a tool result message for errors."""
-        from env_evals.core.tools import ToolResult
+        from llenvs.core.tools import ToolResult
 
         result = ToolResult.from_error("call_1", "search", "Connection timeout")
         msg = ChatMessage.tool_result(result)
@@ -223,7 +223,7 @@ class TestOpenAIBackendTools:
             mock_client.chat.completions.create.return_value = mock_response
             MockOpenAI.return_value = mock_client
 
-            from env_evals.inference.backends.api import OpenAIBackend
+            from llenvs.inference.backends.api import OpenAIBackend
 
             backend = OpenAIBackend(model="gpt-4o")
             result = backend.generate_with_tools(
@@ -263,7 +263,7 @@ class TestOpenAIBackendTools:
             mock_client.chat.completions.create.return_value = mock_response
             MockOpenAI.return_value = mock_client
 
-            from env_evals.inference.backends.api import OpenAIBackend
+            from llenvs.inference.backends.api import OpenAIBackend
 
             backend = OpenAIBackend(model="gpt-4o")
             result = backend.generate_with_tools(
@@ -305,7 +305,7 @@ class TestAnthropicBackendTools:
             mock_client.messages.create.return_value = mock_response
             MockAnthropic.return_value = mock_client
 
-            from env_evals.inference.backends.api import AnthropicBackend
+            from llenvs.inference.backends.api import AnthropicBackend
 
             backend = AnthropicBackend(model="claude-sonnet-4-20250514")
             result = backend.generate_with_tools(
@@ -343,7 +343,7 @@ class TestAnthropicBackendTools:
             mock_client.messages.create.return_value = mock_response
             MockAnthropic.return_value = mock_client
 
-            from env_evals.inference.backends.api import AnthropicBackend
+            from llenvs.inference.backends.api import AnthropicBackend
 
             backend = AnthropicBackend(model="claude-sonnet-4-20250514")
             result = backend.generate_with_tools(

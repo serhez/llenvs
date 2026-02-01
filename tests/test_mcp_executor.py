@@ -4,12 +4,12 @@ import json
 import pytest
 from unittest.mock import MagicMock, patch, AsyncMock
 
-from env_evals.core.mcp_executor import (
+from llenvs.core.mcp_executor import (
     MCPToolExecutor,
     MCPServerConfig,
     MCPConnectionError,
 )
-from env_evals.core.tools import ToolCall, ToolParameterType, ToolResultStatus
+from llenvs.core.tools import ToolCall, ToolParameterType, ToolResultStatus
 
 
 class TestMCPServerConfig:

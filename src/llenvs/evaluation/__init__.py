@@ -1,12 +1,12 @@
 """Evaluation orchestration and metrics."""
 
-from env_evals.evaluation.runner import (
+from llenvs.evaluation.runner import (
     EpisodeRunner,
     EpisodeResult,
     BatchResult,
     run_evaluation,
 )
-from env_evals.evaluation.metrics import (
+from llenvs.evaluation.metrics import (
     MetricValue,
     MetricsBundle,
     compute_accuracy,
@@ -15,7 +15,7 @@ from env_evals.evaluation.metrics import (
     compute_format_compliance,
     compute_all_metrics,
 )
-from env_evals.evaluation.results import (
+from llenvs.evaluation.results import (
     EvaluationMetadata,
     EvaluationResult,
     format_episode_result,

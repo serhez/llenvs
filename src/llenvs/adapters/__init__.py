@@ -4,20 +4,20 @@ Adapters bridge between third-party libraries and our common interface.
 Available adapters are automatically registered with the environment_registry.
 """
 
-from env_evals.adapters.reasoning_gym import (
+from llenvs.adapters.reasoning_gym import (
     ReasoningGymEnvironment,
     ReasoningGymHidden,
     ReasoningGymAdapter,
     create_reasoning_gym_environment,
 )
-from env_evals.adapters.huggingface import (
+from llenvs.adapters.huggingface import (
     HuggingFaceEnvironment,
     HuggingFaceHidden,
     HuggingFaceAdapter,
     create_huggingface_environment,
     DATASET_PRESETS,
 )
-from env_evals.adapters.gem import (
+from llenvs.adapters.gem import (
     GemEnvironment,
     GemHidden,
     GemToolEnvironment,
@@ -31,7 +31,7 @@ from env_evals.adapters.gem import (
     GEM_SEARCH_TOOL,
     GEM_SUBMIT_ANSWER_TOOL,
 )
-from env_evals.adapters.webshop import (
+from llenvs.adapters.webshop import (
     WebShopEnvironment,
     WebShopHidden,
     WebShopAdapter,
@@ -79,7 +79,7 @@ def _register_adapters() -> None:
     Called automatically on import. Adapters for libraries that aren't
     installed are silently skipped.
     """
-    from env_evals.core.registry import environment_registry
+    from llenvs.core.registry import environment_registry
 
     # Register reasoning-gym adapter if available
     try:

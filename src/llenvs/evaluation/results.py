@@ -9,8 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from env_evals.evaluation.runner import BatchResult, EpisodeResult
-from env_evals.evaluation.metrics import MetricsBundle, compute_all_metrics
+from llenvs.evaluation.runner import BatchResult, EpisodeResult
+from llenvs.evaluation.metrics import MetricsBundle, compute_all_metrics
 
 
 @dataclass

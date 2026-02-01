@@ -7,10 +7,10 @@ where the environment executes tools and returns results in observations.
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from env_evals.core.environment import EnvironmentSpec, StepResult
-from env_evals.core.reward import RewardBundle, RewardFunction
-from env_evals.core.state import State
-from env_evals.core.tools import (
+from llenvs.core.environment import EnvironmentSpec, StepResult
+from llenvs.core.reward import RewardBundle, RewardFunction
+from llenvs.core.state import State
+from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
     ToolExecutor,
@@ -23,13 +23,13 @@ HiddenT = TypeVar("HiddenT")
 
 # Forward reference for AgentObservation - import at runtime to avoid circular import
 def _get_agent_observation_class():
-    from env_evals.core.state import AgentObservation
+    from llenvs.core.state import AgentObservation
 
     return AgentObservation
 
 
 def _get_agent_action_class():
-    from env_evals.core.state import AgentAction
+    from llenvs.core.state import AgentAction
 
     return AgentAction
 

@@ -1,8 +1,8 @@
 """Tests for prompt transformers and pipelines."""
 
 import pytest
-from env_evals.inference.protocol import ChatMessage
-from env_evals.inference.prompting import (
+from llenvs.inference.protocol import ChatMessage
+from llenvs.inference.prompting import (
     PromptPipeline,
     SystemPromptInjector,
     FewShotInjector,

@@ -213,7 +213,7 @@ class EnvironmentFactory:
             KeyError: If adapter is not registered.
             ValueError: If environment name is not recognized by adapter.
         """
-        from env_evals.core.registry import environment_registry, extractor_registry
+        from llenvs.core.registry import environment_registry, extractor_registry
 
         # Create extractor from config
         extractor = extractor_registry.create(config.extractor, **config.extractor_config)
@@ -248,22 +248,22 @@ class BackendFactory:
         backend_type = config.backend.lower()
 
         if backend_type == "vllm":
-            from env_evals.inference.backends.vllm import VLLMBackend
+            from llenvs.inference.backends.vllm import VLLMBackend
 
             return VLLMBackend(model_path=config.model, **config.params)
 
         elif backend_type == "openai":
-            from env_evals.inference.backends.api import OpenAIBackend
+            from llenvs.inference.backends.api import OpenAIBackend
 
             return OpenAIBackend(model=config.model, **config.params)
 
         elif backend_type == "anthropic":
-            from env_evals.inference.backends.api import AnthropicBackend
+            from llenvs.inference.backends.api import AnthropicBackend
 
             return AnthropicBackend(model=config.model, **config.params)
 
         elif backend_type == "openrouter":
-            from env_evals.inference.backends.api import OpenRouterBackend
+            from llenvs.inference.backends.api import OpenRouterBackend
 
             return OpenRouterBackend(model=config.model, **config.params)
 
@@ -280,7 +280,7 @@ def create_sampling_params(config: InferenceConfig) -> Any:
     Returns:
         SamplingParams instance.
     """
-    from env_evals.inference.protocol import SamplingParams
+    from llenvs.inference.protocol import SamplingParams
 
     return SamplingParams(
         temperature=config.temperature,

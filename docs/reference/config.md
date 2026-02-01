@@ -39,7 +39,7 @@ llenvs run config.yaml --environment leg_counting
 ## Sampling Parameters
 
 ```python
-from env_evals.inference import SamplingParams
+from llenvs.inference import SamplingParams
 
 params = SamplingParams(
     max_tokens=2048,        # Maximum tokens to generate
@@ -60,7 +60,7 @@ params = SamplingParams(
 ### OpenAI
 
 ```python
-from env_evals.inference.backends import OpenAIBackend
+from llenvs.inference.backends import OpenAIBackend
 
 backend = OpenAIBackend(
     model="gpt-4o",
@@ -73,7 +73,7 @@ backend = OpenAIBackend(
 ### Anthropic
 
 ```python
-from env_evals.inference.backends import AnthropicBackend
+from llenvs.inference.backends import AnthropicBackend
 
 backend = AnthropicBackend(
     model="claude-sonnet-4-20250514",
@@ -84,7 +84,7 @@ backend = AnthropicBackend(
 ### vLLM
 
 ```python
-from env_evals.inference.backends import VLLMBackend
+from llenvs.inference.backends import VLLMBackend
 
 backend = VLLMBackend(
     model_path="meta-llama/Llama-3.1-8B-Instruct",
@@ -98,7 +98,7 @@ backend = VLLMBackend(
 ### OpenRouter
 
 ```python
-from env_evals.inference.backends import OpenRouterBackend
+from llenvs.inference.backends import OpenRouterBackend
 
 backend = OpenRouterBackend(
     model="anthropic/claude-sonnet-4-20250514",
@@ -131,7 +131,7 @@ print(f"Tools: {caps.supports_function_calling}")
 ### Reasoning-Gym
 
 ```python
-from env_evals.adapters import create_reasoning_gym_environment
+from llenvs.adapters import create_reasoning_gym_environment
 
 env = create_reasoning_gym_environment(
     dataset_name="leg_counting",
@@ -146,7 +146,7 @@ env = create_reasoning_gym_environment(
 ### HuggingFace
 
 ```python
-from env_evals.adapters import HuggingFaceAdapter
+from llenvs.adapters import HuggingFaceAdapter
 
 adapter = HuggingFaceAdapter()
 env = adapter.get_environment(
@@ -165,7 +165,7 @@ env = adapter.get_environment(
 ### GEM
 
 ```python
-from env_evals.adapters import create_gem_environment, create_gem_tool_environment
+from llenvs.adapters import create_gem_environment, create_gem_tool_environment
 
 # Basic environment
 env = create_gem_environment(
@@ -188,7 +188,7 @@ env = create_gem_tool_environment(
 ### WebShop
 
 ```python
-from env_evals.adapters import create_webshop_environment
+from llenvs.adapters import create_webshop_environment
 
 env = create_webshop_environment(
     observation_mode="text_rich",  # text_rich, text, html
@@ -201,7 +201,7 @@ env = create_webshop_environment(
 ## Prompt Pipeline Configuration
 
 ```python
-from env_evals.inference.prompting import build_standard_pipeline
+from llenvs.inference.prompting import build_standard_pipeline
 
 pipeline = build_standard_pipeline(
     system_prompt="You are a helpful assistant.",
@@ -215,7 +215,7 @@ pipeline = build_standard_pipeline(
 Or compose manually:
 
 ```python
-from env_evals.inference.prompting import (
+from llenvs.inference.prompting import (
     SystemPromptInjector,
     FewShotInjector,
     ChainOfThoughtWrapper,
@@ -233,7 +233,7 @@ pipeline = (
 ## Evaluation Runner Configuration
 
 ```python
-from env_evals.evaluation import EpisodeRunner, ToolEpisodeRunner
+from llenvs.evaluation import EpisodeRunner, ToolEpisodeRunner
 
 # Basic runner
 runner = EpisodeRunner(
@@ -263,7 +263,7 @@ batch = runner.run_batch(
 ## MCP Server Configuration
 
 ```python
-from env_evals.core import MCPServerConfig, MCPToolExecutor
+from llenvs.core import MCPServerConfig, MCPToolExecutor
 
 config = MCPServerConfig(
     command="npx",                      # Command to start server

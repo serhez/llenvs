@@ -7,18 +7,18 @@ Key capabilities:
 - Multiple inference backends (vLLM, OpenAI, Anthropic, OpenRouter)
 """
 
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
-from env_evals.core.trajectory import Trajectory, Transition, Checkpoint
-from env_evals.core.environment import Environment, StepResult, EnvironmentSpec
-from env_evals.core.extraction import (
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
+from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.extraction import (
     AnswerExtractor,
     TagBasedExtractor,
     RegexExtractor,
     GSM8KExtractor,
     MultipleChoiceExtractor,
 )
-from env_evals.core.config import EvalConfig
+from llenvs.core.config import EvalConfig
 
 __version__ = "0.1.0"
 

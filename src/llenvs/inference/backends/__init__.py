@@ -1,7 +1,7 @@
 """Inference backends for different model providers."""
 
-from env_evals.inference.backends.vllm import VLLMBackend
-from env_evals.inference.backends.api import (
+from llenvs.inference.backends.vllm import VLLMBackend
+from llenvs.inference.backends.api import (
     OpenAIBackend,
     AnthropicBackend,
     OpenRouterBackend,

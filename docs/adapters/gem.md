@@ -13,8 +13,8 @@ pip install llenvs[gem]
 ## Quick Start
 
 ```python
-from env_evals.adapters import create_gem_environment
-from env_evals.core import TextAction
+from llenvs.adapters import create_gem_environment
+from llenvs.core import TextAction
 
 # Create a multi-turn game
 env = create_gem_environment("game:GuessTheNumber-v0")
@@ -28,8 +28,8 @@ env = create_gem_environment("math:GSM8K")
 GEM provides native multi-turn games where the model interacts across multiple steps:
 
 ```python
-from env_evals.adapters import create_gem_environment
-from env_evals.core import TextAction
+from llenvs.adapters import create_gem_environment
+from llenvs.core import TextAction
 
 # GuessTheNumber - binary search game
 env = create_gem_environment("game:GuessTheNumber-v0")
@@ -72,8 +72,8 @@ Most games have difficulty variants: `-easy`, `-hard`, `-random`.
 GEM also wraps standard benchmarks as single-turn environments:
 
 ```python
-from env_evals.adapters import create_gem_environment
-from env_evals.core import TextAction
+from llenvs.adapters import create_gem_environment
+from llenvs.core import TextAction
 
 # Math benchmark
 env = create_gem_environment("math:GSM8K")
@@ -113,8 +113,8 @@ print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
 GEM environments like `math:*` and `qa:*` support tools (Python execution, search). Use `create_gem_tool_environment` for structured function calling:
 
 ```python
-from env_evals.adapters import create_gem_tool_environment
-from env_evals.core import AgentAction, ToolCall
+from llenvs.adapters import create_gem_tool_environment
+from llenvs.core import AgentAction, ToolCall
 
 # Create tool-enabled environment
 env = create_gem_tool_environment(
@@ -174,10 +174,10 @@ result = env.step(state, action)
 ### Using with ToolEpisodeRunner
 
 ```python
-from env_evals.adapters import create_gem_tool_environment
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.evaluation import ToolEpisodeRunner
-from env_evals.inference import SamplingParams
+from llenvs.adapters import create_gem_tool_environment
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.evaluation import ToolEpisodeRunner
+from llenvs.inference import SamplingParams
 
 env = create_gem_tool_environment("math:GSM8K", tool_types=("python",))
 backend = OpenAIBackend(model="gpt-4o")
@@ -196,7 +196,7 @@ print(f"Success: {result.success}")
 ## Using the Adapter Directly
 
 ```python
-from env_evals.adapters import GemAdapter
+from llenvs.adapters import GemAdapter
 
 adapter = GemAdapter()
 
@@ -226,7 +226,7 @@ GEM internally wraps reasoning-gym, so some environments are available through b
 env1 = create_gem_environment("reasoning_gym:leg_counting")
 
 # Via ReasoningGym adapter (native)
-from env_evals.adapters import create_reasoning_gym_environment
+from llenvs.adapters import create_reasoning_gym_environment
 env2 = create_reasoning_gym_environment("leg_counting")
 ```
 

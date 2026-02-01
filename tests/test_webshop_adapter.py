@@ -4,9 +4,9 @@ import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from env_evals.core.state import TextObservation, TextAction
-from env_evals.core.reward import RewardType
-from env_evals.adapters.webshop import (
+from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.reward import RewardType
+from llenvs.adapters.webshop import (
     WebShopEnvironment,
     WebShopHidden,
     WebShopAdapter,
@@ -369,7 +369,7 @@ class TestWebShopAdapter:
         assert "search[keywords]" in info["actions"]
         assert "click[element]" in info["actions"]
 
-    @patch("env_evals.adapters.webshop.WebShopAdapter._get_webshop")
+    @patch("llenvs.adapters.webshop.WebShopAdapter._get_webshop")
     def test_get_environment(self, mock_get_webshop):
         """Test creating environment via adapter."""
         # Setup mock
@@ -388,7 +388,7 @@ class TestWebShopAdapter:
         assert env.spec.max_steps == 10
         mock_gym.make.assert_called_once()
 
-    @patch("env_evals.adapters.webshop.WebShopAdapter._get_webshop")
+    @patch("llenvs.adapters.webshop.WebShopAdapter._get_webshop")
     def test_get_environment_parses_name(self, mock_get_webshop):
         """Test environment name parsing."""
         mock_gym = MagicMock()
@@ -405,7 +405,7 @@ class TestWebShopAdapter:
         call_kwargs = mock_gym.make.call_args[1]
         assert call_kwargs["observation_mode"] == "html"
 
-    @patch("env_evals.adapters.webshop.WebShopAdapter._get_webshop")
+    @patch("llenvs.adapters.webshop.WebShopAdapter._get_webshop")
     def test_invalid_observation_mode(self, mock_get_webshop):
         """Test error on invalid observation mode."""
         mock_gym = MagicMock()
@@ -421,7 +421,7 @@ class TestWebShopAdapter:
 class TestCreateWebShopEnvironment:
     """Tests for the factory function."""
 
-    @patch("env_evals.adapters.webshop.WebShopAdapter._get_webshop")
+    @patch("llenvs.adapters.webshop.WebShopAdapter._get_webshop")
     def test_create_environment(self, mock_get_webshop):
         """Test factory function creates environment."""
         mock_gym = MagicMock()

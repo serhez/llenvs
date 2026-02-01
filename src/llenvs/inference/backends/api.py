@@ -7,8 +7,8 @@ import json
 import uuid
 from typing import Any
 
-from env_evals.core.tools import ToolCall, ToolDefinition
-from env_evals.inference.protocol import (
+from llenvs.core.tools import ToolCall, ToolDefinition
+from llenvs.inference.protocol import (
     ModelBackend,
     BackendCapabilities,
     SamplingParams,

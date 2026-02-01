@@ -1,17 +1,17 @@
 """Tests for the ReasoningGym adapter."""
 
 import pytest
-from env_evals.core.state import TextObservation, TextAction
-from env_evals.core.reward import RewardType
-from env_evals.core.extraction import TagBasedExtractor, RegexExtractor
-from env_evals.adapters.reasoning_gym import (
+from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.reward import RewardType
+from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
+from llenvs.adapters.reasoning_gym import (
     ReasoningGymEnvironment,
     ReasoningGymHidden,
     ReasoningGymAdapter,
     CorrectnessRewardFunction,
     FormatRewardFunction,
 )
-from env_evals.core.registry import EnvironmentRegistry
+from llenvs.core.registry import EnvironmentRegistry
 
 
 class TestReasoningGymEnvironment:
@@ -251,7 +251,7 @@ class TestFormatRewardFunction:
         reward_fn = FormatRewardFunction(extractor)
 
         # Create minimal state (format reward doesn't need hidden state details)
-        from env_evals.core.state import State, StateMetadata
+        from llenvs.core.state import State, StateMetadata
 
         state = State(
             observation=TextObservation(prompt="test"),
@@ -272,7 +272,7 @@ class TestFormatRewardFunction:
         extractor = TagBasedExtractor()
         reward_fn = FormatRewardFunction(extractor)
 
-        from env_evals.core.state import State, StateMetadata
+        from llenvs.core.state import State, StateMetadata
 
         state = State(
             observation=TextObservation(prompt="test"),
@@ -357,10 +357,10 @@ class TestReasoningGymAdapter:
         """Test get_environment creates an environment."""
         # Patch the create_reasoning_gym_environment function
         def mock_create(dataset_name, **kwargs):
-            from env_evals.adapters.reasoning_gym import ReasoningGymEnvironment
+            from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
             return ReasoningGymEnvironment(dataset=mock_dataset)
 
-        from env_evals.adapters import reasoning_gym
+        from llenvs.adapters import reasoning_gym
         monkeypatch.setattr(reasoning_gym, "create_reasoning_gym_environment", mock_create)
 
         adapter = ReasoningGymAdapter()

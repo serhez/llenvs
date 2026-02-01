@@ -4,7 +4,7 @@ This document covers tool/function calling support in llenvs.
 
 ## Tool Definitions
 
-**Location**: `env_evals/core/tools.py`
+**Location**: `llenvs/core/tools.py`
 
 ### ToolParameterType
 
@@ -49,7 +49,7 @@ class ToolDefinition:
 Example:
 
 ```python
-from env_evals.core import ToolDefinition, ToolParameter, ToolParameterType
+from llenvs.core import ToolDefinition, ToolParameter, ToolParameterType
 
 weather_tool = ToolDefinition(
     name="get_weather",
@@ -126,7 +126,7 @@ class ToolExecutor(Protocol):
 Executor backed by dict of Python callables:
 
 ```python
-from env_evals.core import SimpleToolExecutor, ToolCall
+from llenvs.core import SimpleToolExecutor, ToolCall
 
 def get_weather(city: str, units: str = "celsius") -> str:
     return f"Weather in {city}: 22° {units}"
@@ -140,12 +140,12 @@ print(result.output)  # "Weather in Paris: 22° celsius"
 
 ### AsyncToolExecutor
 
-**Location**: `env_evals/core/async_executor.py`
+**Location**: `llenvs/core/async_executor.py`
 
 Executor that runs tool calls asynchronously with parallel batch execution:
 
 ```python
-from env_evals.core import AsyncToolExecutor, ToolCall
+from llenvs.core import AsyncToolExecutor, ToolCall
 
 async def fetch_weather(city: str) -> str:
     async with aiohttp.ClientSession() as session:
@@ -177,12 +177,12 @@ Key features:
 
 ### MCPToolExecutor
 
-**Location**: `env_evals/core/mcp_executor.py`
+**Location**: `llenvs/core/mcp_executor.py`
 
 Executor that connects to MCP (Model Context Protocol) servers:
 
 ```python
-from env_evals.core import MCPToolExecutor, MCPServerConfig, ToolCall
+from llenvs.core import MCPToolExecutor, MCPServerConfig, ToolCall
 
 # Connect to an MCP filesystem server
 config = MCPServerConfig(
@@ -208,7 +208,7 @@ with MCPToolExecutor(config) as executor:
 
 ## Tool Environment
 
-**Location**: `env_evals/core/tool_environment.py`
+**Location**: `llenvs/core/tool_environment.py`
 
 ### ToolEnvironment Protocol
 
@@ -266,7 +266,7 @@ class BaseToolEnvironment(Generic[HiddenT]):
 
 ## Tool-Specific Rewards
 
-**Location**: `env_evals/core/tool_rewards.py`
+**Location**: `llenvs/core/tool_rewards.py`
 
 ```python
 @dataclass
@@ -287,8 +287,8 @@ class ToolEfficiencyReward:
 ## Using Tools with Backends
 
 ```python
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.inference import ChatMessage, SamplingParams
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.inference import ChatMessage, SamplingParams
 
 backend = OpenAIBackend(model="gpt-4o")
 

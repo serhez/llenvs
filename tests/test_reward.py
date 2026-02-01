@@ -1,7 +1,7 @@
 """Tests for reward abstractions."""
 
 import pytest
-from env_evals.core.reward import RewardSignal, RewardBundle, RewardType
+from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
 
 
 class TestRewardType:

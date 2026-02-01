@@ -14,7 +14,7 @@ llenvs supports multiple inference backends with a unified interface.
 ## vLLM (Local Inference)
 
 ```python
-from env_evals.inference.backends import VLLMBackend
+from llenvs.inference.backends import VLLMBackend
 
 backend = VLLMBackend(
     model_path="meta-llama/Llama-3.1-8B-Instruct",
@@ -47,7 +47,7 @@ for token_lp in results[0].token_logprobs:
 ## OpenAI
 
 ```python
-from env_evals.inference.backends import OpenAIBackend
+from llenvs.inference.backends import OpenAIBackend
 
 # Uses OPENAI_API_KEY env var by default
 backend = OpenAIBackend(model="gpt-4o")
@@ -60,7 +60,7 @@ backend = OpenAIBackend(
 )
 
 # Chat generation
-from env_evals.inference import ChatMessage
+from llenvs.inference import ChatMessage
 result = backend.generate_chat(
     [
         ChatMessage(role="system", content="You are helpful."),
@@ -73,7 +73,7 @@ result = backend.generate_chat(
 ## Anthropic
 
 ```python
-from env_evals.inference.backends import AnthropicBackend
+from llenvs.inference.backends import AnthropicBackend
 
 backend = AnthropicBackend(model="claude-sonnet-4-20250514")
 
@@ -88,7 +88,7 @@ continuations = backend.continue_from_prefix(
 ## OpenRouter
 
 ```python
-from env_evals.inference.backends import OpenRouterBackend
+from llenvs.inference.backends import OpenRouterBackend
 
 backend = OpenRouterBackend(
     model="anthropic/claude-sonnet-4-20250514",
@@ -100,7 +100,7 @@ backend = OpenRouterBackend(
 ## Sampling Parameters
 
 ```python
-from env_evals.inference import SamplingParams
+from llenvs.inference import SamplingParams
 
 params = SamplingParams(
     max_tokens=2048,
@@ -132,7 +132,7 @@ print(f"Function calling: {caps.supports_function_calling}")
 ### Building Pipelines
 
 ```python
-from env_evals.inference.prompting import (
+from llenvs.inference.prompting import (
     SystemPromptInjector,
     FewShotInjector,
     ChainOfThoughtWrapper,
@@ -157,7 +157,7 @@ transformed = pipeline.transform(messages)
 ### Standard Pipeline Helper
 
 ```python
-from env_evals.inference.prompting import build_standard_pipeline
+from llenvs.inference.prompting import build_standard_pipeline
 
 pipeline = build_standard_pipeline(
     system_prompt="You are a helpful assistant.",
@@ -171,7 +171,7 @@ pipeline = build_standard_pipeline(
 ### Chain of Thought Styles
 
 ```python
-from env_evals.inference.prompting import ChainOfThoughtWrapper
+from llenvs.inference.prompting import ChainOfThoughtWrapper
 
 ChainOfThoughtWrapper("think_step_by_step")
 # → "Think through this step by step..."
@@ -186,7 +186,7 @@ ChainOfThoughtWrapper("explain")
 ### Answer Format Options
 
 ```python
-from env_evals.inference.prompting import AnswerFormatInjector
+from llenvs.inference.prompting import AnswerFormatInjector
 
 AnswerFormatInjector("xml_answer", tag_name="answer")
 # → "Put your final answer in <answer>...</answer> tags."
@@ -206,7 +206,7 @@ AnswerFormatInjector("gsm8k")
 ### Built-in Extractors
 
 ```python
-from env_evals.core.extraction import (
+from llenvs.core.extraction import (
     TagBasedExtractor,
     RegexExtractor,
     GSM8KExtractor,

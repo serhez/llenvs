@@ -3,7 +3,7 @@
 import pytest
 from typing import Any
 
-from env_evals.core.tools import (
+from llenvs.core.tools import (
     ToolParameter,
     ToolParameterType,
     ToolDefinition,

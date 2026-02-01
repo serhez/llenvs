@@ -1,7 +1,7 @@
 """Tests for core state abstractions."""
 
 import pytest
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
 
 
 class TestStateMetadata:

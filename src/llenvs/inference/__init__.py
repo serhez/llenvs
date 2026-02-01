@@ -1,6 +1,6 @@
 """Inference layer for model backends and generation."""
 
-from env_evals.inference.protocol import (
+from llenvs.inference.protocol import (
     ModelBackend,
     BackendCapabilities,
     SamplingParams,
@@ -9,7 +9,7 @@ from env_evals.inference.protocol import (
     StopReason,
     TokenLogprob,
 )
-from env_evals.inference.prompting import (
+from llenvs.inference.prompting import (
     PromptTransformer,
     PromptPipeline,
     SystemPromptInjector,

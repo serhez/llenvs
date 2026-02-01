@@ -13,8 +13,8 @@ pip install llenvs[reasoning-gym]
 ## Quick Start
 
 ```python
-from env_evals.adapters import create_reasoning_gym_environment
-from env_evals.core import TextAction
+from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core import TextAction
 
 env = create_reasoning_gym_environment(
     dataset_name="leg_counting",
@@ -34,7 +34,7 @@ print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
 ## Using the Adapter
 
 ```python
-from env_evals.adapters import ReasoningGymAdapter
+from llenvs.adapters import ReasoningGymAdapter
 
 adapter = ReasoningGymAdapter()
 
@@ -106,10 +106,10 @@ class ReasoningGymHidden:
 ## Example: Running Evaluation
 
 ```python
-from env_evals.adapters import create_reasoning_gym_environment
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.evaluation import EpisodeRunner
-from env_evals.inference import SamplingParams
+from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.evaluation import EpisodeRunner
+from llenvs.inference import SamplingParams
 
 env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
 backend = OpenAIBackend(model="gpt-4o")

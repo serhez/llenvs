@@ -11,9 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 import uuid
 
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from env_evals.core.environment import StepResult, EnvironmentSpec
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.environment import StepResult, EnvironmentSpec
 
 
 @dataclass(frozen=True)

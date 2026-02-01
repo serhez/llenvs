@@ -12,8 +12,8 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from env_evals.core.state import AgentAction
-    from env_evals.core.tools import ToolCall, ToolDefinition, ToolResult
+    from llenvs.core.state import AgentAction
+    from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 
 class StopReason(Enum):
@@ -107,7 +107,7 @@ class GenerationResult:
 
     def to_agent_action(self) -> "AgentAction":
         """Convert to AgentAction for use with tool environments."""
-        from env_evals.core.state import AgentAction
+        from llenvs.core.state import AgentAction
 
         return AgentAction(text=self.text, tool_calls=self.tool_calls)
 

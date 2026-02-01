@@ -162,7 +162,7 @@ class EnvironmentRegistry:
     """
 
     def __init__(self) -> None:
-        from env_evals.core.adapter import Adapter
+        from llenvs.core.adapter import Adapter
 
         self._adapters: dict[str, Adapter] = {}
 
@@ -280,7 +280,7 @@ def register_defaults() -> None:
 
     Called automatically on import, but can be called again to reset.
     """
-    from env_evals.core.extraction import (
+    from llenvs.core.extraction import (
         TagBasedExtractor,
         RegexExtractor,
         GSM8KExtractor,

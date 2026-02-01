@@ -4,16 +4,16 @@ import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from env_evals.core.state import AgentObservation, AgentAction
-from env_evals.core.tools import (
+from llenvs.core.state import AgentObservation, AgentAction
+from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
     ToolParameterType,
     ToolResult,
     ToolResultStatus,
 )
-from env_evals.core.reward import RewardType
-from env_evals.adapters.gem import (
+from llenvs.core.reward import RewardType
+from llenvs.adapters.gem import (
     GemToolEnvironment,
     GemToolHidden,
     GemToolExecutor,
@@ -306,7 +306,7 @@ class TestGemToolHidden:
 class TestGemToolEnvironment:
     """Tests for the GEM tool environment wrapper."""
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_creation(self, mock_create_tools, mock_gem_env):
         """Test environment creation."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -323,7 +323,7 @@ class TestGemToolEnvironment:
         assert env.spec.is_multi_turn is True
         assert env.spec.max_steps == 10
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_available_tools_property(self, mock_create_tools, mock_gem_env):
         """Test available_tools returns correct definitions."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -340,7 +340,7 @@ class TestGemToolEnvironment:
         assert "python" in tool_names
         assert "submit_answer" in tool_names
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_reset_returns_agent_observation(self, mock_create_tools, mock_gem_env):
         """Test reset returns AgentObservation with tools."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -371,7 +371,7 @@ class TestGemToolEnvironment:
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_step_with_tool_call(self, mock_create_tools, mock_gem_env):
         """Test stepping with a tool call."""
         mock_python = MockPythonCodeTool()
@@ -403,7 +403,7 @@ class TestGemToolEnvironment:
         # Check next observation includes tool results
         assert len(result.next_state.observation.tool_results) == 1
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_submit_answer_terminates(self, mock_create_tools, mock_gem_env):
         """Test submit_answer tool terminates episode."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -428,7 +428,7 @@ class TestGemToolEnvironment:
         # Check reward
         assert result.info["gem_reward"] == 1.0
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_submit_wrong_answer(self, mock_create_tools, mock_gem_env):
         """Test submitting wrong answer."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -452,7 +452,7 @@ class TestGemToolEnvironment:
         # But reward is 0
         assert result.info["gem_reward"] == 0.0
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_text_action(self, mock_create_tools, mock_gem_env):
         """Test text-only action (direct answer)."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -472,7 +472,7 @@ class TestGemToolEnvironment:
         assert result.terminated is True
         assert result.info["gem_reward"] == 1.0
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_invalid_tool_call(self, mock_create_tools, mock_gem_env):
         """Test handling of invalid tool names."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -496,7 +496,7 @@ class TestGemToolEnvironment:
         assert tool_results[0].is_error
         assert tool_results[0].status == ToolResultStatus.INVALID_TOOL
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_multi_step_episode(self, mock_create_tools, mock_gem_env):
         """Test multi-step episode with tools."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -525,7 +525,7 @@ class TestGemToolEnvironment:
         assert result2.terminated
         assert result2.info["gem_reward"] == 1.0
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_truncation_at_max_steps(self, mock_create_tools, mock_gem_env):
         """Test environment truncates at max_steps."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -552,7 +552,7 @@ class TestGemToolEnvironment:
         assert result.truncated is True
         assert result.next_state.metadata.is_terminal is True
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_reward_functions(self, mock_create_tools, mock_gem_env):
         """Test reward function composition."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -569,7 +569,7 @@ class TestGemToolEnvironment:
         assert "correctness" in reward_names
         assert "tool_validity" in reward_names
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_state_restoration(self, mock_create_tools, mock_gem_env):
         """Test that state is properly restored for replay."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
@@ -600,7 +600,7 @@ class TestGemToolEnvironment:
 class TestGemToolEnvironmentWithSearchTool:
     """Tests for GEM tool environment with search tool."""
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_search_tool_available(self, mock_create_tools, mock_gem_env):
         """Test search tool is available when enabled."""
         mock_create_tools.return_value = {
@@ -619,7 +619,7 @@ class TestGemToolEnvironmentWithSearchTool:
         assert "python" in tool_names
         assert "submit_answer" in tool_names
 
-    @patch("env_evals.adapters.gem.GemToolEnvironment._create_gem_tools")
+    @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_search_tool_execution(self, mock_create_tools, mock_gem_env):
         """Test search tool execution."""
         mock_create_tools.return_value = {
@@ -650,14 +650,14 @@ class TestGemToolEnvironmentWithSearchTool:
 class TestGemAdapterToolEnvironment:
     """Tests for GemAdapter.get_tool_environment method."""
 
-    @patch("env_evals.adapters.gem.GemAdapter._get_gem")
+    @patch("llenvs.adapters.gem.GemAdapter._get_gem")
     def test_get_tool_environment(self, mock_get_gem):
         """Test creating tool environment via adapter."""
         mock_gem = MagicMock()
         mock_gem.make.return_value = MockGemEnvWithTools()
         mock_get_gem.return_value = mock_gem
 
-        from env_evals.adapters.gem import GemAdapter
+        from llenvs.adapters.gem import GemAdapter
 
         adapter = GemAdapter()
 
@@ -675,14 +675,14 @@ class TestGemAdapterToolEnvironment:
         assert env.spec.name == "math:GSM8K"
         assert env.spec.max_steps == 5
 
-    @patch("env_evals.adapters.gem.GemAdapter._get_gem")
+    @patch("llenvs.adapters.gem.GemAdapter._get_gem")
     def test_create_gem_tool_environment_factory(self, mock_get_gem):
         """Test factory function for creating tool environments."""
         mock_gem = MagicMock()
         mock_gem.make.return_value = MockGemEnvWithTools()
         mock_get_gem.return_value = mock_gem
 
-        from env_evals.adapters.gem import create_gem_tool_environment
+        from llenvs.adapters.gem import create_gem_tool_environment
 
         with patch.object(
             GemToolEnvironment,

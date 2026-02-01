@@ -89,7 +89,7 @@ export OPENROUTER_API_KEY="sk-or-..."
 Or pass keys directly in code:
 
 ```python
-from env_evals.inference.backends import OpenAIBackend
+from llenvs.inference.backends import OpenAIBackend
 
 backend = OpenAIBackend(
     model="gpt-4o",
@@ -106,7 +106,7 @@ For local inference with vLLM:
 - For multi-GPU: `tensor_parallel_size` parameter
 
 ```python
-from env_evals.inference.backends import VLLMBackend
+from llenvs.inference.backends import VLLMBackend
 
 backend = VLLMBackend(
     model_path="meta-llama/Llama-3.1-8B-Instruct",
@@ -121,11 +121,11 @@ backend = VLLMBackend(
 
 ```python
 # Test core imports
-from env_evals import State, Environment, Trajectory
+from llenvs import State, Environment, Trajectory
 print("Core imports: OK")
 
 # Test tool imports
-from env_evals.core import (
+from llenvs.core import (
     ToolDefinition, ToolParameter, ToolParameterType,
     ToolCall, ToolResult, AgentObservation, AgentAction,
     SimpleToolExecutor, AsyncToolExecutor,
@@ -134,7 +134,7 @@ from env_evals.core import (
 print("Tool imports: OK")
 
 # Test extraction
-from env_evals.core.extraction import TagBasedExtractor
+from llenvs.core.extraction import TagBasedExtractor
 extractor = TagBasedExtractor()
 answer, _ = extractor.extract("<answer>42</answer>")
 assert answer == "42"
@@ -142,21 +142,21 @@ print("Extraction: OK")
 
 # Test backend (if installed)
 try:
-    from env_evals.inference.backends import OpenAIBackend
+    from llenvs.inference.backends import OpenAIBackend
     print("OpenAI backend: OK")
 except ImportError:
     print("OpenAI backend: Not installed")
 
 # Test HuggingFace adapter (if installed)
 try:
-    from env_evals.adapters import create_huggingface_environment
+    from llenvs.adapters import create_huggingface_environment
     print("HuggingFace adapter: OK")
 except ImportError:
     print("HuggingFace adapter: Not installed")
 
 # Test reasoning-gym adapter (if installed)
 try:
-    from env_evals.adapters import create_reasoning_gym_environment
+    from llenvs.adapters import create_reasoning_gym_environment
     print("reasoning-gym adapter: OK")
 except ImportError:
     print("reasoning-gym adapter: Not installed")
@@ -169,7 +169,7 @@ except ImportError:
 After installation, the package provides:
 
 ```
-env_evals/
+llenvs/
 ├── core/           # Core abstractions
 │   ├── state.py            # State, TextObservation, AgentObservation, AgentAction
 │   ├── environment.py      # Environment protocol

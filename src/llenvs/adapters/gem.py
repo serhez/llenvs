@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 import uuid
 
-from env_evals.core.state import (
+from llenvs.core.state import (
     State,
     StateMetadata,
     TextObservation,
@@ -16,10 +16,10 @@ from env_evals.core.state import (
     AgentObservation,
     AgentAction,
 )
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from env_evals.core.environment import Environment, StepResult, EnvironmentSpec
-from env_evals.core.extraction import AnswerExtractor, TagBasedExtractor
-from env_evals.core.tools import (
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
+from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
     ToolParameter,
@@ -28,8 +28,8 @@ from env_evals.core.tools import (
     ToolResultStatus,
     ToolExecutor,
 )
-from env_evals.core.tool_environment import BaseToolEnvironment
-from env_evals.core.tool_rewards import ToolValidityReward
+from llenvs.core.tool_environment import BaseToolEnvironment
+from llenvs.core.tool_rewards import ToolValidityReward
 
 
 # Multi-turn environments (games) - these are natively multi-step

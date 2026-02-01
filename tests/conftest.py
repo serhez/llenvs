@@ -3,9 +3,9 @@
 import pytest
 from typing import Any
 
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardSignal, RewardBundle, RewardType
-from env_evals.core.trajectory import Trajectory, Transition
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
+from llenvs.core.trajectory import Trajectory, Transition
 
 
 @pytest.fixture

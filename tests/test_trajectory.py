@@ -1,9 +1,9 @@
 """Tests for trajectory tracking with checkpointing and branching."""
 
 import pytest
-from env_evals.core.state import State, StateMetadata, TextObservation, TextAction
-from env_evals.core.reward import RewardBundle, RewardSignal, RewardType
-from env_evals.core.trajectory import Trajectory, Transition, Checkpoint
+from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 
 
 class TestTransition:

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Protocol, TypeVar
 
-from env_evals.core.state import State
+from llenvs.core.state import State
 
 ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")

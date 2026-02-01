@@ -1,7 +1,7 @@
 """Tests for answer extraction."""
 
 import pytest
-from env_evals.core.extraction import (
+from llenvs.core.extraction import (
     TagBasedExtractor,
     RegexExtractor,
     GSM8KExtractor,

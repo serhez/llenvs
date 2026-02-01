@@ -13,7 +13,7 @@ pip install llenvs[huggingface]
 ## Quick Start with Presets
 
 ```python
-from env_evals.adapters import create_huggingface_environment
+from llenvs.adapters import create_huggingface_environment
 
 # AIME 2024 - Competition math (30 problems)
 env = create_huggingface_environment("HuggingFaceH4/aime_2024")
@@ -28,7 +28,7 @@ env = create_huggingface_environment("di-zhang-fdu/AIME_1983_2024")
 ## Custom Configuration
 
 ```python
-from env_evals.adapters import HuggingFaceAdapter
+from llenvs.adapters import HuggingFaceAdapter
 
 adapter = HuggingFaceAdapter()
 
@@ -87,7 +87,7 @@ env = adapter.get_environment(..., scoring=my_scorer)
 Common datasets have preconfigured settings:
 
 ```python
-from env_evals.adapters.huggingface import DATASET_PRESETS
+from llenvs.adapters.huggingface import DATASET_PRESETS
 
 print(DATASET_PRESETS.keys())
 # ['HuggingFaceH4/aime_2024', 'gsm8k', 'di-zhang-fdu/AIME_1983_2024', ...]
@@ -96,10 +96,10 @@ print(DATASET_PRESETS.keys())
 ## Example: AIME Evaluation
 
 ```python
-from env_evals.adapters import create_huggingface_environment
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.inference import SamplingParams
-from env_evals.core import TextAction
+from llenvs.adapters import create_huggingface_environment
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.inference import SamplingParams
+from llenvs.core import TextAction
 
 env = create_huggingface_environment("HuggingFaceH4/aime_2024")
 backend = OpenAIBackend(model="gpt-4o")

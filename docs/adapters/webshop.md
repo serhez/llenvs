@@ -13,8 +13,8 @@ pip install webshop
 ## Quick Start
 
 ```python
-from env_evals.adapters import create_webshop_environment
-from env_evals.core import TextAction
+from llenvs.adapters import create_webshop_environment
+from llenvs.core import TextAction
 
 # Create environment (use num_products=1000 for fast preview)
 env = create_webshop_environment(
@@ -66,7 +66,7 @@ WebShop uses text-based actions (not structured tool calls):
 ## Using the Adapter Directly
 
 ```python
-from env_evals.adapters import WebShopAdapter
+from llenvs.adapters import WebShopAdapter
 
 adapter = WebShopAdapter()
 
@@ -88,10 +88,10 @@ print(info)
 ## Running with EpisodeRunner
 
 ```python
-from env_evals.adapters import create_webshop_environment
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.evaluation import EpisodeRunner
-from env_evals.inference import SamplingParams
+from llenvs.adapters import create_webshop_environment
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.evaluation import EpisodeRunner
+from llenvs.inference import SamplingParams
 
 env = create_webshop_environment(max_steps=15)
 backend = OpenAIBackend(model="gpt-4o")

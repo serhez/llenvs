@@ -3,10 +3,10 @@
 import pytest
 from typing import Any
 
-from env_evals.core.state import State, StateMetadata, AgentObservation, AgentAction
-from env_evals.core.tools import ToolCall, ToolResult, ToolResultStatus
-from env_evals.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
-from env_evals.core.reward import RewardType
+from llenvs.core.state import State, StateMetadata, AgentObservation, AgentAction
+from llenvs.core.tools import ToolCall, ToolResult, ToolResultStatus
+from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
+from llenvs.core.reward import RewardType
 
 
 @pytest.fixture

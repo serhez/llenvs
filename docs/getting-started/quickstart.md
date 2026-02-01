@@ -51,10 +51,10 @@ output_dir: ./results
 ### Basic Evaluation Loop
 
 ```python
-from env_evals.core.registry import environment_registry
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.inference import SamplingParams
-from env_evals.core import TextAction
+from llenvs.core.registry import environment_registry
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.inference import SamplingParams
+from llenvs.core import TextAction
 
 # Create environment via registry
 env = environment_registry.get(
@@ -73,7 +73,7 @@ state, info = env.reset(options={"task_index": 0})
 print(f"Question: {state.observation.prompt}")
 
 # Generate response
-from env_evals.inference import ChatMessage
+from llenvs.inference import ChatMessage
 messages = [ChatMessage(role="user", content=state.observation.prompt)]
 result = backend.generate_chat(messages, params)
 print(f"Response: {result.text}")
@@ -92,10 +92,10 @@ print(f"Extracted answer: {step_result.info['extracted_answer']}")
 For running multiple episodes with proper orchestration:
 
 ```python
-from env_evals.adapters import create_reasoning_gym_environment
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.inference import SamplingParams, build_standard_pipeline
-from env_evals.evaluation import EpisodeRunner
+from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.inference import SamplingParams, build_standard_pipeline
+from llenvs.evaluation import EpisodeRunner
 
 # Create environment and backend
 env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
@@ -133,7 +133,7 @@ print(f"\nSuccess rate: {batch_result.success_rate:.2%}")
 ### Convenience Function
 
 ```python
-from env_evals.evaluation import run_evaluation
+from llenvs.evaluation import run_evaluation
 
 result = run_evaluation(
     environment=env,

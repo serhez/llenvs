@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 if TYPE_CHECKING:
-    from env_evals.core.tools import ToolCall, ToolDefinition, ToolResult
+    from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")

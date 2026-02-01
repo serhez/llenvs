@@ -16,7 +16,7 @@ llenvs provides a unified interface to multiple environment sources through adap
 The environment registry provides adapter-based lookup:
 
 ```python
-from env_evals.core.registry import environment_registry
+from llenvs.core.registry import environment_registry
 
 # List all registered adapters
 adapters = environment_registry.list_adapters()
@@ -44,7 +44,7 @@ if ("reasoning_gym", "sudoku") in environment_registry:
 ## Working with Adapters Directly
 
 ```python
-from env_evals.adapters import ReasoningGymAdapter
+from llenvs.adapters import ReasoningGymAdapter
 
 adapter = ReasoningGymAdapter()
 
@@ -129,7 +129,7 @@ for i in range(len(env)):
 Record and replay episodes:
 
 ```python
-from env_evals.core import Trajectory, Transition
+from llenvs.core import Trajectory, Transition
 
 # Initialize trajectory
 state, _ = env.reset(options={"task_index": 0})

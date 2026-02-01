@@ -11,14 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from env_evals.core.config import (
+from llenvs.core.config import (
     EvalConfig,
     EnvironmentFactory,
     BackendFactory,
     create_sampling_params,
 )
-from env_evals.evaluation.runner import run_evaluation
-from env_evals.evaluation.results import (
+from llenvs.evaluation.runner import run_evaluation
+from llenvs.evaluation.results import (
     create_evaluation_result,
     print_summary,
 )

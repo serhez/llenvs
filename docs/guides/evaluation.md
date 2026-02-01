@@ -7,10 +7,10 @@ This guide covers running evaluations, computing metrics, and saving results.
 The `EpisodeRunner` orchestrates evaluation episodes:
 
 ```python
-from env_evals.adapters import create_reasoning_gym_environment
-from env_evals.inference.backends import OpenAIBackend
-from env_evals.inference import SamplingParams, build_standard_pipeline
-from env_evals.evaluation import EpisodeRunner
+from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.inference import SamplingParams, build_standard_pipeline
+from llenvs.evaluation import EpisodeRunner
 
 env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
 backend = OpenAIBackend(model="gpt-4o")
@@ -44,8 +44,8 @@ print(f"\nSuccess rate: {batch_result.success_rate:.2%}")
 For tool-enabled environments:
 
 ```python
-from env_evals.adapters import create_gem_tool_environment
-from env_evals.evaluation import ToolEpisodeRunner
+from llenvs.adapters import create_gem_tool_environment
+from llenvs.evaluation import ToolEpisodeRunner
 
 env = create_gem_tool_environment("math:GSM8K", tool_types=("python",))
 
@@ -64,7 +64,7 @@ result = runner.run_episode(task_index=0)
 ### Basic Metrics
 
 ```python
-from env_evals.evaluation.metrics import (
+from llenvs.evaluation.metrics import (
     compute_accuracy,
     compute_mean_reward,
     compute_format_compliance,
@@ -88,7 +88,7 @@ print(f"Format compliance: {format_rate.value:.1%}")
 For multiple samples per task:
 
 ```python
-from env_evals.evaluation.metrics import compute_pass_at_k
+from llenvs.evaluation.metrics import compute_pass_at_k
 
 # Run multiple times per task
 results_by_task = {}
@@ -123,7 +123,7 @@ for name, metric in metrics.metrics.items():
 
 ```python
 from datetime import datetime
-from env_evals.evaluation.results import create_evaluation_result, print_summary
+from llenvs.evaluation.results import create_evaluation_result, print_summary
 
 # Create formatted result
 eval_result = create_evaluation_result(
@@ -173,7 +173,7 @@ eval_result.save("results/eval_summary.json", include_results=False)
 ## Convenience Function
 
 ```python
-from env_evals.evaluation import run_evaluation
+from llenvs.evaluation import run_evaluation
 
 result = run_evaluation(
     environment=env,
@@ -202,7 +202,7 @@ for result in batch_result.episode_results:
 ## Custom Reward Analysis
 
 ```python
-from env_evals.core import RewardType
+from llenvs.core import RewardType
 
 for result in batch_result.episode_results:
     for transition in result.trajectory.transitions:

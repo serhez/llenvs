@@ -4,7 +4,7 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from env_evals.core.config import (
+from llenvs.core.config import (
     EvalConfig,
     EnvironmentConfig,
     ModelConfig,
