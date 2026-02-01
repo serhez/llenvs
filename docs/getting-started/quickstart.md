@@ -68,7 +68,7 @@ env = environment_registry.get(
 backend = OpenAIBackend(model="gpt-4o")
 params = SamplingParams(temperature=0.0, max_tokens=1024)
 
-# Run single episode
+# Run single trajectory
 state, info = env.reset(options={"task_index": 0})
 print(f"Question: {state.observation.prompt}")
 
@@ -87,15 +87,15 @@ print(f"Rewards: {step_result.rewards.total}")
 print(f"Extracted answer: {step_result.info['extracted_answer']}")
 ```
 
-### Using the EpisodeRunner
+### Using the TrajectoryRunner
 
-For running multiple episodes with proper orchestration:
+For running multiple trajectories with proper orchestration:
 
 ```python
 from llenvs.adapters import create_reasoning_gym_environment
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.inference import SamplingParams, build_standard_pipeline
-from llenvs.evaluation import EpisodeRunner
+from llenvs.evaluation import TrajectoryRunner
 
 # Create environment and backend
 env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
@@ -110,15 +110,15 @@ pipeline = build_standard_pipeline(
 )
 
 # Create runner
-runner = EpisodeRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0, max_tokens=1024),
     prompt_pipeline=pipeline,
 )
 
-# Run single episode
-result = runner.run_episode(task_index=0)
+# Run single trajectory
+result = runner.run_trajectory(task_index=0)
 print(f"Success: {result.success}")
 print(f"Total reward: {result.total_reward}")
 

@@ -171,25 +171,25 @@ result = env.step(state, action)
 # Tool result contains search results
 ```
 
-### Using with ToolEpisodeRunner
+### Using with ToolTrajectoryRunner
 
 ```python
 from llenvs.adapters import create_gem_tool_environment
 from llenvs.inference.backends import OpenAIBackend
-from llenvs.evaluation import ToolEpisodeRunner
+from llenvs.evaluation import ToolTrajectoryRunner
 from llenvs.inference import SamplingParams
 
 env = create_gem_tool_environment("math:GSM8K", tool_types=("python",))
 backend = OpenAIBackend(model="gpt-4o")
 
-runner = ToolEpisodeRunner(
+runner = ToolTrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0),
     system_prompt="Use Python to solve math problems. Submit your final answer.",
 )
 
-result = runner.run_episode(task_index=0)
+result = runner.run_trajectory(task_index=0)
 print(f"Success: {result.success}")
 ```
 

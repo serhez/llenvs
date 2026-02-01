@@ -135,7 +135,7 @@ from llenvs.core import Trajectory, Transition
 state, _ = env.reset(options={"task_index": 0})
 trajectory = Trajectory.create(state)
 
-# Run episode and record
+# Run trajectory and record
 while not trajectory.is_terminal:
     action = TextAction(text=model_response)
     result = env.step(trajectory.current_state, action)

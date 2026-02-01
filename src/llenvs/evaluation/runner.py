@@ -1,7 +1,7 @@
-"""Episode runner for orchestrating evaluations.
+"""Trajectory runner for orchestrating evaluations.
 
-Handles running episodes through environments with model backends,
-collecting trajectories and results.
+Handles running trajectories through environments with model backends,
+collecting results.
 """
 
 from dataclasses import dataclass, field
@@ -25,13 +25,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class EpisodeResult:
-    """Result of running a single episode.
+class TrajectoryResult:
+    """Result of running a single trajectory.
 
     Attributes:
-        trajectory: The full trajectory of the episode.
-        total_reward: Sum of all rewards.
-        success: Whether the episode was successful (based on correctness).
+        trajectory: The full trajectory (sequence of state-action-reward transitions).
+        total_reward: Sum of all rewards across the trajectory.
+        success: Whether the trajectory was successful (based on correctness).
         metadata: Additional result metadata.
     """
 
@@ -43,30 +43,30 @@ class EpisodeResult:
 
 @dataclass
 class BatchResult:
-    """Result of running a batch of episodes.
+    """Result of running a batch of trajectories.
 
     Attributes:
-        episode_results: List of individual episode results.
-        success_rate: Fraction of successful episodes.
-        mean_reward: Mean total reward across episodes.
+        trajectory_results: List of individual trajectory results.
+        success_rate: Fraction of successful trajectories.
+        mean_reward: Mean total reward across trajectories.
         metadata: Additional batch metadata.
     """
 
-    episode_results: list[EpisodeResult]
+    trajectory_results: list[TrajectoryResult]
     success_rate: float
     mean_reward: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
-class EpisodeRunner:
-    """Runs episodes through an environment with a model backend.
+class TrajectoryRunner:
+    """Runs trajectories through an environment with a model backend.
 
     Handles the interaction loop between model and environment,
     collecting trajectories and computing results.
 
     Attributes:
-        environment: The environment to run episodes in.
+        environment: The environment to run trajectories in.
         backend: The model backend for generation.
         sampling_params: Parameters for text generation.
         prompt_pipeline: Optional pipeline to transform prompts.
@@ -132,39 +132,39 @@ class EpisodeRunner:
         action = TextAction(text=result.text)
         return action, result
 
-    def run_episode(
+    def run_trajectory(
         self,
         task_index: int,
-        episode_id: str | None = None,
+        trajectory_id: str | None = None,
         max_steps: int | None = None,
-    ) -> EpisodeResult:
-        """Run a single episode.
+    ) -> TrajectoryResult:
+        """Run a single trajectory.
 
         Args:
             task_index: Index of the task in the environment.
-            episode_id: Optional custom episode ID.
+            trajectory_id: Optional custom trajectory ID.
             max_steps: Maximum steps (overrides environment spec).
 
         Returns:
-            EpisodeResult with trajectory and metrics.
+            TrajectoryResult with trajectory and metrics.
         """
         # Reset environment
         options = {"task_index": task_index}
-        if episode_id:
-            options["episode_id"] = episode_id
+        if trajectory_id:
+            options["episode_id"] = trajectory_id
 
         state, reset_info = self.environment.reset(options=options)
         trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
 
         max_steps = max_steps or self.environment.spec.max_steps or 100
 
-        # Run episode loop
+        # Run trajectory loop
         step_count = 0
         while not state.metadata.is_terminal and step_count < max_steps:
             # Generate action
             action, gen_result = self._generate_action(state)
 
-            # Take step
+            # Take step (apply transition function)
             step_result = self.environment.step(state, action)
 
             # Record transition
@@ -198,7 +198,7 @@ class EpisodeRunner:
             if correctness:
                 success = correctness.value >= 1.0
 
-        return EpisodeResult(
+        return TrajectoryResult(
             trajectory=trajectory,
             total_reward=trajectory.total_reward,
             success=success,
@@ -214,29 +214,29 @@ class EpisodeRunner:
         task_indices: list[int],
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
-        """Run a batch of episodes.
+        """Run a batch of trajectories.
 
         Args:
             task_indices: List of task indices to run.
             progress_callback: Optional callback(current, total) for progress.
 
         Returns:
-            BatchResult with all episode results and aggregate metrics.
+            BatchResult with all trajectory results and aggregate metrics.
         """
-        episode_results = []
+        trajectory_results: list[TrajectoryResult] = []
 
         for i, task_index in enumerate(task_indices):
             if progress_callback:
                 progress_callback(i, len(task_indices))
 
             try:
-                result = self.run_episode(task_index)
-                episode_results.append(result)
+                result = self.run_trajectory(task_index)
+                trajectory_results.append(result)
             except Exception as e:
                 logger.error(f"Error running task {task_index}: {e}")
                 # Create failed result
-                episode_results.append(
-                    EpisodeResult(
+                trajectory_results.append(
+                    TrajectoryResult(
                         trajectory=Trajectory(
                             episode_id=f"error_{task_index}",
                             initial_state=State(
@@ -255,18 +255,18 @@ class EpisodeRunner:
             progress_callback(len(task_indices), len(task_indices))
 
         # Compute aggregate metrics
-        num_successful = sum(1 for r in episode_results if r.success)
-        success_rate = num_successful / len(episode_results) if episode_results else 0.0
+        num_successful = sum(1 for r in trajectory_results if r.success)
+        success_rate = num_successful / len(trajectory_results) if trajectory_results else 0.0
 
-        total_rewards = [r.total_reward for r in episode_results]
+        total_rewards = [r.total_reward for r in trajectory_results]
         mean_reward = sum(total_rewards) / len(total_rewards) if total_rewards else 0.0
 
         return BatchResult(
-            episode_results=episode_results,
+            trajectory_results=trajectory_results,
             success_rate=success_rate,
             mean_reward=mean_reward,
             metadata={
-                "num_episodes": len(episode_results),
+                "num_trajectories": len(trajectory_results),
                 "num_successful": num_successful,
             },
         )
@@ -313,7 +313,7 @@ def run_evaluation(
         num_tasks = num_tasks or max_tasks
         task_indices = list(range(min(num_tasks, max_tasks)))
 
-    runner = EpisodeRunner(
+    runner = TrajectoryRunner(
         environment=environment,
         backend=backend,
         sampling_params=sampling_params or SamplingParams(),
@@ -325,14 +325,14 @@ def run_evaluation(
 
 
 @dataclass
-class ToolEpisodeRunner:
-    """Runs episodes through a tool-aware environment with a model backend.
+class ToolTrajectoryRunner:
+    """Runs trajectories through a tool-aware environment with a model backend.
 
-    Similar to EpisodeRunner but supports tool calling via the
+    Similar to TrajectoryRunner but supports tool calling via the
     generate_with_tools backend method.
 
     Attributes:
-        environment: The tool environment to run episodes in.
+        environment: The tool environment to run trajectories in.
         backend: The model backend for generation.
         sampling_params: Parameters for text generation.
         prompt_pipeline: Optional pipeline to transform prompts.
@@ -447,39 +447,39 @@ class ToolEpisodeRunner:
 
         return result.to_agent_action(), result
 
-    def run_episode(
+    def run_trajectory(
         self,
         task_index: int,
-        episode_id: str | None = None,
+        trajectory_id: str | None = None,
         max_steps: int | None = None,
-    ) -> EpisodeResult:
-        """Run a single episode.
+    ) -> TrajectoryResult:
+        """Run a single trajectory.
 
         Args:
             task_index: Index of the task in the environment.
-            episode_id: Optional custom episode ID.
+            trajectory_id: Optional custom trajectory ID.
             max_steps: Maximum steps (overrides environment spec).
 
         Returns:
-            EpisodeResult with trajectory and metrics.
+            TrajectoryResult with trajectory and metrics.
         """
         # Reset environment
         options = {"task_index": task_index}
-        if episode_id:
-            options["episode_id"] = episode_id
+        if trajectory_id:
+            options["episode_id"] = trajectory_id
 
         state, reset_info = self.environment.reset(options=options)
         trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
 
         max_steps = max_steps or self.environment.spec.max_steps or 100
 
-        # Run episode loop
+        # Run trajectory loop
         step_count = 0
         while not state.metadata.is_terminal and step_count < max_steps:
             # Generate action
             action, gen_result = self._generate_action(state)
 
-            # Take step
+            # Take step (apply transition function)
             step_result = self.environment.step(state, action)
 
             # Record transition
@@ -515,7 +515,7 @@ class ToolEpisodeRunner:
             if correctness:
                 success = correctness.value >= 1.0
 
-        return EpisodeResult(
+        return TrajectoryResult(
             trajectory=trajectory,
             total_reward=trajectory.total_reward,
             success=success,
@@ -531,31 +531,29 @@ class ToolEpisodeRunner:
         task_indices: list[int],
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
-        """Run a batch of episodes.
+        """Run a batch of trajectories.
 
         Args:
             task_indices: List of task indices to run.
             progress_callback: Optional callback(current, total) for progress.
 
         Returns:
-            BatchResult with all episode results and aggregate metrics.
+            BatchResult with all trajectory results and aggregate metrics.
         """
-        episode_results = []
+        trajectory_results: list[TrajectoryResult] = []
 
         for i, task_index in enumerate(task_indices):
             if progress_callback:
                 progress_callback(i, len(task_indices))
 
             try:
-                result = self.run_episode(task_index)
-                episode_results.append(result)
+                result = self.run_trajectory(task_index)
+                trajectory_results.append(result)
             except Exception as e:
                 logger.error(f"Error running task {task_index}: {e}")
                 # Create failed result
-                from llenvs.core.tools import ToolResult
-
-                episode_results.append(
-                    EpisodeResult(
+                trajectory_results.append(
+                    TrajectoryResult(
                         trajectory=Trajectory(
                             episode_id=f"error_{task_index}",
                             initial_state=State(
@@ -574,18 +572,18 @@ class ToolEpisodeRunner:
             progress_callback(len(task_indices), len(task_indices))
 
         # Compute aggregate metrics
-        num_successful = sum(1 for r in episode_results if r.success)
-        success_rate = num_successful / len(episode_results) if episode_results else 0.0
+        num_successful = sum(1 for r in trajectory_results if r.success)
+        success_rate = num_successful / len(trajectory_results) if trajectory_results else 0.0
 
-        total_rewards = [r.total_reward for r in episode_results]
+        total_rewards = [r.total_reward for r in trajectory_results]
         mean_reward = sum(total_rewards) / len(total_rewards) if total_rewards else 0.0
 
         return BatchResult(
-            episode_results=episode_results,
+            trajectory_results=trajectory_results,
             success_rate=success_rate,
             mean_reward=mean_reward,
             metadata={
-                "num_episodes": len(episode_results),
+                "num_trajectories": len(trajectory_results),
                 "num_successful": num_successful,
             },
         )
@@ -632,7 +630,7 @@ def run_tool_evaluation(
         num_tasks = num_tasks or max_tasks
         task_indices = list(range(min(num_tasks, max_tasks)))
 
-    runner = ToolEpisodeRunner(
+    runner = ToolTrajectoryRunner(
         environment=environment,
         backend=backend,
         sampling_params=sampling_params or SamplingParams(),

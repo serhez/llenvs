@@ -48,6 +48,11 @@ class TokenLogprob:
 class SamplingParams:
     """Parameters controlling text generation.
 
+    Common parameters are defined as typed fields for discoverability.
+    Backend-specific parameters can be passed via `extra` and will be
+    forwarded to the underlying backend (e.g., HuggingFace transformers,
+    vLLM, OpenAI API).
+
     Attributes:
         max_tokens: Maximum tokens to generate.
         temperature: Sampling temperature (0 = greedy).
@@ -59,6 +64,9 @@ class SamplingParams:
         n: Number of completions to generate.
         logprobs: Whether to return log probabilities.
         num_logprobs: Number of top logprobs to return per token.
+        extra: Backend-specific parameters passed through to the underlying
+            inference library. For HuggingFace: repetition_penalty, do_sample,
+            num_beams, etc. For vLLM: best_of, use_beam_search, etc.
     """
 
     max_tokens: int = 2048
@@ -71,6 +79,7 @@ class SamplingParams:
     n: int = 1
     logprobs: bool = False
     num_logprobs: int = 5
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -108,13 +108,13 @@ class ReasoningGymHidden:
 ```python
 from llenvs.adapters import create_reasoning_gym_environment
 from llenvs.inference.backends import OpenAIBackend
-from llenvs.evaluation import EpisodeRunner
+from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
 
 env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
 backend = OpenAIBackend(model="gpt-4o")
 
-runner = EpisodeRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0, max_tokens=512),

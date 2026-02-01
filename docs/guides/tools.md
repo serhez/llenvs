@@ -229,24 +229,24 @@ efficiency_reward = ToolEfficiencyReward(
 )
 ```
 
-## ToolEpisodeRunner
+## ToolTrajectoryRunner
 
 For running tool-enabled evaluations:
 
 ```python
-from llenvs.evaluation import ToolEpisodeRunner
+from llenvs.evaluation import ToolTrajectoryRunner
 
 env = create_gem_tool_environment("math:GSM8K")
 backend = OpenAIBackend(model="gpt-4o")
 
-runner = ToolEpisodeRunner(
+runner = ToolTrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0),
     system_prompt="Use tools to solve problems. Submit your final answer.",
 )
 
-result = runner.run_episode(task_index=0)
+result = runner.run_trajectory(task_index=0)
 print(f"Success: {result.success}")
 ```
 

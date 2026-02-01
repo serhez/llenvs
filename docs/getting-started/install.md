@@ -228,7 +228,7 @@ llenvs/
 │       ├── huggingface.py # HuggingFace Transformers backend
 │       └── api.py         # OpenAI, Anthropic, OpenRouter (with tool support)
 ├── evaluation/     # Evaluation tools
-│   ├── runner.py          # EpisodeRunner, ToolEpisodeRunner
+│   ├── runner.py          # TrajectoryRunner, ToolTrajectoryRunner
 │   ├── metrics.py
 │   └── results.py
 └── cli/            # Command-line interface

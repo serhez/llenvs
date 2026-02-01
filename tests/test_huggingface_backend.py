@@ -157,6 +157,65 @@ class TestHuggingFaceBackendUnit:
         # Should include original eos_token_id plus stop sequence token
         assert 42 in kwargs["eos_token_id"] or kwargs["eos_token_id"] == [1, 42]
 
+    def test_to_generate_kwargs_extra_params(self):
+        """Test that extra params are passed through to generate kwargs."""
+        backend, _, _, _ = self._create_mock_backend()
+        params = SamplingParams(
+            max_tokens=100,
+            temperature=0.7,
+            extra={
+                "repetition_penalty": 1.2,
+                "num_beams": 4,
+                "length_penalty": 0.8,
+            },
+        )
+
+        kwargs = backend._to_generate_kwargs(params)
+
+        assert kwargs["repetition_penalty"] == 1.2
+        assert kwargs["num_beams"] == 4
+        assert kwargs["length_penalty"] == 0.8
+
+    def test_to_generate_kwargs_extra_overrides(self):
+        """Test that extra params can override computed values."""
+        backend, _, _, _ = self._create_mock_backend()
+        params = SamplingParams(
+            temperature=0.7,
+            extra={"do_sample": False},  # Override the computed do_sample
+        )
+
+        kwargs = backend._to_generate_kwargs(params)
+
+        # extra should override the computed do_sample=True
+        assert kwargs["do_sample"] is False
+
+    def test_to_generate_kwargs_frequency_penalty_mapping(self):
+        """Test that frequency_penalty maps to repetition_penalty."""
+        backend, _, _, _ = self._create_mock_backend()
+        params = SamplingParams(
+            temperature=0.7,
+            frequency_penalty=0.5,
+        )
+
+        kwargs = backend._to_generate_kwargs(params)
+
+        # frequency_penalty should be converted to repetition_penalty
+        assert kwargs["repetition_penalty"] == 1.5  # 1.0 + 0.5
+
+    def test_to_generate_kwargs_extra_empty(self):
+        """Test that empty extra dict doesn't affect kwargs."""
+        backend, _, _, _ = self._create_mock_backend()
+        params = SamplingParams(
+            max_tokens=100,
+            temperature=0.0,
+            extra={},
+        )
+
+        kwargs = backend._to_generate_kwargs(params)
+
+        assert kwargs["max_new_tokens"] == 100
+        assert kwargs["do_sample"] is False
+
 
 class TestConvertStopReason:
     """Tests for _convert_stop_reason helper."""

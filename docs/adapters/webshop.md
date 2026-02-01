@@ -85,18 +85,18 @@ print(info)
 # {"name": "webshop:text_rich", "adapter": "webshop", "type": "multi_turn"}
 ```
 
-## Running with EpisodeRunner
+## Running with TrajectoryRunner
 
 ```python
 from llenvs.adapters import create_webshop_environment
 from llenvs.inference.backends import OpenAIBackend
-from llenvs.evaluation import EpisodeRunner
+from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
 
 env = create_webshop_environment(max_steps=15)
 backend = OpenAIBackend(model="gpt-4o")
 
-runner = EpisodeRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0, max_tokens=256),
@@ -110,7 +110,7 @@ Use these actions:
 Always click "Buy Now" when you find a matching product.""",
 )
 
-result = runner.run_episode(task_index=0)
+result = runner.run_trajectory(task_index=0)
 print(f"Success: {result.success}")
 print(f"Reward: {result.total_reward}")
 ```

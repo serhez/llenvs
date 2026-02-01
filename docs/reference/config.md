@@ -233,10 +233,10 @@ pipeline = (
 ## Evaluation Runner Configuration
 
 ```python
-from llenvs.evaluation import EpisodeRunner, ToolEpisodeRunner
+from llenvs.evaluation import TrajectoryRunner, ToolTrajectoryRunner
 
 # Basic runner
-runner = EpisodeRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=params,
@@ -245,7 +245,7 @@ runner = EpisodeRunner(
 )
 
 # Tool-aware runner
-runner = ToolEpisodeRunner(
+runner = ToolTrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=params,
@@ -253,7 +253,7 @@ runner = ToolEpisodeRunner(
 )
 
 # Run evaluation
-result = runner.run_episode(task_index=0)
+result = runner.run_trajectory(task_index=0)
 batch = runner.run_batch(
     task_indices=list(range(100)),
     progress_callback=lambda c, t: print(f"{c}/{t}"),

@@ -9,8 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from llenvs.evaluation.runner import BatchResult, EpisodeResult
-from llenvs.evaluation.metrics import MetricsBundle, compute_all_metrics
+from llenvs.evaluation.runner import BatchResult, TrajectoryResult
+from llenvs.evaluation.metrics import (
+    MetricsBundle,
+    ContinuousStatistics,
+    BinaryStatistics,
+    compute_all_metrics,
+)
 
 
 @dataclass
@@ -22,7 +27,7 @@ class EvaluationMetadata:
         model: Model name/path.
         environment: Environment name.
         duration_seconds: Total runtime.
-        num_episodes: Number of episodes run.
+        num_trajectories: Number of trajectories run.
         config: Configuration used.
     """
 
@@ -30,7 +35,7 @@ class EvaluationMetadata:
     model: str
     environment: str
     duration_seconds: float = 0.0
-    num_episodes: int = 0
+    num_trajectories: int = 0
     config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -41,7 +46,7 @@ class EvaluationResult:
     Attributes:
         metadata: Evaluation metadata.
         metrics: Computed metrics.
-        results: Per-episode results (optional, can be large).
+        results: Per-trajectory results (optional, can be large).
         summary: Summary statistics.
     """
 
@@ -54,7 +59,7 @@ class EvaluationResult:
         """Convert to dictionary format.
 
         Args:
-            include_results: Whether to include per-episode results.
+            include_results: Whether to include per-trajectory results.
 
         Returns:
             Dictionary representation.
@@ -74,7 +79,7 @@ class EvaluationResult:
         """Convert to JSON string.
 
         Args:
-            include_results: Whether to include per-episode results.
+            include_results: Whether to include per-trajectory results.
 
         Returns:
             JSON string.
@@ -90,7 +95,7 @@ class EvaluationResult:
 
         Args:
             path: Output file path.
-            include_results: Whether to include per-episode results.
+            include_results: Whether to include per-trajectory results.
 
         Returns:
             Path to the saved file.
@@ -104,16 +109,16 @@ class EvaluationResult:
         return path
 
 
-def format_episode_result(episode: EpisodeResult) -> dict[str, Any]:
-    """Format an episode result for serialization.
+def format_trajectory_result(traj_result: TrajectoryResult) -> dict[str, Any]:
+    """Format a trajectory result for serialization.
 
     Args:
-        episode: The episode result.
+        traj_result: The trajectory result.
 
     Returns:
         Dictionary suitable for JSON serialization.
     """
-    trajectory = episode.trajectory
+    trajectory = traj_result.trajectory
 
     # Extract key information from trajectory
     transitions_data = []
@@ -142,15 +147,15 @@ def format_episode_result(episode: EpisodeResult) -> dict[str, Any]:
         expected = trajectory.initial_state.hidden.expected_answer
 
     return {
-        "episode_id": trajectory.episode_id,
-        "task_index": episode.metadata.get("task_index"),
+        "trajectory_id": trajectory.episode_id,
+        "task_index": traj_result.metadata.get("task_index"),
         "prompt": prompt[:2000],  # Truncate
         "expected_answer": expected,
-        "success": episode.success,
-        "total_reward": episode.total_reward,
+        "success": traj_result.success,
+        "total_reward": traj_result.total_reward,
         "num_steps": len(trajectory),
         "transitions": transitions_data,
-        "metadata": episode.metadata,
+        "metadata": traj_result.metadata,
     }
 
 
@@ -170,7 +175,7 @@ def create_evaluation_result(
         environment_name: Name of the environment.
         start_time: When evaluation started.
         config: Optional configuration dict.
-        include_detailed_results: Whether to include per-episode details.
+        include_detailed_results: Whether to include per-trajectory details.
 
     Returns:
         Formatted EvaluationResult.
@@ -184,7 +189,7 @@ def create_evaluation_result(
         model=model_name,
         environment=environment_name,
         duration_seconds=duration,
-        num_episodes=len(batch_result.episode_results),
+        num_trajectories=len(batch_result.trajectory_results),
         config=config or {},
     )
 
@@ -194,16 +199,16 @@ def create_evaluation_result(
     # Format results if requested
     results = None
     if include_detailed_results:
-        results = [format_episode_result(ep) for ep in batch_result.episode_results]
+        results = [format_trajectory_result(tr) for tr in batch_result.trajectory_results]
 
     # Create summary
     accuracy = metrics.get("accuracy")
     summary = {
         "success_rate": batch_result.success_rate,
         "mean_reward": batch_result.mean_reward,
-        "accuracy": accuracy.value if accuracy else batch_result.success_rate,
-        "num_episodes": len(batch_result.episode_results),
-        "num_successful": sum(1 for r in batch_result.episode_results if r.success),
+        "accuracy": accuracy.statistics.mean if accuracy else batch_result.success_rate,
+        "num_trajectories": len(batch_result.trajectory_results),
+        "num_successful": sum(1 for r in batch_result.trajectory_results if r.success),
     }
 
     return EvaluationResult(
@@ -226,17 +231,23 @@ def print_summary(result: EvaluationResult) -> None:
     print(f"Model: {result.metadata.model}")
     print(f"Timestamp: {result.metadata.timestamp}")
     print(f"Duration: {result.metadata.duration_seconds:.1f}s")
-    print(f"Episodes: {result.metadata.num_episodes}")
+    print(f"Trajectories: {result.metadata.num_trajectories}")
     print()
     print("Metrics:")
     print("-" * 40)
 
     for name, metric in result.metrics.metrics.items():
-        if metric.std_error is not None:
-            print(f"  {name}: {metric.value:.4f} +/- {metric.std_error:.4f}")
-        else:
-            print(f"  {name}: {metric.value:.4f}")
+        stats = metric.statistics
+        parts = [f"  {name}: {stats.mean:.4f}"]
+        if isinstance(stats, ContinuousStatistics):
+            if stats.std_dev is not None:
+                parts.append(f" (std: {stats.std_dev:.4f})")
+        elif isinstance(stats, BinaryStatistics):
+            parts.append(f" ({stats.count}/{stats.n})")
+        if stats.std_error is not None:
+            parts.append(f" +/- {stats.std_error:.4f}")
+        print("".join(parts))
 
     print()
-    print(f"Summary: {result.summary['num_successful']}/{result.summary['num_episodes']} successful")
+    print(f"Summary: {result.summary['num_successful']}/{result.summary['num_trajectories']} successful")
     print(f"{'=' * 60}\n")

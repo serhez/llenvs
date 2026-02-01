@@ -301,3 +301,7 @@ def register_defaults() -> None:
 
 # Register defaults on import
 register_defaults()
+
+# Import adapters to trigger auto-registration with environment_registry
+# This must come after environment_registry is created
+import llenvs.adapters  # noqa: E402, F401

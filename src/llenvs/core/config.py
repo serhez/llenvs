@@ -59,6 +59,8 @@ class InferenceConfig:
         top_p: Nucleus sampling threshold.
         top_k: Top-k sampling.
         stop_sequences: Stop sequences.
+        extra: Backend-specific parameters passed through to the underlying
+            inference library (e.g., repetition_penalty for HuggingFace).
     """
 
     temperature: float = 0.0
@@ -66,6 +68,7 @@ class InferenceConfig:
     top_p: float = 1.0
     top_k: int = 0
     stop_sequences: list[str] = field(default_factory=list)
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -288,4 +291,5 @@ def create_sampling_params(config: InferenceConfig) -> Any:
         top_p=config.top_p,
         top_k=config.top_k,
         stop_sequences=tuple(config.stop_sequences),
+        extra=config.extra,
     )

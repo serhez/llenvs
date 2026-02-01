@@ -169,7 +169,11 @@ class HuggingFaceBackend(ModelBackend):
         return self._model
 
     def _to_generate_kwargs(self, params: SamplingParams) -> dict[str, Any]:
-        """Convert SamplingParams to transformers generate() kwargs."""
+        """Convert SamplingParams to transformers generate() kwargs.
+
+        Maps common SamplingParams fields to HuggingFace generate() arguments,
+        then merges any backend-specific params from `extra`.
+        """
         kwargs: dict[str, Any] = {
             "max_new_tokens": params.max_tokens,
             "do_sample": params.temperature > 0,
@@ -183,6 +187,13 @@ class HuggingFaceBackend(ModelBackend):
             kwargs["top_p"] = params.top_p
             if params.top_k > 0:
                 kwargs["top_k"] = params.top_k
+
+        # Map frequency_penalty to repetition_penalty if set
+        # Note: HF repetition_penalty is multiplicative (1.0 = no penalty, >1 = penalty)
+        # while OpenAI frequency_penalty is additive (0 = no penalty, >0 = penalty)
+        if params.frequency_penalty > 0:
+            # Approximate conversion: repetition_penalty ≈ 1 + frequency_penalty
+            kwargs["repetition_penalty"] = 1.0 + params.frequency_penalty
 
         if params.stop_sequences:
             # Convert stop sequences to token IDs
@@ -204,6 +215,10 @@ class HuggingFaceBackend(ModelBackend):
         if params.logprobs:
             kwargs["output_scores"] = True
             kwargs["return_dict_in_generate"] = True
+
+        # Merge backend-specific extra params (these take precedence)
+        if params.extra:
+            kwargs.update(params.extra)
 
         return kwargs
 
@@ -342,6 +357,25 @@ class HuggingFaceBackend(ModelBackend):
 
         return results
 
+    def _format_messages_fallback(self, messages: list[ChatMessage]) -> str:
+        """Format messages for models without a chat template.
+
+        Uses a simple format that works reasonably with base models.
+
+        Args:
+            messages: List of chat messages.
+
+        Returns:
+            Formatted prompt string.
+        """
+        parts = []
+        for msg in messages:
+            role = msg.role.capitalize()
+            parts.append(f"{role}: {msg.content}")
+        # Add prompt for assistant response
+        parts.append("Assistant:")
+        return "\n\n".join(parts)
+
     def generate_chat(
         self,
         messages: list[ChatMessage],
@@ -359,12 +393,16 @@ class HuggingFaceBackend(ModelBackend):
         # Convert to dict format for chat template
         message_dicts = [m.to_dict() for m in messages]
 
-        # Apply chat template
-        prompt = self._tokenizer.apply_chat_template(
-            message_dicts,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        # Apply chat template if available, otherwise use fallback
+        if self._tokenizer.chat_template is not None:
+            prompt = self._tokenizer.apply_chat_template(
+                message_dicts,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+        else:
+            # Fallback for base models without chat templates (e.g., GPT-2)
+            prompt = self._format_messages_fallback(messages)
 
         results = self.generate([prompt], params)
         return results[0]

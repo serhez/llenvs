@@ -211,6 +211,53 @@ params = SamplingParams(
 )
 ```
 
+### Backend-Specific Parameters
+
+Use the `extra` parameter to pass backend-specific options that aren't part of the common interface. These are forwarded directly to the underlying library.
+
+```python
+# HuggingFace-specific (transformers)
+params = SamplingParams(
+    temperature=0.7,
+    extra={
+        "repetition_penalty": 1.2,
+        "num_beams": 4,
+        "do_sample": True,
+        "length_penalty": 1.0,
+    },
+)
+
+# vLLM-specific
+params = SamplingParams(
+    temperature=0.7,
+    extra={
+        "best_of": 3,
+        "use_beam_search": True,
+        "length_penalty": 1.0,
+    },
+)
+
+# OpenAI-specific
+params = SamplingParams(
+    temperature=0.7,
+    extra={
+        "seed": 42,
+        "response_format": {"type": "json_object"},
+        "logit_bias": {123: -100},
+    },
+)
+
+# Anthropic-specific
+params = SamplingParams(
+    temperature=0.7,
+    extra={
+        "metadata": {"user_id": "user-123"},
+    },
+)
+```
+
+> **Note:** Parameters in `extra` take precedence over the common parameters if there's a conflict. Unknown parameters may cause errors from the underlying API.
+
 ## Capabilities
 
 Check what a backend supports:

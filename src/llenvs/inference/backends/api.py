@@ -158,6 +158,10 @@ class OpenAIBackend(ModelBackend):
             kwargs["logprobs"] = True
             kwargs["top_logprobs"] = params.num_logprobs
 
+        # Merge backend-specific extra params
+        if params.extra:
+            kwargs.update(params.extra)
+
         response = self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]
 
@@ -376,6 +380,10 @@ class AnthropicBackend(ModelBackend):
 
         if params.stop_sequences:
             kwargs["stop_sequences"] = list(params.stop_sequences)
+
+        # Merge backend-specific extra params
+        if params.extra:
+            kwargs.update(params.extra)
 
         response = self._client.messages.create(**kwargs)
 
@@ -664,6 +672,10 @@ class OpenRouterBackend(ModelBackend):
 
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
+
+        # Merge backend-specific extra params
+        if params.extra:
+            kwargs.update(params.extra)
 
         response = self._client.chat.completions.create(**kwargs)
         choice = response.choices[0]

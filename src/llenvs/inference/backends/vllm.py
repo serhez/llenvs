@@ -123,7 +123,11 @@ class VLLMBackend(ModelBackend):
         return self._tokenizer
 
     def _to_vllm_params(self, params: SamplingParams) -> Any:
-        """Convert to vLLM SamplingParams."""
+        """Convert to vLLM SamplingParams.
+
+        Maps common SamplingParams fields to vLLM arguments, then merges
+        any backend-specific params from `extra`.
+        """
         kwargs: dict[str, Any] = {
             "max_tokens": params.max_tokens,
             "temperature": params.temperature,
@@ -141,6 +145,10 @@ class VLLMBackend(ModelBackend):
 
         if params.logprobs:
             kwargs["logprobs"] = params.num_logprobs
+
+        # Merge backend-specific extra params (these take precedence)
+        if params.extra:
+            kwargs.update(params.extra)
 
         return self._VLLMSamplingParams(**kwargs)
 
