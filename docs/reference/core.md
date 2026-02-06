@@ -286,14 +286,22 @@ class AnswerExtractor(Protocol):
 
 ### Built-in Extractors
 
-| Extractor | Description | Example Pattern |
-|-----------|-------------|-----------------|
-| `TagBasedExtractor` | XML-style tags | `<answer>42</answer>` |
-| `RegexExtractor` | Custom regex with capture group | Any pattern |
-| `GSM8KExtractor` | GSM8K format | `#### 42` |
-| `MultipleChoiceExtractor` | A/B/C/D answers | `Answer: B`, `(A)` |
-| `CompositeExtractor` | Try multiple extractors in order | - |
-| `FallbackExtractor` | Return full response | - |
+| Extractor | Registry Name | Description | Example Pattern |
+|-----------|---------------|-------------|-----------------|
+| `TagBasedExtractor` | `tag_based` | XML-style tags | `<answer>42</answer>` |
+| `RegexExtractor` | `regex` | Custom regex with capture group | Any pattern |
+| `GSM8KExtractor` | `gsm8k` | GSM8K format | `#### 42` |
+| `MultipleChoiceExtractor` | `multiple_choice` | A/B/C/D answers | `Answer: B`, `(A)` |
+| `BoxedExtractor` | `boxed` | LaTeX `\boxed{...}` with balanced braces | `\boxed{x^{2}+1}` |
+| `NumericExtractor` | `numeric` | Last number in text | `The answer is 42` |
+| `LastLineExtractor` | `last_line` | Last non-empty line | Any text |
+| `CodeBlockExtractor` | `code_block` | Markdown code fences | ` ```python\n...\n``` ` |
+| `PatternAnswerExtractor` | `pattern_answer` | "the answer is X", "therefore X", "= X" | Natural language |
+| `CompositeExtractor` | - | Try multiple extractors in order | - |
+| `FallbackExtractor` | `fallback` | Return full response | - |
+| `NativeExtractor` | - | Wraps a third-party extraction function | - |
+
+All extractors follow the **last match wins** convention when multiple matches exist.
 
 ```python
 # Tag-based (default)
@@ -309,10 +317,47 @@ answer, meta = extractor.extract("So the total is #### 42")
 # Composite fallback chain
 extractor = CompositeExtractor(extractors=[
     TagBasedExtractor(),
-    GSM8KExtractor(),
+    BoxedExtractor(),
+    PatternAnswerExtractor(),
+    NumericExtractor(),
     FallbackExtractor(),
 ])
 ```
+
+### Cleaning Layer
+
+**Location**: `llenvs/core/cleaning.py`
+
+`CleanedExtractor` wraps any extractor with **pre-cleaners** (applied to the raw response before extraction) and **post-cleaners** (applied to the extracted answer after extraction).
+
+```python
+from llenvs.core.extraction import CleanedExtractor
+from llenvs.core.cleaning import strip_special_tokens, strip_trailing_punctuation
+
+extractor = CleanedExtractor(
+    inner=TagBasedExtractor(),
+    pre_cleaners=[strip_special_tokens],
+    post_cleaners=[strip_trailing_punctuation],
+)
+answer, meta = extractor.extract("<answer>42.</answer><|endoftext|>")
+# answer = "42"
+```
+
+**Pre-cleaners** (raw response → cleaned response):
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `strip_special_tokens` | Yes | Remove `<\|endoftext\|>`, `<pad>`, `</s>`, `<\|im_end\|>`, `<\|im_start\|>`, `<s>` |
+
+**Post-cleaners** (extracted answer → cleaned answer):
+
+| Name | Default | Description |
+|------|---------|-------------|
+| `strip_trailing_punctuation` | Yes | Remove trailing `.` or `,` (preserves decimal numbers) |
+| `strip_surrounding_quotes` | No | Remove matched surrounding `"..."` or `'...'` |
+| `strip_latex_dollars` | No | Remove surrounding `$...$` or `$$...$$` |
+
+When using YAML configuration, the cleaning layer is applied automatically by `EnvironmentFactory`. See [Configuration](config.md) for details.
 
 ## Registry
 

@@ -11,7 +11,11 @@ environments:
     adapter: reasoning_gym
     size: 100
     seed: 42
-    extractor: tag_based
+    extractors:
+      - type: tag_based
+        config: {tag_name: answer}
+      - type: pattern_answer
+      - type: numeric
 
 model:
   backend: openai
@@ -197,6 +201,66 @@ env = create_webshop_environment(
     human_goals=True,              # Use human-written goals
 )
 ```
+
+## Extraction Configuration
+
+### Extractor Chains
+
+Configure an ordered list of extractors to try. The first extractor that succeeds is used:
+
+```yaml
+environments:
+  - name: polynomial_equations
+    adapter: reasoning_gym
+    extractors:
+      - type: tag_based
+        config: {tag_name: answer}
+      - type: boxed
+      - type: pattern_answer
+      - type: numeric
+```
+
+Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `fallback`, `native`.
+
+The `native` type uses the adapter's built-in extraction (only supported by `reasoning_gym`).
+
+For backward compatibility, a single extractor can be specified:
+
+```yaml
+environments:
+  - name: test
+    extractor: tag_based
+    extractor_config: {tag_name: answer}
+```
+
+### Cleaning Layer
+
+Pre-cleaners run on the raw response before extraction. Post-cleaners run on the extracted answer after extraction. `EnvironmentFactory` applies cleaning automatically.
+
+```yaml
+environments:
+  - name: math_task
+    extractors:
+      - type: boxed
+      - type: numeric
+    # Defaults: strip_special_tokens pre-cleaner, strip_trailing_punctuation post-cleaner
+
+  - name: code_generation
+    extractors:
+      - type: code_block
+        config: {language: python}
+    pre_cleaners: [strip_special_tokens]
+    post_cleaners: []  # Disable post-cleaning for code
+```
+
+Semantics:
+- **Not specified** (`None`) — use defaults (`strip_special_tokens` pre, `strip_trailing_punctuation` post)
+- **Empty list** (`[]`) — disable cleaning entirely
+- **Explicit list** — use exactly those cleaners
+
+Available pre-cleaners: `strip_special_tokens`
+
+Available post-cleaners: `strip_trailing_punctuation`, `strip_surrounding_quotes`, `strip_latex_dollars`
 
 ## Prompt Pipeline Configuration
 
