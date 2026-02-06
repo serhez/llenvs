@@ -25,9 +25,9 @@ inference:
   temperature: 0.0
   max_tokens: 2048
 
-system_prompt: |
-  You are a helpful assistant. Think step by step.
-  Put your final answer in <answer>...</answer> tags.
+system_prompt: math_reasoning          # Pre-built prompt by name
+model_profile: auto                    # Detect from model name
+prompt_template: math                  # Global default template
 
 output_dir: ./results
 ```
@@ -202,6 +202,84 @@ env = create_webshop_environment(
 )
 ```
 
+## Prompt Configuration
+
+Configure system prompts, question templates, and model profiles. See the [Prompts guide](../guides/prompts.md) for full details.
+
+### system_prompt
+
+A string or list of strings. Each string is resolved by looking up in the system prompt registry, then the fragment registry, then treating as literal text.
+
+```yaml
+# Pre-built prompt by name
+system_prompt: math_reasoning
+
+# Composed from fragments
+system_prompt:
+  - math_expert
+  - think_step_by_step
+  - xml_answer
+
+# Literal string
+system_prompt: "You are a helpful assistant. Think step by step."
+```
+
+### prompt_template
+
+A string referencing a registered template name (`plain`, `math`, `coding`, `reasoning`) or a literal template with a `{question}` placeholder. Applied to the last user message at runtime.
+
+```yaml
+prompt_template: math
+```
+
+### model_profile
+
+A string referencing a registered profile name (`deepseek_r1`, `o1`, `llama3_instruct`, `qwen_chat`) or `"auto"` to detect from the model name.
+
+```yaml
+model_profile: deepseek_r1
+model_profile: auto          # Detect from model name
+```
+
+### Per-Environment Overrides
+
+`system_prompt` and `prompt_template` can be set per-environment to override the eval-level defaults:
+
+```yaml
+system_prompt: general_reasoning
+prompt_template: reasoning
+
+environments:
+  - name: simple_arithmetic
+    # Uses eval-level defaults
+
+  - name: polynomial_equations
+    system_prompt: math_reasoning    # Override for this env
+    prompt_template: math            # Override for this env
+```
+
+### prompts
+
+A dict of named prompt component overrides for multi-step environments. Keys and their meaning are environment-specific. Single-turn environments ignore this field.
+
+```yaml
+environments:
+  - name: webshop
+    adapter: webshop
+    prompts:
+      instruction_prefix: "Your goal: {instruction}"
+      step_format: "Turn {step}:"
+      action_hint: "Navigate using search[keywords] or click[element]."
+```
+
+WebShop prompt components:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `instruction_prefix` | `Instruction: {instruction}` | Template prepended to each observation |
+| `step_format` | `[Step {step}]` | Step counter format |
+| `action_hint` | `Actions: search[keywords] or click[element]` | Available actions hint |
+
 ## Extraction Configuration
 
 ### Extractor Chains
@@ -224,7 +302,7 @@ Each entry has a `type` (registry name) and optional `config` (kwargs passed to 
 
 The `native` type uses the adapter's built-in extraction (only supported by `reasoning_gym`).
 
-For backward compatibility, a single extractor can be specified:
+As a shorthand, a single extractor can be specified:
 
 ```yaml
 environments:
@@ -298,14 +376,17 @@ pipeline = (
 
 ```python
 from llenvs.evaluation import TrajectoryRunner, ToolTrajectoryRunner
+from llenvs.inference import TEMPLATE_REGISTRY, PROFILE_REGISTRY
 
 # Basic runner
 runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=params,
-    prompt_pipeline=pipeline,    # Optional
-    system_prompt="...",         # Alternative to pipeline
+    system_prompt="...",             # System prompt string
+    prompt_template=TEMPLATE_REGISTRY["math"],  # Optional template
+    model_profile=PROFILE_REGISTRY["deepseek_r1"],  # Optional profile
+    prompt_pipeline=pipeline,        # Optional low-level pipeline
 )
 
 # Tool-aware runner
@@ -314,6 +395,7 @@ runner = ToolTrajectoryRunner(
     backend=backend,
     sampling_params=params,
     system_prompt="Use tools to solve problems.",
+    prompt_template=TEMPLATE_REGISTRY["reasoning"],
 )
 
 # Run evaluation

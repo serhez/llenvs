@@ -11,6 +11,7 @@ from llenvs.inference.prompting import (
     MessageTrimmer,
     RoleMapper,
     ContentWrapper,
+    PromptTemplateTransformer,
     build_standard_pipeline,
 )
 
@@ -339,3 +340,64 @@ class TestBuildStandardPipeline:
 
         # Check format
         assert "<solution>" in system.content or "<solution>" in result[-1].content
+
+
+class TestPromptTemplateTransformer:
+    """Tests for PromptTemplateTransformer."""
+
+    def test_applies_to_last_user_message(self, user_message):
+        """Test that template wraps the last user message."""
+        from llenvs.inference.prompts import PromptTemplate
+
+        template = PromptTemplate(template="Solve: {question}", name="math")
+        transformer = PromptTemplateTransformer(template=template)
+        result = transformer.transform(user_message)
+
+        assert len(result) == 1
+        assert result[0].content == "Solve: What is 2+2?"
+
+    def test_applies_to_last_user_in_conversation(self, conversation):
+        """Test that only the last user message is wrapped."""
+        from llenvs.inference.prompts import PromptTemplate
+
+        template = PromptTemplate(template="[Q] {question}", name="test")
+        transformer = PromptTemplateTransformer(template=template)
+        result = transformer.transform(conversation)
+
+        # First user message unchanged
+        assert result[1].content == "Hello"
+        # Last user message wrapped
+        assert result[-1].content == "[Q] What is 2+2?"
+
+    def test_empty_messages(self):
+        """Test with empty message list."""
+        from llenvs.inference.prompts import PromptTemplate
+
+        template = PromptTemplate(template="Solve: {question}")
+        transformer = PromptTemplateTransformer(template=template)
+        result = transformer.transform([])
+        assert result == []
+
+    def test_no_user_messages(self):
+        """Test with no user messages."""
+        from llenvs.inference.prompts import PromptTemplate
+
+        template = PromptTemplate(template="Solve: {question}")
+        transformer = PromptTemplateTransformer(template=template)
+        messages = [ChatMessage(role="system", content="Hello")]
+        result = transformer.transform(messages)
+        assert result == messages
+
+    def test_composable_with_pipeline(self, user_message):
+        """Test that it composes with other transformers."""
+        from llenvs.inference.prompts import PromptTemplate
+
+        template = PromptTemplate(template="Problem: {question}")
+        pipeline = (
+            SystemPromptInjector("You are helpful.")
+            >> PromptTemplateTransformer(template=template)
+        )
+        result = pipeline.transform(user_message)
+
+        assert result[0].role == "system"
+        assert result[1].content == "Problem: What is 2+2?"

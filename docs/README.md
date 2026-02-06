@@ -10,6 +10,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 ## Guides
 
 - **[Environments](guides/environments.md)** - Working with different environment types
+- **[Prompts](guides/prompts.md)** - Fragments, system prompts, templates, and model profiles
 - **[Tools & Function Calling](guides/tools.md)** - Using tools in evaluations
 - **[Segmentation](guides/segmentation.md)** - Multi-step reasoning with segmenters
 - **[Evaluation](guides/evaluation.md)** - Running evaluations and computing metrics

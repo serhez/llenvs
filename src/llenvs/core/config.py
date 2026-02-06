@@ -20,10 +20,14 @@ class EnvironmentConfig:
         adapter: Adapter type (e.g., "reasoning_gym").
         size: Number of samples.
         seed: Random seed.
-        extractor: Answer extractor type (singular, backward compat).
-        extractor_config: Extractor configuration (singular, backward compat).
+        extractor: Answer extractor type (single extractor shorthand).
+        extractor_config: Extractor configuration (single extractor shorthand).
         extractors: Ordered list of extractors to try (chain). When set,
             builds a CompositeExtractor. Overrides extractor/extractor_config.
+        prompt_template: Per-env prompt template name or literal template string.
+        system_prompt: Per-env system prompt override. A string (name or literal)
+            or list of fragment/prompt names.
+        prompts: Per-env prompt component overrides for multi-step environments.
         params: Additional environment-specific parameters.
     """
 
@@ -36,6 +40,9 @@ class EnvironmentConfig:
     extractors: list[dict[str, Any]] | None = None
     pre_cleaners: list[str] | None = None
     post_cleaners: list[str] | None = None
+    prompt_template: str | None = None
+    system_prompt: str | list[str] | None = None
+    prompts: dict[str, str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -84,7 +91,10 @@ class EvalConfig:
         environments: List of environment configurations.
         model: Model configuration.
         inference: Inference parameters.
-        system_prompt: Optional system prompt.
+        system_prompt: Optional system prompt. A string (name or literal)
+            or list of fragment/prompt names.
+        model_profile: Model profile name or "auto" for detection.
+        prompt_template: Global default prompt template name.
         output_dir: Output directory for results.
         limit: Maximum number of tasks per environment.
         save_detailed_results: Whether to save per-episode results.
@@ -93,7 +103,9 @@ class EvalConfig:
     environments: list[EnvironmentConfig]
     model: ModelConfig
     inference: InferenceConfig = field(default_factory=InferenceConfig)
-    system_prompt: str | None = None
+    system_prompt: str | list[str] | None = None
+    model_profile: str | None = None
+    prompt_template: str | None = None
     output_dir: str = "./results"
     limit: int | None = None
     save_detailed_results: bool = True
@@ -141,6 +153,9 @@ class EvalConfig:
                     extractors=env_data.get("extractors"),
                     pre_cleaners=pre_cleaners,
                     post_cleaners=post_cleaners,
+                    prompt_template=env_data.get("prompt_template"),
+                    system_prompt=env_data.get("system_prompt"),
+                    prompts=env_data.get("prompts"),
                     params=env_data.get("params", {}),
                 )
             )
@@ -168,6 +183,8 @@ class EvalConfig:
             model=model,
             inference=inference,
             system_prompt=data.get("system_prompt"),
+            model_profile=data.get("model_profile"),
+            prompt_template=data.get("prompt_template"),
             output_dir=data.get("output_dir", "./results"),
             limit=data.get("limit"),
             save_detailed_results=data.get("save_detailed_results", True),
@@ -196,6 +213,12 @@ class EvalConfig:
                 d["pre_cleaners"] = env.pre_cleaners
             if env.post_cleaners is not None:
                 d["post_cleaners"] = env.post_cleaners
+            if env.prompt_template is not None:
+                d["prompt_template"] = env.prompt_template
+            if env.system_prompt is not None:
+                d["system_prompt"] = env.system_prompt
+            if env.prompts is not None:
+                d["prompts"] = env.prompts
             env_dicts.append(d)
 
         return {
@@ -213,6 +236,8 @@ class EvalConfig:
                 "stop_sequences": self.inference.stop_sequences,
             },
             "system_prompt": self.system_prompt,
+            "model_profile": self.model_profile,
+            "prompt_template": self.prompt_template,
             "output_dir": self.output_dir,
             "limit": self.limit,
             "save_detailed_results": self.save_detailed_results,
@@ -262,7 +287,7 @@ class EnvironmentFactory:
 
             extractor = CompositeExtractor(extractors=chain)
         else:
-            # Backward compat: single extractor
+            # Single extractor shorthand
             extractor = extractor_registry.create(
                 config.extractor, **config.extractor_config
             )
@@ -277,6 +302,11 @@ class EnvironmentFactory:
                 post_cleaners=post_fns,
             )
 
+        # Build kwargs, including prompts if set
+        env_kwargs: dict[str, Any] = {**config.params}
+        if config.prompts is not None:
+            env_kwargs["prompts"] = config.prompts
+
         # Use the environment registry to get the environment
         return environment_registry.get(
             name=config.name,
@@ -284,7 +314,7 @@ class EnvironmentFactory:
             size=config.size,
             seed=config.seed,
             extractor=extractor,
-            **config.params,
+            **env_kwargs,
         )
 
 

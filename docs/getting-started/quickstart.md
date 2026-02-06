@@ -39,9 +39,11 @@ inference:
   temperature: 0.0
   max_tokens: 2048
 
-system_prompt: |
-  You are a helpful assistant. Think step by step.
-  Put your final answer in <answer>...</answer> tags.
+system_prompt: general_reasoning  # Pre-built prompt (see Prompts guide)
+# Or use a literal string:
+# system_prompt: |
+#   You are a helpful assistant. Think step by step.
+#   Put your final answer in <answer>...</answer> tags.
 
 output_dir: ./results
 ```
@@ -150,5 +152,6 @@ print(f"Mean reward: {result.mean_reward:.3f}")
 ## Next Steps
 
 - **[Environments Guide](../guides/environments.md)** - Learn about different environment types
+- **[Prompts Guide](../guides/prompts.md)** - Pre-built system prompts, templates, and model profiles
 - **[Tools Guide](../guides/tools.md)** - Add tool/function calling to evaluations
 - **[Evaluation Guide](../guides/evaluation.md)** - Compute metrics and save results

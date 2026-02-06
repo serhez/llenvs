@@ -272,6 +272,8 @@ print(f"Function calling: {caps.supports_function_calling}")
 
 ## Prompt Engineering
 
+For pre-built system prompts, question templates, and model profiles, see the [Prompts guide](prompts.md). The pipeline system below is the low-level API that those higher-level tools build on.
+
 ### Building Pipelines
 
 ```python

@@ -4,9 +4,14 @@ Handles running trajectories through environments with model backends,
 collecting results.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 import logging
+
+if TYPE_CHECKING:
+    from llenvs.inference.prompts import ModelProfile, PromptTemplate
 
 from llenvs.core.state import State, TextObservation, TextAction, AgentObservation, AgentAction
 from llenvs.core.environment import Environment, StepResult
@@ -19,7 +24,7 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
 )
-from llenvs.inference.prompting import PromptPipeline
+from llenvs.inference.prompting import PromptPipeline, PromptTemplateTransformer
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +83,8 @@ class TrajectoryRunner:
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     prompt_pipeline: PromptPipeline | None = None
     system_prompt: str | None = None
+    prompt_template: "PromptTemplate | None" = None
+    model_profile: "ModelProfile | None" = None
 
     def _build_messages(
         self,
@@ -108,6 +115,16 @@ class TrajectoryRunner:
         else:
             # Fallback for other observation types
             messages.append(ChatMessage(role="user", content=str(state.observation)))
+
+        # Apply prompt template to wrap the question
+        if self.prompt_template is not None:
+            transformer = PromptTemplateTransformer(template=self.prompt_template)
+            messages = transformer.transform(messages)
+
+        # Apply model profile transformers
+        if self.model_profile is not None:
+            for t in self.model_profile.build_transformers():
+                messages = t.transform(messages)
 
         # Apply prompt pipeline if configured
         if self.prompt_pipeline:
@@ -291,6 +308,8 @@ def run_evaluation(
     sampling_params: SamplingParams | None = None,
     prompt_pipeline: PromptPipeline | None = None,
     system_prompt: str | None = None,
+    prompt_template: PromptTemplate | None = None,
+    model_profile: ModelProfile | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchResult:
     """Convenience function to run an evaluation.
@@ -303,6 +322,8 @@ def run_evaluation(
         sampling_params: Generation parameters.
         prompt_pipeline: Optional prompt pipeline.
         system_prompt: Optional system prompt.
+        prompt_template: Optional prompt template for wrapping questions.
+        model_profile: Optional model profile for model-specific adjustments.
         progress_callback: Optional progress callback.
 
     Returns:
@@ -319,6 +340,8 @@ def run_evaluation(
         sampling_params=sampling_params or SamplingParams(),
         prompt_pipeline=prompt_pipeline,
         system_prompt=system_prompt,
+        prompt_template=prompt_template,
+        model_profile=model_profile,
     )
 
     return runner.run_batch(task_indices, progress_callback=progress_callback)
@@ -344,6 +367,8 @@ class ToolTrajectoryRunner:
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     prompt_pipeline: PromptPipeline | None = None
     system_prompt: str | None = None
+    prompt_template: PromptTemplate | None = None
+    model_profile: ModelProfile | None = None
 
     def _build_messages(
         self,
@@ -414,6 +439,16 @@ class ToolTrajectoryRunner:
 
                 elif role == "user":
                     messages.append(ChatMessage(role="user", content=msg.get("content", "")))
+
+        # Apply prompt template to wrap the question
+        if self.prompt_template is not None:
+            transformer = PromptTemplateTransformer(template=self.prompt_template)
+            messages = transformer.transform(messages)
+
+        # Apply model profile transformers
+        if self.model_profile is not None:
+            for t in self.model_profile.build_transformers():
+                messages = t.transform(messages)
 
         # Apply prompt pipeline if configured
         if self.prompt_pipeline:
@@ -608,6 +643,8 @@ def run_tool_evaluation(
     sampling_params: SamplingParams | None = None,
     prompt_pipeline: PromptPipeline | None = None,
     system_prompt: str | None = None,
+    prompt_template: PromptTemplate | None = None,
+    model_profile: ModelProfile | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchResult:
     """Convenience function to run a tool-aware evaluation.
@@ -620,6 +657,8 @@ def run_tool_evaluation(
         sampling_params: Generation parameters.
         prompt_pipeline: Optional prompt pipeline.
         system_prompt: Optional system prompt.
+        prompt_template: Optional prompt template for wrapping questions.
+        model_profile: Optional model profile for model-specific adjustments.
         progress_callback: Optional progress callback.
 
     Returns:
@@ -636,6 +675,8 @@ def run_tool_evaluation(
         sampling_params=sampling_params or SamplingParams(),
         prompt_pipeline=prompt_pipeline,
         system_prompt=system_prompt,
+        prompt_template=prompt_template,
+        model_profile=model_profile,
     )
 
     return runner.run_batch(task_indices, progress_callback=progress_callback)

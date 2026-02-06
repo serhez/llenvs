@@ -171,6 +171,11 @@ class ReasoningGymEnvironment:
         self._dataset_name = getattr(dataset, "name", "reasoning_gym")
 
     @property
+    def prompts(self) -> dict[str, str]:
+        """Single-turn environment has no configurable prompts."""
+        return {}
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
@@ -495,6 +500,14 @@ class ReasoningGymAdapter:
             return rg_extract(text, tag_name="answer", strip=True)
 
         return NativeExtractor(fn=_extract, name="reasoning_gym")
+
+    def get_default_system_prompt(self, name: str) -> None:
+        """reasoning-gym questions are self-contained, no default system prompt."""
+        return None
+
+    def get_prompt_template(self, name: str) -> None:
+        """reasoning-gym questions are self-contained, no wrapping needed."""
+        return None
 
     def get_environment_info(self, name: str) -> dict[str, Any]:
         """Get metadata about an environment without creating it.

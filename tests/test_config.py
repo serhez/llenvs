@@ -302,8 +302,8 @@ class TestExtractorsChainConfig:
         assert len(config.extractors) == 2
         assert config.extractors[0]["type"] == "tag_based"
 
-    def test_backward_compat_no_extractors(self):
-        """Test backward compat: extractor (singular) still works."""
+    def test_single_extractor_shorthand(self):
+        """Test single extractor shorthand (extractor field)."""
         config = EnvironmentConfig(
             name="test",
             extractor="gsm8k",
@@ -338,7 +338,7 @@ class TestExtractorsChainConfig:
         assert env.extractors[2]["type"] == "numeric"
 
     def test_from_dict_without_extractors(self):
-        """Test EvalConfig.from_dict() backward compat without extractors."""
+        """Test EvalConfig.from_dict() with single extractor shorthand."""
         data = {
             "environments": [
                 {
@@ -503,3 +503,96 @@ class TestExtractorsChainConfig:
         result = config.to_dict()
 
         assert result["environments"][0]["extractors"] == original["environments"][0]["extractors"]
+
+
+class TestPromptsConfig:
+    """Tests for the prompts field in EnvironmentConfig."""
+
+    def test_prompts_default_none(self):
+        """Test that prompts defaults to None."""
+        config = EnvironmentConfig(name="test")
+        assert config.prompts is None
+
+    def test_prompts_with_dict(self):
+        """Test prompts field with a dict."""
+        config = EnvironmentConfig(
+            name="webshop",
+            prompts={"action_hint": "Custom hint.", "step_format": "Turn {step}:"},
+        )
+        assert config.prompts is not None
+        assert config.prompts["action_hint"] == "Custom hint."
+        assert config.prompts["step_format"] == "Turn {step}:"
+
+    def test_from_dict_with_prompts(self):
+        """Test EvalConfig.from_dict() parses prompts."""
+        data = {
+            "environments": [
+                {
+                    "name": "webshop",
+                    "adapter": "webshop",
+                    "prompts": {
+                        "action_hint": "Navigate using search[q] or click[e].",
+                        "instruction_prefix": "Your goal: {instruction}",
+                    },
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert env.prompts is not None
+        assert env.prompts["action_hint"] == "Navigate using search[q] or click[e]."
+
+    def test_from_dict_without_prompts(self):
+        """Test from_dict defaults prompts to None."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert env.prompts is None
+
+    def test_to_dict_with_prompts(self):
+        """Test to_dict serializes prompts."""
+        config = EvalConfig(
+            environments=[
+                EnvironmentConfig(
+                    name="webshop",
+                    prompts={"action_hint": "Custom."},
+                )
+            ],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        env_data = data["environments"][0]
+        assert "prompts" in env_data
+        assert env_data["prompts"]["action_hint"] == "Custom."
+
+    def test_to_dict_without_prompts(self):
+        """Test to_dict omits prompts when None."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        env_data = data["environments"][0]
+        assert "prompts" not in env_data
+
+    def test_roundtrip_with_prompts(self):
+        """Test roundtrip with prompts."""
+        original = {
+            "environments": [
+                {
+                    "name": "webshop",
+                    "prompts": {
+                        "action_hint": "Custom hint.",
+                        "step_format": "Turn {step}:",
+                    },
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+        assert result["environments"][0]["prompts"] == original["environments"][0]["prompts"]

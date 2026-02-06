@@ -11,6 +11,7 @@ from llenvs.adapters.webshop import (
     WebShopHidden,
     WebShopAdapter,
     WebShopReward,
+    DEFAULT_WEBSHOP_PROMPTS,
     create_webshop_environment,
 )
 
@@ -487,3 +488,100 @@ class TestWebShopMultiStepEpisode:
 
         # Episode continues (mock doesn't simulate wrong product details)
         assert not result2.terminated
+
+
+class TestWebShopPrompts:
+    """Tests for WebShop configurable prompt components."""
+
+    def test_default_prompts(self, mock_webshop_env):
+        """Test that default prompts are set."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        prompts = env.prompts
+
+        assert "instruction_prefix" in prompts
+        assert "step_format" in prompts
+        assert "action_hint" in prompts
+
+    def test_default_prompts_match_constants(self, mock_webshop_env):
+        """Test that default prompts match DEFAULT_WEBSHOP_PROMPTS."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        assert env.prompts == DEFAULT_WEBSHOP_PROMPTS
+
+    def test_prompts_returns_copy(self, mock_webshop_env):
+        """Test that prompts property returns a copy."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        p1 = env.prompts
+        p2 = env.prompts
+        assert p1 == p2
+        assert p1 is not p2  # Different dict instances
+
+    def test_custom_prompts_override(self, mock_webshop_env):
+        """Test overriding specific prompt components."""
+        custom = {"action_hint": "Navigate using search[q] or click[e]."}
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            prompts=custom,
+        )
+        prompts = env.prompts
+
+        # Overridden
+        assert prompts["action_hint"] == "Navigate using search[q] or click[e]."
+        # Defaults preserved
+        assert prompts["instruction_prefix"] == DEFAULT_WEBSHOP_PROMPTS["instruction_prefix"]
+        assert prompts["step_format"] == DEFAULT_WEBSHOP_PROMPTS["step_format"]
+
+    def test_custom_instruction_prefix(self, mock_webshop_env):
+        """Test custom instruction prefix appears in observation."""
+        custom = {"instruction_prefix": "Your goal: {instruction}"}
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            prompts=custom,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert "Your goal:" in state.observation.prompt
+        # Default "Instruction:" should NOT appear
+        assert not state.observation.prompt.startswith("Instruction:")
+
+    def test_custom_step_format(self, mock_webshop_env):
+        """Test custom step format appears in observation."""
+        custom = {"step_format": "Step #{step}:"}
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            prompts=custom,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert "Step #0:" in state.observation.prompt
+
+    def test_custom_action_hint(self, mock_webshop_env):
+        """Test custom action hint appears in observation."""
+        custom = {"action_hint": "Use search[q] or click[e] to navigate."}
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            prompts=custom,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert "Use search[q] or click[e] to navigate." in state.observation.prompt
+
+    def test_empty_action_hint(self, mock_webshop_env):
+        """Test that empty action hint is omitted."""
+        custom = {"action_hint": ""}
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            prompts=custom,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Default action hint should not appear
+        assert "Actions: search[keywords]" not in state.observation.prompt
+
+
+class TestWebShopAdapterDefaultSystemPrompt:
+    """Tests for WebShopAdapter.get_default_system_prompt."""
+
+    def test_returns_none(self):
+        """WebShop adapter returns None for default system prompt."""
+        adapter = WebShopAdapter()
+        assert adapter.get_default_system_prompt("webshop") is None

@@ -310,6 +310,11 @@ class GemEnvironment:
         self._current_task_index = 0
 
     @property
+    def prompts(self) -> dict[str, str]:
+        """GEM manages its own observations."""
+        return {}
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
@@ -568,6 +573,14 @@ class GemAdapter:
             include_format_reward=include_format_reward,
             max_steps=max_steps,
         )
+
+    def get_default_system_prompt(self, name: str) -> None:
+        """GEM manages its own observations, no default system prompt."""
+        return None
+
+    def get_prompt_template(self, name: str) -> None:
+        """GEM environments manage their own prompts."""
+        return None
 
     def get_native_extractor(self, task_name: str) -> None:
         """GEM does not provide native extraction.
@@ -854,6 +867,11 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             defs.append(GEM_SEARCH_TOOL)
         defs.append(GEM_SUBMIT_ANSWER_TOOL)  # Always include submit
         return tuple(defs)
+
+    @property
+    def prompts(self) -> dict[str, str]:
+        """GEM tool environments manage prompts internally."""
+        return {}
 
     @property
     def available_tools(self) -> tuple[ToolDefinition, ...]:

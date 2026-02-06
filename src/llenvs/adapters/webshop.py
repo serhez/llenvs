@@ -73,6 +73,13 @@ class WebShopReward:
         )
 
 
+DEFAULT_WEBSHOP_PROMPTS: dict[str, str] = {
+    "instruction_prefix": "Instruction: {instruction}",
+    "step_format": "[Step {step}]",
+    "action_hint": "Actions: search[keywords] or click[element]",
+}
+
+
 class WebShopEnvironment:
     """MDP wrapper for WebShop e-commerce environment.
 
@@ -108,6 +115,7 @@ class WebShopEnvironment:
         observation_mode: str = "text_rich",
         max_steps: int = 15,
         include_instruction_in_obs: bool = True,
+        prompts: dict[str, str] | None = None,
     ) -> None:
         """Initialize WebShop environment wrapper.
 
@@ -120,15 +128,25 @@ class WebShopEnvironment:
             max_steps: Maximum steps per episode before truncation.
             include_instruction_in_obs: Whether to prepend instruction to
                 each observation (helps model remember the goal).
+            prompts: Override default prompt components. Keys:
+                instruction_prefix, step_format, action_hint.
         """
         self._env = webshop_env
         self._observation_mode = observation_mode
         self._max_steps = max_steps
         self._include_instruction_in_obs = include_instruction_in_obs
         self._reward_fn = WebShopReward()
+        self._prompts = {**DEFAULT_WEBSHOP_PROMPTS}
+        if prompts:
+            self._prompts.update(prompts)
 
         # Track current instruction for observation building
         self._current_instruction: str = ""
+
+    @property
+    def prompts(self) -> dict[str, str]:
+        """Named prompt components used for building observations."""
+        return dict(self._prompts)
 
     @property
     def spec(self) -> EnvironmentSpec:
@@ -191,15 +209,18 @@ class WebShopEnvironment:
         parts = []
 
         if self._include_instruction_in_obs:
-            parts.append(f"Instruction: {instruction}")
+            prefix = self._prompts["instruction_prefix"]
+            parts.append(prefix.format(instruction=instruction))
             parts.append("")
 
-        parts.append(f"[Step {step}]")
+        step_fmt = self._prompts["step_format"]
+        parts.append(step_fmt.format(step=step))
         parts.append(raw_obs)
 
-        # Add action format hint
-        parts.append("")
-        parts.append("Actions: search[keywords] or click[element]")
+        hint = self._prompts.get("action_hint", "")
+        if hint:
+            parts.append("")
+            parts.append(hint)
 
         return "\n".join(parts)
 
@@ -426,6 +447,7 @@ class WebShopAdapter:
         max_steps: int = 15,
         num_products: int | None = None,
         human_goals: bool = True,
+        prompts: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> WebShopEnvironment:
         """Create a WebShop environment.
@@ -477,7 +499,16 @@ class WebShopAdapter:
             webshop_env=webshop_env,
             observation_mode=observation_mode,
             max_steps=max_steps,
+            prompts=prompts,
         )
+
+    def get_default_system_prompt(self, name: str) -> None:
+        """WebShop observations include built-in instructions."""
+        return None
+
+    def get_prompt_template(self, name: str) -> None:
+        """WebShop manages multi-turn prompts internally."""
+        return None
 
     def get_native_extractor(self, task_name: str) -> None:
         """WebShop does not provide native extraction.
@@ -517,6 +548,7 @@ def create_webshop_environment(
     max_steps: int = 15,
     num_products: int | None = None,
     human_goals: bool = True,
+    prompts: dict[str, str] | None = None,
     **kwargs: Any,
 ) -> WebShopEnvironment:
     """Factory function to create a WebShop environment.
@@ -554,5 +586,6 @@ def create_webshop_environment(
         max_steps=max_steps,
         num_products=num_products,
         human_goals=human_goals,
+        prompts=prompts,
         **kwargs,
     )

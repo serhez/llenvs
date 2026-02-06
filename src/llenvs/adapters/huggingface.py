@@ -4,9 +4,14 @@ Provides access to thousands of datasets on the HuggingFace Hub through
 a common interface. Most HF datasets are single-turn (question -> answer).
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 import uuid
+
+if TYPE_CHECKING:
+    from llenvs.inference.prompts import PromptTemplate
 
 from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
@@ -372,6 +377,11 @@ class HuggingFaceEnvironment:
         self._format_reward = HuggingFaceFormatReward(self._extractor)
 
     @property
+    def prompts(self) -> dict[str, str]:
+        """Single-turn environment has no configurable prompts."""
+        return {}
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
@@ -728,6 +738,35 @@ class HuggingFaceAdapter:
             include_format_reward=include_format_reward,
             metadata_columns=metadata_columns,
         )
+
+    def get_default_system_prompt(self, name: str) -> None:
+        """HuggingFace datasets are raw, no default system prompt."""
+        return None
+
+    def get_prompt_template(self, name: str) -> "PromptTemplate | None":
+        """Return a prompt template based on dataset presets.
+
+        Math-related datasets get the math template; others return None.
+
+        Args:
+            name: Dataset name.
+
+        Returns:
+            A PromptTemplate or None.
+        """
+        from llenvs.inference.prompts import TEMPLATE_REGISTRY
+
+        if name not in DATASET_PRESETS:
+            return None
+
+        preset = DATASET_PRESETS[name]
+        scoring = preset.get("scoring", "")
+        answer_extraction = preset.get("answer_extraction", "")
+
+        if scoring == "numeric" or answer_extraction in ("boxed", "numeric"):
+            return TEMPLATE_REGISTRY.get("math")
+
+        return None
 
     def get_native_extractor(self, task_name: str) -> None:
         """HuggingFace does not provide native extraction.

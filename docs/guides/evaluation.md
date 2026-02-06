@@ -281,10 +281,30 @@ eval_result.save("results/eval_summary.json", include_results=False)
 }
 ```
 
+## Prompt Templates and Model Profiles
+
+The runner supports prompt templates (wrapping questions) and model profiles (model-specific adjustments):
+
+```python
+from llenvs.inference import TEMPLATE_REGISTRY, PROFILE_REGISTRY
+
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=SamplingParams(temperature=0.0),
+    system_prompt="You are an expert mathematician.",
+    prompt_template=TEMPLATE_REGISTRY["math"],          # Wraps questions
+    model_profile=PROFILE_REGISTRY["deepseek_r1"],      # Model-specific
+)
+```
+
+The message build order is: system prompt → observation → prompt template → model profile → prompt pipeline. See the [Prompts guide](prompts.md) for full details.
+
 ## Convenience Function
 
 ```python
 from llenvs.evaluation import run_evaluation
+from llenvs.inference import TEMPLATE_REGISTRY
 
 result = run_evaluation(
     environment=env,
@@ -292,6 +312,7 @@ result = run_evaluation(
     num_tasks=50,
     sampling_params=SamplingParams(temperature=0.0),
     system_prompt="Think step by step. Use <answer>...</answer> tags.",
+    prompt_template=TEMPLATE_REGISTRY["math"],  # Optional
 )
 
 print(f"Accuracy: {result.success_rate:.2%}")

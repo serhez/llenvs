@@ -80,6 +80,19 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
     """
 
     @property
+    def prompts(self) -> dict[str, str]:
+        """Named prompt components used internally by this environment.
+
+        Multi-step environments expose templates they use for building
+        observations. Single-turn environments return an empty dict.
+        Users can override these at construction time.
+
+        Returns:
+            Dict mapping prompt names to template strings.
+        """
+        ...
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get the environment specification."""
         ...

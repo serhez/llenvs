@@ -7,10 +7,15 @@ our common environment interface. Each adapter knows how to:
 - Handle library-specific details (scoring, dataset creation, etc.)
 """
 
-from typing import Any, Protocol, runtime_checkable
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from llenvs.core.environment import Environment
 from llenvs.core.extraction import AnswerExtractor
+
+if TYPE_CHECKING:
+    from llenvs.inference.prompts import PromptTemplate
 
 
 @runtime_checkable
@@ -72,6 +77,35 @@ class Adapter(Protocol):
         Returns:
             An AnswerExtractor wrapping the library's native extraction,
             or None if not available.
+        """
+        ...
+
+    def get_default_system_prompt(self, name: str) -> str | None:
+        """Return default system prompt for an environment, or None.
+
+        Adapters return the prompt that their library recommends for this
+        environment. The resolution chain respects this over llenvs defaults,
+        but user config always wins.
+
+        Args:
+            name: Environment/task name.
+
+        Returns:
+            System prompt string or None if not available.
+        """
+        ...
+
+    def get_prompt_template(self, name: str) -> PromptTemplate | None:
+        """Return default prompt template for wrapping this task's questions.
+
+        Adapters return None by default. Override to provide task-specific
+        question wrapping.
+
+        Args:
+            name: Environment/task name.
+
+        Returns:
+            A PromptTemplate or None if no wrapping needed.
         """
         ...
 

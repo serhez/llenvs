@@ -4,11 +4,16 @@ Provides a pipeline of transformations to build prompts from
 base messages. Transformers can be composed with >> operator.
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from llenvs.inference.protocol import ChatMessage
+
+if TYPE_CHECKING:
+    from llenvs.inference.prompts import PromptTemplate
 
 
 @runtime_checkable
@@ -324,6 +329,35 @@ class ContentWrapper(BaseTransformer):
                 result.append(ChatMessage(role=msg.role, content=new_content))
             else:
                 result.append(msg)
+        return result
+
+
+@dataclass
+class PromptTemplateTransformer(BaseTransformer):
+    """Applies a PromptTemplate to the last user message.
+
+    Wraps the last user message content using the template's {question}
+    placeholder. Used by the runner to apply adapter/config templates.
+
+    Attributes:
+        template: The PromptTemplate to apply.
+    """
+
+    template: "PromptTemplate"
+
+    def transform(self, messages: list[ChatMessage]) -> list[ChatMessage]:
+        """Apply template to the last user message."""
+        if not messages:
+            return messages
+
+        result = list(messages)
+
+        for i in range(len(result) - 1, -1, -1):
+            if result[i].role == "user":
+                new_content = self.template.apply(result[i].content)
+                result[i] = ChatMessage(role="user", content=new_content)
+                break
+
         return result
 
 
