@@ -474,6 +474,28 @@ class ReasoningGymAdapter:
             **kwargs,
         )
 
+    def get_native_extractor(self, task_name: str) -> AnswerExtractor:
+        """Return reasoning-gym's native extraction function.
+
+        reasoning-gym provides a single generic extractor for all tasks
+        via reasoning_gym.utils.extract_answer.
+
+        Args:
+            task_name: Task name (unused - reasoning-gym has one extractor).
+
+        Returns:
+            NativeExtractor wrapping reasoning_gym.utils.extract_answer.
+        """
+        from llenvs.core.extraction import NativeExtractor
+
+        rg = self._get_reasoning_gym()
+        from reasoning_gym.utils import extract_answer as rg_extract
+
+        def _extract(text: str) -> str | None:
+            return rg_extract(text, tag_name="answer", strip=True)
+
+        return NativeExtractor(fn=_extract, name="reasoning_gym")
+
     def get_environment_info(self, name: str) -> dict[str, Any]:
         """Get metadata about an environment without creating it.
 

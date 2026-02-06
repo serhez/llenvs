@@ -105,8 +105,7 @@ class TestAnswerExtraction:
     def test_extract_boxed_multiple(self):
         """Test extracts last boxed (for multi-part solutions)."""
         text = "First $\\boxed{1}$, then $\\boxed{2}$."
-        # Our implementation finds the first one
-        assert extract_boxed_answer(text) == "1"
+        assert extract_boxed_answer(text) == "2"
 
     def test_extract_boxed_not_found(self):
         """Test returns None when no boxed found."""

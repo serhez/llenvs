@@ -6,50 +6,42 @@ a common interface. Most HF datasets are single-turn (question -> answer).
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal
-import re
 import uuid
 
 from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
-from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
+from llenvs.core.extraction import (
+    AnswerExtractor,
+    TagBasedExtractor,
+    BoxedExtractor,
+    NumericExtractor,
+    LastLineExtractor,
+)
 
 
 # Type alias for scoring functions
 ScoringFunction = Callable[[str, str], float]
 
+# Singleton instances for answer extraction from dataset columns
+_boxed_extractor = BoxedExtractor()
+_numeric_extractor = NumericExtractor()
+_last_line_extractor = LastLineExtractor()
+
 
 def extract_boxed_answer(text: str) -> str | None:
-    """Extract answer from LaTeX \\boxed{...} format.
+    r"""Extract answer from LaTeX \boxed{...} format.
 
     Handles nested braces correctly.
 
     Args:
-        text: Text containing \\boxed{answer}.
+        text: Text containing \boxed{answer}.
 
     Returns:
         Extracted answer or None if not found.
     """
-    # Find \boxed{ and then match balanced braces
-    pattern = r'\\boxed\s*\{'
-    match = re.search(pattern, text)
-    if not match:
-        return None
-
-    start = match.end()
-    depth = 1
-    pos = start
-
-    while pos < len(text) and depth > 0:
-        if text[pos] == '{':
-            depth += 1
-        elif text[pos] == '}':
-            depth -= 1
-        pos += 1
-
-    if depth == 0:
-        return text[start:pos-1].strip()
-    return None
+    result, _ = _boxed_extractor.extract(text)
+    return result
 
 
 def extract_numeric_answer(text: str) -> str | None:
@@ -64,13 +56,8 @@ def extract_numeric_answer(text: str) -> str | None:
     Returns:
         Extracted number as string or None.
     """
-    # Find all numbers (including negative, decimals, with commas)
-    pattern = r'-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?'
-    matches = re.findall(pattern, text)
-    if matches:
-        # Return last number, remove commas
-        return matches[-1].replace(',', '')
-    return None
+    result, _ = _numeric_extractor.extract(text)
+    return result
 
 
 def extract_last_line(text: str) -> str | None:
@@ -82,8 +69,8 @@ def extract_last_line(text: str) -> str | None:
     Returns:
         Last non-empty line or None.
     """
-    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
-    return lines[-1] if lines else None
+    result, _ = _last_line_extractor.extract(text)
+    return result
 
 
 def normalize_numeric(value: str) -> str | None:
@@ -741,6 +728,17 @@ class HuggingFaceAdapter:
             include_format_reward=include_format_reward,
             metadata_columns=metadata_columns,
         )
+
+    def get_native_extractor(self, task_name: str) -> None:
+        """HuggingFace does not provide native extraction.
+
+        Args:
+            task_name: Task name (unused).
+
+        Returns:
+            None (no native extraction available).
+        """
+        return None
 
     def get_environment_info(self, name: str) -> dict[str, Any]:
         """Get metadata about a dataset without loading it.

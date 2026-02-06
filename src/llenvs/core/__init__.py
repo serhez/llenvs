@@ -33,6 +33,13 @@ from llenvs.core.extraction import (
     MultipleChoiceExtractor,
     CompositeExtractor,
     FallbackExtractor,
+    BoxedExtractor,
+    NumericExtractor,
+    LastLineExtractor,
+    CodeBlockExtractor,
+    PatternAnswerExtractor,
+    CleanedExtractor,
+    NativeExtractor,
 )
 from llenvs.core.registry import (
     Registry,
@@ -109,6 +116,13 @@ __all__ = [
     "MultipleChoiceExtractor",
     "CompositeExtractor",
     "FallbackExtractor",
+    "BoxedExtractor",
+    "NumericExtractor",
+    "LastLineExtractor",
+    "CodeBlockExtractor",
+    "PatternAnswerExtractor",
+    "CleanedExtractor",
+    "NativeExtractor",
     # Registry
     "Registry",
     "environment_registry",

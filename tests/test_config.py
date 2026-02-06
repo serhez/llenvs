@@ -279,3 +279,227 @@ class TestCreateSamplingParams:
 
         assert params.temperature == 0.7
         assert params.extra == {"repetition_penalty": 1.2, "num_beams": 4}
+
+
+class TestExtractorsChainConfig:
+    """Tests for the extractors chain in EnvironmentConfig."""
+
+    def test_extractors_field_default_none(self):
+        """Test that extractors defaults to None."""
+        config = EnvironmentConfig(name="test")
+        assert config.extractors is None
+
+    def test_extractors_field_with_list(self):
+        """Test extractors field with a list."""
+        config = EnvironmentConfig(
+            name="test",
+            extractors=[
+                {"type": "tag_based", "config": {"tag_name": "answer"}},
+                {"type": "numeric"},
+            ],
+        )
+        assert config.extractors is not None
+        assert len(config.extractors) == 2
+        assert config.extractors[0]["type"] == "tag_based"
+
+    def test_backward_compat_no_extractors(self):
+        """Test backward compat: extractor (singular) still works."""
+        config = EnvironmentConfig(
+            name="test",
+            extractor="gsm8k",
+            extractor_config={"strip_whitespace": True},
+        )
+        assert config.extractor == "gsm8k"
+        assert config.extractors is None
+
+    def test_from_dict_with_extractors(self):
+        """Test EvalConfig.from_dict() parses extractors."""
+        data = {
+            "environments": [
+                {
+                    "name": "polynomial_equations",
+                    "adapter": "reasoning_gym",
+                    "extractors": [
+                        {"type": "tag_based", "config": {"tag_name": "answer"}},
+                        {"type": "pattern_answer"},
+                        {"type": "numeric"},
+                    ],
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+
+        env = config.environments[0]
+        assert env.extractors is not None
+        assert len(env.extractors) == 3
+        assert env.extractors[0]["type"] == "tag_based"
+        assert env.extractors[1]["type"] == "pattern_answer"
+        assert env.extractors[2]["type"] == "numeric"
+
+    def test_from_dict_without_extractors(self):
+        """Test EvalConfig.from_dict() backward compat without extractors."""
+        data = {
+            "environments": [
+                {
+                    "name": "test",
+                    "extractor": "gsm8k",
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+
+        env = config.environments[0]
+        assert env.extractors is None
+        assert env.extractor == "gsm8k"
+
+    def test_to_dict_with_extractors(self):
+        """Test to_dict() serializes extractors."""
+        config = EvalConfig(
+            environments=[
+                EnvironmentConfig(
+                    name="test",
+                    extractors=[
+                        {"type": "tag_based"},
+                        {"type": "numeric"},
+                    ],
+                )
+            ],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+
+        env_data = data["environments"][0]
+        assert "extractors" in env_data
+        assert len(env_data["extractors"]) == 2
+        assert env_data["extractors"][0]["type"] == "tag_based"
+
+    def test_to_dict_without_extractors(self):
+        """Test to_dict() omits extractors when None."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+
+        env_data = data["environments"][0]
+        assert "extractors" not in env_data
+
+    def test_cleaners_default_none(self):
+        """Test that pre_cleaners/post_cleaners default to None."""
+        config = EnvironmentConfig(name="test")
+        assert config.pre_cleaners is None
+        assert config.post_cleaners is None
+
+    def test_cleaners_explicit_empty(self):
+        """Test explicit empty list disables cleaning."""
+        config = EnvironmentConfig(name="test", pre_cleaners=[], post_cleaners=[])
+        assert config.pre_cleaners == []
+        assert config.post_cleaners == []
+
+    def test_cleaners_specific_names(self):
+        """Test specific cleaner names."""
+        config = EnvironmentConfig(
+            name="test",
+            pre_cleaners=["strip_special_tokens"],
+            post_cleaners=["strip_trailing_punctuation", "strip_surrounding_quotes"],
+        )
+        assert config.pre_cleaners == ["strip_special_tokens"]
+        assert len(config.post_cleaners) == 2
+
+    def test_from_dict_with_cleaners(self):
+        """Test from_dict parses cleaners."""
+        data = {
+            "environments": [
+                {
+                    "name": "test",
+                    "pre_cleaners": ["strip_special_tokens"],
+                    "post_cleaners": [],
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert env.pre_cleaners == ["strip_special_tokens"]
+        assert env.post_cleaners == []
+
+    def test_from_dict_without_cleaners(self):
+        """Test from_dict defaults cleaners to None."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert env.pre_cleaners is None
+        assert env.post_cleaners is None
+
+    def test_to_dict_with_cleaners(self):
+        """Test to_dict serializes cleaners."""
+        config = EvalConfig(
+            environments=[
+                EnvironmentConfig(
+                    name="test",
+                    pre_cleaners=["strip_special_tokens"],
+                    post_cleaners=["strip_trailing_punctuation"],
+                )
+            ],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        env_data = data["environments"][0]
+        assert env_data["pre_cleaners"] == ["strip_special_tokens"]
+        assert env_data["post_cleaners"] == ["strip_trailing_punctuation"]
+
+    def test_to_dict_without_cleaners(self):
+        """Test to_dict omits cleaners when None."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        env_data = data["environments"][0]
+        assert "pre_cleaners" not in env_data
+        assert "post_cleaners" not in env_data
+
+    def test_roundtrip_with_cleaners(self):
+        """Test roundtrip with cleaners."""
+        original = {
+            "environments": [
+                {
+                    "name": "test",
+                    "pre_cleaners": ["strip_special_tokens"],
+                    "post_cleaners": ["strip_trailing_punctuation", "strip_surrounding_quotes"],
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+        assert result["environments"][0]["pre_cleaners"] == ["strip_special_tokens"]
+        assert result["environments"][0]["post_cleaners"] == [
+            "strip_trailing_punctuation",
+            "strip_surrounding_quotes",
+        ]
+
+    def test_roundtrip_with_extractors(self):
+        """Test roundtrip with extractors chain."""
+        original = {
+            "environments": [
+                {
+                    "name": "test",
+                    "extractors": [
+                        {"type": "boxed"},
+                        {"type": "numeric"},
+                        {"type": "fallback"},
+                    ],
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+
+        assert result["environments"][0]["extractors"] == original["environments"][0]["extractors"]

@@ -10,6 +10,7 @@ our common environment interface. Each adapter knows how to:
 from typing import Any, Protocol, runtime_checkable
 
 from llenvs.core.environment import Environment
+from llenvs.core.extraction import AnswerExtractor
 
 
 @runtime_checkable
@@ -54,6 +55,23 @@ class Adapter(Protocol):
         Raises:
             ValueError: If the environment name is not recognized.
             ImportError: If the underlying library is not installed.
+        """
+        ...
+
+    def get_native_extractor(self, task_name: str) -> AnswerExtractor | None:
+        """Return native extraction for a specific task, or None.
+
+        Adapters should:
+        1. Return a task-specific native extractor if the library provides one.
+        2. Fall back to a generic native extractor if the library has one.
+        3. Return None if the library provides no extraction at all.
+
+        Args:
+            task_name: The task/environment name.
+
+        Returns:
+            An AnswerExtractor wrapping the library's native extraction,
+            or None if not available.
         """
         ...
 

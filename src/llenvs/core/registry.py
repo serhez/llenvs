@@ -286,6 +286,11 @@ def register_defaults() -> None:
         GSM8KExtractor,
         MultipleChoiceExtractor,
         FallbackExtractor,
+        BoxedExtractor,
+        NumericExtractor,
+        LastLineExtractor,
+        CodeBlockExtractor,
+        PatternAnswerExtractor,
     )
 
     # Clear and re-register extractors
@@ -297,6 +302,11 @@ def register_defaults() -> None:
     extractor_registry.register("gsm8k", GSM8KExtractor)
     extractor_registry.register("multiple_choice", MultipleChoiceExtractor)
     extractor_registry.register("fallback", FallbackExtractor)
+    extractor_registry.register("boxed", BoxedExtractor)
+    extractor_registry.register("numeric", NumericExtractor)
+    extractor_registry.register("last_line", LastLineExtractor)
+    extractor_registry.register("code_block", CodeBlockExtractor)
+    extractor_registry.register("pattern_answer", PatternAnswerExtractor)
 
 
 # Register defaults on import

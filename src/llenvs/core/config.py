@@ -20,8 +20,10 @@ class EnvironmentConfig:
         adapter: Adapter type (e.g., "reasoning_gym").
         size: Number of samples.
         seed: Random seed.
-        extractor: Answer extractor type.
-        extractor_config: Extractor configuration.
+        extractor: Answer extractor type (singular, backward compat).
+        extractor_config: Extractor configuration (singular, backward compat).
+        extractors: Ordered list of extractors to try (chain). When set,
+            builds a CompositeExtractor. Overrides extractor/extractor_config.
         params: Additional environment-specific parameters.
     """
 
@@ -31,6 +33,9 @@ class EnvironmentConfig:
     seed: int | None = None
     extractor: str = "tag_based"
     extractor_config: dict[str, Any] = field(default_factory=dict)
+    extractors: list[dict[str, Any]] | None = None
+    pre_cleaners: list[str] | None = None
+    post_cleaners: list[str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -121,6 +126,10 @@ class EvalConfig:
         # Parse environments
         environments = []
         for env_data in data.get("environments", []):
+            # Parse pre_cleaners/post_cleaners: distinguish missing (None) from empty ([])
+            pre_cleaners = env_data.get("pre_cleaners")  # None if not in dict
+            post_cleaners = env_data.get("post_cleaners")  # None if not in dict
+
             environments.append(
                 EnvironmentConfig(
                     name=env_data["name"],
@@ -129,6 +138,9 @@ class EvalConfig:
                     seed=env_data.get("seed"),
                     extractor=env_data.get("extractor", "tag_based"),
                     extractor_config=env_data.get("extractor_config", {}),
+                    extractors=env_data.get("extractors"),
+                    pre_cleaners=pre_cleaners,
+                    post_cleaners=post_cleaners,
                     params=env_data.get("params", {}),
                 )
             )
@@ -167,19 +179,27 @@ class EvalConfig:
         Returns:
             Configuration as dictionary.
         """
+        env_dicts = []
+        for env in self.environments:
+            d: dict[str, Any] = {
+                "name": env.name,
+                "adapter": env.adapter,
+                "size": env.size,
+                "seed": env.seed,
+                "extractor": env.extractor,
+                "extractor_config": env.extractor_config,
+                "params": env.params,
+            }
+            if env.extractors is not None:
+                d["extractors"] = env.extractors
+            if env.pre_cleaners is not None:
+                d["pre_cleaners"] = env.pre_cleaners
+            if env.post_cleaners is not None:
+                d["post_cleaners"] = env.post_cleaners
+            env_dicts.append(d)
+
         return {
-            "environments": [
-                {
-                    "name": env.name,
-                    "adapter": env.adapter,
-                    "size": env.size,
-                    "seed": env.seed,
-                    "extractor": env.extractor,
-                    "extractor_config": env.extractor_config,
-                    "params": env.params,
-                }
-                for env in self.environments
-            ],
+            "environments": env_dicts,
             "model": {
                 "backend": self.model.backend,
                 "model": self.model.model,
@@ -214,12 +234,48 @@ class EnvironmentFactory:
 
         Raises:
             KeyError: If adapter is not registered.
-            ValueError: If environment name is not recognized by adapter.
+            ValueError: If environment name is not recognized by adapter,
+                or if "native" extraction is requested but not available.
         """
         from llenvs.core.registry import environment_registry, extractor_registry
+        from llenvs.core.extraction import CompositeExtractor, CleanedExtractor
+        from llenvs.core.cleaning import resolve_cleaners
 
-        # Create extractor from config
-        extractor = extractor_registry.create(config.extractor, **config.extractor_config)
+        if config.extractors is not None:
+            # Build a CompositeExtractor from the chain
+            chain: list[Any] = []
+            for entry in config.extractors:
+                ext_type = entry["type"]
+                ext_config = entry.get("config", {})
+
+                if ext_type == "native":
+                    adapter_instance = environment_registry.get_adapter(config.adapter)
+                    native_ext = adapter_instance.get_native_extractor(config.name)
+                    if native_ext is None:
+                        raise ValueError(
+                            f"Adapter '{config.adapter}' does not provide "
+                            f"native extraction for task '{config.name}'"
+                        )
+                    chain.append(native_ext)
+                else:
+                    chain.append(extractor_registry.create(ext_type, **ext_config))
+
+            extractor = CompositeExtractor(extractors=chain)
+        else:
+            # Backward compat: single extractor
+            extractor = extractor_registry.create(
+                config.extractor, **config.extractor_config
+            )
+
+        # Wrap with cleaning layer
+        pre_fns = resolve_cleaners(config.pre_cleaners, "pre")
+        post_fns = resolve_cleaners(config.post_cleaners, "post")
+        if pre_fns or post_fns:
+            extractor = CleanedExtractor(
+                inner=extractor,
+                pre_cleaners=pre_fns,
+                post_cleaners=post_fns,
+            )
 
         # Use the environment registry to get the environment
         return environment_registry.get(

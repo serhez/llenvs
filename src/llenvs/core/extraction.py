@@ -6,6 +6,7 @@ handling various formats (XML tags, regex patterns, etc.).
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -248,3 +249,296 @@ class FallbackExtractor:
             content = content.strip()
 
         return content, {"found": True, "format": "fallback", "is_full_response": True}
+
+
+@dataclass
+class BoxedExtractor:
+    r"""Extract answers from LaTeX \boxed{...} format.
+
+    Handles nested braces correctly via balanced brace matching.
+    Takes the last match when multiple \boxed{} are present.
+
+    Attributes:
+        strip_whitespace: Whether to strip whitespace from extracted content.
+    """
+
+    strip_whitespace: bool = True
+
+    def _find_all_boxed(self, text: str) -> list[tuple[str, int, int]]:
+        r"""Find all \boxed{...} with balanced braces.
+
+        Returns list of (content, start_pos, end_pos) tuples.
+        """
+        results: list[tuple[str, int, int]] = []
+        pattern = re.compile(r"\\boxed\s*\{")
+
+        for match in pattern.finditer(text):
+            start = match.end()
+            depth = 1
+            pos = start
+
+            while pos < len(text) and depth > 0:
+                if text[pos] == "{":
+                    depth += 1
+                elif text[pos] == "}":
+                    depth -= 1
+                pos += 1
+
+            if depth == 0:
+                content = text[start : pos - 1]
+                results.append((content, match.start(), pos))
+
+        return results
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        r"""Extract answer from \boxed{...} markers."""
+        matches = self._find_all_boxed(response)
+
+        if not matches:
+            return None, {"found": False, "format": "boxed"}
+
+        content, start, end = matches[-1]
+
+        if self.strip_whitespace:
+            content = content.strip()
+
+        return content, {
+            "found": True,
+            "format": "boxed",
+            "match_start": start,
+            "match_end": end,
+            "num_matches": len(matches),
+        }
+
+
+@dataclass
+class NumericExtractor:
+    """Extract the last number from text.
+
+    Handles integers, decimals, negatives, and comma-separated thousands.
+
+    Attributes:
+        strip_whitespace: Whether to strip whitespace from extracted content.
+    """
+
+    strip_whitespace: bool = True
+
+    def __post_init__(self) -> None:
+        # Match numbers with optional commas for thousands, optional decimal
+        self._pattern = re.compile(
+            r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?"
+        )
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Extract the last number from text."""
+        matches = list(self._pattern.finditer(response))
+
+        if not matches:
+            return None, {"found": False, "format": "numeric"}
+
+        match = matches[-1]
+        content = match.group(0).replace(",", "")
+
+        if self.strip_whitespace:
+            content = content.strip()
+
+        return content, {
+            "found": True,
+            "format": "numeric",
+            "match_start": match.start(),
+            "match_end": match.end(),
+            "num_matches": len(matches),
+        }
+
+
+class LastLineExtractor:
+    """Extract the last non-empty line from text."""
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Return the last non-empty line."""
+        lines = [
+            line.strip() for line in response.strip().split("\n") if line.strip()
+        ]
+
+        if not lines:
+            return None, {"found": False, "format": "last_line"}
+
+        return lines[-1], {
+            "found": True,
+            "format": "last_line",
+            "num_lines": len(lines),
+        }
+
+
+@dataclass
+class CodeBlockExtractor:
+    """Extract content from markdown code fences.
+
+    Takes the last code block. Optionally filters by language.
+
+    Attributes:
+        language: If set, only extract blocks with this language tag.
+    """
+
+    language: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.language:
+            self._pattern = re.compile(
+                rf"```{re.escape(self.language)}\s*\n(.*?)```",
+                re.DOTALL,
+            )
+        else:
+            self._pattern = re.compile(
+                r"```(?:\w*)\s*\n(.*?)```",
+                re.DOTALL,
+            )
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Extract content from code fences."""
+        matches = list(self._pattern.finditer(response))
+
+        if not matches:
+            return None, {"found": False, "format": "code_block"}
+
+        match = matches[-1]
+        content = match.group(1).strip()
+
+        meta: dict[str, Any] = {
+            "found": True,
+            "format": "code_block",
+            "match_start": match.start(),
+            "match_end": match.end(),
+            "num_matches": len(matches),
+        }
+
+        if self.language:
+            meta["language"] = self.language
+
+        return content, meta
+
+
+@dataclass
+class PatternAnswerExtractor:
+    """Extract answers from natural language patterns.
+
+    Looks for patterns like "the answer is X", "therefore, X", "= X".
+    Takes the last match. Captures everything after the pattern to
+    end-of-line.
+
+    Attributes:
+        patterns: List of regex prefix patterns. Each should end at the
+            boundary where the answer begins (the answer is captured as
+            everything after the pattern to end-of-line).
+    """
+
+    patterns: list[str] | None = None
+
+    _DEFAULT_PATTERNS: list[str] = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.patterns is None:
+            self.patterns = [
+                r"the\s+answer\s+is\s+",
+                r"therefore,?\s+",
+                r"=\s+",
+            ]
+
+        self._compiled = [
+            re.compile(rf"(?:{p})(.+?)(?=\.\s|\.$|\n|$)", re.IGNORECASE | re.MULTILINE)
+            for p in self.patterns
+        ]
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Extract answer from natural language patterns."""
+        last_match: re.Match[str] | None = None
+        last_pattern_idx: int = -1
+
+        for idx, pattern in enumerate(self._compiled):
+            for match in pattern.finditer(response):
+                # Track the match with the latest position in text
+                if last_match is None or match.start() > last_match.start():
+                    last_match = match
+                    last_pattern_idx = idx
+
+        if last_match is None:
+            return None, {"found": False, "format": "pattern_answer"}
+
+        content = last_match.group(1).strip()
+
+        return content, {
+            "found": True,
+            "format": "pattern_answer",
+            "pattern_index": last_pattern_idx,
+            "pattern": self.patterns[last_pattern_idx],
+            "match_start": last_match.start(),
+            "match_end": last_match.end(),
+        }
+
+
+@dataclass
+class CleanedExtractor:
+    """Transparent wrapper that applies cleaning around any extractor.
+
+    Pre-cleaners transform the raw response before extraction.
+    Post-cleaners transform the extracted answer after extraction.
+
+    Attributes:
+        inner: The extractor to delegate to.
+        pre_cleaners: Functions applied to the response before extraction.
+        post_cleaners: Functions applied to the extracted answer after extraction.
+    """
+
+    inner: AnswerExtractor
+    pre_cleaners: list[Callable[[str], str]] = field(default_factory=list)
+    post_cleaners: list[Callable[[str], str]] = field(default_factory=list)
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Apply pre-cleaners, extract, then apply post-cleaners."""
+        cleaned_response = response
+        for cleaner in self.pre_cleaners:
+            cleaned_response = cleaner(cleaned_response)
+
+        result, metadata = self.inner.extract(cleaned_response)
+
+        if result is not None:
+            for cleaner in self.post_cleaners:
+                result = cleaner(result)
+
+        metadata["pre_cleaners_applied"] = True
+        metadata["post_cleaners_applied"] = True
+        return result, metadata
+
+
+class NativeExtractor:
+    """Wraps a third-party extraction function as an AnswerExtractor.
+
+    Adapts a function like reasoning_gym.utils.extract_answer to
+    the AnswerExtractor protocol.
+
+    Attributes:
+        fn: The extraction function. Should take a string and return
+            str | None.
+        name: Identifier for the native source (for metadata).
+    """
+
+    def __init__(self, fn: Any, name: str = "native") -> None:
+        self._fn = fn
+        self._name = name
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Call the native extraction function."""
+        result = self._fn(response)
+
+        if result is None:
+            return None, {
+                "found": False,
+                "format": "native",
+                "native_name": self._name,
+            }
+
+        return str(result), {
+            "found": True,
+            "format": "native",
+            "native_name": self._name,
+        }

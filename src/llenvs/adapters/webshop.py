@@ -479,6 +479,17 @@ class WebShopAdapter:
             max_steps=max_steps,
         )
 
+    def get_native_extractor(self, task_name: str) -> None:
+        """WebShop does not provide native extraction.
+
+        Args:
+            task_name: Task name (unused).
+
+        Returns:
+            None (no native extraction available).
+        """
+        return None
+
     def get_environment_info(self, name: str = "webshop") -> dict[str, Any]:
         """Get metadata about the environment.
 

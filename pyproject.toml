@@ -53,8 +53,11 @@ openai = [
 anthropic = [
     "anthropic>=0.20",
 ]
+math-verify = [
+    "math-verify[antlr4-13-2]>=0.7",
+]
 all = [
-    "llenvs[reasoning-gym,huggingface,gem,vllm,openai,anthropic,transformers]",
+    "llenvs[reasoning-gym,huggingface,gem,vllm,openai,anthropic,transformers,math-verify]",
 ]
 dev = [
     "pytest>=7.0",
