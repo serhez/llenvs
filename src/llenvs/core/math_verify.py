@@ -61,16 +61,16 @@ class MathVerifyRewardFunction:
         reward_type: Always OUTCOME.
     """
 
-    _extractor: AnswerExtractor
+    _answer_extractor: AnswerExtractor
     _name: str = "math_correctness"
     _reward_type: RewardType = RewardType.OUTCOME
 
     def __init__(
         self,
-        extractor: AnswerExtractor,
+        answer_extractor: AnswerExtractor,
         name: str = "math_correctness",
     ) -> None:
-        self._extractor = extractor
+        self._answer_extractor = answer_extractor
         self._name = name
         self._reward_type = RewardType.OUTCOME
 
@@ -95,7 +95,7 @@ class MathVerifyRewardFunction:
         2. Try math-verify parse + verify for semantic equivalence.
         3. On parse failure, fall back to normalized string comparison.
         """
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         if extracted is None:
             return RewardSignal(

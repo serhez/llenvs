@@ -11,9 +11,6 @@ from llenvs.adapters.huggingface import (
     HuggingFaceHidden,
     HuggingFaceAdapter,
     HuggingFaceCorrectnessReward,
-    extract_boxed_answer,
-    extract_numeric_answer,
-    extract_last_line,
     normalize_numeric,
     score_exact_match,
     score_numeric,
@@ -89,69 +86,6 @@ def mock_aime_dataset() -> MockHFDataset:
     ])
 
 
-class TestAnswerExtraction:
-    """Tests for answer extraction functions."""
-
-    def test_extract_boxed_simple(self):
-        """Test extracting simple boxed answer."""
-        text = "The answer is $\\boxed{42}$."
-        assert extract_boxed_answer(text) == "42"
-
-    def test_extract_boxed_nested(self):
-        """Test extracting nested boxed answer."""
-        text = "So we get $\\boxed{\\frac{1}{2}}$."
-        assert extract_boxed_answer(text) == "\\frac{1}{2}"
-
-    def test_extract_boxed_multiple(self):
-        """Test extracts last boxed (for multi-part solutions)."""
-        text = "First $\\boxed{1}$, then $\\boxed{2}$."
-        assert extract_boxed_answer(text) == "2"
-
-    def test_extract_boxed_not_found(self):
-        """Test returns None when no boxed found."""
-        text = "The answer is 42."
-        assert extract_boxed_answer(text) is None
-
-    def test_extract_numeric_simple(self):
-        """Test extracting simple number."""
-        text = "The answer is 42."
-        assert extract_numeric_answer(text) == "42"
-
-    def test_extract_numeric_with_commas(self):
-        """Test extracting number with commas."""
-        text = "The total is 1,234,567."
-        assert extract_numeric_answer(text) == "1234567"
-
-    def test_extract_numeric_negative(self):
-        """Test extracting negative number."""
-        text = "The result is -15."
-        assert extract_numeric_answer(text) == "-15"
-
-    def test_extract_numeric_decimal(self):
-        """Test extracting decimal number."""
-        text = "The answer is 3.14159."
-        assert extract_numeric_answer(text) == "3.14159"
-
-    def test_extract_numeric_multiple(self):
-        """Test extracts last number."""
-        text = "We have 1, 2, and finally 3."
-        assert extract_numeric_answer(text) == "3"
-
-    def test_extract_numeric_not_found(self):
-        """Test returns None when no number found."""
-        text = "No numbers here!"
-        assert extract_numeric_answer(text) is None
-
-    def test_extract_last_line(self):
-        """Test extracting last line."""
-        text = "Step 1: Think\nStep 2: Solve\nAnswer: 42"
-        assert extract_last_line(text) == "Answer: 42"
-
-    def test_extract_last_line_strips(self):
-        """Test last line extraction strips whitespace."""
-        text = "Line 1\n  42  \n\n"
-        assert extract_last_line(text) == "42"
-
 
 class TestNormalization:
     """Tests for answer normalization."""
@@ -224,7 +158,7 @@ class TestHuggingFaceEnvironment:
             split="test",
             question_column="problem",
             answer_column="solution",
-            answer_extraction="boxed",
+            ground_truth_extractor="boxed",
             scoring="numeric",
         )
 
@@ -358,7 +292,7 @@ class TestHuggingFaceEnvironment:
             dataset=mock_hf_dataset,
             dataset_name="test/dataset",
             split="test",
-            extractor=extractor,
+            answer_extractor=extractor,
         )
 
         state, _ = env.reset(options={"task_index": 0})
@@ -374,7 +308,7 @@ class TestHuggingFaceEnvironment:
             split="test",
             question_column="problem",
             answer_column="answer",
-            answer_extraction="direct",
+            ground_truth_extractor="direct",
             scoring="numeric",
         )
 
@@ -426,7 +360,7 @@ class TestDatasetPresets:
         preset = DATASET_PRESETS["HuggingFaceH4/aime_2024"]
         assert preset["question_column"] == "problem"
         assert preset["answer_column"] == "answer"
-        assert preset["answer_extraction"] == "direct"
+        assert preset["ground_truth_extractor"] == "direct"
         assert preset["scoring"] == "numeric"
 
     def test_aime_historical_preset_exists(self):
@@ -442,7 +376,7 @@ class TestDatasetPresets:
         preset = DATASET_PRESETS["gsm8k"]
         assert preset["question_column"] == "question"
         assert preset["answer_column"] == "answer"
-        assert preset["answer_extraction"] == "numeric"
+        assert preset["ground_truth_extractor"] == "numeric"
         assert preset["scoring"] == "numeric"
 
 

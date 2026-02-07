@@ -38,14 +38,16 @@ env = adapter.get_environment(
     split="test",               # train, test, validation
     question_column="question", # Column with questions
     answer_column="answer",     # Column with answers
-    answer_extraction="numeric",# How to extract final answer
+    ground_truth_extractor="numeric",  # How to extract ground truth
     scoring="numeric",          # How to score answers
     size=100,                   # Limit to N examples
     seed=42,                    # Shuffle seed
 )
 ```
 
-## Answer Extraction Methods
+## Ground Truth Extraction Methods
+
+These control how the expected answer is extracted from the dataset's answer column:
 
 | Method | Description | Example |
 |--------|-------------|---------|
@@ -54,15 +56,20 @@ env = adapter.get_environment(
 | `"last_line"` | Last non-empty line | Multi-line → last |
 | `"direct"` | Use column directly | No extraction |
 
-Custom extraction:
+Custom ground truth extractor (implements the `AnswerExtractor` protocol):
 
 ```python
-def my_extractor(text: str) -> str | None:
-    import re
-    match = re.search(r"ANSWER: (\d+)", text)
-    return match.group(1) if match else None
+from llenvs.core.extraction import AnswerExtractor
 
-env = adapter.get_environment(..., answer_extraction=my_extractor)
+class MyExtractor:
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        import re
+        match = re.search(r"ANSWER: (\d+)", response)
+        if match:
+            return match.group(1), {"found": True}
+        return None, {"found": False}
+
+env = adapter.get_environment(..., ground_truth_extractor=MyExtractor())
 ```
 
 ## Scoring Options

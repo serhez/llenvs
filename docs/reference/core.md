@@ -298,7 +298,7 @@ class AnswerExtractor(Protocol):
 | `CodeBlockExtractor` | `code_block` | Markdown code fences | ` ```python\n...\n``` ` |
 | `PatternAnswerExtractor` | `pattern_answer` | "the answer is X", "therefore X", "= X" | Natural language |
 | `CompositeExtractor` | - | Try multiple extractors in order | - |
-| `FallbackExtractor` | `fallback` | Return full response | - |
+| `RawGenerationExtractor` | `raw` | Return full response | - |
 | `NativeExtractor` | - | Wraps a third-party extraction function | - |
 
 All extractors follow the **last match wins** convention when multiple matches exist.
@@ -320,7 +320,7 @@ extractor = CompositeExtractor(extractors=[
     BoxedExtractor(),
     PatternAnswerExtractor(),
     NumericExtractor(),
-    FallbackExtractor(),
+    RawGenerationExtractor(),
 ])
 ```
 

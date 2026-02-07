@@ -233,10 +233,12 @@ class CompositeExtractor:
         }
 
 
-class FallbackExtractor:
-    """Extractor that returns the full response if no other extraction works.
+class RawGenerationExtractor:
+    """Extractor that returns the full response as the answer.
 
-    Useful as a last resort in a CompositeExtractor.
+    Use this for explicit "no extraction" — the raw model generation is
+    treated as the answer. Useful as a last resort in a CompositeExtractor
+    or when the model's entire output is the answer.
     """
 
     def __init__(self, strip_whitespace: bool = True) -> None:
@@ -248,7 +250,7 @@ class FallbackExtractor:
         if self.strip_whitespace:
             content = content.strip()
 
-        return content, {"found": True, "format": "fallback", "is_full_response": True}
+        return content, {"found": True, "format": "raw", "is_full_response": True}
 
 
 @dataclass

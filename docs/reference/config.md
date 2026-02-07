@@ -11,7 +11,7 @@ environments:
     adapter: reasoning_gym
     size: 100
     seed: 42
-    extractors:
+    answer_extractors:
       - type: tag_based
         config: {tag_name: answer}
       - type: pattern_answer
@@ -141,7 +141,7 @@ env = create_reasoning_gym_environment(
     dataset_name="leg_counting",
     size=100,                      # Number of samples
     seed=42,                       # Random seed
-    extractor=None,                # Use default TagBasedExtractor
+    answer_extractor=None,         # Use default TagBasedExtractor
     # Additional dataset-specific kwargs passed through
 )
 
@@ -150,7 +150,7 @@ from llenvs.core.reward import FormatReward
 env_with_format = create_reasoning_gym_environment(
     dataset_name="leg_counting",
     size=100,
-    extra_rewards=(FormatReward(env._extractor),),
+    extra_rewards=(FormatReward(env._answer_extractor),),
 )
 ```
 
@@ -166,7 +166,7 @@ env = adapter.get_environment(
     split="test",                  # train, test, validation
     question_column="question",    # Column with questions
     answer_column="answer",        # Column with answers
-    answer_extraction="numeric",   # boxed, numeric, last_line, direct
+    ground_truth_extractor="numeric",  # boxed, numeric, last_line, direct
     scoring="numeric",             # exact, numeric, numeric_tolerance
     size=100,                      # Limit to N examples
     seed=42,                       # Shuffle seed
@@ -296,7 +296,7 @@ Configure an ordered list of extractors to try. The first extractor that succeed
 environments:
   - name: polynomial_equations
     adapter: reasoning_gym
-    extractors:
+    answer_extractors:
       - type: tag_based
         config: {tag_name: answer}
       - type: boxed
@@ -304,7 +304,7 @@ environments:
       - type: numeric
 ```
 
-Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `fallback`, `native`.
+Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `raw`, `native`.
 
 The `native` type uses the adapter's built-in extraction (only supported by `reasoning_gym`).
 
@@ -313,8 +313,8 @@ As a shorthand, a single extractor can be specified:
 ```yaml
 environments:
   - name: test
-    extractor: tag_based
-    extractor_config: {tag_name: answer}
+    answer_extractor: tag_based
+    answer_extractor_config: {tag_name: answer}
 ```
 
 ### Cleaning Layer
@@ -324,13 +324,13 @@ Pre-cleaners run on the raw response before extraction. Post-cleaners run on the
 ```yaml
 environments:
   - name: math_task
-    extractors:
+    answer_extractors:
       - type: boxed
       - type: numeric
     # Defaults: strip_special_tokens pre-cleaner, strip_trailing_punctuation post-cleaner
 
   - name: code_generation
-    extractors:
+    answer_extractors:
       - type: code_block
         config: {language: python}
     pre_cleaners: [strip_special_tokens]

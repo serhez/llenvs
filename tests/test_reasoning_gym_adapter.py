@@ -29,7 +29,7 @@ class TestReasoningGymEnvironment:
     def test_custom_extractor(self, mock_dataset):
         """Test with custom extractor."""
         extractor = RegexExtractor(pattern=r"(\d+)")
-        env = ReasoningGymEnvironment(dataset=mock_dataset, extractor=extractor)
+        env = ReasoningGymEnvironment(dataset=mock_dataset, answer_extractor=extractor)
 
         # Use the environment
         state, _ = env.reset(options={"task_index": 0})

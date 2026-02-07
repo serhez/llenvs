@@ -7,7 +7,7 @@ from llenvs.core.extraction import (
     GSM8KExtractor,
     MultipleChoiceExtractor,
     CompositeExtractor,
-    FallbackExtractor,
+    RawGenerationExtractor,
     BoxedExtractor,
     NumericExtractor,
     LastLineExtractor,
@@ -310,12 +310,12 @@ class TestCompositeExtractor:
         assert answer is None
 
 
-class TestFallbackExtractor:
-    """Tests for FallbackExtractor."""
+class TestRawGenerationExtractor:
+    """Tests for RawGenerationExtractor."""
 
     def test_returns_full_response(self):
         """Test that full response is returned."""
-        extractor = FallbackExtractor()
+        extractor = RawGenerationExtractor()
         text = "This is the full response"
         answer, meta = extractor.extract(text)
 
@@ -325,13 +325,13 @@ class TestFallbackExtractor:
 
     def test_whitespace_stripping(self):
         """Test whitespace stripping."""
-        extractor = FallbackExtractor()
+        extractor = RawGenerationExtractor()
         answer, _ = extractor.extract("  spaced  ")
         assert answer == "spaced"
 
     def test_no_whitespace_stripping(self):
         """Test disabling whitespace stripping."""
-        extractor = FallbackExtractor(strip_whitespace=False)
+        extractor = RawGenerationExtractor(strip_whitespace=False)
         answer, _ = extractor.extract("  spaced  ")
         assert answer == "  spaced  "
 
@@ -340,13 +340,13 @@ class TestFallbackExtractor:
         extractor = CompositeExtractor(
             extractors=[
                 TagBasedExtractor(),
-                FallbackExtractor(),
+                RawGenerationExtractor(),
             ]
         )
         answer, meta = extractor.extract("No tags, just text")
 
         assert answer == "No tags, just text"
-        assert meta["extractor_type"] == "FallbackExtractor"
+        assert meta["extractor_type"] == "RawGenerationExtractor"
 
 
 # =========================================================================
@@ -783,7 +783,7 @@ class TestCompositeExtractorChains:
                 TagBasedExtractor(),
                 PatternAnswerExtractor(),
                 NumericExtractor(),
-                FallbackExtractor(),
+                RawGenerationExtractor(),
             ]
         )
         answer, meta = chain.extract(

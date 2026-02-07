@@ -99,13 +99,13 @@ class FormatReward:
     _name: str = "format"
     _reward_type: RewardType = RewardType.FORMAT
 
-    def __init__(self, extractor: Any) -> None:
-        """Initialize with an extractor.
+    def __init__(self, answer_extractor: Any) -> None:
+        """Initialize with an answer extractor.
 
         Args:
-            extractor: AnswerExtractor to check format compliance.
+            answer_extractor: AnswerExtractor to check format compliance.
         """
-        self._extractor = extractor
+        self._answer_extractor = answer_extractor
 
     @property
     def name(self) -> str:
@@ -122,7 +122,7 @@ class FormatReward:
         next_state: State[Any, Any],
     ) -> RewardSignal:
         """Compute format reward (1.0 if answer extracted, 0.0 otherwise)."""
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         return RewardSignal(
             value=1.0 if extracted is not None else 0.0,

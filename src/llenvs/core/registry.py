@@ -269,7 +269,7 @@ class EnvironmentRegistry:
 
 # Global registries for common component types
 environment_registry = EnvironmentRegistry()
-extractor_registry: Registry[Any] = Registry("extractor")
+answer_extractor_registry: Registry[Any] = Registry("extractor")
 backend_registry: Registry[Any] = Registry("backend")
 reward_function_registry: Registry[Any] = Registry("reward_function")
 adapter_registry: Registry[Any] = Registry("adapter")
@@ -285,7 +285,7 @@ def register_defaults() -> None:
         RegexExtractor,
         GSM8KExtractor,
         MultipleChoiceExtractor,
-        FallbackExtractor,
+        RawGenerationExtractor,
         BoxedExtractor,
         NumericExtractor,
         LastLineExtractor,
@@ -294,19 +294,19 @@ def register_defaults() -> None:
     )
 
     # Clear and re-register extractors
-    extractor_registry._items.clear()
-    extractor_registry._factories.clear()
+    answer_extractor_registry._items.clear()
+    answer_extractor_registry._factories.clear()
 
-    extractor_registry.register("tag_based", TagBasedExtractor)
-    extractor_registry.register("regex", RegexExtractor)
-    extractor_registry.register("gsm8k", GSM8KExtractor)
-    extractor_registry.register("multiple_choice", MultipleChoiceExtractor)
-    extractor_registry.register("fallback", FallbackExtractor)
-    extractor_registry.register("boxed", BoxedExtractor)
-    extractor_registry.register("numeric", NumericExtractor)
-    extractor_registry.register("last_line", LastLineExtractor)
-    extractor_registry.register("code_block", CodeBlockExtractor)
-    extractor_registry.register("pattern_answer", PatternAnswerExtractor)
+    answer_extractor_registry.register("tag_based", TagBasedExtractor)
+    answer_extractor_registry.register("regex", RegexExtractor)
+    answer_extractor_registry.register("gsm8k", GSM8KExtractor)
+    answer_extractor_registry.register("multiple_choice", MultipleChoiceExtractor)
+    answer_extractor_registry.register("raw", RawGenerationExtractor)
+    answer_extractor_registry.register("boxed", BoxedExtractor)
+    answer_extractor_registry.register("numeric", NumericExtractor)
+    answer_extractor_registry.register("last_line", LastLineExtractor)
+    answer_extractor_registry.register("code_block", CodeBlockExtractor)
+    answer_extractor_registry.register("pattern_answer", PatternAnswerExtractor)
 
 
 # Register defaults on import

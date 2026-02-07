@@ -41,15 +41,15 @@ class CorrectnessRewardFunction:
     _name: str = "correctness"
     _reward_type: RewardType = RewardType.OUTCOME
 
-    def __init__(self, dataset: Any, extractor: AnswerExtractor) -> None:
-        """Initialize with dataset and extractor.
+    def __init__(self, dataset: Any, answer_extractor: AnswerExtractor) -> None:
+        """Initialize with dataset and answer extractor.
 
         Args:
             dataset: reasoning-gym ProceduralDataset instance.
-            extractor: Extractor to parse model responses.
+            answer_extractor: Extractor to parse model responses.
         """
         self._dataset = dataset
-        self._extractor = extractor
+        self._answer_extractor = answer_extractor
 
     @property
     def name(self) -> str:
@@ -66,7 +66,7 @@ class CorrectnessRewardFunction:
         next_state: State[TextObservation, ReasoningGymHidden],
     ) -> RewardSignal:
         """Compute correctness reward using reasoning-gym's scoring."""
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         if extracted is None:
             return RewardSignal(
@@ -102,29 +102,29 @@ class ReasoningGymEnvironment:
 
     Attributes:
         dataset: The underlying reasoning-gym ProceduralDataset.
-        extractor: AnswerExtractor for parsing model responses.
+        answer_extractor: AnswerExtractor for parsing model responses.
     """
 
     def __init__(
         self,
         dataset: Any,
-        extractor: AnswerExtractor | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
     ) -> None:
         """Initialize the environment.
 
         Args:
             dataset: reasoning-gym ProceduralDataset instance.
-            extractor: Extractor for parsing model responses.
+            answer_extractor: Extractor for parsing model responses.
                 Defaults to TagBasedExtractor with "answer" tag.
             extra_rewards: Additional reward functions appended after native rewards.
         """
         self._dataset = dataset
-        self._extractor = extractor or TagBasedExtractor()
+        self._answer_extractor = answer_extractor or TagBasedExtractor()
 
         # Build reward functions
         self._native_rewards: tuple[RewardFunction, ...] = (
-            CorrectnessRewardFunction(dataset, self._extractor),
+            CorrectnessRewardFunction(dataset, self._answer_extractor),
         )
         self._extra_rewards = extra_rewards
 
@@ -259,7 +259,7 @@ class ReasoningGymEnvironment:
         )
 
         # Extract answer for info
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         return StepResult(
             next_state=next_state,
@@ -306,7 +306,7 @@ def create_reasoning_gym_environment(
     dataset_name: str,
     size: int | None = None,
     seed: int | None = None,
-    extractor: AnswerExtractor | None = None,
+    answer_extractor: AnswerExtractor | None = None,
     extra_rewards: tuple[RewardFunction, ...] = (),
     **dataset_kwargs: Any,
 ) -> ReasoningGymEnvironment:
@@ -316,7 +316,7 @@ def create_reasoning_gym_environment(
         dataset_name: Name of the reasoning-gym dataset.
         size: Number of samples to include (None = all).
         seed: Random seed for dataset generation.
-        extractor: AnswerExtractor for parsing responses.
+        answer_extractor: AnswerExtractor for parsing responses.
         extra_rewards: Additional reward functions appended after native rewards.
         **dataset_kwargs: Additional kwargs passed to dataset creation.
 
@@ -345,7 +345,7 @@ def create_reasoning_gym_environment(
 
     return ReasoningGymEnvironment(
         dataset=dataset,
-        extractor=extractor,
+        answer_extractor=answer_extractor,
         extra_rewards=extra_rewards,
     )
 
@@ -408,7 +408,7 @@ class ReasoningGymAdapter:
         name: str,
         size: int | None = None,
         seed: int | None = None,
-        extractor: AnswerExtractor | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         **kwargs: Any,
     ) -> ReasoningGymEnvironment:
@@ -418,7 +418,7 @@ class ReasoningGymAdapter:
             name: Environment/dataset name (e.g., "sudoku", "leg_counting").
             size: Number of samples to include.
             seed: Random seed for dataset generation.
-            extractor: AnswerExtractor for parsing responses.
+            answer_extractor: AnswerExtractor for parsing responses.
             extra_rewards: Additional reward functions appended after native rewards.
             **kwargs: Additional arguments passed to reasoning-gym.
 
@@ -433,12 +433,12 @@ class ReasoningGymAdapter:
             dataset_name=name,
             size=size,
             seed=seed,
-            extractor=extractor,
+            answer_extractor=answer_extractor,
             extra_rewards=extra_rewards,
             **kwargs,
         )
 
-    def get_native_extractor(self, task_name: str) -> AnswerExtractor:
+    def get_native_answer_extractor(self, task_name: str) -> AnswerExtractor:
         """Return reasoning-gym's native extraction function.
 
         reasoning-gym provides a single generic extractor for all tasks

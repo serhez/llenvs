@@ -47,16 +47,16 @@ class TestMathVerifyRewardFunctionProperties:
     """Test basic properties of MathVerifyRewardFunction."""
 
     def test_name(self):
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("x"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("x"))
         assert reward.name == "math_correctness"
 
     def test_reward_type(self):
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("x"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("x"))
         assert reward.reward_type == RewardType.OUTCOME
 
     def test_custom_name(self):
         reward = MathVerifyRewardFunction(
-            extractor=_make_extractor("x"), name="custom_math"
+            answer_extractor=_make_extractor("x"), name="custom_math"
         )
         assert reward.name == "custom_math"
 
@@ -66,7 +66,7 @@ class TestMathVerifyExtractionFailure:
 
     def test_none_extraction_returns_zero(self):
         """When extractor returns None, reward should be 0.0."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor(None))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor(None))
         state = _make_state("42")
         action = TextAction(text="I don't know")
 
@@ -83,7 +83,7 @@ class TestMathVerifyEquivalence:
 
     def test_exact_match(self):
         """Identical strings should be equivalent."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("42"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("42"))
         state = _make_state("42")
         action = TextAction(text="<answer>42</answer>")
 
@@ -92,7 +92,7 @@ class TestMathVerifyEquivalence:
 
     def test_integer_float_equivalence(self):
         """42 and 42.0 should be equivalent."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("42.0"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("42.0"))
         state = _make_state("42")
         action = TextAction(text="<answer>42.0</answer>")
 
@@ -101,7 +101,7 @@ class TestMathVerifyEquivalence:
 
     def test_fraction_decimal_equivalence(self):
         """1/2 and 0.5 should be equivalent."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("0.5"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("0.5"))
         state = _make_state("1/2")
         action = TextAction(text="<answer>0.5</answer>")
 
@@ -110,7 +110,7 @@ class TestMathVerifyEquivalence:
 
     def test_fraction_equivalence(self):
         """2/4 and 1/2 should be equivalent."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("2/4"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("2/4"))
         state = _make_state("1/2")
         action = TextAction(text="<answer>2/4</answer>")
 
@@ -119,7 +119,7 @@ class TestMathVerifyEquivalence:
 
     def test_negative_number(self):
         """-3 and -3.0 should be equivalent."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("-3.0"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("-3.0"))
         state = _make_state("-3")
         action = TextAction(text="<answer>-3.0</answer>")
 
@@ -128,7 +128,7 @@ class TestMathVerifyEquivalence:
 
     def test_wrong_answer(self):
         """Clearly different answers should score 0."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("7"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("7"))
         state = _make_state("42")
         action = TextAction(text="<answer>7</answer>")
 
@@ -137,7 +137,7 @@ class TestMathVerifyEquivalence:
 
     def test_latex_equivalence(self):
         """LaTeX fractions should be parsed correctly."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("\\frac{1}{2}"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("\\frac{1}{2}"))
         state = _make_state("0.5")
         action = TextAction(text="<answer>\\frac{1}{2}</answer>")
 
@@ -147,7 +147,7 @@ class TestMathVerifyEquivalence:
     def test_percentage_as_decimal(self):
         """50/100 and 1/2 should be equivalent."""
         reward = MathVerifyRewardFunction(
-            extractor=_make_extractor("50/100")
+            answer_extractor=_make_extractor("50/100")
         )
         state = _make_state("1/2")
         action = TextAction(text="<answer>50/100</answer>")
@@ -157,7 +157,7 @@ class TestMathVerifyEquivalence:
 
     def test_whitespace_insensitive(self):
         """Extra whitespace shouldn't matter."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("  42  "))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("  42  "))
         state = _make_state("42")
         action = TextAction(text="<answer>  42  </answer>")
 
@@ -170,7 +170,7 @@ class TestMathVerifyFallback:
 
     def test_fallback_exact_match(self):
         """When math-verify can't parse, fall back to string comparison."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("hello"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("hello"))
         state = _make_state("hello")
         action = TextAction(text="<answer>hello</answer>")
 
@@ -179,7 +179,7 @@ class TestMathVerifyFallback:
 
     def test_fallback_case_and_whitespace(self):
         """Fallback should normalize case and whitespace."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("  Hello World  "))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("  Hello World  "))
         state = _make_state("hello world")
         action = TextAction(text="<answer>  Hello World  </answer>")
 
@@ -188,7 +188,7 @@ class TestMathVerifyFallback:
 
     def test_fallback_mismatch(self):
         """Fallback should return 0 on string mismatch."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("dog"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("dog"))
         state = _make_state("cat")
         action = TextAction(text="<answer>dog</answer>")
 
@@ -197,7 +197,7 @@ class TestMathVerifyFallback:
 
     def test_metadata_includes_method(self):
         """Metadata should indicate which comparison method was used."""
-        reward = MathVerifyRewardFunction(extractor=_make_extractor("42"))
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("42"))
         state = _make_state("42")
         action = TextAction(text="<answer>42</answer>")
 
@@ -213,7 +213,7 @@ class TestMathVerifyWithRealExtractor:
         from llenvs.core.extraction import TagBasedExtractor
 
         extractor = TagBasedExtractor(tag_name="answer")
-        reward = MathVerifyRewardFunction(extractor=extractor)
+        reward = MathVerifyRewardFunction(answer_extractor=extractor)
         state = _make_state("42")
         action = TextAction(text="The answer is <answer>42</answer>.")
 
@@ -226,7 +226,7 @@ class TestMathVerifyWithRealExtractor:
         from llenvs.core.extraction import TagBasedExtractor
 
         extractor = TagBasedExtractor(tag_name="answer")
-        reward = MathVerifyRewardFunction(extractor=extractor)
+        reward = MathVerifyRewardFunction(answer_extractor=extractor)
         state = _make_state("42")
         action = TextAction(text="The answer is 42, no tags here.")
 

@@ -422,7 +422,7 @@ class TestGemEnvironment:
             gem_env=mock_single_turn_env,
             env_id="math:GSM8K",
             is_multi_turn=False,
-            extractor=extractor,
+            answer_extractor=extractor,
         )
         state, _ = env.reset()
 

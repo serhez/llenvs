@@ -53,7 +53,7 @@ env = adapter.get_environment(
     name="simple_arithmetic",
     size=500,
     seed=42,
-    extractor=None,  # Use default TagBasedExtractor
+    answer_extractor=None,  # Use default TagBasedExtractor
 )
 
 # Add optional extra rewards (e.g., format compliance)
@@ -61,7 +61,7 @@ from llenvs.core.reward import FormatReward
 env_with_format = adapter.get_environment(
     name="simple_arithmetic",
     size=500,
-    extra_rewards=(FormatReward(env._extractor),),
+    extra_rewards=(FormatReward(env._answer_extractor),),
 )
 ```
 
@@ -71,7 +71,7 @@ env_with_format = adapter.get_environment(
 |-----------|------|-------------|
 | `size` | `int` | Number of samples to generate |
 | `seed` | `int` | Random seed for reproducibility |
-| `extractor` | `AnswerExtractor` | Custom answer extractor |
+| `answer_extractor` | `AnswerExtractor` | Custom answer extractor |
 | `extra_rewards` | `tuple[RewardFunction, ...]` | Additional reward functions appended after native rewards |
 | `**dataset_kwargs` | | Passed to dataset constructor |
 

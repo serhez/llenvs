@@ -243,7 +243,7 @@ class GemEnvironment:
         gem_env: Any,
         env_id: str,
         is_multi_turn: bool,
-        extractor: AnswerExtractor | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         max_steps: int | None = None,
     ) -> None:
@@ -253,14 +253,14 @@ class GemEnvironment:
             gem_env: The underlying GEM environment instance.
             env_id: GEM environment identifier (e.g., "game:Sudoku-v0").
             is_multi_turn: Whether this is a multi-turn environment.
-            extractor: Extractor for model responses. Defaults to TagBasedExtractor.
+            answer_extractor: Extractor for model responses. Defaults to TagBasedExtractor.
             extra_rewards: Additional reward functions appended after native rewards.
             max_steps: Maximum steps per episode (None = unlimited).
         """
         self._gem_env = gem_env
         self._env_id = env_id
         self._is_multi_turn = is_multi_turn
-        self._extractor = extractor or TagBasedExtractor()
+        self._answer_extractor = answer_extractor or TagBasedExtractor()
         self._max_steps = max_steps
 
         self._native_rewards: tuple[RewardFunction, ...] = (GemCorrectnessReward(),)
@@ -410,7 +410,7 @@ class GemEnvironment:
         rewards = self.compute_rewards(state, action, next_state)
 
         # Extract answer for info
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         return StepResult(
             next_state=next_state,
@@ -493,7 +493,7 @@ class GemAdapter:
         self,
         name: str,
         seed: int | None = None,
-        extractor: AnswerExtractor | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         max_steps: int | None = None,
         **kwargs: Any,
@@ -503,7 +503,7 @@ class GemAdapter:
         Args:
             name: Environment ID (e.g., "game:Sudoku-v0", "math:GSM8K").
             seed: Random seed for environment creation.
-            extractor: Extractor for model responses.
+            answer_extractor: Extractor for model responses.
             extra_rewards: Additional reward functions appended after native rewards.
             max_steps: Maximum steps per episode (None = unlimited).
             **kwargs: Additional arguments passed to gem.make().
@@ -527,7 +527,7 @@ class GemAdapter:
             gem_env=gem_env,
             env_id=name,
             is_multi_turn=is_multi_turn,
-            extractor=extractor,
+            answer_extractor=answer_extractor,
             extra_rewards=extra_rewards,
             max_steps=max_steps,
         )
@@ -540,8 +540,8 @@ class GemAdapter:
         """GEM environments manage their own prompts."""
         return None
 
-    def get_native_extractor(self, task_name: str) -> None:
-        """GEM does not provide native extraction.
+    def get_native_answer_extractor(self, task_name: str) -> None:
+        """GEM does not provide native answer extraction.
 
         Args:
             task_name: Task name (unused).
@@ -1067,7 +1067,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
 def create_gem_environment(
     env_id: str,
     seed: int | None = None,
-    extractor: AnswerExtractor | None = None,
+    answer_extractor: AnswerExtractor | None = None,
     extra_rewards: tuple[RewardFunction, ...] = (),
     **kwargs: Any,
 ) -> GemEnvironment:
@@ -1078,7 +1078,7 @@ def create_gem_environment(
     Args:
         env_id: GEM environment ID (e.g., "game:Sudoku-v0").
         seed: Random seed for environment creation.
-        extractor: Extractor for model responses.
+        answer_extractor: Extractor for model responses.
         extra_rewards: Additional reward functions appended after native rewards.
         **kwargs: Additional arguments passed to gem.make().
 
@@ -1097,7 +1097,7 @@ def create_gem_environment(
     return adapter.get_environment(
         env_id,
         seed=seed,
-        extractor=extractor,
+        answer_extractor=answer_extractor,
         extra_rewards=extra_rewards,
         **kwargs,
     )

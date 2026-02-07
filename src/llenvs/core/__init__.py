@@ -32,7 +32,7 @@ from llenvs.core.extraction import (
     GSM8KExtractor,
     MultipleChoiceExtractor,
     CompositeExtractor,
-    FallbackExtractor,
+    RawGenerationExtractor,
     BoxedExtractor,
     NumericExtractor,
     LastLineExtractor,
@@ -44,7 +44,7 @@ from llenvs.core.extraction import (
 from llenvs.core.registry import (
     Registry,
     environment_registry,
-    extractor_registry,
+    answer_extractor_registry,
     backend_registry,
 )
 from llenvs.core.config import (
@@ -115,7 +115,7 @@ __all__ = [
     "GSM8KExtractor",
     "MultipleChoiceExtractor",
     "CompositeExtractor",
-    "FallbackExtractor",
+    "RawGenerationExtractor",
     "BoxedExtractor",
     "NumericExtractor",
     "LastLineExtractor",
@@ -126,7 +126,7 @@ __all__ = [
     # Registry
     "Registry",
     "environment_registry",
-    "extractor_registry",
+    "answer_extractor_registry",
     "backend_registry",
     # Config
     "EvalConfig",

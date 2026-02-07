@@ -513,8 +513,8 @@ class WebShopAdapter:
         """WebShop manages multi-turn prompts internally."""
         return None
 
-    def get_native_extractor(self, task_name: str) -> None:
-        """WebShop does not provide native extraction.
+    def get_native_answer_extractor(self, task_name: str) -> None:
+        """WebShop does not provide native answer extraction.
 
         Args:
             task_name: Task name (unused).

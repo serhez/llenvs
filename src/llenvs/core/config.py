@@ -20,10 +20,10 @@ class EnvironmentConfig:
         adapter: Adapter type (e.g., "reasoning_gym").
         size: Number of samples.
         seed: Random seed.
-        extractor: Answer extractor type (single extractor shorthand).
-        extractor_config: Extractor configuration (single extractor shorthand).
-        extractors: Ordered list of extractors to try (chain). When set,
-            builds a CompositeExtractor. Overrides extractor/extractor_config.
+        answer_extractor: Answer extractor type (single extractor shorthand).
+        answer_extractor_config: Extractor configuration (single extractor shorthand).
+        answer_extractors: Ordered list of extractors to try (chain). When set,
+            builds a CompositeExtractor. Overrides answer_extractor/answer_extractor_config.
         prompt_template: Per-env prompt template name or literal template string.
         system_prompt: Per-env system prompt override. A string (name or literal)
             or list of fragment/prompt names.
@@ -35,9 +35,9 @@ class EnvironmentConfig:
     adapter: str = "reasoning_gym"
     size: int | None = None
     seed: int | None = None
-    extractor: str = "tag_based"
-    extractor_config: dict[str, Any] = field(default_factory=dict)
-    extractors: list[dict[str, Any]] | None = None
+    answer_extractor: str = "tag_based"
+    answer_extractor_config: dict[str, Any] = field(default_factory=dict)
+    answer_extractors: list[dict[str, Any]] | None = None
     pre_cleaners: list[str] | None = None
     post_cleaners: list[str] | None = None
     prompt_template: str | None = None
@@ -148,9 +148,9 @@ class EvalConfig:
                     adapter=env_data.get("adapter", "reasoning_gym"),
                     size=env_data.get("size"),
                     seed=env_data.get("seed"),
-                    extractor=env_data.get("extractor", "tag_based"),
-                    extractor_config=env_data.get("extractor_config", {}),
-                    extractors=env_data.get("extractors"),
+                    answer_extractor=env_data.get("answer_extractor", "tag_based"),
+                    answer_extractor_config=env_data.get("answer_extractor_config", {}),
+                    answer_extractors=env_data.get("answer_extractors"),
                     pre_cleaners=pre_cleaners,
                     post_cleaners=post_cleaners,
                     prompt_template=env_data.get("prompt_template"),
@@ -203,12 +203,12 @@ class EvalConfig:
                 "adapter": env.adapter,
                 "size": env.size,
                 "seed": env.seed,
-                "extractor": env.extractor,
-                "extractor_config": env.extractor_config,
+                "answer_extractor": env.answer_extractor,
+                "answer_extractor_config": env.answer_extractor_config,
                 "params": env.params,
             }
-            if env.extractors is not None:
-                d["extractors"] = env.extractors
+            if env.answer_extractors is not None:
+                d["answer_extractors"] = env.answer_extractors
             if env.pre_cleaners is not None:
                 d["pre_cleaners"] = env.pre_cleaners
             if env.post_cleaners is not None:
@@ -262,20 +262,20 @@ class EnvironmentFactory:
             ValueError: If environment name is not recognized by adapter,
                 or if "native" extraction is requested but not available.
         """
-        from llenvs.core.registry import environment_registry, extractor_registry
+        from llenvs.core.registry import environment_registry, answer_extractor_registry
         from llenvs.core.extraction import CompositeExtractor, CleanedExtractor
         from llenvs.core.cleaning import resolve_cleaners
 
-        if config.extractors is not None:
+        if config.answer_extractors is not None:
             # Build a CompositeExtractor from the chain
             chain: list[Any] = []
-            for entry in config.extractors:
+            for entry in config.answer_extractors:
                 ext_type = entry["type"]
                 ext_config = entry.get("config", {})
 
                 if ext_type == "native":
                     adapter_instance = environment_registry.get_adapter(config.adapter)
-                    native_ext = adapter_instance.get_native_extractor(config.name)
+                    native_ext = adapter_instance.get_native_answer_extractor(config.name)
                     if native_ext is None:
                         raise ValueError(
                             f"Adapter '{config.adapter}' does not provide "
@@ -283,21 +283,21 @@ class EnvironmentFactory:
                         )
                     chain.append(native_ext)
                 else:
-                    chain.append(extractor_registry.create(ext_type, **ext_config))
+                    chain.append(answer_extractor_registry.create(ext_type, **ext_config))
 
-            extractor = CompositeExtractor(extractors=chain)
+            answer_extractor = CompositeExtractor(extractors=chain)
         else:
             # Single extractor shorthand
-            extractor = extractor_registry.create(
-                config.extractor, **config.extractor_config
+            answer_extractor = answer_extractor_registry.create(
+                config.answer_extractor, **config.answer_extractor_config
             )
 
         # Wrap with cleaning layer
         pre_fns = resolve_cleaners(config.pre_cleaners, "pre")
         post_fns = resolve_cleaners(config.post_cleaners, "post")
         if pre_fns or post_fns:
-            extractor = CleanedExtractor(
-                inner=extractor,
+            answer_extractor = CleanedExtractor(
+                inner=answer_extractor,
                 pre_cleaners=pre_fns,
                 post_cleaners=post_fns,
             )
@@ -313,7 +313,7 @@ class EnvironmentFactory:
             adapter=config.adapter,
             size=config.size,
             seed=config.seed,
-            extractor=extractor,
+            answer_extractor=answer_extractor,
             **env_kwargs,
         )
 

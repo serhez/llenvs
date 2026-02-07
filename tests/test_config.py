@@ -24,8 +24,8 @@ class TestEnvironmentConfig:
         assert config.adapter == "reasoning_gym"
         assert config.size is None
         assert config.seed is None
-        assert config.extractor == "tag_based"
-        assert config.extractor_config == {}
+        assert config.answer_extractor == "tag_based"
+        assert config.answer_extractor_config == {}
         assert config.params == {}
 
     def test_full_config(self):
@@ -35,14 +35,14 @@ class TestEnvironmentConfig:
             adapter="reasoning_gym",
             size=100,
             seed=42,
-            extractor="regex",
-            extractor_config={"pattern": r"(\d+)"},
+            answer_extractor="regex",
+            answer_extractor_config={"pattern": r"(\d+)"},
             params={"difficulty": "hard"},
         )
 
         assert config.size == 100
         assert config.seed == 42
-        assert config.extractor_config["pattern"] == r"(\d+)"
+        assert config.answer_extractor_config["pattern"] == r"(\d+)"
 
 
 class TestModelConfig:
@@ -119,7 +119,7 @@ class TestEvalConfig:
                     "adapter": "reasoning_gym",
                     "size": 100,
                     "seed": 42,
-                    "extractor": "tag_based",
+                    "answer_extractor": "tag_based",
                     "params": {"difficulty": "easy"},
                 },
                 {
@@ -284,42 +284,42 @@ class TestCreateSamplingParams:
 class TestExtractorsChainConfig:
     """Tests for the extractors chain in EnvironmentConfig."""
 
-    def test_extractors_field_default_none(self):
-        """Test that extractors defaults to None."""
+    def test_answer_extractors_field_default_none(self):
+        """Test that answer_extractors defaults to None."""
         config = EnvironmentConfig(name="test")
-        assert config.extractors is None
+        assert config.answer_extractors is None
 
-    def test_extractors_field_with_list(self):
-        """Test extractors field with a list."""
+    def test_answer_extractors_field_with_list(self):
+        """Test answer_extractors field with a list."""
         config = EnvironmentConfig(
             name="test",
-            extractors=[
+            answer_extractors=[
                 {"type": "tag_based", "config": {"tag_name": "answer"}},
                 {"type": "numeric"},
             ],
         )
-        assert config.extractors is not None
-        assert len(config.extractors) == 2
-        assert config.extractors[0]["type"] == "tag_based"
+        assert config.answer_extractors is not None
+        assert len(config.answer_extractors) == 2
+        assert config.answer_extractors[0]["type"] == "tag_based"
 
-    def test_single_extractor_shorthand(self):
-        """Test single extractor shorthand (extractor field)."""
+    def test_single_answer_extractor_shorthand(self):
+        """Test single answer_extractor shorthand."""
         config = EnvironmentConfig(
             name="test",
-            extractor="gsm8k",
-            extractor_config={"strip_whitespace": True},
+            answer_extractor="gsm8k",
+            answer_extractor_config={"strip_whitespace": True},
         )
-        assert config.extractor == "gsm8k"
-        assert config.extractors is None
+        assert config.answer_extractor == "gsm8k"
+        assert config.answer_extractors is None
 
-    def test_from_dict_with_extractors(self):
-        """Test EvalConfig.from_dict() parses extractors."""
+    def test_from_dict_with_answer_extractors(self):
+        """Test EvalConfig.from_dict() parses answer_extractors."""
         data = {
             "environments": [
                 {
                     "name": "polynomial_equations",
                     "adapter": "reasoning_gym",
-                    "extractors": [
+                    "answer_extractors": [
                         {"type": "tag_based", "config": {"tag_name": "answer"}},
                         {"type": "pattern_answer"},
                         {"type": "numeric"},
@@ -331,19 +331,19 @@ class TestExtractorsChainConfig:
         config = EvalConfig.from_dict(data)
 
         env = config.environments[0]
-        assert env.extractors is not None
-        assert len(env.extractors) == 3
-        assert env.extractors[0]["type"] == "tag_based"
-        assert env.extractors[1]["type"] == "pattern_answer"
-        assert env.extractors[2]["type"] == "numeric"
+        assert env.answer_extractors is not None
+        assert len(env.answer_extractors) == 3
+        assert env.answer_extractors[0]["type"] == "tag_based"
+        assert env.answer_extractors[1]["type"] == "pattern_answer"
+        assert env.answer_extractors[2]["type"] == "numeric"
 
-    def test_from_dict_without_extractors(self):
-        """Test EvalConfig.from_dict() with single extractor shorthand."""
+    def test_from_dict_without_answer_extractors(self):
+        """Test EvalConfig.from_dict() with single answer_extractor shorthand."""
         data = {
             "environments": [
                 {
                     "name": "test",
-                    "extractor": "gsm8k",
+                    "answer_extractor": "gsm8k",
                 }
             ],
             "model": {"model": "test-model"},
@@ -351,16 +351,16 @@ class TestExtractorsChainConfig:
         config = EvalConfig.from_dict(data)
 
         env = config.environments[0]
-        assert env.extractors is None
-        assert env.extractor == "gsm8k"
+        assert env.answer_extractors is None
+        assert env.answer_extractor == "gsm8k"
 
-    def test_to_dict_with_extractors(self):
-        """Test to_dict() serializes extractors."""
+    def test_to_dict_with_answer_extractors(self):
+        """Test to_dict() serializes answer_extractors."""
         config = EvalConfig(
             environments=[
                 EnvironmentConfig(
                     name="test",
-                    extractors=[
+                    answer_extractors=[
                         {"type": "tag_based"},
                         {"type": "numeric"},
                     ],
@@ -371,12 +371,12 @@ class TestExtractorsChainConfig:
         data = config.to_dict()
 
         env_data = data["environments"][0]
-        assert "extractors" in env_data
-        assert len(env_data["extractors"]) == 2
-        assert env_data["extractors"][0]["type"] == "tag_based"
+        assert "answer_extractors" in env_data
+        assert len(env_data["answer_extractors"]) == 2
+        assert env_data["answer_extractors"][0]["type"] == "tag_based"
 
-    def test_to_dict_without_extractors(self):
-        """Test to_dict() omits extractors when None."""
+    def test_to_dict_without_answer_extractors(self):
+        """Test to_dict() omits answer_extractors when None."""
         config = EvalConfig(
             environments=[EnvironmentConfig(name="test")],
             model=ModelConfig(model="test-model"),
@@ -384,7 +384,7 @@ class TestExtractorsChainConfig:
         data = config.to_dict()
 
         env_data = data["environments"][0]
-        assert "extractors" not in env_data
+        assert "answer_extractors" not in env_data
 
     def test_cleaners_default_none(self):
         """Test that pre_cleaners/post_cleaners default to None."""
@@ -484,16 +484,16 @@ class TestExtractorsChainConfig:
             "strip_surrounding_quotes",
         ]
 
-    def test_roundtrip_with_extractors(self):
-        """Test roundtrip with extractors chain."""
+    def test_roundtrip_with_answer_extractors(self):
+        """Test roundtrip with answer_extractors chain."""
         original = {
             "environments": [
                 {
                     "name": "test",
-                    "extractors": [
+                    "answer_extractors": [
                         {"type": "boxed"},
                         {"type": "numeric"},
-                        {"type": "fallback"},
+                        {"type": "raw"},
                     ],
                 }
             ],
@@ -502,7 +502,7 @@ class TestExtractorsChainConfig:
         config = EvalConfig.from_dict(original)
         result = config.to_dict()
 
-        assert result["environments"][0]["extractors"] == original["environments"][0]["extractors"]
+        assert result["environments"][0]["answer_extractors"] == original["environments"][0]["answer_extractors"]
 
 
 class TestPromptsConfig:

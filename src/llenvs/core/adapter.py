@@ -63,7 +63,7 @@ class Adapter(Protocol):
         """
         ...
 
-    def get_native_extractor(self, task_name: str) -> AnswerExtractor | None:
+    def get_native_answer_extractor(self, task_name: str) -> AnswerExtractor | None:
         """Return native extraction for a specific task, or None.
 
         Adapters should:

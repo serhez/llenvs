@@ -6,8 +6,8 @@ a common interface. Most HF datasets are single-turn (question -> answer).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Literal
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Callable
 import uuid
 
 if TYPE_CHECKING:
@@ -22,60 +22,12 @@ from llenvs.core.extraction import (
     BoxedExtractor,
     NumericExtractor,
     LastLineExtractor,
+    RawGenerationExtractor,
 )
 
 
 # Type alias for scoring functions
 ScoringFunction = Callable[[str, str], float]
-
-# Singleton instances for answer extraction from dataset columns
-_boxed_extractor = BoxedExtractor()
-_numeric_extractor = NumericExtractor()
-_last_line_extractor = LastLineExtractor()
-
-
-def extract_boxed_answer(text: str) -> str | None:
-    r"""Extract answer from LaTeX \boxed{...} format.
-
-    Handles nested braces correctly.
-
-    Args:
-        text: Text containing \boxed{answer}.
-
-    Returns:
-        Extracted answer or None if not found.
-    """
-    result, _ = _boxed_extractor.extract(text)
-    return result
-
-
-def extract_numeric_answer(text: str) -> str | None:
-    """Extract numeric answer (last number in text).
-
-    Handles integers, decimals, and negative numbers.
-    Removes commas from numbers like 1,234.
-
-    Args:
-        text: Text containing numeric answer.
-
-    Returns:
-        Extracted number as string or None.
-    """
-    result, _ = _numeric_extractor.extract(text)
-    return result
-
-
-def extract_last_line(text: str) -> str | None:
-    """Extract last non-empty line as answer.
-
-    Args:
-        text: Text to extract from.
-
-    Returns:
-        Last non-empty line or None.
-    """
-    result, _ = _last_line_extractor.extract(text)
-    return result
 
 
 def normalize_numeric(value: str) -> str | None:
@@ -156,12 +108,12 @@ def score_numeric_tolerance(predicted: str, expected: str, rtol: float = 1e-5) -
         return 0.0
 
 
-# Built-in answer extraction strategies
-ANSWER_EXTRACTORS: dict[str, Callable[[str], str | None]] = {
-    "boxed": extract_boxed_answer,
-    "numeric": extract_numeric_answer,
-    "last_line": extract_last_line,
-    "direct": lambda x: x.strip() if x else None,
+# Built-in ground truth extraction strategies (for dataset answer columns)
+GROUND_TRUTH_EXTRACTORS: dict[str, AnswerExtractor] = {
+    "boxed": BoxedExtractor(),
+    "numeric": NumericExtractor(),
+    "last_line": LastLineExtractor(),
+    "direct": RawGenerationExtractor(),
 }
 
 # Built-in scoring functions
@@ -199,19 +151,16 @@ class HuggingFaceCorrectnessReward:
 
     def __init__(
         self,
-        extractor: AnswerExtractor,
-        answer_extraction: Callable[[str], str | None],
+        answer_extractor: AnswerExtractor,
         scoring_fn: ScoringFunction,
     ) -> None:
         """Initialize reward function.
 
         Args:
-            extractor: Extractor for model responses.
-            answer_extraction: Function to extract answer from expected solution.
+            answer_extractor: Extractor for model responses.
             scoring_fn: Function to score predicted vs expected.
         """
-        self._extractor = extractor
-        self._answer_extraction = answer_extraction
+        self._answer_extractor = answer_extractor
         self._scoring_fn = scoring_fn
 
     @property
@@ -230,7 +179,7 @@ class HuggingFaceCorrectnessReward:
     ) -> RewardSignal:
         """Compute correctness reward."""
         # Extract answer from model response
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         if extracted is None:
             return RewardSignal(
@@ -277,9 +226,9 @@ class HuggingFaceEnvironment:
         split: str,
         question_column: str = "problem",
         answer_column: str = "solution",
-        answer_extraction: str | Callable[[str], str | None] = "boxed",
+        ground_truth_extractor: AnswerExtractor | str = "boxed",
         scoring: str | ScoringFunction = "numeric",
-        extractor: AnswerExtractor | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         metadata_columns: list[str] | None = None,
     ) -> None:
@@ -291,12 +240,12 @@ class HuggingFaceEnvironment:
             split: Dataset split (e.g., "train", "test").
             question_column: Column containing the question/problem.
             answer_column: Column containing the answer/solution.
-            answer_extraction: How to extract final answer from answer_column.
+            ground_truth_extractor: Extractor for the dataset answer column.
                 Either a string key ("boxed", "numeric", "last_line", "direct")
-                or a custom function.
+                or an AnswerExtractor instance.
             scoring: How to score answers. Either a string key
                 ("exact", "numeric", "numeric_tolerance") or a custom function.
-            extractor: Extractor for model responses. Defaults to TagBasedExtractor.
+            answer_extractor: Extractor for model responses. Defaults to TagBasedExtractor.
             extra_rewards: Additional reward functions appended after native rewards.
             metadata_columns: Additional columns to include in state metadata.
         """
@@ -307,16 +256,16 @@ class HuggingFaceEnvironment:
         self._answer_column = answer_column
         self._metadata_columns = metadata_columns or []
 
-        # Set up answer extraction
-        if isinstance(answer_extraction, str):
-            if answer_extraction not in ANSWER_EXTRACTORS:
+        # Set up ground truth extractor
+        if isinstance(ground_truth_extractor, str):
+            if ground_truth_extractor not in GROUND_TRUTH_EXTRACTORS:
                 raise ValueError(
-                    f"Unknown answer_extraction: {answer_extraction}. "
-                    f"Available: {list(ANSWER_EXTRACTORS.keys())}"
+                    f"Unknown ground_truth_extractor: {ground_truth_extractor}. "
+                    f"Available: {list(GROUND_TRUTH_EXTRACTORS.keys())}"
                 )
-            self._answer_extraction = ANSWER_EXTRACTORS[answer_extraction]
+            self._ground_truth_extractor = GROUND_TRUTH_EXTRACTORS[ground_truth_extractor]
         else:
-            self._answer_extraction = answer_extraction
+            self._ground_truth_extractor = ground_truth_extractor
 
         # Set up scoring
         if isinstance(scoring, str):
@@ -330,13 +279,12 @@ class HuggingFaceEnvironment:
             self._scoring_fn = scoring
 
         # Set up extractor for model responses
-        self._extractor = extractor or TagBasedExtractor()
+        self._answer_extractor = answer_extractor or TagBasedExtractor()
 
         # Build reward functions
         self._native_rewards: tuple[RewardFunction, ...] = (
             HuggingFaceCorrectnessReward(
-                extractor=self._extractor,
-                answer_extraction=self._answer_extraction,
+                answer_extractor=self._answer_extractor,
                 scoring_fn=self._scoring_fn,
             ),
         )
@@ -426,8 +374,8 @@ class HuggingFaceEnvironment:
             )
         raw_answer = entry[self._answer_column]
 
-        # Apply answer extraction to get final answer
-        expected_answer = self._answer_extraction(str(raw_answer))
+        # Apply ground truth extraction to get final answer
+        expected_answer, _ = self._ground_truth_extractor.extract(str(raw_answer))
         if expected_answer is None:
             # Fall back to raw answer if extraction fails
             expected_answer = str(raw_answer).strip()
@@ -509,7 +457,7 @@ class HuggingFaceEnvironment:
         )
 
         # Extract answer for info
-        extracted, extraction_meta = self._extractor.extract(action.text)
+        extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         return StepResult(
             next_state=next_state,
@@ -556,7 +504,7 @@ class HuggingFaceAdapter:
             split="test",
             question_column="problem",
             answer_column="solution",
-            answer_extraction="boxed",
+            ground_truth_extractor="boxed",
             scoring="numeric",
         )
     """
@@ -617,9 +565,9 @@ class HuggingFaceAdapter:
         subset: str | None = None,
         question_column: str = "problem",
         answer_column: str = "solution",
-        answer_extraction: str | Callable[[str], str | None] = "boxed",
+        ground_truth_extractor: AnswerExtractor | str = "boxed",
         scoring: str | ScoringFunction = "numeric",
-        extractor: AnswerExtractor | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         metadata_columns: list[str] | None = None,
         size: int | None = None,
@@ -636,9 +584,9 @@ class HuggingFaceAdapter:
             subset: Dataset subset/config name if applicable.
             question_column: Column containing questions.
             answer_column: Column containing answers.
-            answer_extraction: How to extract final answer from answer_column.
+            ground_truth_extractor: Extractor for the dataset answer column.
             scoring: How to score predicted vs expected answers.
-            extractor: Extractor for model responses.
+            answer_extractor: Extractor for model responses.
             extra_rewards: Additional reward functions appended after native rewards.
             metadata_columns: Additional columns to include in metadata.
             size: Limit dataset to first N examples.
@@ -696,9 +644,9 @@ class HuggingFaceAdapter:
             split=split,
             question_column=question_column,
             answer_column=answer_column,
-            answer_extraction=answer_extraction,
+            ground_truth_extractor=ground_truth_extractor,
             scoring=scoring,
-            extractor=extractor,
+            answer_extractor=answer_extractor,
             extra_rewards=extra_rewards,
             metadata_columns=metadata_columns,
         )
@@ -725,15 +673,15 @@ class HuggingFaceAdapter:
 
         preset = DATASET_PRESETS[name]
         scoring = preset.get("scoring", "")
-        answer_extraction = preset.get("answer_extraction", "")
+        ground_truth_extractor = preset.get("ground_truth_extractor", "")
 
-        if scoring == "numeric" or answer_extraction in ("boxed", "numeric"):
+        if scoring == "numeric" or ground_truth_extractor in ("boxed", "numeric"):
             return TEMPLATE_REGISTRY.get("math")
 
         return None
 
-    def get_native_extractor(self, task_name: str) -> None:
-        """HuggingFace does not provide native extraction.
+    def get_native_answer_extractor(self, task_name: str) -> None:
+        """HuggingFace does not provide native answer extraction.
 
         Args:
             task_name: Task name (unused).
@@ -791,7 +739,7 @@ DATASET_PRESETS: dict[str, dict[str, Any]] = {
         "split": "train",  # This dataset only has train split
         "question_column": "problem",
         "answer_column": "answer",
-        "answer_extraction": "direct",
+        "ground_truth_extractor": "direct",
         "scoring": "numeric",
         "metadata_columns": ["id", "year", "url"],
     },
@@ -799,14 +747,14 @@ DATASET_PRESETS: dict[str, dict[str, Any]] = {
         "split": "train",
         "question_column": "problem",
         "answer_column": "answer",
-        "answer_extraction": "direct",
+        "ground_truth_extractor": "direct",
         "scoring": "numeric",
     },
     "di-zhang-fdu/AIME_1983_2024": {
         "split": "train",
         "question_column": "Question",
         "answer_column": "Answer",
-        "answer_extraction": "direct",
+        "ground_truth_extractor": "direct",
         "scoring": "numeric",
         "metadata_columns": ["Year", "Problem Number"],
     },
@@ -815,14 +763,14 @@ DATASET_PRESETS: dict[str, dict[str, Any]] = {
         "subset": "main",
         "question_column": "question",
         "answer_column": "answer",
-        "answer_extraction": "numeric",
+        "ground_truth_extractor": "numeric",
         "scoring": "numeric",
     },
     # OpenAI simple-evals MATH (if available)
     "openai/gsm8k": {
         "question_column": "question",
         "answer_column": "answer",
-        "answer_extraction": "numeric",
+        "ground_truth_extractor": "numeric",
         "scoring": "numeric",
     },
 }

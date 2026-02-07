@@ -29,7 +29,7 @@ environments:
     adapter: reasoning_gym
     size: 100
     seed: 42
-    extractor: tag_based
+    answer_extractor: tag_based
 
 model:
   backend: openai
