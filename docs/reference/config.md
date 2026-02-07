@@ -142,8 +142,15 @@ env = create_reasoning_gym_environment(
     size=100,                      # Number of samples
     seed=42,                       # Random seed
     extractor=None,                # Use default TagBasedExtractor
-    include_format_reward=True,    # Include format compliance reward
     # Additional dataset-specific kwargs passed through
+)
+
+# Add optional extra rewards (e.g., format compliance)
+from llenvs.core.reward import FormatReward
+env_with_format = create_reasoning_gym_environment(
+    dataset_name="leg_counting",
+    size=100,
+    extra_rewards=(FormatReward(env._extractor),),
 )
 ```
 
@@ -175,7 +182,6 @@ from llenvs.adapters import create_gem_environment, create_gem_tool_environment
 env = create_gem_environment(
     env_id="game:Wordle-v0",
     max_steps=6,
-    include_format_reward=True,
 )
 
 # Tool-enabled environment

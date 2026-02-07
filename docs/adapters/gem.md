@@ -213,7 +213,14 @@ print(info)
 env = adapter.get_environment(
     "game:Wordle-v0",
     max_steps=6,
-    include_format_reward=True,
+)
+
+# Add optional extra rewards (e.g., format compliance)
+from llenvs.core.reward import FormatReward
+from llenvs.core.extraction import TagBasedExtractor
+env_with_format = adapter.get_environment(
+    "game:Wordle-v0",
+    extra_rewards=(FormatReward(TagBasedExtractor()),),
 )
 ```
 

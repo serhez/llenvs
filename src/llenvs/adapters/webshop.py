@@ -115,6 +115,7 @@ class WebShopEnvironment:
         observation_mode: str = "text_rich",
         max_steps: int = 15,
         include_instruction_in_obs: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
     ) -> None:
         """Initialize WebShop environment wrapper.
@@ -128,6 +129,7 @@ class WebShopEnvironment:
             max_steps: Maximum steps per episode before truncation.
             include_instruction_in_obs: Whether to prepend instruction to
                 each observation (helps model remember the goal).
+            extra_rewards: Additional reward functions appended after native rewards.
             prompts: Override default prompt components. Keys:
                 instruction_prefix, step_format, action_hint.
         """
@@ -135,7 +137,8 @@ class WebShopEnvironment:
         self._observation_mode = observation_mode
         self._max_steps = max_steps
         self._include_instruction_in_obs = include_instruction_in_obs
-        self._reward_fn = WebShopReward()
+        self._native_rewards: tuple[RewardFunction, ...] = (WebShopReward(),)
+        self._extra_rewards = extra_rewards
         self._prompts = {**DEFAULT_WEBSHOP_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
@@ -169,7 +172,7 @@ class WebShopEnvironment:
         self,
     ) -> tuple[RewardFunction[TextObservation, WebShopHidden, TextAction], ...]:
         """Get reward functions used by this environment."""
-        return (self._reward_fn,)
+        return self._native_rewards + self._extra_rewards
 
     def _extract_available_actions(self, observation: str) -> tuple[str, ...]:
         """Extract available clickable actions from observation.

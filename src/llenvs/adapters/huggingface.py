@@ -258,41 +258,6 @@ class HuggingFaceCorrectnessReward:
         )
 
 
-@dataclass
-class HuggingFaceFormatReward:
-    """Reward function for checking answer format compliance."""
-
-    _name: str = "format"
-    _reward_type: RewardType = RewardType.FORMAT
-
-    def __init__(self, extractor: AnswerExtractor) -> None:
-        self._extractor = extractor
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def reward_type(self) -> RewardType:
-        return self._reward_type
-
-    def compute(
-        self,
-        state: State[TextObservation, HuggingFaceHidden],
-        action: TextAction,
-        next_state: State[TextObservation, HuggingFaceHidden],
-    ) -> RewardSignal:
-        """Compute format reward."""
-        extracted, extraction_meta = self._extractor.extract(action.text)
-
-        return RewardSignal(
-            value=1.0 if extracted is not None else 0.0,
-            name=self.name,
-            reward_type=self.reward_type,
-            metadata={"extraction": extraction_meta},
-        )
-
-
 class HuggingFaceEnvironment:
     """MDP wrapper for HuggingFace datasets.
 
@@ -315,7 +280,7 @@ class HuggingFaceEnvironment:
         answer_extraction: str | Callable[[str], str | None] = "boxed",
         scoring: str | ScoringFunction = "numeric",
         extractor: AnswerExtractor | None = None,
-        include_format_reward: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         metadata_columns: list[str] | None = None,
     ) -> None:
         """Initialize the environment.
@@ -332,7 +297,7 @@ class HuggingFaceEnvironment:
             scoring: How to score answers. Either a string key
                 ("exact", "numeric", "numeric_tolerance") or a custom function.
             extractor: Extractor for model responses. Defaults to TagBasedExtractor.
-            include_format_reward: Whether to include format checking reward.
+            extra_rewards: Additional reward functions appended after native rewards.
             metadata_columns: Additional columns to include in state metadata.
         """
         self._dataset = dataset
@@ -366,15 +331,16 @@ class HuggingFaceEnvironment:
 
         # Set up extractor for model responses
         self._extractor = extractor or TagBasedExtractor()
-        self._include_format_reward = include_format_reward
 
         # Build reward functions
-        self._correctness_reward = HuggingFaceCorrectnessReward(
-            extractor=self._extractor,
-            answer_extraction=self._answer_extraction,
-            scoring_fn=self._scoring_fn,
+        self._native_rewards: tuple[RewardFunction, ...] = (
+            HuggingFaceCorrectnessReward(
+                extractor=self._extractor,
+                answer_extraction=self._answer_extraction,
+                scoring_fn=self._scoring_fn,
+            ),
         )
-        self._format_reward = HuggingFaceFormatReward(self._extractor)
+        self._extra_rewards = extra_rewards
 
     @property
     def prompts(self) -> dict[str, str]:
@@ -404,9 +370,7 @@ class HuggingFaceEnvironment:
         self,
     ) -> tuple[RewardFunction[TextObservation, HuggingFaceHidden, TextAction], ...]:
         """Get reward functions used by this environment."""
-        if self._include_format_reward:
-            return (self._correctness_reward, self._format_reward)
-        return (self._correctness_reward,)
+        return self._native_rewards + self._extra_rewards
 
     @property
     def dataset(self) -> Any:
@@ -656,7 +620,7 @@ class HuggingFaceAdapter:
         answer_extraction: str | Callable[[str], str | None] = "boxed",
         scoring: str | ScoringFunction = "numeric",
         extractor: AnswerExtractor | None = None,
-        include_format_reward: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         metadata_columns: list[str] | None = None,
         size: int | None = None,
         seed: int | None = None,
@@ -675,7 +639,7 @@ class HuggingFaceAdapter:
             answer_extraction: How to extract final answer from answer_column.
             scoring: How to score predicted vs expected answers.
             extractor: Extractor for model responses.
-            include_format_reward: Whether to include format reward.
+            extra_rewards: Additional reward functions appended after native rewards.
             metadata_columns: Additional columns to include in metadata.
             size: Limit dataset to first N examples.
             seed: Random seed for shuffling (if size is set).
@@ -735,7 +699,7 @@ class HuggingFaceAdapter:
             answer_extraction=answer_extraction,
             scoring=scoring,
             extractor=extractor,
-            include_format_reward=include_format_reward,
+            extra_rewards=extra_rewards,
             metadata_columns=metadata_columns,
         )
 

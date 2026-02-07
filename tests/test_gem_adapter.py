@@ -11,13 +11,13 @@ from llenvs.adapters.gem import (
     GemHidden,
     GemAdapter,
     GemCorrectnessReward,
-    GemFormatReward,
     MULTI_TURN_ENVS,
     MULTI_TURN_PREFIXES,
     _is_multi_turn_env,
     _freeze_dict,
     _unfreeze_dict,
 )
+from llenvs.core.reward import FormatReward
 from llenvs.core.registry import EnvironmentRegistry
 
 
@@ -227,19 +227,19 @@ class TestGemCorrectnessReward:
         assert reward_fn.reward_type == RewardType.OUTCOME
 
 
-class TestGemFormatReward:
-    """Tests for GemFormatReward."""
+class TestFormatRewardWithGem:
+    """Tests for FormatReward used with GEM environments."""
 
     def test_reward_name(self):
         """Test reward function name."""
         extractor = TagBasedExtractor()
-        reward_fn = GemFormatReward(extractor)
+        reward_fn = FormatReward(extractor)
         assert reward_fn.name == "format"
 
     def test_reward_type(self):
         """Test reward function type."""
         extractor = TagBasedExtractor()
-        reward_fn = GemFormatReward(extractor)
+        reward_fn = FormatReward(extractor)
         assert reward_fn.reward_type == RewardType.FORMAT
 
 
@@ -381,12 +381,14 @@ class TestGemEnvironment:
         assert result.terminated is True
         assert result.rewards.by_name("correctness").value == 1.0
 
-    def test_format_reward(self, mock_single_turn_env):
-        """Test format reward with proper tagging."""
+    def test_format_reward_via_extra_rewards(self, mock_single_turn_env):
+        """Test format reward when added via extra_rewards."""
+        extractor = TagBasedExtractor()
         env = GemEnvironment(
             gem_env=mock_single_turn_env,
             env_id="math:GSM8K",
             is_multi_turn=False,
+            extra_rewards=(FormatReward(extractor),),
         )
         state, _ = env.reset()
 
@@ -398,8 +400,8 @@ class TestGemEnvironment:
         assert format_reward is not None
         assert format_reward.value == 1.0
 
-    def test_format_reward_missing_tags(self, mock_single_turn_env):
-        """Test format reward when tags are missing."""
+    def test_no_format_reward_by_default(self, mock_single_turn_env):
+        """Test no format reward by default (native-only)."""
         env = GemEnvironment(
             gem_env=mock_single_turn_env,
             env_id="math:GSM8K",
@@ -407,13 +409,11 @@ class TestGemEnvironment:
         )
         state, _ = env.reset()
 
-        # Without tags
         action = TextAction(text="The answer is 4")
         result = env.step(state, action)
 
-        format_reward = result.rewards.by_name("format")
-        assert format_reward is not None
-        assert format_reward.value == 0.0
+        # No format reward by default
+        assert result.rewards.by_name("format") is None
 
     def test_custom_extractor(self, mock_single_turn_env):
         """Test with custom extractor."""
@@ -431,13 +431,12 @@ class TestGemEnvironment:
 
         assert result.info["extracted_answer"] == "4"
 
-    def test_no_format_reward(self, mock_single_turn_env):
-        """Test environment without format reward."""
+    def test_default_native_only_rewards(self, mock_single_turn_env):
+        """Test default rewards are native-only."""
         env = GemEnvironment(
             gem_env=mock_single_turn_env,
             env_id="math:GSM8K",
             is_multi_turn=False,
-            include_format_reward=False,
         )
 
         assert len(env.reward_functions) == 1
@@ -565,8 +564,8 @@ class TestGemEnvironmentSpec:
 class TestRewardBundle:
     """Tests for reward bundle from GEM environments."""
 
-    def test_total_reward(self, mock_single_turn_env):
-        """Test total reward calculation."""
+    def test_total_reward_native_only(self, mock_single_turn_env):
+        """Test total reward with native-only default."""
         env = GemEnvironment(
             gem_env=mock_single_turn_env,
             env_id="math:GSM8K",
@@ -574,19 +573,37 @@ class TestRewardBundle:
         )
         state, _ = env.reset()
 
-        # Correct answer with tags
         action = TextAction(text="<answer>4</answer>")
         result = env.step(state, action)
 
-        # Total should be correctness + format = 1.0 + 1.0 = 2.0
-        assert result.rewards.total == 2.0
+        # Only correctness (native) reward
+        assert result.rewards.total == 1.0
 
-    def test_reward_by_type(self, mock_single_turn_env):
-        """Test filtering rewards by type."""
+    def test_total_reward_with_extra(self, mock_single_turn_env):
+        """Test total reward with extra format reward."""
+        extractor = TagBasedExtractor()
         env = GemEnvironment(
             gem_env=mock_single_turn_env,
             env_id="math:GSM8K",
             is_multi_turn=False,
+            extra_rewards=(FormatReward(extractor),),
+        )
+        state, _ = env.reset()
+
+        action = TextAction(text="<answer>4</answer>")
+        result = env.step(state, action)
+
+        # correctness + format = 1.0 + 1.0 = 2.0
+        assert result.rewards.total == 2.0
+
+    def test_reward_by_type(self, mock_single_turn_env):
+        """Test filtering rewards by type."""
+        extractor = TagBasedExtractor()
+        env = GemEnvironment(
+            gem_env=mock_single_turn_env,
+            env_id="math:GSM8K",
+            is_multi_turn=False,
+            extra_rewards=(FormatReward(extractor),),
         )
         state, _ = env.reset()
 

@@ -11,7 +11,6 @@ from llenvs.adapters.huggingface import (
     HuggingFaceHidden,
     HuggingFaceAdapter,
     HuggingFaceCorrectnessReward,
-    HuggingFaceFormatReward,
     extract_boxed_answer,
     extract_numeric_answer,
     extract_last_line,
@@ -21,6 +20,7 @@ from llenvs.adapters.huggingface import (
     score_numeric_tolerance,
     DATASET_PRESETS,
 )
+from llenvs.core.reward import FormatReward
 from llenvs.core.registry import EnvironmentRegistry
 
 
@@ -313,15 +313,13 @@ class TestHuggingFaceEnvironment:
         assert result.terminated is True
         assert result.next_state.metadata.is_terminal is True
 
-        # Check correctness reward
+        # Check correctness reward (native-only default)
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
         assert correctness.value == 1.0
 
-        # Check format reward
-        format_reward = result.rewards.by_name("format")
-        assert format_reward is not None
-        assert format_reward.value == 1.0
+        # No format reward by default
+        assert result.rewards.by_name("format") is None
 
     def test_step_incorrect_answer(self, mock_hf_dataset):
         """Test step with incorrect answer."""
@@ -338,10 +336,6 @@ class TestHuggingFaceEnvironment:
         correctness = result.rewards.by_name("correctness")
         assert correctness.value == 0.0
 
-        # Format reward still 1.0 (answer was extracted)
-        format_reward = result.rewards.by_name("format")
-        assert format_reward.value == 1.0
-
     def test_step_no_answer_extracted(self, mock_hf_dataset):
         """Test step when no answer can be extracted."""
         env = HuggingFaceEnvironment(
@@ -354,12 +348,8 @@ class TestHuggingFaceEnvironment:
         action = TextAction(text="I don't know")
         result = env.step(state, action)
 
-        # Both rewards should be 0
         correctness = result.rewards.by_name("correctness")
         assert correctness.value == 0.0
-
-        format_reward = result.rewards.by_name("format")
-        assert format_reward.value == 0.0
 
     def test_custom_extractor(self, mock_hf_dataset):
         """Test with custom extractor."""

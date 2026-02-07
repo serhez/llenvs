@@ -29,7 +29,6 @@ from llenvs.core.tools import (
     ToolExecutor,
 )
 from llenvs.core.tool_environment import BaseToolEnvironment
-from llenvs.core.tool_rewards import ToolValidityReward
 
 
 # Multi-turn environments (games) - these are natively multi-step
@@ -218,44 +217,6 @@ class GemCorrectnessReward:
         )
 
 
-@dataclass
-class GemFormatReward:
-    """Format reward for checking answer extraction.
-
-    Checks if the model's response contains a properly formatted answer
-    that can be extracted by the configured extractor.
-    """
-
-    _name: str = "format"
-    _reward_type: RewardType = RewardType.FORMAT
-
-    def __init__(self, extractor: AnswerExtractor) -> None:
-        self._extractor = extractor
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def reward_type(self) -> RewardType:
-        return self._reward_type
-
-    def compute(
-        self,
-        state: State[TextObservation, GemHidden],
-        action: TextAction,
-        next_state: State[TextObservation, GemHidden],
-    ) -> RewardSignal:
-        """Compute format compliance reward."""
-        extracted, meta = self._extractor.extract(action.text)
-        return RewardSignal(
-            value=1.0 if extracted is not None else 0.0,
-            name=self.name,
-            reward_type=self.reward_type,
-            metadata={"extraction": meta},
-        )
-
-
 class GemEnvironment:
     """MDP wrapper for GEM environments.
 
@@ -283,7 +244,7 @@ class GemEnvironment:
         env_id: str,
         is_multi_turn: bool,
         extractor: AnswerExtractor | None = None,
-        include_format_reward: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         max_steps: int | None = None,
     ) -> None:
         """Initialize GEM environment wrapper.
@@ -293,18 +254,17 @@ class GemEnvironment:
             env_id: GEM environment identifier (e.g., "game:Sudoku-v0").
             is_multi_turn: Whether this is a multi-turn environment.
             extractor: Extractor for model responses. Defaults to TagBasedExtractor.
-            include_format_reward: Whether to include format checking reward.
+            extra_rewards: Additional reward functions appended after native rewards.
             max_steps: Maximum steps per episode (None = unlimited).
         """
         self._gem_env = gem_env
         self._env_id = env_id
         self._is_multi_turn = is_multi_turn
         self._extractor = extractor or TagBasedExtractor()
-        self._include_format_reward = include_format_reward
         self._max_steps = max_steps
 
-        self._correctness_reward = GemCorrectnessReward()
-        self._format_reward = GemFormatReward(self._extractor)
+        self._native_rewards: tuple[RewardFunction, ...] = (GemCorrectnessReward(),)
+        self._extra_rewards = extra_rewards
 
         # Track current task for multi-episode use
         self._current_task_index = 0
@@ -332,9 +292,7 @@ class GemEnvironment:
         self,
     ) -> tuple[RewardFunction[TextObservation, GemHidden, TextAction], ...]:
         """Get reward functions used by this environment."""
-        if self._include_format_reward:
-            return (self._correctness_reward, self._format_reward)
-        return (self._correctness_reward,)
+        return self._native_rewards + self._extra_rewards
 
     def _snapshot_state(self) -> tuple[tuple[str, Any], ...]:
         """Capture GEM env state as frozen structure."""
@@ -536,7 +494,7 @@ class GemAdapter:
         name: str,
         seed: int | None = None,
         extractor: AnswerExtractor | None = None,
-        include_format_reward: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         max_steps: int | None = None,
         **kwargs: Any,
     ) -> GemEnvironment:
@@ -546,7 +504,7 @@ class GemAdapter:
             name: Environment ID (e.g., "game:Sudoku-v0", "math:GSM8K").
             seed: Random seed for environment creation.
             extractor: Extractor for model responses.
-            include_format_reward: Whether to include format checking reward.
+            extra_rewards: Additional reward functions appended after native rewards.
             max_steps: Maximum steps per episode (None = unlimited).
             **kwargs: Additional arguments passed to gem.make().
 
@@ -570,7 +528,7 @@ class GemAdapter:
             env_id=name,
             is_multi_turn=is_multi_turn,
             extractor=extractor,
-            include_format_reward=include_format_reward,
+            extra_rewards=extra_rewards,
             max_steps=max_steps,
         )
 
@@ -615,6 +573,7 @@ class GemAdapter:
         name: str,
         tool_types: tuple[str, ...] = ("python",),
         max_steps: int = 10,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         **kwargs: Any,
     ) -> "GemToolEnvironment":
         """Create a tool-enabled GEM environment.
@@ -623,6 +582,7 @@ class GemAdapter:
             name: Environment ID (e.g., "math:GSM8K", "qa:HotpotQA")
             tool_types: Which tools to enable ("python", "search")
             max_steps: Max steps per episode
+            extra_rewards: Additional reward functions appended after native rewards.
             **kwargs: Additional args (search_url, search_topk)
 
         Returns:
@@ -636,6 +596,7 @@ class GemAdapter:
             env_id=name,
             tool_types=tool_types,
             max_steps=max_steps,
+            extra_rewards=extra_rewards,
             **kwargs,
         )
 
@@ -779,6 +740,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         env_id: str,
         tool_types: tuple[str, ...] = ("python",),
         max_steps: int | None = None,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         **tool_kwargs: Any,
     ) -> None:
         """Initialize tool environment wrapper.
@@ -788,6 +750,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             env_id: GEM environment identifier (e.g., "math:GSM8K").
             tool_types: Which tools to enable ("python", "search").
             max_steps: Maximum steps per episode (default 10).
+            extra_rewards: Additional reward functions appended after native rewards.
             **tool_kwargs: Additional arguments for tool creation
                           (search_url, search_topk for search tool).
         """
@@ -806,8 +769,8 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         self._executor = GemToolExecutor(self._gem_tools)
 
         # Reward functions
-        self._correctness_reward = GemCorrectnessReward()
-        self._validity_reward = ToolValidityReward()
+        self._native_rewards: tuple[RewardFunction, ...] = (GemCorrectnessReward(),)
+        self._extra_rewards = extra_rewards
 
     def _get_gem(self) -> Any:
         """Import and return the gem module."""
@@ -896,7 +859,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         self,
     ) -> tuple[RewardFunction[AgentObservation, GemToolHidden, AgentAction], ...]:
         """Get reward functions used by this environment."""
-        return (self._correctness_reward, self._validity_reward)
+        return self._native_rewards + self._extra_rewards
 
     def _snapshot_state(self) -> tuple[tuple[str, Any], ...]:
         """Capture GEM env state as frozen structure."""
@@ -1105,7 +1068,7 @@ def create_gem_environment(
     env_id: str,
     seed: int | None = None,
     extractor: AnswerExtractor | None = None,
-    include_format_reward: bool = True,
+    extra_rewards: tuple[RewardFunction, ...] = (),
     **kwargs: Any,
 ) -> GemEnvironment:
     """Factory function to create a GemEnvironment.
@@ -1116,7 +1079,7 @@ def create_gem_environment(
         env_id: GEM environment ID (e.g., "game:Sudoku-v0").
         seed: Random seed for environment creation.
         extractor: Extractor for model responses.
-        include_format_reward: Whether to include format reward.
+        extra_rewards: Additional reward functions appended after native rewards.
         **kwargs: Additional arguments passed to gem.make().
 
     Returns:
@@ -1135,7 +1098,7 @@ def create_gem_environment(
         env_id,
         seed=seed,
         extractor=extractor,
-        include_format_reward=include_format_reward,
+        extra_rewards=extra_rewards,
         **kwargs,
     )
 
@@ -1144,6 +1107,7 @@ def create_gem_tool_environment(
     env_id: str,
     tool_types: tuple[str, ...] = ("python",),
     max_steps: int = 10,
+    extra_rewards: tuple[RewardFunction, ...] = (),
     **kwargs: Any,
 ) -> GemToolEnvironment:
     """Factory function for GEM tool environments.
@@ -1155,6 +1119,7 @@ def create_gem_tool_environment(
         env_id: GEM environment ID (e.g., "math:GSM8K", "qa:HotpotQA").
         tool_types: Which tools to enable ("python", "search").
         max_steps: Maximum steps per episode.
+        extra_rewards: Additional reward functions appended after native rewards.
         **kwargs: Additional arguments (search_url, search_topk).
 
     Returns:
@@ -1180,5 +1145,6 @@ def create_gem_tool_environment(
         env_id,
         tool_types=tool_types,
         max_steps=max_steps,
+        extra_rewards=extra_rewards,
         **kwargs,
     )

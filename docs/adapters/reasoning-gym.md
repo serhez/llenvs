@@ -54,7 +54,14 @@ env = adapter.get_environment(
     size=500,
     seed=42,
     extractor=None,  # Use default TagBasedExtractor
-    include_format_reward=True,
+)
+
+# Add optional extra rewards (e.g., format compliance)
+from llenvs.core.reward import FormatReward
+env_with_format = adapter.get_environment(
+    name="simple_arithmetic",
+    size=500,
+    extra_rewards=(FormatReward(env._extractor),),
 )
 ```
 
@@ -65,7 +72,7 @@ env = adapter.get_environment(
 | `size` | `int` | Number of samples to generate |
 | `seed` | `int` | Random seed for reproducibility |
 | `extractor` | `AnswerExtractor` | Custom answer extractor |
-| `include_format_reward` | `bool` | Include format compliance reward |
+| `extra_rewards` | `tuple[RewardFunction, ...]` | Additional reward functions appended after native rewards |
 | `**dataset_kwargs` | | Passed to dataset constructor |
 
 ## Available Datasets
@@ -98,10 +105,12 @@ class ReasoningGymHidden:
 
 ## Rewards
 
-| Reward | Type | Description |
-|--------|------|-------------|
-| `correctness` | OUTCOME | 1.0 if answer matches expected |
-| `format` | FORMAT | 1.0 if answer can be extracted |
+By default, only native rewards are included. Extra rewards (like format checking) are opt-in via `extra_rewards`.
+
+| Reward | Type | Default | Description |
+|--------|------|---------|-------------|
+| `correctness` | OUTCOME | Yes | 1.0 if answer matches expected |
+| `format` | FORMAT | No | 1.0 if answer can be extracted (add via `FormatReward`) |
 
 ## Example: Running Evaluation
 

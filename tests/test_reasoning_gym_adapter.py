@@ -9,8 +9,8 @@ from llenvs.adapters.reasoning_gym import (
     ReasoningGymHidden,
     ReasoningGymAdapter,
     CorrectnessRewardFunction,
-    FormatRewardFunction,
 )
+from llenvs.core.reward import FormatReward
 from llenvs.core.registry import EnvironmentRegistry
 
 
@@ -46,13 +46,23 @@ class TestReasoningGymEnvironment:
         assert spec.action_type == TextAction
         assert spec.metadata["dataset_size"] == 3
 
-    def test_reward_functions(self, mock_dataset):
-        """Test reward functions property."""
-        env = ReasoningGymEnvironment(dataset=mock_dataset, include_format_reward=True)
-        assert len(env.reward_functions) == 2
+    def test_reward_functions_default_native_only(self, mock_dataset):
+        """Test default reward functions are native-only."""
+        env = ReasoningGymEnvironment(dataset=mock_dataset)
+        assert len(env.reward_functions) == 1
+        assert env.reward_functions[0].name == "correctness"
 
-        env_no_format = ReasoningGymEnvironment(dataset=mock_dataset, include_format_reward=False)
-        assert len(env_no_format.reward_functions) == 1
+    def test_extra_rewards(self, mock_dataset):
+        """Test extra_rewards are appended to native rewards."""
+        extractor = TagBasedExtractor()
+        format_reward = FormatReward(extractor)
+        env = ReasoningGymEnvironment(
+            dataset=mock_dataset,
+            extra_rewards=(format_reward,),
+        )
+        assert len(env.reward_functions) == 2
+        assert env.reward_functions[0].name == "correctness"
+        assert env.reward_functions[1].name == "format"
 
     def test_reset(self, mock_dataset):
         """Test environment reset."""
@@ -113,14 +123,13 @@ class TestReasoningGymEnvironment:
         assert result.truncated is False
         assert result.next_state.metadata.is_terminal is True
 
-        # Check rewards
+        # Check rewards (native-only by default)
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
         assert correctness.value == 1.0
 
-        format_reward = result.rewards.by_name("format")
-        assert format_reward is not None
-        assert format_reward.value == 1.0
+        # No format reward by default
+        assert result.rewards.by_name("format") is None
 
         # Check info
         assert result.info["extracted_answer"] == "4"
@@ -138,10 +147,6 @@ class TestReasoningGymEnvironment:
         assert correctness is not None
         assert correctness.value == 0.0
 
-        # Format reward still 1.0 (answer was extracted)
-        format_reward = result.rewards.by_name("format")
-        assert format_reward.value == 1.0
-
     def test_step_no_answer_extracted(self, mock_dataset):
         """Test step when no answer can be extracted."""
         env = ReasoningGymEnvironment(dataset=mock_dataset)
@@ -150,12 +155,8 @@ class TestReasoningGymEnvironment:
         action = TextAction(text="I don't know the answer")
         result = env.step(state, action)
 
-        # Both rewards should be 0
         correctness = result.rewards.by_name("correctness")
         assert correctness.value == 0.0
-
-        format_reward = result.rewards.by_name("format")
-        assert format_reward.value == 0.0
 
         assert result.info["extracted_answer"] is None
 
@@ -192,7 +193,7 @@ class TestReasoningGymEnvironment:
         action = TextAction(text="<answer>4</answer>")
         rewards = env.compute_rewards(state, action, state)
 
-        assert rewards.total == 2.0  # correctness + format
+        assert rewards.total == 1.0  # correctness only (native-only default)
 
 
 class TestCorrectnessRewardFunction:
@@ -242,15 +243,14 @@ class TestCorrectnessRewardFunction:
         assert signal.metadata["extracted"] is None
 
 
-class TestFormatRewardFunction:
-    """Tests for FormatRewardFunction."""
+class TestFormatReward:
+    """Tests for the unified FormatReward from core."""
 
     def test_format_followed(self):
         """Test reward when format is followed."""
         extractor = TagBasedExtractor()
-        reward_fn = FormatRewardFunction(extractor)
+        reward_fn = FormatReward(extractor)
 
-        # Create minimal state (format reward doesn't need hidden state details)
         from llenvs.core.state import State, StateMetadata
 
         state = State(
@@ -265,12 +265,13 @@ class TestFormatRewardFunction:
         signal = reward_fn.compute(state, action, state)
 
         assert signal.value == 1.0
+        assert signal.name == "format"
         assert signal.reward_type == RewardType.FORMAT
 
     def test_format_not_followed(self):
         """Test reward when format is not followed."""
         extractor = TagBasedExtractor()
-        reward_fn = FormatRewardFunction(extractor)
+        reward_fn = FormatReward(extractor)
 
         from llenvs.core.state import State, StateMetadata
 

@@ -94,46 +94,6 @@ class CorrectnessRewardFunction:
         )
 
 
-@dataclass
-class FormatRewardFunction:
-    """Reward function for checking if answer was properly formatted."""
-
-    _name: str = "format"
-    _reward_type: RewardType = RewardType.FORMAT
-
-    def __init__(self, extractor: AnswerExtractor) -> None:
-        """Initialize with extractor.
-
-        Args:
-            extractor: Extractor to parse model responses.
-        """
-        self._extractor = extractor
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def reward_type(self) -> RewardType:
-        return self._reward_type
-
-    def compute(
-        self,
-        state: State[TextObservation, ReasoningGymHidden],
-        action: TextAction,
-        next_state: State[TextObservation, ReasoningGymHidden],
-    ) -> RewardSignal:
-        """Compute format reward (1.0 if answer extracted, 0.0 otherwise)."""
-        extracted, extraction_meta = self._extractor.extract(action.text)
-
-        return RewardSignal(
-            value=1.0 if extracted is not None else 0.0,
-            name=self.name,
-            reward_type=self.reward_type,
-            metadata={"extraction": extraction_meta},
-        )
-
-
 class ReasoningGymEnvironment:
     """MDP wrapper for reasoning-gym ProceduralDataset.
 
@@ -149,7 +109,7 @@ class ReasoningGymEnvironment:
         self,
         dataset: Any,
         extractor: AnswerExtractor | None = None,
-        include_format_reward: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
     ) -> None:
         """Initialize the environment.
 
@@ -157,15 +117,16 @@ class ReasoningGymEnvironment:
             dataset: reasoning-gym ProceduralDataset instance.
             extractor: Extractor for parsing model responses.
                 Defaults to TagBasedExtractor with "answer" tag.
-            include_format_reward: Whether to include format checking reward.
+            extra_rewards: Additional reward functions appended after native rewards.
         """
         self._dataset = dataset
         self._extractor = extractor or TagBasedExtractor()
-        self._include_format_reward = include_format_reward
 
         # Build reward functions
-        self._correctness_reward = CorrectnessRewardFunction(dataset, self._extractor)
-        self._format_reward = FormatRewardFunction(self._extractor)
+        self._native_rewards: tuple[RewardFunction, ...] = (
+            CorrectnessRewardFunction(dataset, self._extractor),
+        )
+        self._extra_rewards = extra_rewards
 
         # Get dataset name from config if available
         self._dataset_name = getattr(dataset, "name", "reasoning_gym")
@@ -196,9 +157,7 @@ class ReasoningGymEnvironment:
         self,
     ) -> tuple[RewardFunction[TextObservation, ReasoningGymHidden, TextAction], ...]:
         """Get reward functions used by this environment."""
-        if self._include_format_reward:
-            return (self._correctness_reward, self._format_reward)
-        return (self._correctness_reward,)
+        return self._native_rewards + self._extra_rewards
 
     def reset(
         self,
@@ -348,7 +307,7 @@ def create_reasoning_gym_environment(
     size: int | None = None,
     seed: int | None = None,
     extractor: AnswerExtractor | None = None,
-    include_format_reward: bool = True,
+    extra_rewards: tuple[RewardFunction, ...] = (),
     **dataset_kwargs: Any,
 ) -> ReasoningGymEnvironment:
     """Factory function to create a ReasoningGymEnvironment.
@@ -358,7 +317,7 @@ def create_reasoning_gym_environment(
         size: Number of samples to include (None = all).
         seed: Random seed for dataset generation.
         extractor: AnswerExtractor for parsing responses.
-        include_format_reward: Whether to include format reward.
+        extra_rewards: Additional reward functions appended after native rewards.
         **dataset_kwargs: Additional kwargs passed to dataset creation.
 
     Returns:
@@ -387,7 +346,7 @@ def create_reasoning_gym_environment(
     return ReasoningGymEnvironment(
         dataset=dataset,
         extractor=extractor,
-        include_format_reward=include_format_reward,
+        extra_rewards=extra_rewards,
     )
 
 
@@ -450,7 +409,7 @@ class ReasoningGymAdapter:
         size: int | None = None,
         seed: int | None = None,
         extractor: AnswerExtractor | None = None,
-        include_format_reward: bool = True,
+        extra_rewards: tuple[RewardFunction, ...] = (),
         **kwargs: Any,
     ) -> ReasoningGymEnvironment:
         """Create an environment by name.
@@ -460,7 +419,7 @@ class ReasoningGymAdapter:
             size: Number of samples to include.
             seed: Random seed for dataset generation.
             extractor: AnswerExtractor for parsing responses.
-            include_format_reward: Whether to include format checking reward.
+            extra_rewards: Additional reward functions appended after native rewards.
             **kwargs: Additional arguments passed to reasoning-gym.
 
         Returns:
@@ -475,7 +434,7 @@ class ReasoningGymAdapter:
             size=size,
             seed=seed,
             extractor=extractor,
-            include_format_reward=include_format_reward,
+            extra_rewards=extra_rewards,
             **kwargs,
         )
 

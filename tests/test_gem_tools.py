@@ -567,7 +567,7 @@ class TestGemToolEnvironment:
         reward_names = [r.name for r in rewards]
 
         assert "correctness" in reward_names
-        assert "tool_validity" in reward_names
+        # tool_validity is not included by default (native-only rewards)
 
     @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_state_restoration(self, mock_create_tools, mock_gem_env):

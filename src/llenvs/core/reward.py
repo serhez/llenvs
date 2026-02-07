@@ -88,6 +88,50 @@ class RewardBundle:
         return cls(signals=())
 
 
+@dataclass
+class FormatReward:
+    """Reward for checking if an answer was properly formatted.
+
+    Returns 1.0 if the extractor successfully extracts an answer,
+    0.0 otherwise. Generic across all adapters.
+    """
+
+    _name: str = "format"
+    _reward_type: RewardType = RewardType.FORMAT
+
+    def __init__(self, extractor: Any) -> None:
+        """Initialize with an extractor.
+
+        Args:
+            extractor: AnswerExtractor to check format compliance.
+        """
+        self._extractor = extractor
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def reward_type(self) -> RewardType:
+        return self._reward_type
+
+    def compute(
+        self,
+        state: State[Any, Any],
+        action: Any,
+        next_state: State[Any, Any],
+    ) -> RewardSignal:
+        """Compute format reward (1.0 if answer extracted, 0.0 otherwise)."""
+        extracted, extraction_meta = self._extractor.extract(action.text)
+
+        return RewardSignal(
+            value=1.0 if extracted is not None else 0.0,
+            name=self.name,
+            reward_type=self.reward_type,
+            metadata={"extraction": extraction_meta},
+        )
+
+
 class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
     """Protocol for computing reward signals.
 
