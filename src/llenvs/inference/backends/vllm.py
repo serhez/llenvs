@@ -225,6 +225,28 @@ class VLLMBackend(ModelBackend):
 
         return results
 
+    def generate_chat_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        params: SamplingParams,
+    ) -> list[GenerationResult]:
+        """Generate responses for multiple conversations in one batched call.
+
+        Converts each conversation to a prompt string via the chat template,
+        then passes all prompts to generate() for efficient GPU batching.
+        """
+        if not messages_batch:
+            return []
+        prompts = [
+            self._tokenizer.apply_chat_template(
+                [m.to_dict() for m in msgs],
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            for msgs in messages_batch
+        ]
+        return self.generate(prompts, params)
+
     def generate_chat(
         self,
         messages: list[ChatMessage],

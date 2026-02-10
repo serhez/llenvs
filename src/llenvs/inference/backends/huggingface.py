@@ -357,6 +357,34 @@ class HuggingFaceBackend(ModelBackend):
 
         return results
 
+    def generate_chat_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        params: SamplingParams,
+    ) -> list[GenerationResult]:
+        """Generate responses for multiple conversations in one batched call.
+
+        Converts each conversation to a prompt string via the chat template
+        (or fallback formatter), then passes all prompts to generate() for
+        efficient batched GPU inference.
+        """
+        if not messages_batch:
+            return []
+        if self._tokenizer.chat_template is not None:
+            prompts = [
+                self._tokenizer.apply_chat_template(
+                    [m.to_dict() for m in msgs],
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+                for msgs in messages_batch
+            ]
+        else:
+            prompts = [
+                self._format_messages_fallback(msgs) for msgs in messages_batch
+            ]
+        return self.generate(prompts, params)
+
     def _format_messages_fallback(self, messages: list[ChatMessage]) -> str:
         """Format messages for models without a chat template.
 

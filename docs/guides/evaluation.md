@@ -59,6 +59,43 @@ runner = ToolTrajectoryRunner(
 result = runner.run_trajectory(task_index=0)
 ```
 
+## Batched Evaluation
+
+`run_batch()` automatically batches inference calls using lockstep execution. All active trajectories advance one step together, and the backend's `generate_chat_batch()` (or `generate_with_tools_batch()`) is called once per step with all active conversations. Trajectories that finish early drop out of subsequent batches.
+
+This applies to all three runner types:
+- **`TrajectoryRunner`**: Batches `generate_chat_batch()` calls per step.
+- **`ToolTrajectoryRunner`**: Batches `generate_with_tools_batch()` (or `generate_chat_batch()` fallback) per step.
+- **`SegmentedTrajectoryRunner`**: Batches segment generation via `generate_segment_batch()` on the continuation strategy. Callbacks (`step_callback`) still run per-trajectory after each step.
+
+This gives significant speedups:
+- **vLLM / HuggingFace**: All prompts go through the GPU in one batched call per step.
+- **API backends (OpenAI, Anthropic, OpenRouter)**: Concurrent async HTTP requests limited by `max_concurrency`.
+
+Single-trajectory `run_trajectory()` is unchanged.
+
+```python
+# This automatically batches inference across all 100 tasks
+batch_result = runner.run_batch(
+    task_indices=list(range(100)),
+    progress_callback=lambda c, t: print(f"\r{c}/{t}", end=""),
+)
+```
+
+Use `batch_size` to limit how many trajectories run in each lockstep batch (useful for GPU memory management):
+
+```python
+# Process 32 tasks at a time instead of all 100
+batch_result = runner.run_batch(
+    task_indices=list(range(100)),
+    batch_size=32,
+)
+```
+
+For cross-environment batching (interleaving trajectories from multiple environments into a single lockstep loop), see `run_multi_evaluation()` in the [Parallelization guide](parallelization.md#cross-environment-batching).
+
+See the [Parallelization guide](parallelization.md) for architecture details, `max_concurrency` tuning, and performance tips.
+
 ## Metrics and Statistics
 
 The evaluation module separates **metrics** (what we measure) from **statistics** (how we summarize):

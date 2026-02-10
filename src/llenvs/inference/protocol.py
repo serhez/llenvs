@@ -204,6 +204,7 @@ class BackendCapabilities:
     supports_function_calling: bool = False
     max_batch_size: int | None = None
     max_context_length: int | None = None
+    max_concurrency: int | None = None
 
 
 class ModelBackend(ABC):
@@ -277,6 +278,53 @@ class ModelBackend(ABC):
             NotImplementedError: If backend doesn't support chat.
         """
         raise NotImplementedError("This backend does not support chat generation")
+
+    def generate_chat_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        params: SamplingParams,
+    ) -> list[GenerationResult]:
+        """Generate responses for multiple chat conversations.
+
+        Enables efficient batched inference across independent conversations.
+        The default implementation calls generate_chat() sequentially.
+        Backends should override for better performance (e.g., GPU batching
+        for vLLM/HF, concurrent HTTP requests for API backends).
+
+        Args:
+            messages_batch: List of conversations, each a list of ChatMessages.
+            params: Sampling parameters (shared across all conversations).
+
+        Returns:
+            List of GenerationResults, one per conversation, in the same order.
+        """
+        return [self.generate_chat(msgs, params) for msgs in messages_batch]
+
+    def generate_with_tools_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        tools: list["ToolDefinition"],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> list[GenerationResult]:
+        """Generate tool-calling responses for multiple conversations.
+
+        The default implementation calls generate_with_tools() sequentially.
+        Backends should override for better performance.
+
+        Args:
+            messages_batch: List of conversations.
+            tools: Available tool definitions (shared across all conversations).
+            params: Sampling parameters.
+            tool_choice: Tool selection mode.
+
+        Returns:
+            List of GenerationResults, one per conversation, in the same order.
+        """
+        return [
+            self.generate_with_tools(msgs, tools, params, tool_choice)
+            for msgs in messages_batch
+        ]
 
     def generate_with_logprobs(
         self,

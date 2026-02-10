@@ -83,6 +83,20 @@ result = run_segmented_evaluation(
 print(f"Accuracy: {result.success_rate:.1%}")
 ```
 
+### Batched segmented evaluation
+
+`run_batch()` on `SegmentedTrajectoryRunner` uses lockstep batched generation. All active trajectories generate one segment together via `generate_segment_batch()`, then step their environments. Trajectories that finish generation early drop out. Callbacks (`step_callback`) run per-trajectory after each step.
+
+```python
+result = run_segmented_evaluation(
+    environment=env,
+    backend=backend,
+    num_tasks=100,
+    step_callback=my_callback,  # Runs per-trajectory
+    progress_callback=lambda c, t: print(f"\r{c}/{t}", end=""),
+)
+```
+
 ### Observation injection with step_callback
 
 Inject feedback between segments to create a multi-turn conversation:
@@ -335,6 +349,43 @@ Segments concatenate to exactly reconstruct the original text — no characters 
 segments = segmenter.segment(response)
 assert "".join(segments) == response
 ```
+
+### LLMSegmenter
+
+Uses a `ModelBackend` to semantically segment text into meaningful reasoning steps. The LLM returns a JSON array of segment strings, which are mapped back to exact positions in the original text via greedy substring matching.
+
+```python
+from llenvs.core import LLMSegmenter
+
+# Any ModelBackend works (API, vLLM, HuggingFace, etc.)
+segmenter = LLMSegmenter(backend=backend)
+
+segments = segmenter.segment("Let me think about this. The key insight is...")
+# ["Let me think about this. ", "The key insight is..."]
+```
+
+Custom prompt template (must include `{raw_generation}`):
+
+```python
+segmenter = LLMSegmenter(
+    backend=backend,
+    prompt_template="Split into steps:\n{raw_generation}",
+)
+```
+
+Custom parser — receives `(original_text, llm_response)` and returns segments:
+
+```python
+def my_parser(original: str, llm_response: str) -> list[str]:
+    # Custom parsing logic
+    return [original]  # fallback: single segment
+
+segmenter = LLMSegmenter(backend=backend, parser=my_parser)
+```
+
+Limitations:
+- `find_boundary()` raises `NotImplementedError` — LLM calls are too expensive for streaming. Use replay mode only.
+- Segments always concatenate to exactly reconstruct the original text (greedy matching preserves original characters).
 
 ### CompositeSegmenter
 

@@ -4,9 +4,15 @@ Segmenters split text into logical segments (sentences, lines, numbered steps, e
 to enable per-step rewards and intermediate intervention in single-turn environments.
 """
 
+from __future__ import annotations
+
+import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
+
+from llenvs.inference.protocol import ChatMessage, ModelBackend, SamplingParams
 
 
 @runtime_checkable
@@ -53,9 +59,25 @@ class SentenceSegmenter:
 
     # Common abbreviations to avoid splitting on
     abbreviations: tuple[str, ...] = (
-        "Mr.", "Mrs.", "Ms.", "Dr.", "Prof.", "Sr.", "Jr.",
-        "vs.", "etc.", "i.e.", "e.g.", "cf.", "approx.",
-        "Fig.", "fig.", "Eq.", "eq.", "No.", "no.",
+        "Mr.",
+        "Mrs.",
+        "Ms.",
+        "Dr.",
+        "Prof.",
+        "Sr.",
+        "Jr.",
+        "vs.",
+        "etc.",
+        "i.e.",
+        "e.g.",
+        "cf.",
+        "approx.",
+        "Fig.",
+        "fig.",
+        "Eq.",
+        "eq.",
+        "No.",
+        "no.",
     )
 
     def segment(self, text: str) -> list[str]:
@@ -65,7 +87,7 @@ class SentenceSegmenter:
 
         # Pattern: sentence-ending punctuation followed by whitespace or end
         # We use a positive lookbehind for the punctuation and positive lookahead for space/end
-        pattern = r'(?<=[.!?])\s+'
+        pattern = r"(?<=[.!?])\s+"
 
         # Split on sentence boundaries
         raw_segments = re.split(pattern, text.strip())
@@ -81,9 +103,7 @@ class SentenceSegmenter:
                 current = seg
 
             # Check if current segment ends with an abbreviation
-            ends_with_abbrev = any(
-                current.rstrip().endswith(abbr) for abbr in self.abbreviations
-            )
+            ends_with_abbrev = any(current.rstrip().endswith(abbr) for abbr in self.abbreviations)
 
             if not ends_with_abbrev:
                 segments.append(current.strip())
@@ -101,16 +121,16 @@ class SentenceSegmenter:
             return None
 
         # Look for sentence-ending punctuation followed by whitespace
-        pattern = r'[.!?]\s+'
+        pattern = r"[.!?]\s+"
         match = re.search(pattern, text)
 
         if match:
             # Check if this is an abbreviation
-            prefix = text[:match.start() + 1]  # Include the punctuation
+            prefix = text[: match.start() + 1]  # Include the punctuation
             for abbr in self.abbreviations:
                 if prefix.endswith(abbr):
                     # Try to find next boundary after this abbreviation
-                    rest = text[match.end():]
+                    rest = text[match.end() :]
                     next_boundary = self.find_boundary(rest)
                     if next_boundary is not None:
                         return match.end() + next_boundary
@@ -194,7 +214,7 @@ class PatternSegmenter:
             # Adjust start to not include leading whitespace in the split point
             # (the pattern may have matched leading whitespace for word boundary)
             split_start = match.start()
-            if match.group().startswith((' ', '\t', '\n')):
+            if match.group().startswith((" ", "\t", "\n")):
                 split_start += 1
 
             # Add text before this match (if any)
@@ -224,7 +244,7 @@ class PatternSegmenter:
 
         # Adjust for leading whitespace in pattern
         split_start = match.start()
-        if match.group().startswith((' ', '\t', '\n')):
+        if match.group().startswith((" ", "\t", "\n")):
             split_start += 1
 
         # If match is at the start, find the next one
@@ -233,7 +253,7 @@ class PatternSegmenter:
             if not match:
                 return None
             split_start = match.start()
-            if match.group().startswith((' ', '\t', '\n')):
+            if match.group().startswith((" ", "\t", "\n")):
                 split_start += 1
 
         return split_start
@@ -317,7 +337,7 @@ class TokenSegmenter:
             prefix = self.tokenizer.decode(tokens[:chunk_end])
             char_boundary = len(prefix)
 
-            segment = text[len(text) - len(remaining):char_boundary]
+            segment = text[len(text) - len(remaining) : char_boundary]
             segments.append(segment)
             remaining = text[char_boundary:]
             offset = chunk_end
@@ -333,32 +353,165 @@ class TokenSegmenter:
         if len(tokens) <= self.token_size:
             return None
 
-        prefix = self.tokenizer.decode(tokens[:self.token_size])
+        prefix = self.tokenizer.decode(tokens[: self.token_size])
         return len(prefix)
 
 
+DEFAULT_LLM_SEGMENTER_SYSTEM_PROMPT = (
+    "You are a text segmentation assistant. Your job is to split text into "
+    "meaningful logical segments (reasoning steps, thoughts, or conclusions). "
+    "Always respond with ONLY a JSON array of strings. Each string must be "
+    "copied exactly from the original text — do not rewrite, paraphrase, or "
+    "correct anything."
+)
+
+DEFAULT_LLM_SEGMENTER_PROMPT = """\
+Split the following text into meaningful logical segments. Return a JSON array \
+of strings where each string is an exact substring copied from the original text. \
+The segments should cover the entire text with no gaps or overlaps.
+
+Text:
+{raw_generation}"""
+
+
+def _map_segments_to_original(original: str, proposed: list[str]) -> list[str]:
+    """Map LLM-proposed segments back to exact positions in original text.
+
+    Uses greedy substring matching: for each proposed segment, finds the
+    earliest occurrence in the remaining original text. The segment text
+    in the result is sliced from the original to preserve exact characters
+    (including whitespace the LLM may have trimmed).
+
+    Returns segments that concatenate to exactly reconstruct ``original``.
+    """
+    segments: list[str] = []
+    pos = 0
+
+    for i, seg in enumerate(proposed):
+        needle = seg.strip()
+        if not needle:
+            continue
+        idx = original.find(needle, pos)
+        if idx == -1:
+            # Segment not found — dump remainder as one segment
+            if pos < len(original):
+                segments.append(original[pos:])
+            return segments
+
+        # Determine the end of this matched region
+        match_end = idx + len(needle)
+
+        if i < len(proposed) - 1:
+            # Not the last segment: include text from current pos up to
+            # the end of the matched needle (captures leading whitespace
+            # between segments).
+            segments.append(original[pos:match_end])
+            pos = match_end
+        else:
+            # Last segment: take everything from current pos to end
+            segments.append(original[pos:])
+            pos = len(original)
+
+    # If nothing matched at all, return remainder
+    if pos < len(original):
+        segments.append(original[pos:])
+
+    return segments
+
+
+def default_segment_parser(original_text: str, llm_response: str) -> list[str]:
+    """Parse LLM response into segments mapped to the original text.
+
+    1. Strips markdown code fences from the response.
+    2. Parses a JSON array of strings.
+    3. Maps proposed segments back to exact positions in the original text
+       via greedy substring matching.
+    4. Falls back to ``[original_text]`` if parsing fails.
+    """
+    if not original_text:
+        return []
+
+    text = llm_response.strip()
+
+    # Strip markdown code fences
+    text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+    text = re.sub(r"\n?```\s*$", "", text)
+    text = text.strip()
+
+    # Try to find a JSON array in the text
+    if not text.startswith("["):
+        # Look for [...] embedded in surrounding prose
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            text = match.group(0)
+        else:
+            return [original_text]
+
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return [original_text]
+
+    if not isinstance(parsed, list) or not all(isinstance(s, str) for s in parsed):
+        return [original_text]
+
+    if not parsed:
+        return [original_text]
+
+    return _map_segments_to_original(original_text, parsed)
+
+
 @dataclass
-class SemanticSegmenter:
+class LLMSegmenter:
     """LLM-based segmentation for logical boundaries.
 
-    Uses a small language model to identify semantic boundaries in text.
-    This is a placeholder for future implementation.
+    Calls a ``ModelBackend`` to semantically segment text into meaningful
+    reasoning steps, thoughts, or logical units. The LLM returns a JSON
+    array of segment strings which are mapped back to exact positions in
+    the original text via greedy substring matching.
+
+    Attributes:
+        backend: Any inference backend (vLLM, API, etc.).
+        prompt_template: Format string with ``{raw_generation}`` placeholder.
+        parser: Callable ``(original_text, llm_response) -> segments``.
+        sampling_params: Controls LLM generation.
+        system_prompt: Optional system message (``None`` to omit).
     """
 
-    model: Any = None  # Small LM for boundary detection
+    backend: ModelBackend
+    prompt_template: str = DEFAULT_LLM_SEGMENTER_PROMPT
+    parser: Callable[[str, str], list[str]] = default_segment_parser
+    sampling_params: SamplingParams = field(
+        default_factory=lambda: SamplingParams(temperature=0.0, max_tokens=4096)
+    )
+    system_prompt: str | None = DEFAULT_LLM_SEGMENTER_SYSTEM_PROMPT
 
     def segment(self, text: str) -> list[str]:
-        """Segment text using semantic analysis.
+        """Segment text using LLM-based semantic analysis."""
+        if not text:
+            return []
 
-        Not yet implemented. Falls back to sentence segmentation.
-        """
-        # Placeholder: fall back to sentence segmentation
-        return SentenceSegmenter().segment(text)
+        messages: list[ChatMessage] = []
+        if self.system_prompt is not None:
+            messages.append(ChatMessage(role="system", content=self.system_prompt))
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=self.prompt_template.format(raw_generation=text),
+            )
+        )
+
+        result = self.backend.generate_chat(messages, self.sampling_params)
+        llm_response = result.text or ""
+
+        return self.parser(text, llm_response)
 
     def find_boundary(self, text: str) -> int | None:
-        """Find semantic boundary using LLM.
+        """Not supported — LLM calls are too expensive for streaming.
 
-        Not yet implemented. Falls back to sentence boundary.
+        Raises:
+            NotImplementedError: Always.
         """
-        # Placeholder: fall back to sentence boundary
-        return SentenceSegmenter().find_boundary(text)
+        raise NotImplementedError(
+            "LLMSegmenter does not support find_boundary(); use replay mode instead of streaming."
+        )

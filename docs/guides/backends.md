@@ -8,9 +8,9 @@
 |---------|---------|----------|
 | vLLM | `vllm` | Logprobs, batching, prefix continuation, streaming |
 | HuggingFace | `transformers` | Logprobs, batching, prefix continuation, chat templates |
-| OpenAI | `openai` | Logprobs, streaming, function calling |
-| Anthropic | `anthropic` | Prefix continuation (prefill), streaming |
-| OpenRouter | - | Access to multiple models |
+| OpenAI | `openai` | Logprobs, batching (concurrent), streaming, function calling |
+| Anthropic | `anthropic` | Batching (concurrent), prefix continuation (prefill), streaming |
+| OpenRouter | `openai` | Batching (concurrent), access to multiple models |
 
 ## vLLM (Local Inference)
 
@@ -147,11 +147,12 @@ from llenvs.inference.backends import OpenAIBackend
 # Uses OPENAI_API_KEY env var by default
 backend = OpenAIBackend(model="gpt-4o")
 
-# Or explicit key
+# Or explicit key with concurrency control
 backend = OpenAIBackend(
     model="gpt-4o",
     api_key="sk-...",
     organization="org-...",
+    max_concurrency=32,  # Max concurrent API requests (default: 64)
 )
 
 # Chat generation
@@ -171,7 +172,10 @@ result = backend.generate_chat(
 ```python
 from llenvs.inference.backends import AnthropicBackend
 
-backend = AnthropicBackend(model="claude-sonnet-4-20250514")
+backend = AnthropicBackend(
+    model="claude-sonnet-4-20250514",
+    max_concurrency=32,  # Max concurrent API requests (default: 64)
+)
 
 # Supports prefix continuation via assistant prefill
 continuations = backend.continue_from_prefix(
@@ -190,6 +194,7 @@ backend = OpenRouterBackend(
     model="anthropic/claude-sonnet-4-20250514",
     site_url="https://mysite.com",
     app_name="MyApp",
+    max_concurrency=32,  # Max concurrent API requests (default: 64)
 )
 ```
 
@@ -257,6 +262,31 @@ params = SamplingParams(
 ```
 
 > **Note:** Parameters in `extra` take precedence over the common parameters if there's a conflict. Unknown parameters may cause errors from the underlying API.
+
+## Batch Generation
+
+All backends support `generate_chat_batch()` for processing multiple independent conversations efficiently. This is the foundation for parallel evaluation.
+
+```python
+from llenvs.inference import ChatMessage, SamplingParams
+
+messages_batch = [
+    [ChatMessage(role="user", content="What is 2+2?")],
+    [ChatMessage(role="user", content="What is 3*3?")],
+    [ChatMessage(role="user", content="What is 10/2?")],
+]
+
+results = backend.generate_chat_batch(messages_batch, SamplingParams())
+for result in results:
+    print(result.text)
+```
+
+How each backend implements batching:
+
+- **vLLM / HuggingFace**: Converts all conversations to prompt strings and calls the model in a single batched GPU call. Maximum throughput.
+- **API backends (OpenAI, Anthropic, OpenRouter)**: Fires concurrent async HTTP requests with a semaphore limiting parallelism to `max_concurrency`. No API provider supports sending multiple prompts in a single call, so concurrency is the only way to parallelize.
+
+Tool-calling has an equivalent `generate_with_tools_batch()`.
 
 ## Capabilities
 

@@ -32,7 +32,9 @@ from llenvs.evaluation.continuation import (
     ContinuationStrategy,
     TokenContinuationStrategy,
     BoundaryContinuationStrategy,
+    SegmentContext,
     select_strategy,
+    _BUFFER_ONLY_RESULT,
 )
 
 logger = logging.getLogger(__name__)
@@ -87,6 +89,141 @@ class BatchResult:
     success_rate: float
     mean_reward: float
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _ActiveTrajectory:
+    """Internal state for tracking a trajectory during lockstep batch execution."""
+
+    position: int
+    task_index: int
+    state: State[Any, Any]
+    reset_info: dict[str, Any]
+    trajectory: Trajectory[Any, Any, Any]
+    done: bool = False
+    error: str | None = None
+    step_count: int = 0
+
+
+@dataclass
+class _ActiveSegmentedTrajectory:
+    """Internal state for tracking a segmented trajectory during batch execution."""
+
+    position: int
+    task_index: int
+    state: State[Any, Any]
+    reset_info: dict[str, Any]
+    trajectory: Trajectory[Any, Any, Any]
+    messages: list[ChatMessage]
+    accumulated: str = ""
+    buffer: str = ""
+    done: bool = False
+    error: str | None = None
+    step_count: int = 0
+    forced_segment: str | None = None
+    complete_early: bool = False
+    generation_done: bool = False
+
+
+def _error_metadata(task_index: int) -> "StateMetadata":
+    """Create dummy metadata for error cases."""
+    from llenvs.core.state import StateMetadata
+
+    return StateMetadata(
+        step=0,
+        episode_id=f"error_{task_index}",
+        is_terminal=True,
+        info={"error": True},
+    )
+
+
+def _aggregate_results(
+    trajectory_results: list[TrajectoryResult],
+) -> BatchResult:
+    """Compute aggregate metrics for a batch of trajectory results."""
+    num_successful = sum(1 for r in trajectory_results if r.success)
+    success_rate = num_successful / len(trajectory_results) if trajectory_results else 0.0
+    total_rewards = [r.total_reward for r in trajectory_results]
+    mean_reward = sum(total_rewards) / len(total_rewards) if total_rewards else 0.0
+
+    return BatchResult(
+        trajectory_results=trajectory_results,
+        success_rate=success_rate,
+        mean_reward=mean_reward,
+        metadata={
+            "num_trajectories": len(trajectory_results),
+            "num_successful": num_successful,
+        },
+    )
+
+
+def _run_in_chunks(
+    run_fn: Callable[[list[int], Callable[[int, int], None] | None], BatchResult],
+    task_indices: list[int],
+    batch_size: int,
+    progress_callback: Callable[[int, int], None] | None,
+) -> BatchResult:
+    """Run batches in chunks of batch_size, aggregating results.
+
+    Args:
+        run_fn: Callable that takes (task_indices, progress_callback) and
+            returns a BatchResult.
+        task_indices: All task indices to process.
+        batch_size: Maximum tasks per chunk.
+        progress_callback: Optional callback(completed, total).
+
+    Returns:
+        Aggregated BatchResult over all chunks.
+    """
+    all_results: list[TrajectoryResult] = []
+    total = len(task_indices)
+
+    for start in range(0, total, batch_size):
+        chunk = task_indices[start : start + batch_size]
+
+        sub_cb: Callable[[int, int], None] | None = None
+        if progress_callback:
+            _offset = start
+
+            def sub_cb(done: int, chunk_total: int, _s: int = _offset) -> None:
+                progress_callback(_s + done, total)
+
+        chunk_result = run_fn(chunk, sub_cb)
+        all_results.extend(chunk_result.trajectory_results)
+
+    if progress_callback:
+        progress_callback(total, total)
+
+    return _aggregate_results(all_results)
+
+
+def _finalize_trajectory(t: _ActiveTrajectory | _ActiveSegmentedTrajectory) -> TrajectoryResult:
+    """Build a TrajectoryResult from a completed active trajectory."""
+    if t.error is not None:
+        return TrajectoryResult(
+            trajectory=t.trajectory,
+            total_reward=t.trajectory.total_reward,
+            success=False,
+            metadata={"error": t.error, "task_index": t.task_index},
+        )
+
+    success = False
+    if t.trajectory.transitions:
+        last_rewards = t.trajectory.transitions[-1].rewards
+        correctness = last_rewards.by_name("correctness")
+        if correctness:
+            success = correctness.value >= 1.0
+
+    return TrajectoryResult(
+        trajectory=t.trajectory,
+        total_reward=t.trajectory.total_reward,
+        success=success,
+        metadata={
+            "task_index": t.task_index,
+            "num_steps": len(t.trajectory),
+            "reset_info": t.reset_info,
+        },
+    )
 
 
 @dataclass
@@ -255,37 +392,296 @@ class TrajectoryRunner:
     def run_batch(
         self,
         task_indices: list[int],
+        batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
-        """Run a batch of trajectories.
+        """Run a batch of trajectories with lockstep batched generation.
+
+        All trajectories advance one step together in each iteration,
+        batching inference calls via generate_chat_batch(). Trajectories
+        that finish early drop out of subsequent batches.
 
         Args:
             task_indices: List of task indices to run.
-            progress_callback: Optional callback(current, total) for progress.
+            batch_size: Maximum trajectories per lockstep batch. When set,
+                task_indices are chunked and each chunk is processed
+                independently. None means all tasks in one batch.
+            progress_callback: Optional callback(completed, total) for progress.
 
         Returns:
             BatchResult with all trajectory results and aggregate metrics.
         """
-        trajectory_results: list[TrajectoryResult] = []
+        if batch_size is not None and len(task_indices) > batch_size:
+            return _run_in_chunks(
+                lambda indices, cb: self.run_batch(indices, progress_callback=cb),
+                task_indices,
+                batch_size,
+                progress_callback,
+            )
 
-        for i, task_index in enumerate(task_indices):
-            if progress_callback:
-                progress_callback(i, len(task_indices))
+        if not task_indices:
+            return _aggregate_results([])
 
+        max_steps = self.environment.spec.max_steps or 100
+        total = len(task_indices)
+        result_slots: list[TrajectoryResult | None] = [None] * total
+
+        # Phase 1: Reset all tasks
+        active: list[_ActiveTrajectory] = []
+        for pos, task_index in enumerate(task_indices):
             try:
-                result = self.run_trajectory(task_index)
-                trajectory_results.append(result)
+                state, reset_info = self.environment.reset(
+                    options={"task_index": task_index}
+                )
+                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                active.append(
+                    _ActiveTrajectory(
+                        position=pos,
+                        task_index=task_index,
+                        state=state,
+                        reset_info=reset_info,
+                        trajectory=trajectory,
+                    )
+                )
             except Exception as e:
-                logger.error(f"Error running task {task_index}: {e}")
-                # Create failed result
-                trajectory_results.append(
+                logger.error(f"Error resetting task {task_index}: {e}")
+                result_slots[pos] = TrajectoryResult(
+                    trajectory=Trajectory(
+                        episode_id=f"error_{task_index}",
+                        initial_state=State(
+                            observation=TextObservation(prompt=""),
+                            hidden=None,
+                            metadata=_error_metadata(task_index),
+                        ),
+                    ),
+                    total_reward=0.0,
+                    success=False,
+                    metadata={"error": str(e), "task_index": task_index},
+                )
+
+        reset_errors = total - len(active)
+
+        # Phase 2: Lockstep generation
+        while True:
+            remaining = [t for t in active if not t.done]
+            if not remaining:
+                break
+
+            messages_batch = [self._build_messages(t.state) for t in remaining]
+            gen_results = self.backend.generate_chat_batch(
+                messages_batch, self.sampling_params
+            )
+
+            for t, gen_result in zip(remaining, gen_results):
+                try:
+                    action = TextAction(text=gen_result.text)
+                    step_result = self.environment.step(t.state, action)
+
+                    transition: Transition[Any, Any, Any] = Transition(
+                        state=t.state,
+                        action=action,
+                        next_state=step_result.next_state,
+                        rewards=step_result.rewards,
+                        info={
+                            "generation": {
+                                "prompt_tokens": gen_result.prompt_tokens,
+                                "completion_tokens": gen_result.completion_tokens,
+                                "finish_reason": gen_result.finish_reason.name,
+                            },
+                            "step": step_result.info,
+                        },
+                    )
+                    t.trajectory.add_transition(transition)
+                    t.state = step_result.next_state
+                    t.step_count += 1
+
+                    if step_result.done or t.step_count >= max_steps:
+                        t.done = True
+                except Exception as e:
+                    logger.error(f"Error stepping task {t.task_index}: {e}")
+                    t.done = True
+                    t.error = str(e)
+
+            if progress_callback:
+                done_count = reset_errors + sum(1 for t in active if t.done)
+                progress_callback(done_count, total)
+
+        # Phase 3: Build results
+        for t in active:
+            result_slots[t.position] = _finalize_trajectory(t)
+
+        if progress_callback:
+            progress_callback(total, total)
+
+        return _aggregate_results([r for r in result_slots if r is not None])
+
+
+@dataclass(frozen=True)
+class MultiEvalEntry:
+    """One environment + its task indices for multi-environment batching."""
+
+    runner: TrajectoryRunner
+    task_indices: list[int]
+
+
+@dataclass
+class _MultiActiveTrajectory:
+    """Wraps _ActiveTrajectory with its entry index and runner."""
+
+    entry_index: int
+    inner: _ActiveTrajectory
+    runner: TrajectoryRunner
+
+
+def _run_multi_lockstep(
+    trajectories: list[_MultiActiveTrajectory],
+    backend: ModelBackend,
+    sampling_params: SamplingParams,
+    max_steps_per_entry: dict[int, int],
+    progress_callback: Callable[[int, int], None] | None = None,
+    total_for_progress: int = 0,
+    progress_offset: int = 0,
+) -> None:
+    """Run lockstep loop over pre-initialized multi-entry trajectories.
+
+    Mutates trajectories in-place (marks done, records transitions).
+    """
+    while True:
+        remaining = [t for t in trajectories if not t.inner.done]
+        if not remaining:
+            break
+
+        messages_batch = [t.runner._build_messages(t.inner.state) for t in remaining]
+        gen_results = backend.generate_chat_batch(messages_batch, sampling_params)
+
+        for t, gen_result in zip(remaining, gen_results):
+            try:
+                action = TextAction(text=gen_result.text)
+                step_result = t.runner.environment.step(t.inner.state, action)
+
+                transition: Transition[Any, Any, Any] = Transition(
+                    state=t.inner.state,
+                    action=action,
+                    next_state=step_result.next_state,
+                    rewards=step_result.rewards,
+                    info={
+                        "generation": {
+                            "prompt_tokens": gen_result.prompt_tokens,
+                            "completion_tokens": gen_result.completion_tokens,
+                            "finish_reason": gen_result.finish_reason.name,
+                        },
+                        "step": step_result.info,
+                    },
+                )
+                t.inner.trajectory.add_transition(transition)
+                t.inner.state = step_result.next_state
+                t.inner.step_count += 1
+
+                max_steps = max_steps_per_entry[t.entry_index]
+                if step_result.done or t.inner.step_count >= max_steps:
+                    t.inner.done = True
+            except Exception as e:
+                logger.error(f"Error stepping task {t.inner.task_index}: {e}")
+                t.inner.done = True
+                t.inner.error = str(e)
+
+        if progress_callback:
+            done_count = progress_offset + sum(1 for t in trajectories if t.inner.done)
+            progress_callback(done_count, total_for_progress)
+
+
+def run_multi_evaluation(
+    entries: list[MultiEvalEntry],
+    batch_size: int | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> list[BatchResult]:
+    """Run cross-environment batched evaluation.
+
+    Interleaves trajectories from multiple environments into a single
+    lockstep loop, making one generate_chat_batch() call per step across
+    all environments. This maximizes GPU utilization and API concurrency.
+
+    All entries must share the same backend and sampling_params. Only
+    TrajectoryRunner is supported (tool and segmented runners are not).
+
+    Args:
+        entries: List of MultiEvalEntry, each pairing a TrajectoryRunner
+            with task indices.
+        batch_size: Maximum trajectories per lockstep batch. When set,
+            all trajectories (across all entries) are chunked and each
+            chunk processed independently, then results merged per entry.
+        progress_callback: Optional callback(completed, total) where
+            total is the sum of all task_indices across entries.
+
+    Returns:
+        List of BatchResult, one per entry in the same order as entries.
+
+    Raises:
+        ValueError: If entries use different backends or sampling_params.
+    """
+    if not entries:
+        return []
+
+    # Validate shared backend and sampling_params
+    first = entries[0].runner
+    for i, entry in enumerate(entries[1:], 1):
+        if entry.runner.backend is not first.backend:
+            raise ValueError(
+                f"All entries must share the same backend. "
+                f"Entry 0 and entry {i} have different backends."
+            )
+        if entry.runner.sampling_params != first.sampling_params:
+            raise ValueError(
+                f"All entries must share the same sampling_params. "
+                f"Entry 0 and entry {i} have different sampling_params."
+            )
+
+    backend = first.backend
+    sampling_params = first.sampling_params
+
+    # Compute max_steps per entry
+    max_steps_per_entry: dict[int, int] = {}
+    for i, entry in enumerate(entries):
+        max_steps_per_entry[i] = entry.runner.environment.spec.max_steps or 100
+
+    total = sum(len(e.task_indices) for e in entries)
+
+    # Reset all tasks across all entries
+    all_trajectories: list[_MultiActiveTrajectory] = []
+    # Track reset errors per entry for result assembly
+    reset_error_results: dict[int, list[TrajectoryResult]] = {i: [] for i in range(len(entries))}
+
+    for entry_idx, entry in enumerate(entries):
+        for task_index in entry.task_indices:
+            try:
+                state, reset_info = entry.runner.environment.reset(
+                    options={"task_index": task_index}
+                )
+                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                inner = _ActiveTrajectory(
+                    position=len(all_trajectories),
+                    task_index=task_index,
+                    state=state,
+                    reset_info=reset_info,
+                    trajectory=trajectory,
+                )
+                all_trajectories.append(
+                    _MultiActiveTrajectory(
+                        entry_index=entry_idx,
+                        inner=inner,
+                        runner=entry.runner,
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error resetting task {task_index} in entry {entry_idx}: {e}")
+                reset_error_results[entry_idx].append(
                     TrajectoryResult(
                         trajectory=Trajectory(
                             episode_id=f"error_{task_index}",
                             initial_state=State(
                                 observation=TextObservation(prompt=""),
                                 hidden=None,
-                                metadata=self._dummy_metadata(task_index),
+                                metadata=_error_metadata(task_index),
                             ),
                         ),
                         total_reward=0.0,
@@ -294,36 +690,39 @@ class TrajectoryRunner:
                     )
                 )
 
-        if progress_callback:
-            progress_callback(len(task_indices), len(task_indices))
-
-        # Compute aggregate metrics
-        num_successful = sum(1 for r in trajectory_results if r.success)
-        success_rate = num_successful / len(trajectory_results) if trajectory_results else 0.0
-
-        total_rewards = [r.total_reward for r in trajectory_results]
-        mean_reward = sum(total_rewards) / len(total_rewards) if total_rewards else 0.0
-
-        return BatchResult(
-            trajectory_results=trajectory_results,
-            success_rate=success_rate,
-            mean_reward=mean_reward,
-            metadata={
-                "num_trajectories": len(trajectory_results),
-                "num_successful": num_successful,
-            },
+    if batch_size is not None and len(all_trajectories) > batch_size:
+        # Chunk trajectories and process each chunk
+        for start in range(0, len(all_trajectories), batch_size):
+            chunk = all_trajectories[start:start + batch_size]
+            offset = start  # reset errors already handled outside lockstep
+            _run_multi_lockstep(
+                chunk, backend, sampling_params, max_steps_per_entry,
+                progress_callback=progress_callback,
+                total_for_progress=total,
+                progress_offset=sum(
+                    1 for t in all_trajectories[:start] if t.inner.done
+                ) + sum(len(v) for v in reset_error_results.values()),
+            )
+    else:
+        reset_errors_total = sum(len(v) for v in reset_error_results.values())
+        _run_multi_lockstep(
+            all_trajectories, backend, sampling_params, max_steps_per_entry,
+            progress_callback=progress_callback,
+            total_for_progress=total,
+            progress_offset=reset_errors_total,
         )
 
-    def _dummy_metadata(self, task_index: int) -> Any:
-        """Create dummy metadata for error cases."""
-        from llenvs.core.state import StateMetadata
+    # Partition results by entry_index
+    per_entry_results: dict[int, list[TrajectoryResult]] = {
+        i: list(reset_error_results[i]) for i in range(len(entries))
+    }
+    for t in all_trajectories:
+        per_entry_results[t.entry_index].append(_finalize_trajectory(t.inner))
 
-        return StateMetadata(
-            step=0,
-            episode_id=f"error_{task_index}",
-            is_terminal=True,
-            info={"error": True},
-        )
+    if progress_callback:
+        progress_callback(total, total)
+
+    return [_aggregate_results(per_entry_results[i]) for i in range(len(entries))]
 
 
 def run_evaluation(
@@ -336,6 +735,7 @@ def run_evaluation(
     system_prompt: str | None = None,
     prompt_template: PromptTemplate | None = None,
     model_profile: ModelProfile | None = None,
+    batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchResult:
     """Convenience function to run an evaluation.
@@ -350,6 +750,7 @@ def run_evaluation(
         system_prompt: Optional system prompt.
         prompt_template: Optional prompt template for wrapping questions.
         model_profile: Optional model profile for model-specific adjustments.
+        batch_size: Maximum trajectories per lockstep batch.
         progress_callback: Optional progress callback.
 
     Returns:
@@ -370,7 +771,9 @@ def run_evaluation(
         model_profile=model_profile,
     )
 
-    return runner.run_batch(task_indices, progress_callback=progress_callback)
+    return runner.run_batch(
+        task_indices, batch_size=batch_size, progress_callback=progress_callback,
+    )
 
 
 @dataclass
@@ -590,75 +993,141 @@ class ToolTrajectoryRunner:
     def run_batch(
         self,
         task_indices: list[int],
+        batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
-        """Run a batch of trajectories.
+        """Run a batch of tool trajectories with lockstep batched generation.
+
+        All trajectories advance one step together. Uses
+        generate_with_tools_batch() when the backend supports function calling
+        and tools are available, otherwise falls back to generate_chat_batch().
 
         Args:
             task_indices: List of task indices to run.
-            progress_callback: Optional callback(current, total) for progress.
+            batch_size: Maximum trajectories per lockstep batch. When set,
+                task_indices are chunked and each chunk is processed
+                independently. None means all tasks in one batch.
+            progress_callback: Optional callback(completed, total) for progress.
 
         Returns:
             BatchResult with all trajectory results and aggregate metrics.
         """
-        trajectory_results: list[TrajectoryResult] = []
+        if batch_size is not None and len(task_indices) > batch_size:
+            return _run_in_chunks(
+                lambda indices, cb: self.run_batch(indices, progress_callback=cb),
+                task_indices,
+                batch_size,
+                progress_callback,
+            )
 
-        for i, task_index in enumerate(task_indices):
-            if progress_callback:
-                progress_callback(i, len(task_indices))
+        if not task_indices:
+            return _aggregate_results([])
 
+        max_steps = self.environment.spec.max_steps or 100
+        total = len(task_indices)
+        result_slots: list[TrajectoryResult | None] = [None] * total
+
+        # Phase 1: Reset all tasks
+        active: list[_ActiveTrajectory] = []
+        for pos, task_index in enumerate(task_indices):
             try:
-                result = self.run_trajectory(task_index)
-                trajectory_results.append(result)
-            except Exception as e:
-                logger.error(f"Error running task {task_index}: {e}")
-                # Create failed result
-                trajectory_results.append(
-                    TrajectoryResult(
-                        trajectory=Trajectory(
-                            episode_id=f"error_{task_index}",
-                            initial_state=State(
-                                observation=AgentObservation(prompt=""),
-                                hidden=None,
-                                metadata=self._dummy_metadata(task_index),
-                            ),
-                        ),
-                        total_reward=0.0,
-                        success=False,
-                        metadata={"error": str(e), "task_index": task_index},
+                state, reset_info = self.environment.reset(
+                    options={"task_index": task_index}
+                )
+                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                active.append(
+                    _ActiveTrajectory(
+                        position=pos,
+                        task_index=task_index,
+                        state=state,
+                        reset_info=reset_info,
+                        trajectory=trajectory,
                     )
                 )
+            except Exception as e:
+                logger.error(f"Error resetting task {task_index}: {e}")
+                result_slots[pos] = TrajectoryResult(
+                    trajectory=Trajectory(
+                        episode_id=f"error_{task_index}",
+                        initial_state=State(
+                            observation=AgentObservation(prompt=""),
+                            hidden=None,
+                            metadata=_error_metadata(task_index),
+                        ),
+                    ),
+                    total_reward=0.0,
+                    success=False,
+                    metadata={"error": str(e), "task_index": task_index},
+                )
+
+        reset_errors = total - len(active)
+
+        # Phase 2: Lockstep generation
+        while True:
+            remaining = [t for t in active if not t.done]
+            if not remaining:
+                break
+
+            messages_batch = [self._build_messages(t.state) for t in remaining]
+
+            # Use tool calling if tools available and backend supports it
+            first_obs = remaining[0].state.observation
+            tools = list(first_obs.available_tools)
+            use_tools = tools and self.backend.capabilities.supports_function_calling
+
+            if use_tools:
+                gen_results = self.backend.generate_with_tools_batch(
+                    messages_batch, tools, self.sampling_params
+                )
+            else:
+                gen_results = self.backend.generate_chat_batch(
+                    messages_batch, self.sampling_params
+                )
+
+            for t, gen_result in zip(remaining, gen_results):
+                try:
+                    action = gen_result.to_agent_action()
+                    step_result = self.environment.step(t.state, action)
+
+                    transition: Transition[Any, Any, Any] = Transition(
+                        state=t.state,
+                        action=action,
+                        next_state=step_result.next_state,
+                        rewards=step_result.rewards,
+                        info={
+                            "generation": {
+                                "prompt_tokens": gen_result.prompt_tokens,
+                                "completion_tokens": gen_result.completion_tokens,
+                                "finish_reason": gen_result.finish_reason.name,
+                                "has_tool_calls": gen_result.has_tool_calls,
+                                "num_tool_calls": len(gen_result.tool_calls),
+                            },
+                            "step": step_result.info,
+                        },
+                    )
+                    t.trajectory.add_transition(transition)
+                    t.state = step_result.next_state
+                    t.step_count += 1
+
+                    if step_result.done or t.step_count >= max_steps:
+                        t.done = True
+                except Exception as e:
+                    logger.error(f"Error stepping task {t.task_index}: {e}")
+                    t.done = True
+                    t.error = str(e)
+
+            if progress_callback:
+                done_count = reset_errors + sum(1 for t in active if t.done)
+                progress_callback(done_count, total)
+
+        # Phase 3: Build results
+        for t in active:
+            result_slots[t.position] = _finalize_trajectory(t)
 
         if progress_callback:
-            progress_callback(len(task_indices), len(task_indices))
+            progress_callback(total, total)
 
-        # Compute aggregate metrics
-        num_successful = sum(1 for r in trajectory_results if r.success)
-        success_rate = num_successful / len(trajectory_results) if trajectory_results else 0.0
-
-        total_rewards = [r.total_reward for r in trajectory_results]
-        mean_reward = sum(total_rewards) / len(total_rewards) if total_rewards else 0.0
-
-        return BatchResult(
-            trajectory_results=trajectory_results,
-            success_rate=success_rate,
-            mean_reward=mean_reward,
-            metadata={
-                "num_trajectories": len(trajectory_results),
-                "num_successful": num_successful,
-            },
-        )
-
-    def _dummy_metadata(self, task_index: int) -> Any:
-        """Create dummy metadata for error cases."""
-        from llenvs.core.state import StateMetadata
-
-        return StateMetadata(
-            step=0,
-            episode_id=f"error_{task_index}",
-            is_terminal=True,
-            info={"error": True},
-        )
+        return _aggregate_results([r for r in result_slots if r is not None])
 
 
 def run_tool_evaluation(
@@ -671,6 +1140,7 @@ def run_tool_evaluation(
     system_prompt: str | None = None,
     prompt_template: PromptTemplate | None = None,
     model_profile: ModelProfile | None = None,
+    batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchResult:
     """Convenience function to run a tool-aware evaluation.
@@ -685,6 +1155,7 @@ def run_tool_evaluation(
         system_prompt: Optional system prompt.
         prompt_template: Optional prompt template for wrapping questions.
         model_profile: Optional model profile for model-specific adjustments.
+        batch_size: Maximum trajectories per lockstep batch.
         progress_callback: Optional progress callback.
 
     Returns:
@@ -705,7 +1176,9 @@ def run_tool_evaluation(
         model_profile=model_profile,
     )
 
-    return runner.run_batch(task_indices, progress_callback=progress_callback)
+    return runner.run_batch(
+        task_indices, batch_size=batch_size, progress_callback=progress_callback,
+    )
 
 
 @dataclass
@@ -1096,74 +1569,279 @@ class SegmentedTrajectoryRunner:
         task_indices: list[int],
         step_callback: Callable[[StepResult[Any, Any]], str | ForceAction | None] | None = None,
         max_steps: int | None = None,
+        batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> BatchResult:
-        """Run a batch of segmented trajectories.
+        """Run a batch of segmented trajectories with lockstep batched generation.
+
+        All trajectories advance one segment together in each iteration,
+        batching inference calls via generate_segment_batch(). Trajectories
+        that finish generation early drop out of subsequent batches.
 
         Args:
             task_indices: List of task indices to run.
             step_callback: Optional per-step callback (shared across trajectories).
             max_steps: Maximum segment steps per trajectory.
+            batch_size: Maximum trajectories per lockstep batch. When set,
+                task_indices are chunked and each chunk is processed
+                independently. None means all tasks in one batch.
             progress_callback: Optional callback(current, total) for progress.
 
         Returns:
             BatchResult with all trajectory results and aggregate metrics.
         """
-        trajectory_results: list[TrajectoryResult] = []
-
-        for i, task_index in enumerate(task_indices):
-            if progress_callback:
-                progress_callback(i, len(task_indices))
-
-            try:
-                result = self.run_trajectory(
-                    task_index,
-                    max_steps=max_steps,
+        if batch_size is not None and len(task_indices) > batch_size:
+            return _run_in_chunks(
+                lambda indices, cb: self.run_batch(
+                    indices,
                     step_callback=step_callback,
-                )
-                trajectory_results.append(result)
-            except Exception as e:
-                logger.error(f"Error running task {task_index}: {e}")
-                from llenvs.core.state import StateMetadata
+                    max_steps=max_steps,
+                    progress_callback=cb,
+                ),
+                task_indices,
+                batch_size,
+                progress_callback,
+            )
 
-                trajectory_results.append(
-                    TrajectoryResult(
-                        trajectory=Trajectory(
-                            episode_id=f"error_{task_index}",
-                            initial_state=State(
-                                observation=TextObservation(prompt=""),
-                                hidden=None,
-                                metadata=StateMetadata(
-                                    step=0,
-                                    episode_id=f"error_{task_index}",
-                                    is_terminal=True,
-                                    info={"error": True},
-                                ),
-                            ),
-                        ),
-                        total_reward=0.0,
-                        success=False,
-                        metadata={"error": str(e), "task_index": task_index},
+        if not task_indices:
+            return _aggregate_results([])
+
+        env = self.environment
+        strategy = self._select_strategy()
+        max_steps = max_steps or 1000
+        total = len(task_indices)
+        result_slots: list[TrajectoryResult | None] = [None] * total
+
+        # Phase 1: Reset all tasks
+        active: list[_ActiveSegmentedTrajectory] = []
+        for pos, task_index in enumerate(task_indices):
+            try:
+                state, reset_info = env.reset(options={"task_index": task_index})
+                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                messages = self._build_messages(state)
+                active.append(
+                    _ActiveSegmentedTrajectory(
+                        position=pos,
+                        task_index=task_index,
+                        state=state,
+                        reset_info=reset_info,
+                        trajectory=trajectory,
+                        messages=messages,
                     )
                 )
+            except Exception as e:
+                logger.error(f"Error resetting task {task_index}: {e}")
+                result_slots[pos] = TrajectoryResult(
+                    trajectory=Trajectory(
+                        episode_id=f"error_{task_index}",
+                        initial_state=State(
+                            observation=TextObservation(prompt=""),
+                            hidden=None,
+                            metadata=_error_metadata(task_index),
+                        ),
+                    ),
+                    total_reward=0.0,
+                    success=False,
+                    metadata={"error": str(e), "task_index": task_index},
+                )
+
+        reset_errors = total - len(active)
+
+        # Phase 2: Lockstep segment generation
+        while True:
+            # Separate trajectories needing generation from those with forced segments
+            need_gen: list[_ActiveSegmentedTrajectory] = []
+            have_forced: list[_ActiveSegmentedTrajectory] = []
+            for t in active:
+                if t.done or t.generation_done:
+                    continue
+                if t.forced_segment is not None:
+                    have_forced.append(t)
+                else:
+                    need_gen.append(t)
+
+            if not need_gen and not have_forced:
+                break
+
+            # Batch generate for trajectories needing generation
+            gen_map: dict[int, tuple[str, str, GenerationResult]] = {}
+            if need_gen:
+                contexts = [
+                    SegmentContext(
+                        messages=t.messages,
+                        accumulated_text=t.accumulated,
+                        buffer=t.buffer,
+                    )
+                    for t in need_gen
+                ]
+                seg_results = strategy.generate_segment_batch(
+                    contexts, self.sampling_params
+                )
+                for t, seg_result in zip(need_gen, seg_results):
+                    gen_map[id(t)] = seg_result
+
+            # Process all active trajectories this round
+            for t in need_gen + have_forced:
+                try:
+                    if t.forced_segment is not None:
+                        segment = t.forced_segment
+                        t.forced_segment = None
+                        t.buffer = ""
+                        is_forced = True
+                        gen_result = _BUFFER_ONLY_RESULT
+                    else:
+                        segment, t.buffer, gen_result = gen_map[id(t)]
+                        is_forced = False
+                        if not segment:
+                            t.generation_done = True
+                            continue
+
+                    # Step the environment
+                    action = TextAction(text=segment)
+                    step_result = env.step(t.state, action)
+
+                    # Build transition info
+                    if is_forced:
+                        trans_info: dict[str, Any] = {
+                            "forced": True,
+                            "step": step_result.info,
+                        }
+                    else:
+                        trans_info = {
+                            "generation": {
+                                "prompt_tokens": gen_result.prompt_tokens,
+                                "completion_tokens": gen_result.completion_tokens,
+                                "finish_reason": gen_result.finish_reason.name,
+                            },
+                            "step": step_result.info,
+                        }
+
+                    transition: Transition[Any, Any, Any] = Transition(
+                        state=t.state,
+                        action=action,
+                        next_state=step_result.next_state,
+                        rewards=step_result.rewards,
+                        info=trans_info,
+                    )
+                    t.trajectory.add_transition(transition)
+
+                    t.accumulated += segment
+                    t.state = step_result.next_state
+                    t.step_count += 1
+
+                    if step_result.done:
+                        t.done = True
+                        continue
+
+                    # Handle step_callback
+                    if step_callback is not None:
+                        feedback = step_callback(step_result)
+                        if feedback is COMPLETE:
+                            t.complete_early = True
+                            t.generation_done = True
+                            continue
+                        elif isinstance(feedback, ForceAction):
+                            t.forced_segment = feedback.text
+                        elif feedback is not None:
+                            t.messages.append(
+                                ChatMessage(role="assistant", content=t.accumulated)
+                            )
+                            t.messages.append(
+                                ChatMessage(role="user", content=feedback)
+                            )
+                            t.accumulated = ""
+                            t.buffer = ""
+
+                    # Check if generation is done
+                    if not is_forced and strategy.is_generation_done(gen_result, t.buffer):
+                        t.generation_done = True
+
+                    if t.step_count >= max_steps:
+                        t.generation_done = True
+
+                except Exception as e:
+                    logger.error(f"Error stepping task {t.task_index}: {e}")
+                    t.done = True
+                    t.error = str(e)
+
+            if progress_callback:
+                done_count = reset_errors + sum(
+                    1 for t in active if t.done or t.generation_done
+                )
+                progress_callback(done_count, total)
+
+        # Phase 3: Buffer drain
+        for t in active:
+            if t.buffer and not t.done and not t.complete_early:
+                try:
+                    action = TextAction(text=t.buffer)
+                    step_result = env.step(t.state, action)
+
+                    transition = Transition(
+                        state=t.state,
+                        action=action,
+                        next_state=step_result.next_state,
+                        rewards=step_result.rewards,
+                        info={"step": step_result.info},
+                    )
+                    t.trajectory.add_transition(transition)
+
+                    t.accumulated += t.buffer
+                    t.state = step_result.next_state
+                    t.step_count += 1
+                    t.buffer = ""
+
+                    if step_result.done:
+                        t.done = True
+                except Exception as e:
+                    logger.error(f"Error draining buffer for task {t.task_index}: {e}")
+                    t.done = True
+                    t.error = str(e)
+
+        # Phase 4: Complete remainder for COMPLETE callbacks
+        for t in active:
+            if t.complete_early and not t.done:
+                try:
+                    state, terminal = self._complete_remainder(
+                        env, t.trajectory, t.state, t.messages, t.accumulated,
+                    )
+                    t.state = state
+                    if terminal:
+                        t.done = True
+                except Exception as e:
+                    logger.error(f"Error completing task {t.task_index}: {e}")
+                    t.done = True
+                    t.error = str(e)
+
+        # Phase 5: Finalize non-terminal trajectories
+        for t in active:
+            if not t.done and t.error is None:
+                try:
+                    finalize_result = env.finalize(t.state)
+
+                    transition = Transition(
+                        state=t.state,
+                        action=TextAction(text=""),
+                        next_state=finalize_result.next_state,
+                        rewards=finalize_result.rewards,
+                        info={"step": finalize_result.info, "finalize": True},
+                    )
+                    t.trajectory.add_transition(transition)
+                    t.state = finalize_result.next_state
+                    t.done = True
+                except Exception as e:
+                    logger.error(f"Error finalizing task {t.task_index}: {e}")
+                    t.done = True
+                    t.error = str(e)
+
+        # Phase 6: Build results
+        for t in active:
+            result_slots[t.position] = _finalize_trajectory(t)
 
         if progress_callback:
-            progress_callback(len(task_indices), len(task_indices))
+            progress_callback(total, total)
 
-        num_successful = sum(1 for r in trajectory_results if r.success)
-        success_rate = num_successful / len(trajectory_results) if trajectory_results else 0.0
-        total_rewards = [r.total_reward for r in trajectory_results]
-        mean_reward = sum(total_rewards) / len(total_rewards) if total_rewards else 0.0
-
-        return BatchResult(
-            trajectory_results=trajectory_results,
-            success_rate=success_rate,
-            mean_reward=mean_reward,
-            metadata={
-                "num_trajectories": len(trajectory_results),
-                "num_successful": num_successful,
-            },
-        )
+        return _aggregate_results([r for r in result_slots if r is not None])
 
 
 def run_segmented_evaluation(
@@ -1179,6 +1857,7 @@ def run_segmented_evaluation(
     step_callback: Callable[[StepResult[Any, Any]], str | ForceAction | None] | None = None,
     max_steps: int | None = None,
     chunk_max_tokens: int = 256,
+    batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> BatchResult:
     """Convenience function to run a segmented evaluation.
@@ -1196,6 +1875,7 @@ def run_segmented_evaluation(
         step_callback: Optional per-step callback for observation injection.
         max_steps: Maximum segment steps per trajectory.
         chunk_max_tokens: Max tokens per chunk for boundary strategies.
+        batch_size: Maximum trajectories per lockstep batch.
         progress_callback: Optional progress callback.
 
     Returns:
@@ -1221,5 +1901,6 @@ def run_segmented_evaluation(
         task_indices,
         step_callback=step_callback,
         max_steps=max_steps,
+        batch_size=batch_size,
         progress_callback=progress_callback,
     )

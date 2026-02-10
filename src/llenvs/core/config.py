@@ -53,11 +53,13 @@ class ModelConfig:
     Attributes:
         backend: Backend type (vllm, openai, anthropic, openrouter).
         model: Model path or name.
+        max_concurrency: Maximum concurrent requests for API backends.
         params: Backend-specific parameters.
     """
 
     backend: str = "vllm"
     model: str = ""
+    max_concurrency: int = 64
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -97,6 +99,8 @@ class EvalConfig:
         prompt_template: Global default prompt template name.
         output_dir: Output directory for results.
         limit: Maximum number of tasks per environment.
+        batch_size: Maximum trajectories per batch for run_batch(). None
+            means all trajectories run in a single lockstep batch.
         save_detailed_results: Whether to save per-episode results.
     """
 
@@ -108,6 +112,7 @@ class EvalConfig:
     prompt_template: str | None = None
     output_dir: str = "./results"
     limit: int | None = None
+    batch_size: int | None = None
     save_detailed_results: bool = True
 
     @classmethod
@@ -165,6 +170,7 @@ class EvalConfig:
         model = ModelConfig(
             backend=model_data.get("backend", "vllm"),
             model=model_data.get("model", model_data.get("path", "")),
+            max_concurrency=model_data.get("max_concurrency", 64),
             params=model_data.get("params", {}),
         )
 
@@ -187,6 +193,7 @@ class EvalConfig:
             prompt_template=data.get("prompt_template"),
             output_dir=data.get("output_dir", "./results"),
             limit=data.get("limit"),
+            batch_size=data.get("batch_size"),
             save_detailed_results=data.get("save_detailed_results", True),
         )
 
@@ -221,11 +228,12 @@ class EvalConfig:
                 d["prompts"] = env.prompts
             env_dicts.append(d)
 
-        return {
+        result: dict[str, Any] = {
             "environments": env_dicts,
             "model": {
                 "backend": self.model.backend,
                 "model": self.model.model,
+                "max_concurrency": self.model.max_concurrency,
                 "params": self.model.params,
             },
             "inference": {
@@ -242,6 +250,9 @@ class EvalConfig:
             "limit": self.limit,
             "save_detailed_results": self.save_detailed_results,
         }
+        if self.batch_size is not None:
+            result["batch_size"] = self.batch_size
+        return result
 
 
 class EnvironmentFactory:
@@ -344,17 +355,29 @@ class BackendFactory:
         elif backend_type == "openai":
             from llenvs.inference.backends.api import OpenAIBackend
 
-            return OpenAIBackend(model=config.model, **config.params)
+            return OpenAIBackend(
+                model=config.model,
+                max_concurrency=config.max_concurrency,
+                **config.params,
+            )
 
         elif backend_type == "anthropic":
             from llenvs.inference.backends.api import AnthropicBackend
 
-            return AnthropicBackend(model=config.model, **config.params)
+            return AnthropicBackend(
+                model=config.model,
+                max_concurrency=config.max_concurrency,
+                **config.params,
+            )
 
         elif backend_type == "openrouter":
             from llenvs.inference.backends.api import OpenRouterBackend
 
-            return OpenRouterBackend(model=config.model, **config.params)
+            return OpenRouterBackend(
+                model=config.model,
+                max_concurrency=config.max_concurrency,
+                **config.params,
+            )
 
         else:
             raise ValueError(f"Unknown backend type: {backend_type}")

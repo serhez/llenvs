@@ -1,5 +1,7 @@
 """Tests for text segmentation and segmented environments."""
 
+import json
+
 import pytest
 from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
 from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
@@ -9,12 +11,20 @@ from llenvs.core.segmentation import (
     LineSegmenter,
     PatternSegmenter,
     CompositeSegmenter,
-    SemanticSegmenter,
+    LLMSegmenter,
     TokenSegmenter,
+    default_segment_parser,
 )
 from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
     SegmentedHidden,
+)
+from llenvs.inference.protocol import (
+    BackendCapabilities,
+    ChatMessage,
+    GenerationResult,
+    ModelBackend,
+    SamplingParams,
 )
 
 
@@ -717,12 +727,285 @@ class TestSegmenterProtocol:
         segmenter = CompositeSegmenter(segmenters=(SentenceSegmenter(),))
         assert isinstance(segmenter, Segmenter)
 
-    def test_semantic_segmenter_is_segmenter(self):
-        """Test SemanticSegmenter implements Segmenter."""
-        segmenter = SemanticSegmenter()
+    def test_llm_segmenter_is_segmenter(self):
+        """Test LLMSegmenter implements Segmenter."""
+        backend = _MockLLMBackend(response='["text"]')
+        segmenter = LLMSegmenter(backend=backend)
         assert isinstance(segmenter, Segmenter)
 
     def test_token_segmenter_is_segmenter(self):
         """Test TokenSegmenter implements Segmenter."""
         segmenter = TokenSegmenter(tokenizer=_CharTokenizer(), token_size=4)
         assert isinstance(segmenter, Segmenter)
+
+
+# ---------------------------------------------------------------------------
+# Mock backend for LLMSegmenter tests
+# ---------------------------------------------------------------------------
+
+
+class _MockLLMBackend(ModelBackend):
+    """Minimal ModelBackend that returns a canned response."""
+
+    def __init__(self, response: str) -> None:
+        self._response = response
+        self.last_messages: list[ChatMessage] | None = None
+        self.last_params: SamplingParams | None = None
+
+    @property
+    def capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(supports_chat=True)
+
+    @property
+    def model_name(self) -> str:
+        return "mock"
+
+    def generate(
+        self,
+        prompts: list[str],
+        params: SamplingParams,
+    ) -> list[GenerationResult]:
+        return [GenerationResult(text=self._response) for _ in prompts]
+
+    def generate_chat(
+        self,
+        messages: list[ChatMessage],
+        params: SamplingParams,
+    ) -> GenerationResult:
+        self.last_messages = messages
+        self.last_params = params
+        return GenerationResult(text=self._response)
+
+
+# ---------------------------------------------------------------------------
+# TestLLMSegmenter
+# ---------------------------------------------------------------------------
+
+
+class TestLLMSegmenter:
+    """Tests for LLMSegmenter."""
+
+    def test_basic_segmentation(self):
+        """Mock backend returns valid JSON segments, verify correct mapping."""
+        original = "First, I add the numbers. Then I get the result."
+        llm_response = json.dumps(
+            ["First, I add the numbers.", "Then I get the result."]
+        )
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(backend=backend)
+
+        segments = segmenter.segment(original)
+
+        assert len(segments) == 2
+        assert "First, I add the numbers." in segments[0]
+        assert "Then I get the result." in segments[1]
+        assert "".join(segments) == original
+
+    def test_empty_text(self):
+        """Empty text returns []."""
+        backend = _MockLLMBackend(response="[]")
+        segmenter = LLMSegmenter(backend=backend)
+
+        assert segmenter.segment("") == []
+
+    def test_whitespace_tolerance(self):
+        """LLM segments have trimmed whitespace, greedy match still works."""
+        original = "  Hello world.  Goodbye world.  "
+        # LLM trims, but greedy match should recover positions in original
+        llm_response = json.dumps(["Hello world.", "Goodbye world."])
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(backend=backend)
+
+        segments = segmenter.segment(original)
+
+        assert len(segments) == 2
+        assert "Hello world." in segments[0]
+        assert "Goodbye world." in segments[1]
+        # Segments should reconstruct back to original
+        assert "".join(segments) == original
+
+    def test_malformed_json_fallback(self):
+        """Invalid JSON returns [original_text]."""
+        original = "Some text here."
+        backend = _MockLLMBackend(response="not json at all")
+        segmenter = LLMSegmenter(backend=backend)
+
+        segments = segmenter.segment(original)
+
+        assert segments == [original]
+
+    def test_markdown_code_block_stripping(self):
+        """JSON wrapped in triple backticks still parses."""
+        original = "Step one. Step two."
+        llm_response = '```json\n["Step one.", "Step two."]\n```'
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(backend=backend)
+
+        segments = segmenter.segment(original)
+
+        assert len(segments) == 2
+        assert "".join(segments) == original
+
+    def test_json_embedded_in_text(self):
+        """Parser finds [...] within surrounding prose."""
+        original = "Alpha. Beta."
+        llm_response = 'Here are the segments:\n["Alpha.", "Beta."]\nDone.'
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(backend=backend)
+
+        segments = segmenter.segment(original)
+
+        assert len(segments) == 2
+        assert "".join(segments) == original
+
+    def test_custom_prompt_template(self):
+        """Custom template with {raw_generation} is used."""
+        original = "Hello."
+        llm_response = json.dumps(["Hello."])
+        backend = _MockLLMBackend(response=llm_response)
+        custom_template = "CUSTOM: {raw_generation}"
+        segmenter = LLMSegmenter(backend=backend, prompt_template=custom_template)
+
+        segmenter.segment(original)
+
+        # Verify the backend received the formatted custom template
+        assert backend.last_messages is not None
+        user_msgs = [m for m in backend.last_messages if m.role == "user"]
+        assert len(user_msgs) == 1
+        assert user_msgs[0].content == "CUSTOM: Hello."
+
+    def test_custom_parser(self):
+        """Custom parser callable is invoked with (original, llm_response)."""
+        original = "Some text."
+        llm_response = "anything"
+        backend = _MockLLMBackend(response=llm_response)
+
+        calls: list[tuple[str, str]] = []
+
+        def my_parser(orig: str, resp: str) -> list[str]:
+            calls.append((orig, resp))
+            return [orig]
+
+        segmenter = LLMSegmenter(backend=backend, parser=my_parser)
+        segments = segmenter.segment(original)
+
+        assert calls == [(original, llm_response)]
+        assert segments == [original]
+
+    def test_custom_system_prompt(self):
+        """Verify system message in chat messages."""
+        original = "Text."
+        llm_response = json.dumps(["Text."])
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(
+            backend=backend, system_prompt="Custom system prompt"
+        )
+
+        segmenter.segment(original)
+
+        assert backend.last_messages is not None
+        system_msgs = [m for m in backend.last_messages if m.role == "system"]
+        assert len(system_msgs) == 1
+        assert system_msgs[0].content == "Custom system prompt"
+
+    def test_no_system_prompt(self):
+        """system_prompt=None, only user message sent."""
+        original = "Text."
+        llm_response = json.dumps(["Text."])
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(backend=backend, system_prompt=None)
+
+        segmenter.segment(original)
+
+        assert backend.last_messages is not None
+        system_msgs = [m for m in backend.last_messages if m.role == "system"]
+        assert len(system_msgs) == 0
+
+    def test_find_boundary_raises(self):
+        """find_boundary raises NotImplementedError."""
+        backend = _MockLLMBackend(response="[]")
+        segmenter = LLMSegmenter(backend=backend)
+
+        with pytest.raises(NotImplementedError):
+            segmenter.find_boundary("some text")
+
+    def test_protocol_compliance(self):
+        """isinstance(segmenter, Segmenter) is True."""
+        backend = _MockLLMBackend(response="[]")
+        segmenter = LLMSegmenter(backend=backend)
+
+        assert isinstance(segmenter, Segmenter)
+
+    def test_segments_reconstruct_original(self):
+        """''.join(segments) == original for well-formed inputs."""
+        original = "First sentence. Second sentence. Third sentence."
+        llm_response = json.dumps(
+            ["First sentence.", "Second sentence.", "Third sentence."]
+        )
+        backend = _MockLLMBackend(response=llm_response)
+        segmenter = LLMSegmenter(backend=backend)
+
+        segments = segmenter.segment(original)
+
+        assert "".join(segments) == original
+
+
+# ---------------------------------------------------------------------------
+# TestDefaultSegmentParser
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultSegmentParser:
+    """Unit tests for default_segment_parser."""
+
+    def test_exact_match_segments(self):
+        """Segments that exactly match substrings."""
+        original = "Hello world. Goodbye world."
+        llm_response = json.dumps(["Hello world.", "Goodbye world."])
+
+        segments = default_segment_parser(original, llm_response)
+
+        assert len(segments) == 2
+        assert "Hello world." in segments[0]
+        assert "Goodbye world." in segments[1]
+
+    def test_concatenation_invariant(self):
+        """Joined segments equal original."""
+        original = "Alpha. Beta. Gamma."
+        llm_response = json.dumps(["Alpha.", "Beta.", "Gamma."])
+
+        segments = default_segment_parser(original, llm_response)
+
+        assert "".join(segments) == original
+
+    def test_code_block_stripping(self):
+        """Markdown fences removed before parsing."""
+        original = "One. Two."
+        llm_response = '```\n["One.", "Two."]\n```'
+
+        segments = default_segment_parser(original, llm_response)
+
+        assert len(segments) == 2
+        assert "".join(segments) == original
+
+    def test_invalid_json_fallback(self):
+        """Returns [original] for invalid JSON."""
+        original = "Some text."
+
+        segments = default_segment_parser(original, "{{broken")
+
+        assert segments == [original]
+
+    def test_non_string_array_fallback(self):
+        """Returns [original] for non-string array."""
+        original = "Some text."
+
+        segments = default_segment_parser(original, "[1, 2, 3]")
+
+        assert segments == [original]
+
+    def test_empty_segments(self):
+        """Returns [] for empty original."""
+        segments = default_segment_parser("", "[]")
+
+        assert segments == []

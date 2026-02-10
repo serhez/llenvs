@@ -62,7 +62,8 @@ from llenvs.core.segmentation import (
     PatternSegmenter,
     CompositeSegmenter,
     TokenSegmenter,
-    SemanticSegmenter,
+    LLMSegmenter,
+    default_segment_parser,
 )
 from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
@@ -143,7 +144,8 @@ __all__ = [
     "PatternSegmenter",
     "CompositeSegmenter",
     "TokenSegmenter",
-    "SemanticSegmenter",
+    "LLMSegmenter",
+    "default_segment_parser",
     "SegmentedEnvironment",
     "SegmentedHidden",
 ]

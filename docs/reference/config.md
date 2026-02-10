@@ -71,6 +71,7 @@ backend = OpenAIBackend(
     api_key="sk-...",         # Optional, uses OPENAI_API_KEY env var
     organization="org-...",   # Optional
     base_url=None,            # Custom endpoint
+    max_concurrency=64,       # Max concurrent batch requests
 )
 ```
 
@@ -82,6 +83,7 @@ from llenvs.inference.backends import AnthropicBackend
 backend = AnthropicBackend(
     model="claude-sonnet-4-20250514",
     api_key="...",            # Optional, uses ANTHROPIC_API_KEY env var
+    max_concurrency=64,       # Max concurrent batch requests
 )
 ```
 
@@ -109,6 +111,7 @@ backend = OpenRouterBackend(
     api_key="...",            # Optional, uses OPENROUTER_API_KEY env var
     site_url="https://mysite.com",
     app_name="MyApp",
+    max_concurrency=64,       # Max concurrent batch requests
 )
 ```
 
@@ -116,10 +119,11 @@ backend = OpenRouterBackend(
 
 | Backend | Logprobs | Prefix Continuation | Batching | Tool Calling |
 |---------|----------|---------------------|----------|--------------|
-| vLLM | ✅ | ✅ | ✅ | ✅ |
-| OpenAI | ✅ | ❌ | ❌ | ✅ |
-| Anthropic | ❌ | ✅ (prefill) | ❌ | ✅ |
-| OpenRouter | varies | ❌ | ❌ | varies |
+| vLLM | ✅ | ✅ | ✅ (GPU) | ✅ |
+| HuggingFace | ✅ | ✅ | ✅ (GPU) | ❌ |
+| OpenAI | ✅ | ❌ | ✅ (concurrent) | ✅ |
+| Anthropic | ❌ | ✅ (prefill) | ✅ (concurrent) | ✅ |
+| OpenRouter | varies | ❌ | ✅ (concurrent) | varies |
 
 Check programmatically:
 

@@ -55,6 +55,7 @@ class TestModelConfig:
         assert config.backend == "vllm"
         assert config.model == ""
         assert config.params == {}
+        assert config.max_concurrency == 64
 
     def test_full_config(self):
         """Test with all values set."""
@@ -66,6 +67,11 @@ class TestModelConfig:
 
         assert config.backend == "openai"
         assert config.model == "gpt-4o"
+
+    def test_max_concurrency_custom(self):
+        """Test custom max_concurrency."""
+        config = ModelConfig(backend="openai", model="gpt-4o", max_concurrency=16)
+        assert config.max_concurrency == 16
 
 
 class TestInferenceConfig:
@@ -97,6 +103,23 @@ class TestInferenceConfig:
 
 class TestEvalConfig:
     """Tests for EvalConfig."""
+
+    def test_batch_size_default(self):
+        """Test batch_size defaults to None."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(),
+        )
+        assert config.batch_size is None
+
+    def test_batch_size_custom(self):
+        """Test custom batch_size."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(),
+            batch_size=32,
+        )
+        assert config.batch_size == 32
 
     def test_from_dict_minimal(self):
         """Test creating config from minimal dict."""
@@ -205,6 +228,83 @@ output_dir: ./test_results
         assert data["inference"]["temperature"] == 0.5
         assert data["system_prompt"] == "Test prompt"
         assert data["limit"] == 50
+
+    def test_from_dict_max_concurrency(self):
+        """Test from_dict parses max_concurrency from model section."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "gpt-4o", "max_concurrency": 16},
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.model.max_concurrency == 16
+
+    def test_from_dict_max_concurrency_default(self):
+        """Test from_dict defaults max_concurrency to 64."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "gpt-4o"},
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.model.max_concurrency == 64
+
+    def test_to_dict_max_concurrency(self):
+        """Test to_dict serializes max_concurrency in model section."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(backend="openai", model="gpt-4o", max_concurrency=16),
+        )
+        data = config.to_dict()
+        assert data["model"]["max_concurrency"] == 16
+
+    def test_from_dict_batch_size(self):
+        """Test from_dict parses batch_size."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "gpt-4o"},
+            "batch_size": 32,
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.batch_size == 32
+
+    def test_from_dict_batch_size_default(self):
+        """Test from_dict defaults batch_size to None."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "gpt-4o"},
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.batch_size is None
+
+    def test_to_dict_batch_size(self):
+        """Test to_dict serializes batch_size when set."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(),
+            batch_size=32,
+        )
+        data = config.to_dict()
+        assert data["batch_size"] == 32
+
+    def test_to_dict_batch_size_none(self):
+        """Test to_dict omits batch_size when None."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(),
+        )
+        data = config.to_dict()
+        assert "batch_size" not in data
+
+    def test_roundtrip_with_batch_size_and_max_concurrency(self):
+        """Test roundtrip preserves batch_size and max_concurrency."""
+        original = {
+            "environments": [{"name": "test"}],
+            "model": {"backend": "openai", "model": "gpt-4o", "max_concurrency": 16},
+            "batch_size": 32,
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+        assert result["model"]["max_concurrency"] == 16
+        assert result["batch_size"] == 32
 
     def test_roundtrip(self):
         """Test dict -> config -> dict roundtrip."""
