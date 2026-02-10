@@ -279,6 +279,65 @@ class CompositeSegmenter:
 
 
 @dataclass
+class TokenSegmenter:
+    """Split text into fixed-size token chunks.
+
+    Accepts any tokenizer with encode(str) -> list[int] and decode(list[int]) -> str
+    methods (HuggingFace AutoTokenizer, vLLM tokenizers, tiktoken, etc.).
+
+    Uses prefix decoding to find character boundaries: decodes token prefixes
+    and slices the original text at the decoded length. This guarantees that
+    concatenating segments exactly reconstructs the original text.
+    """
+
+    tokenizer: Any  # Object with encode(str)->list[int], decode(list[int])->str
+    token_size: int = 64
+
+    def segment(self, text: str) -> list[str]:
+        """Split text into token-sized chunks."""
+        if not text:
+            return []
+
+        tokens = self.tokenizer.encode(text)
+        if len(tokens) <= self.token_size:
+            return [text]
+
+        segments = []
+        remaining = text
+        offset = 0
+
+        while offset < len(tokens):
+            chunk_end = min(offset + self.token_size, len(tokens))
+            if chunk_end >= len(tokens):
+                # Last chunk: take all remaining text
+                segments.append(remaining)
+                break
+
+            # Decode prefix up to chunk_end to find the character boundary
+            prefix = self.tokenizer.decode(tokens[:chunk_end])
+            char_boundary = len(prefix)
+
+            segment = text[len(text) - len(remaining):char_boundary]
+            segments.append(segment)
+            remaining = text[char_boundary:]
+            offset = chunk_end
+
+        return segments
+
+    def find_boundary(self, text: str) -> int | None:
+        """Find the first token-chunk boundary."""
+        if not text:
+            return None
+
+        tokens = self.tokenizer.encode(text)
+        if len(tokens) <= self.token_size:
+            return None
+
+        prefix = self.tokenizer.decode(tokens[:self.token_size])
+        return len(prefix)
+
+
+@dataclass
 class SemanticSegmenter:
     """LLM-based segmentation for logical boundaries.
 

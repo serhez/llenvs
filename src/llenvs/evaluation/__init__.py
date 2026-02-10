@@ -1,12 +1,22 @@
 """Evaluation orchestration and metrics."""
 
 from llenvs.evaluation.runner import (
+    COMPLETE,
+    ForceAction,
     TrajectoryRunner,
     TrajectoryResult,
     ToolTrajectoryRunner,
+    SegmentedTrajectoryRunner,
     BatchResult,
     run_evaluation,
     run_tool_evaluation,
+    run_segmented_evaluation,
+)
+from llenvs.evaluation.continuation import (
+    ContinuationStrategy,
+    TokenContinuationStrategy,
+    BoundaryContinuationStrategy,
+    select_strategy,
 )
 from llenvs.evaluation.metrics import (
     ContinuousStatistics,
@@ -33,12 +43,21 @@ from llenvs.evaluation.results import (
 
 __all__ = [
     # Runner
+    "COMPLETE",
+    "ForceAction",
     "TrajectoryRunner",
     "TrajectoryResult",
     "ToolTrajectoryRunner",
+    "SegmentedTrajectoryRunner",
     "BatchResult",
     "run_evaluation",
     "run_tool_evaluation",
+    "run_segmented_evaluation",
+    # Continuation strategies
+    "ContinuationStrategy",
+    "TokenContinuationStrategy",
+    "BoundaryContinuationStrategy",
+    "select_strategy",
     # Metrics
     "ContinuousStatistics",
     "BinaryStatistics",

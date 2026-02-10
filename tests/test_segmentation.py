@@ -10,6 +10,7 @@ from llenvs.core.segmentation import (
     PatternSegmenter,
     CompositeSegmenter,
     SemanticSegmenter,
+    TokenSegmenter,
 )
 from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
@@ -232,6 +233,145 @@ class TestCompositeSegmenter:
 
         # Sentence boundary (7) comes before newline boundary
         assert boundary == 7
+
+
+class MockTokenizer:
+    """Character-level tokenizer for testing: one token per character."""
+
+    def encode(self, text: str) -> list[int]:
+        return list(range(len(text)))
+
+    def decode(self, tokens: list[int]) -> str:
+        # Since tokens are just indices 0..N-1, length of tokens = length of text
+        # We need the original text to decode, but this mock just returns
+        # a string of the right length. Tests pass the original text through segment().
+        return "x" * len(tokens)
+
+
+class _CharTokenizer:
+    """Character-level tokenizer that preserves text through encode/decode."""
+
+    def __init__(self) -> None:
+        self._text: str = ""
+
+    def encode(self, text: str) -> list[int]:
+        self._text = text
+        return [ord(c) for c in text]
+
+    def decode(self, tokens: list[int]) -> str:
+        # Decode prefix: use stored text sliced to token length
+        return self._text[:len(tokens)]
+
+
+class TestTokenSegmenter:
+    """Tests for TokenSegmenter."""
+
+    def test_basic_segmentation(self):
+        """Test splitting into expected chunks."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=4)
+        text = "abcdefghij"  # 10 chars -> chunks of 4, 4, 2
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 3
+        assert segments[0] == "abcd"
+        assert segments[1] == "efgh"
+        assert segments[2] == "ij"
+
+    def test_exact_reconstruction(self):
+        """Test that joining segments exactly reconstructs original text."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=3)
+        text = "Hello, world! This is a test."
+
+        segments = segmenter.segment(text)
+
+        assert "".join(segments) == text
+
+    def test_text_shorter_than_token_size(self):
+        """Test text shorter than token_size returns single segment."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=100)
+        text = "short"
+
+        segments = segmenter.segment(text)
+
+        assert segments == ["short"]
+
+    def test_text_exactly_token_size(self):
+        """Test text exactly token_size returns single segment."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=5)
+        text = "exact"
+
+        segments = segmenter.segment(text)
+
+        assert segments == ["exact"]
+
+    def test_empty_text(self):
+        """Test empty text returns empty list."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=4)
+
+        assert segmenter.segment("") == []
+
+    def test_find_boundary_basic(self):
+        """Test find_boundary returns correct character index."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=4)
+        text = "abcdefgh"  # 8 chars, boundary at char 4
+
+        boundary = segmenter.find_boundary(text)
+
+        assert boundary == 4
+
+    def test_find_boundary_no_boundary(self):
+        """Test find_boundary returns None when text fits in one chunk."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=100)
+        text = "short text"
+
+        assert segmenter.find_boundary(text) is None
+
+    def test_find_boundary_empty(self):
+        """Test find_boundary returns None for empty text."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=4)
+
+        assert segmenter.find_boundary("") is None
+
+    def test_protocol_compliance(self):
+        """Test TokenSegmenter implements Segmenter protocol."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=4)
+
+        assert isinstance(segmenter, Segmenter)
+
+    def test_various_chunk_sizes_one(self):
+        """Test token_size=1 produces one segment per character."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=1)
+        text = "abcd"
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 4
+        assert segments == ["a", "b", "c", "d"]
+        assert "".join(segments) == text
+
+    def test_various_chunk_sizes_large(self):
+        """Test token_size=8 with short text."""
+        tokenizer = _CharTokenizer()
+        segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=8)
+        text = "abcdefghijklmnop"  # 16 chars -> 2 chunks of 8
+
+        segments = segmenter.segment(text)
+
+        assert len(segments) == 2
+        assert segments[0] == "abcdefgh"
+        assert segments[1] == "ijklmnop"
+        assert "".join(segments) == text
 
 
 class TestSegmentedHidden:
@@ -580,4 +720,9 @@ class TestSegmenterProtocol:
     def test_semantic_segmenter_is_segmenter(self):
         """Test SemanticSegmenter implements Segmenter."""
         segmenter = SemanticSegmenter()
+        assert isinstance(segmenter, Segmenter)
+
+    def test_token_segmenter_is_segmenter(self):
+        """Test TokenSegmenter implements Segmenter."""
+        segmenter = TokenSegmenter(tokenizer=_CharTokenizer(), token_size=4)
         assert isinstance(segmenter, Segmenter)

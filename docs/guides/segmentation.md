@@ -39,9 +39,206 @@ for i, result in enumerate(results):
 # Step 3: terminal=True, reward=2.0
 ```
 
-## Generation-Time Control
+## Generation-Time Segmentation
 
-Step through segments during generation for intervention:
+`SegmentedTrajectoryRunner` generates one segment at a time, calling `env.step()` after each segment. This enables per-step rewards, intervention, and branching during live generation — unlike replay mode which analyzes a complete response after the fact.
+
+### Basic usage with TokenSegmenter
+
+```python
+from llenvs.core import SegmentedEnvironment, TokenSegmenter
+from llenvs.evaluation import SegmentedTrajectoryRunner, run_segmented_evaluation
+from llenvs.inference.protocol import SamplingParams
+
+base_env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+
+tokenizer = ...  # Any tokenizer with encode/decode
+segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=64)
+env = SegmentedEnvironment(base_env, segmenter)
+
+# Run a single trajectory
+runner = SegmentedTrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=SamplingParams(max_tokens=2048),
+)
+result = runner.run_trajectory(task_index=0)
+print(f"Steps: {len(result.trajectory)}, Success: {result.success}")
+```
+
+### With SentenceSegmenter
+
+For text-pattern segmenters, the runner generates text in chunks and splits at segment boundaries:
+
+```python
+from llenvs.core import SentenceSegmenter
+
+env = SegmentedEnvironment(base_env, SentenceSegmenter())
+
+result = run_segmented_evaluation(
+    environment=env,
+    backend=backend,
+    num_tasks=10,
+)
+print(f"Accuracy: {result.success_rate:.1%}")
+```
+
+### Observation injection with step_callback
+
+Inject feedback between segments to create a multi-turn conversation:
+
+```python
+def reward_feedback(step_result):
+    """Return feedback string or None to continue without feedback."""
+    reward = step_result.rewards.total
+    if reward < 0.5:
+        return f"Score: {reward:.2f}. Please reconsider your approach."
+    return None  # No feedback, continue single assistant turn
+
+result = runner.run_trajectory(
+    task_index=0,
+    step_callback=reward_feedback,
+)
+```
+
+When `step_callback` returns a string, the conversation becomes multi-turn:
+
+```
+[system, user(question)]
+→ assistant: "Step 1: count legs..."     (segments 1-3)
+→ user: "Score: 0.3, reconsider"         (feedback from callback)
+→ assistant: "Actually, let me..."       (segments 4-N)
+```
+
+When callback returns `None` (or no callback is provided), generation continues as a single assistant turn split into segments.
+
+### Early exit with `COMPLETE`
+
+For probing or intervention studies, you can step segment-by-segment until a point of interest, then finish the rest cheaply in one LLM call — all within `run_trajectory()`:
+
+```python
+from llenvs.evaluation import SegmentedTrajectoryRunner, COMPLETE
+
+runner = SegmentedTrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=SamplingParams(max_tokens=2048),
+)
+
+def probe_callback(step_result):
+    """Step 5 segments, then finish in one shot."""
+    if step_result.info.get("segment_index", 0) >= 5:
+        return COMPLETE  # finish remainder in a single LLM call
+    return None
+
+result = runner.run_trajectory(task_index=0, step_callback=probe_callback)
+# result.trajectory has all transitions (probed + remainder)
+# result.success reflects final correctness
+```
+
+The callback can return:
+- `None` — continue generating segment-by-segment (same assistant turn)
+- A feedback string — inject as a user message (new assistant turn)
+- `COMPLETE` — stop segment-by-segment generation, generate the rest in one LLM call, segment it, replay through the environment, and finalize
+- `ForceAction(text)` — use the given text as the next segment instead of calling the backend (see [Forcing actions](#forcing-actions))
+
+If the episode ends naturally before the callback returns `COMPLETE`, the behavior is identical to a normal `run_trajectory()` call.
+
+### Prefix replay
+
+Replay predetermined content through the environment before generation starts. Useful for resuming from a partial trace or studying continuations from a specific prefix.
+
+The `prefix` parameter on `run_trajectory()` accepts two forms:
+
+**Text form** — raw text, auto-segmented and stepped from the reset state:
+
+```python
+result = runner.run_trajectory(
+    task_index=0,
+    prefix="Step 1: count animals.\nStep 2: 2 dogs.",
+)
+# Prefix is segmented via env.segmenter, stepped through env,
+# then generation continues with the prefix as assistant prefill.
+```
+
+**Structured form** — state-action pairs from a prior trajectory, stepped using the provided states:
+
+```python
+# Run an initial trajectory
+old_result = runner.run_trajectory(task_index=0)
+
+# Extract the first 5 state-action pairs
+prefix_pairs = [
+    (t.state, t.action)
+    for t in old_result.trajectory.transitions[:5]
+]
+
+# Resume from that prefix
+result = runner.run_trajectory(task_index=0, prefix=prefix_pairs)
+```
+
+Both forms:
+- Reset the environment normally, then step each prefix action through it
+- Record transitions with `info["replayed"] = True`
+- Do **not** invoke `step_callback` during replay
+- Do **not** count prefix steps toward `max_steps`
+- Set `result.metadata["prefix_steps"]` to the number of replayed steps
+
+The text form derives state from each step for the next step. The structured form uses the **provided** state for each `env.step()` call, allowing exact replay of non-deterministic trajectories.
+
+Prefix + one-shot completion:
+
+```python
+result = runner.run_trajectory(
+    task_index=0,
+    prefix="My partial reasoning trace...",
+    step_callback=lambda _: COMPLETE,
+)
+```
+
+### Forcing actions
+
+Override generation at specific steps with predetermined text using `ForceAction`:
+
+```python
+from llenvs.evaluation import ForceAction
+
+def my_callback(step_result):
+    if step_result.next_state.hidden.segment_index == 3:
+        return ForceAction("Therefore, x = 42.")
+    return None
+
+result = runner.run_trajectory(task_index=0, step_callback=my_callback)
+```
+
+When `ForceAction` is returned, the runner:
+- Uses the provided text as the next segment (no backend call)
+- Clears the buffer (stale after context change)
+- Records the transition with `info["forced"] = True`
+- Includes the forced text in the accumulated context for subsequent generation
+
+`ForceAction` composes with other callback returns — you can alternate between forcing actions, injecting feedback, and continuing normally:
+
+```python
+def complex_callback(step_result):
+    idx = step_result.next_state.hidden.segment_index
+    if idx == 2:
+        return ForceAction("Injected reasoning step.")
+    if idx == 5:
+        return COMPLETE
+    return None
+```
+
+### Continuation strategies
+
+The runner auto-selects the appropriate strategy based on segmenter type:
+
+- **`TokenContinuationStrategy`** — For `TokenSegmenter`: sets `max_tokens = token_size`, each generation call produces exactly one segment.
+- **`BoundaryContinuationStrategy`** — For `SentenceSegmenter`, `LineSegmenter`, `PatternSegmenter`: generates text in chunks, uses `find_boundary()` to detect segment boundaries, buffers overflow.
+
+### Manual generation-time control
+
+For custom generation loops without the runner:
 
 ```python
 env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -112,6 +309,31 @@ segmenter = PatternSegmenter(patterns=(
     r"(?:^|\s)\d+[.:]\s",             # Numbered steps
     r"(?:^|\s)(?:So|Thus|Hence),?\s",  # Conclusions
 ))
+```
+
+### TokenSegmenter
+
+Splits text into fixed-size token chunks. Accepts any tokenizer with `encode(str) -> list[int]` and `decode(list[int]) -> str` methods:
+
+```python
+from llenvs.core import TokenSegmenter
+
+# With HuggingFace tokenizer
+from transformers import AutoTokenizer
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3-8B")
+segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=64)
+
+# With tiktoken
+import tiktoken
+tokenizer = tiktoken.encoding_for_model("gpt-4")
+segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=64)
+```
+
+Segments concatenate to exactly reconstruct the original text — no characters are lost or added:
+
+```python
+segments = segmenter.segment(response)
+assert "".join(segments) == response
 ```
 
 ### CompositeSegmenter
