@@ -16,6 +16,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[Evaluation](guides/evaluation.md)** - Running evaluations and computing metrics
 - **[Inference Backends](guides/backends.md)** - Configure model backends and prompting
 - **[RL Training](guides/rl-training.md)** - Integrate with veRL, TRL, and OpenRLHF
+- **[Library Landscape](guides/landscape.md)** - Comparison with OpenEnv, verifiers, and similar libraries
 
 ## Environment Adapters
 
