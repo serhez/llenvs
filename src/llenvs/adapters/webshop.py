@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 import uuid
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.environment import StepResult, EnvironmentSpec
 
@@ -58,9 +58,9 @@ class WebShopReward:
 
     def compute(
         self,
-        state: State[TextObservation, WebShopHidden],
-        action: TextAction,
-        next_state: State[TextObservation, WebShopHidden],
+        state: State[WebShopHidden],
+        action: Action,
+        next_state: State[WebShopHidden],
     ) -> RewardSignal:
         """Compute reward from WebShop's native reward."""
         webshop_reward = next_state.metadata.info.get("webshop_reward", 0.0)
@@ -100,11 +100,11 @@ class WebShopEnvironment:
         >>> print(state.observation.prompt)
         # Shows instruction and current page with clickable elements
 
-        >>> action = TextAction(text="search[wireless headphones]")
+        >>> action = Action(text="search[wireless headphones]")
         >>> result = env.step(state, action)
         # Returns search results page
 
-        >>> action = TextAction(text="click[Buy Now]")
+        >>> action = Action(text="click[Buy Now]")
         >>> result = env.step(result.next_state, action)
         # Completes purchase, returns final reward
     """
@@ -152,14 +152,19 @@ class WebShopEnvironment:
         return dict(self._prompts)
 
     @property
+    def available_tools(self) -> tuple:
+        """No tools available in WebShop environments."""
+        return ()
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
             name="webshop",
             adapter="webshop",
             max_steps=self._max_steps,
-            observation_type=TextObservation,
-            action_type=TextAction,
+            observation_type=Observation,
+            action_type=Action,
             is_multi_turn=True,
             metadata={
                 "observation_mode": self._observation_mode,
@@ -170,7 +175,7 @@ class WebShopEnvironment:
     @property
     def reward_functions(
         self,
-    ) -> tuple[RewardFunction[TextObservation, WebShopHidden, TextAction], ...]:
+    ) -> tuple[RewardFunction[WebShopHidden], ...]:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
@@ -232,7 +237,7 @@ class WebShopEnvironment:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[TextObservation, WebShopHidden], dict[str, Any]]:
+    ) -> tuple[State[WebShopHidden], dict[str, Any]]:
         """Reset environment and return initial state.
 
         Args:
@@ -282,7 +287,7 @@ class WebShopEnvironment:
             available_actions=available,
         )
 
-        observation = TextObservation(prompt=obs_prompt)
+        observation = Observation(prompt=obs_prompt)
 
         metadata = StateMetadata(
             step=0,
@@ -305,9 +310,9 @@ class WebShopEnvironment:
 
     def step(
         self,
-        state: State[TextObservation, WebShopHidden],
-        action: TextAction,
-    ) -> StepResult[TextObservation, WebShopHidden]:
+        state: State[WebShopHidden],
+        action: Action,
+    ) -> StepResult[WebShopHidden]:
         """Take an action from the given state.
 
         Args:
@@ -343,7 +348,7 @@ class WebShopEnvironment:
             available_actions=available,
         )
 
-        new_observation = TextObservation(prompt=obs_prompt)
+        new_observation = Observation(prompt=obs_prompt)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -379,9 +384,9 @@ class WebShopEnvironment:
 
     def compute_rewards(
         self,
-        state: State[TextObservation, WebShopHidden],
-        action: TextAction,
-        next_state: State[TextObservation, WebShopHidden],
+        state: State[WebShopHidden],
+        action: Action,
+        next_state: State[WebShopHidden],
     ) -> RewardBundle:
         """Compute rewards for a transition."""
         signals = []
@@ -504,9 +509,6 @@ class WebShopAdapter:
             max_steps=max_steps,
             prompts=prompts,
         )
-
-    def get_tool_environment(self, name: str, **kwargs: Any) -> Any:
-        raise NotImplementedError(f"{self.name} adapter does not support tool environments")
 
     def get_default_system_prompt(self, name: str) -> None:
         """WebShop observations include built-in instructions."""

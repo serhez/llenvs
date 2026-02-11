@@ -56,7 +56,7 @@ output_dir: ./results
 from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.inference import SamplingParams
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 # Create environment via registry
 env = environment_registry.get(
@@ -81,7 +81,7 @@ result = backend.generate_chat(messages, params)
 print(f"Response: {result.text}")
 
 # Step environment
-action = TextAction(text=result.text)
+action = Action(text=result.text)
 step_result = env.step(state, action)
 
 # Check results

@@ -8,16 +8,14 @@ internal state, enabling branching and parallel exploration.
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from llenvs.core.state import State
+from llenvs.core.state import Action, Observation, State
 from llenvs.core.reward import RewardBundle, RewardFunction
 
-ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")
-ActionT = TypeVar("ActionT")
 
 
 @dataclass(frozen=True)
-class StepResult(Generic[ObsT, HiddenT]):
+class StepResult(Generic[HiddenT]):
     """Result of taking a step in the environment.
 
     Attributes:
@@ -28,7 +26,7 @@ class StepResult(Generic[ObsT, HiddenT]):
         info: Additional step metadata.
     """
 
-    next_state: State[ObsT, HiddenT]
+    next_state: State[HiddenT]
     rewards: RewardBundle
     terminated: bool = False
     truncated: bool = False
@@ -64,7 +62,7 @@ class EnvironmentSpec:
 
 
 @runtime_checkable
-class Environment(Protocol[ObsT, HiddenT, ActionT]):
+class Environment(Protocol[HiddenT]):
     """Protocol for MDP-style evaluation environments.
 
     Environments are stateless - all state is passed explicitly to step().
@@ -74,9 +72,7 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
     - Deterministic replay
 
     Type Parameters:
-        ObsT: Observation type (what the model sees).
         HiddenT: Hidden state type (for reward computation).
-        ActionT: Action type (model responses).
     """
 
     @property
@@ -93,12 +89,24 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
         ...
 
     @property
+    def available_tools(self) -> tuple:
+        """Get the tools available in this environment.
+
+        Text-only environments return an empty tuple.
+        Tool-aware environments return a tuple of ToolDefinitions.
+
+        Returns:
+            Tuple of available tool definitions.
+        """
+        ...
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get the environment specification."""
         ...
 
     @property
-    def reward_functions(self) -> tuple[RewardFunction[ObsT, HiddenT, ActionT], ...]:
+    def reward_functions(self) -> tuple[RewardFunction[HiddenT], ...]:
         """Get the reward functions used by this environment."""
         ...
 
@@ -107,7 +115,7 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[ObsT, HiddenT], dict[str, Any]]:
+    ) -> tuple[State[HiddenT], dict[str, Any]]:
         """Reset the environment and return initial state.
 
         Args:
@@ -121,9 +129,9 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
 
     def step(
         self,
-        state: State[ObsT, HiddenT],
-        action: ActionT,
-    ) -> StepResult[ObsT, HiddenT]:
+        state: State[HiddenT],
+        action: Action,
+    ) -> StepResult[HiddenT]:
         """Take an action from the given state.
 
         This is a pure function - the same state and action always
@@ -140,9 +148,9 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
 
     def compute_rewards(
         self,
-        state: State[ObsT, HiddenT],
-        action: ActionT,
-        next_state: State[ObsT, HiddenT],
+        state: State[HiddenT],
+        action: Action,
+        next_state: State[HiddenT],
     ) -> RewardBundle:
         """Compute rewards for a transition.
 

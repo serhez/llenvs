@@ -4,7 +4,7 @@ import pytest
 from typing import Any
 from unittest.mock import patch
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardType
 
 try:
@@ -20,9 +20,9 @@ from llenvs.core.math_verify import MathVerifyRewardFunction
 from llenvs.adapters.reasoning_gym import ReasoningGymHidden
 
 
-def _make_state(expected_answer: str) -> State[TextObservation, ReasoningGymHidden]:
+def _make_state(expected_answer: str) -> State[ReasoningGymHidden]:
     """Create a test state with the given expected answer."""
-    obs = TextObservation(prompt="What is 1+1?")
+    obs = Observation(prompt="What is 1+1?")
     hidden = ReasoningGymHidden(
         entry={"question": "What is 1+1?", "answer": expected_answer},
         expected_answer=expected_answer,
@@ -68,7 +68,7 @@ class TestMathVerifyExtractionFailure:
         """When extractor returns None, reward should be 0.0."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor(None))
         state = _make_state("42")
-        action = TextAction(text="I don't know")
+        action = Action(text="I don't know")
 
         signal = reward.compute(state, action, state)
 
@@ -85,7 +85,7 @@ class TestMathVerifyEquivalence:
         """Identical strings should be equivalent."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("42"))
         state = _make_state("42")
-        action = TextAction(text="<answer>42</answer>")
+        action = Action(text="<answer>42</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -94,7 +94,7 @@ class TestMathVerifyEquivalence:
         """42 and 42.0 should be equivalent."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("42.0"))
         state = _make_state("42")
-        action = TextAction(text="<answer>42.0</answer>")
+        action = Action(text="<answer>42.0</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -103,7 +103,7 @@ class TestMathVerifyEquivalence:
         """1/2 and 0.5 should be equivalent."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("0.5"))
         state = _make_state("1/2")
-        action = TextAction(text="<answer>0.5</answer>")
+        action = Action(text="<answer>0.5</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -112,7 +112,7 @@ class TestMathVerifyEquivalence:
         """2/4 and 1/2 should be equivalent."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("2/4"))
         state = _make_state("1/2")
-        action = TextAction(text="<answer>2/4</answer>")
+        action = Action(text="<answer>2/4</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -121,7 +121,7 @@ class TestMathVerifyEquivalence:
         """-3 and -3.0 should be equivalent."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("-3.0"))
         state = _make_state("-3")
-        action = TextAction(text="<answer>-3.0</answer>")
+        action = Action(text="<answer>-3.0</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -130,7 +130,7 @@ class TestMathVerifyEquivalence:
         """Clearly different answers should score 0."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("7"))
         state = _make_state("42")
-        action = TextAction(text="<answer>7</answer>")
+        action = Action(text="<answer>7</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 0.0
@@ -139,7 +139,7 @@ class TestMathVerifyEquivalence:
         """LaTeX fractions should be parsed correctly."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("\\frac{1}{2}"))
         state = _make_state("0.5")
-        action = TextAction(text="<answer>\\frac{1}{2}</answer>")
+        action = Action(text="<answer>\\frac{1}{2}</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -150,7 +150,7 @@ class TestMathVerifyEquivalence:
             answer_extractor=_make_extractor("50/100")
         )
         state = _make_state("1/2")
-        action = TextAction(text="<answer>50/100</answer>")
+        action = Action(text="<answer>50/100</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -159,7 +159,7 @@ class TestMathVerifyEquivalence:
         """Extra whitespace shouldn't matter."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("  42  "))
         state = _make_state("42")
-        action = TextAction(text="<answer>  42  </answer>")
+        action = Action(text="<answer>  42  </answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -172,7 +172,7 @@ class TestMathVerifyFallback:
         """When math-verify can't parse, fall back to string comparison."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("hello"))
         state = _make_state("hello")
-        action = TextAction(text="<answer>hello</answer>")
+        action = Action(text="<answer>hello</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -181,7 +181,7 @@ class TestMathVerifyFallback:
         """Fallback should normalize case and whitespace."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("  Hello World  "))
         state = _make_state("hello world")
-        action = TextAction(text="<answer>  Hello World  </answer>")
+        action = Action(text="<answer>  Hello World  </answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -190,7 +190,7 @@ class TestMathVerifyFallback:
         """Fallback should return 0 on string mismatch."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("dog"))
         state = _make_state("cat")
-        action = TextAction(text="<answer>dog</answer>")
+        action = Action(text="<answer>dog</answer>")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 0.0
@@ -199,7 +199,7 @@ class TestMathVerifyFallback:
         """Metadata should indicate which comparison method was used."""
         reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("42"))
         state = _make_state("42")
-        action = TextAction(text="<answer>42</answer>")
+        action = Action(text="<answer>42</answer>")
 
         signal = reward.compute(state, action, state)
         assert "method" in signal.metadata
@@ -215,7 +215,7 @@ class TestMathVerifyWithRealExtractor:
         extractor = TagBasedExtractor(tag_name="answer")
         reward = MathVerifyRewardFunction(answer_extractor=extractor)
         state = _make_state("42")
-        action = TextAction(text="The answer is <answer>42</answer>.")
+        action = Action(text="The answer is <answer>42</answer>.")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 1.0
@@ -228,7 +228,7 @@ class TestMathVerifyWithRealExtractor:
         extractor = TagBasedExtractor(tag_name="answer")
         reward = MathVerifyRewardFunction(answer_extractor=extractor)
         state = _make_state("42")
-        action = TextAction(text="The answer is 42, no tags here.")
+        action = Action(text="The answer is 42, no tags here.")
 
         signal = reward.compute(state, action, state)
         assert signal.value == 0.0

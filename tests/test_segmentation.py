@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
 from llenvs.core.segmentation import (
     Segmenter,
@@ -477,7 +477,7 @@ class TestSegmentedEnvironment:
             metadata=state.metadata,
         )
 
-        result = env.step(state, TextAction(text="First segment. "))
+        result = env.step(state, Action(text="First segment. "))
 
         assert result.terminated is False
         assert result.next_state.metadata.is_terminal is False
@@ -508,7 +508,7 @@ class TestSegmentedEnvironment:
             metadata=state.metadata,
         )
 
-        result = env.step(state, TextAction(text="4</answer>"))
+        result = env.step(state, Action(text="4</answer>"))
 
         assert result.terminated is True
         assert result.next_state.metadata.is_terminal is True
@@ -679,7 +679,7 @@ class TestSegmentedEnvironment:
         original_accumulated = state.hidden.accumulated_text
         original_index = state.hidden.segment_index
 
-        env.step(state, TextAction(text="Segment one. "))
+        env.step(state, Action(text="Segment one. "))
 
         # Original state should be unchanged
         assert state.hidden.accumulated_text == original_accumulated

@@ -4,7 +4,7 @@ import pytest
 from typing import Any
 from dataclasses import dataclass, field
 
-from llenvs.core.state import State, StateMetadata, AgentObservation, AgentAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.environment import StepResult, EnvironmentSpec
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.tools import (
@@ -40,9 +40,9 @@ class CorrectnessReward:
 
     def compute(
         self,
-        state: State[Any, Any],
+        state: State[Any],
         action: Any,
-        next_state: State[Any, Any],
+        next_state: State[Any],
     ) -> RewardSignal:
         return RewardSignal(value=1.0, name=self.name, reward_type=self.reward_type)
 
@@ -106,7 +106,7 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
         )
 
     @property
-    def reward_functions(self) -> tuple[RewardFunction[Any, MockHidden, Any], ...]:
+    def reward_functions(self) -> tuple[RewardFunction[MockHidden], ...]:
         return self._reward_functions
 
     def reset(
@@ -114,8 +114,8 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[AgentObservation, MockHidden], dict[str, Any]]:
-        obs = AgentObservation(
+    ) -> tuple[State[MockHidden], dict[str, Any]]:
+        obs = Observation(
             prompt="Calculate (5 + 3) * 7",
             messages=(),
             tool_results=(),
@@ -131,9 +131,9 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
 
     def step(
         self,
-        state: State[AgentObservation, MockHidden],
-        action: AgentAction,
-    ) -> StepResult[AgentObservation, MockHidden]:
+        state: State[MockHidden],
+        action: Action,
+    ) -> StepResult[MockHidden]:
         # Execute any tool calls
         tool_results = ()
         if action.has_tool_calls:
@@ -205,7 +205,7 @@ class TestBaseToolEnvironment:
         """Test step with a tool call."""
         state, _ = env.reset()
 
-        action = AgentAction(
+        action = Action(
             text="Let me add 5 and 3",
             tool_calls=(
                 ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
@@ -223,7 +223,7 @@ class TestBaseToolEnvironment:
         """Test step with multiple tool calls."""
         state, _ = env.reset()
 
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
                 ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
@@ -240,7 +240,7 @@ class TestBaseToolEnvironment:
         """Test step with terminal tool ends episode."""
         state, _ = env.reset()
 
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="call_1", name="submit_answer", arguments={"answer": "56"}),
             ),
@@ -256,7 +256,7 @@ class TestBaseToolEnvironment:
         """Test step with invalid tool name."""
         state, _ = env.reset()
 
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="call_1", name="divide", arguments={"a": 10, "b": 2}),
             ),
@@ -273,7 +273,7 @@ class TestBaseToolEnvironment:
         """Test step with text-only action."""
         state, _ = env.reset()
 
-        action = AgentAction(text="I'm thinking about the problem...")
+        action = Action(text="I'm thinking about the problem...")
 
         result = env.step(state, action)
 
@@ -285,7 +285,7 @@ class TestBaseToolEnvironment:
         state, _ = env.reset()
 
         # First action
-        action1 = AgentAction(
+        action1 = Action(
             text="Let me add 5 and 3",
             tool_calls=(
                 ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
@@ -302,7 +302,7 @@ class TestBaseToolEnvironment:
         assert messages[1]["tool_call_id"] == "call_1"
 
         # Second action
-        action2 = AgentAction(
+        action2 = Action(
             text="Now multiply by 7",
             tool_calls=(
                 ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
@@ -319,7 +319,7 @@ class TestBaseToolEnvironment:
         state, _ = env.reset()
 
         # First action
-        action1 = AgentAction(
+        action1 = Action(
             tool_calls=(
                 ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
             ),
@@ -328,7 +328,7 @@ class TestBaseToolEnvironment:
         assert len(result1.next_state.observation.tool_results) == 1
 
         # Second action
-        action2 = AgentAction(
+        action2 = Action(
             tool_calls=(
                 ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
             ),
@@ -343,14 +343,14 @@ class TestBaseToolEnvironment:
         """Test that hidden state tracks all tool calls made."""
         state, _ = env.reset()
 
-        action1 = AgentAction(
+        action1 = Action(
             tool_calls=(
                 ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
             ),
         )
         result1 = env.step(state, action1)
 
-        action2 = AgentAction(
+        action2 = Action(
             tool_calls=(
                 ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
             ),

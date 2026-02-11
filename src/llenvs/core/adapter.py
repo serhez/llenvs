@@ -47,12 +47,14 @@ class Adapter(Protocol):
         self,
         name: str,
         **kwargs: Any,
-    ) -> Environment[Any, Any, Any]:
+    ) -> Environment[Any]:
         """Create an environment by name.
 
         Args:
             name: Environment name (from list_environments()).
             **kwargs: Environment-specific configuration (size, seed, etc.).
+                Tool-aware adapters accept tool_types kwarg to create
+                tool environments.
 
         Returns:
             Configured Environment instance.
@@ -106,19 +108,6 @@ class Adapter(Protocol):
 
         Returns:
             A PromptTemplate or None if no wrapping needed.
-        """
-        ...
-
-    def get_tool_environment(
-        self,
-        name: str,
-        **kwargs: Any,
-    ) -> Any:
-        """Create a tool-enabled environment by name.
-
-        Returns a ToolEnvironment with structured tool calling support.
-        Not all adapters support tool environments — raises NotImplementedError
-        if the adapter doesn't have tool support.
         """
         ...
 

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 import uuid
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
@@ -61,9 +61,9 @@ class CorrectnessRewardFunction:
 
     def compute(
         self,
-        state: State[TextObservation, ReasoningGymHidden],
-        action: TextAction,
-        next_state: State[TextObservation, ReasoningGymHidden],
+        state: State[ReasoningGymHidden],
+        action: Action,
+        next_state: State[ReasoningGymHidden],
     ) -> RewardSignal:
         """Compute correctness reward using reasoning-gym's scoring."""
         extracted, extraction_meta = self._answer_extractor.extract(action.text)
@@ -137,14 +137,19 @@ class ReasoningGymEnvironment:
         return {}
 
     @property
+    def available_tools(self) -> tuple:
+        """No tools available in reasoning-gym environments."""
+        return ()
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
             name=self._dataset_name,
             adapter="reasoning_gym",
             max_steps=1,  # Single-turn environment
-            observation_type=TextObservation,
-            action_type=TextAction,
+            observation_type=Observation,
+            action_type=Action,
             is_multi_turn=False,
             metadata={
                 "dataset_size": len(self._dataset),
@@ -155,7 +160,7 @@ class ReasoningGymEnvironment:
     @property
     def reward_functions(
         self,
-    ) -> tuple[RewardFunction[TextObservation, ReasoningGymHidden, TextAction], ...]:
+    ) -> tuple[RewardFunction[ReasoningGymHidden], ...]:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
@@ -164,7 +169,7 @@ class ReasoningGymEnvironment:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[TextObservation, ReasoningGymHidden], dict[str, Any]]:
+    ) -> tuple[State[ReasoningGymHidden], dict[str, Any]]:
         """Reset environment and return initial state.
 
         Args:
@@ -193,7 +198,7 @@ class ReasoningGymEnvironment:
         entry = self._dataset[task_index]
 
         # Create observation (what model sees)
-        observation = TextObservation(prompt=entry["question"])
+        observation = Observation(prompt=entry["question"])
 
         # Create hidden state (for reward computation)
         hidden = ReasoningGymHidden(
@@ -224,9 +229,9 @@ class ReasoningGymEnvironment:
 
     def step(
         self,
-        state: State[TextObservation, ReasoningGymHidden],
-        action: TextAction,
-    ) -> StepResult[TextObservation, ReasoningGymHidden]:
+        state: State[ReasoningGymHidden],
+        action: Action,
+    ) -> StepResult[ReasoningGymHidden]:
         """Take an action (model response) and return result.
 
         For reasoning-gym tasks, a single step always terminates the episode.
@@ -275,9 +280,9 @@ class ReasoningGymEnvironment:
 
     def compute_rewards(
         self,
-        state: State[TextObservation, ReasoningGymHidden],
-        action: TextAction,
-        next_state: State[TextObservation, ReasoningGymHidden],
+        state: State[ReasoningGymHidden],
+        action: Action,
+        next_state: State[ReasoningGymHidden],
     ) -> RewardBundle:
         """Compute rewards for a transition.
 
@@ -397,9 +402,6 @@ class ReasoningGymAdapter:
             answer_extractor=answer_extractor,
             extra_rewards=extra_rewards,
         )
-
-    def get_tool_environment(self, name: str, **kwargs: Any) -> Any:
-        raise NotImplementedError(f"{self.name} adapter does not support tool environments")
 
     def get_native_answer_extractor(self, task_name: str) -> AnswerExtractor:
         """Return reasoning-gym's native extraction function.

@@ -3,7 +3,7 @@
 import pytest
 from typing import Any
 
-from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.state import Observation, Action
 from llenvs.core.reward import RewardType
 from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
 from llenvs.adapters.huggingface import (
@@ -178,8 +178,8 @@ class TestHuggingFaceEnvironment:
 
         assert spec.metadata["dataset_size"] == 3
         assert spec.metadata["split"] == "test"
-        assert spec.observation_type == TextObservation
-        assert spec.action_type == TextAction
+        assert spec.observation_type == Observation
+        assert spec.action_type == Action
 
     def test_reset(self, mock_hf_dataset):
         """Test environment reset."""
@@ -192,7 +192,7 @@ class TestHuggingFaceEnvironment:
         state, info = env.reset(options={"task_index": 0})
 
         # Check observation
-        assert isinstance(state.observation, TextObservation)
+        assert isinstance(state.observation, Observation)
         assert "2 + 2" in state.observation.prompt
 
         # Check hidden state
@@ -240,7 +240,7 @@ class TestHuggingFaceEnvironment:
         )
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="The answer is <answer>4</answer>")
+        action = Action(text="The answer is <answer>4</answer>")
         result = env.step(state, action)
 
         # Check termination
@@ -264,7 +264,7 @@ class TestHuggingFaceEnvironment:
         )
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="The answer is <answer>5</answer>")
+        action = Action(text="The answer is <answer>5</answer>")
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
@@ -279,7 +279,7 @@ class TestHuggingFaceEnvironment:
         )
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="I don't know")
+        action = Action(text="I don't know")
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
@@ -296,7 +296,7 @@ class TestHuggingFaceEnvironment:
         )
 
         state, _ = env.reset(options={"task_index": 0})
-        result = env.step(state, TextAction(text="The answer is 4"))
+        result = env.step(state, Action(text="The answer is 4"))
 
         assert result.info["extracted_answer"] == "4"
 
@@ -315,7 +315,7 @@ class TestHuggingFaceEnvironment:
         state, _ = env.reset(options={"task_index": 0})
         assert state.hidden.expected_answer == "55"
 
-        result = env.step(state, TextAction(text="<answer>55</answer>"))
+        result = env.step(state, Action(text="<answer>55</answer>"))
         correctness = result.rewards.by_name("correctness")
         assert correctness.value == 1.0
 

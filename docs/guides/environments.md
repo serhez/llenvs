@@ -69,12 +69,13 @@ Agent provides one response, receives final reward:
 
 ```python
 from llenvs.core.registry import environment_registry
+from llenvs.core import Action
 
 env = environment_registry.get(name="leg_counting", adapter="reasoning_gym")
 state, _ = env.reset(options={"task_index": 0})
 
 # One action completes the episode
-action = TextAction(text="<answer>8</answer>")
+action = Action(text="<answer>8</answer>")
 result = env.step(state, action)
 assert result.terminated  # Episode done
 ```
@@ -90,7 +91,7 @@ env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
 state, _ = env.reset(seed=42)
 
 while not state.metadata.is_terminal:
-    action = TextAction(text="50")
+    action = Action(text="50")
     result = env.step(state, action)
     state = result.next_state
     print(f"Response: {state.observation.prompt}")
@@ -141,7 +142,7 @@ trajectory = Trajectory.create(state)
 
 # Run trajectory and record
 while not trajectory.is_terminal:
-    action = TextAction(text=model_response)
+    action = Action(text=model_response)
     result = env.step(trajectory.current_state, action)
 
     transition = Transition(

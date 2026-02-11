@@ -14,7 +14,7 @@ pip install webshop
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 # Create environment (use num_products=1000 for fast preview)
 env = environment_registry.get(
@@ -30,18 +30,18 @@ print(f"Instruction: {info['instruction']}")
 # "Find a red wireless headphone under $50"
 
 # Search for products
-action = TextAction(text="search[red wireless headphones]")
+action = Action(text="search[red wireless headphones]")
 result = env.step(state, action)
 print(result.next_state.observation.prompt)
 # Shows search results with clickable products
 
 # Click on a product
-action = TextAction(text="click[Product 1 - Red Headphones $45]")
+action = Action(text="click[Product 1 - Red Headphones $45]")
 result = env.step(result.next_state, action)
 # Shows product details
 
 # Complete purchase
-action = TextAction(text="click[Buy Now]")
+action = Action(text="click[Buy Now]")
 result = env.step(result.next_state, action)
 print(f"Reward: {result.info['webshop_reward']}")
 # Reward based on how well purchase matches instruction

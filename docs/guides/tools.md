@@ -188,14 +188,14 @@ async with MCPToolExecutor(config) as executor:
 
 ## Tool Environments
 
-For environments with built-in tools, use `ToolEnvironment`:
+Environments with built-in tools expose tool definitions via `available_tools` on the observation. Create them with `environment_registry.get()` and pass `tool_types` to specify which tools to enable:
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import AgentAction, ToolCall
+from llenvs.core import Action, ToolCall
 
 # Create tool-enabled environment
-env = environment_registry.get_tool_environment(
+env = environment_registry.get(
     name="math:GSM8K",
     adapter="gem",
     tool_types=("python",),
@@ -207,7 +207,7 @@ print(f"Tools: {[t.name for t in state.observation.available_tools]}")
 
 # Use Python tool
 call = ToolCall(id="1", name="python", arguments={"code": "print(0.15 * 80)"})
-action = AgentAction(tool_calls=(call,))
+action = Action(tool_calls=(call,))
 result = env.step(state, action)
 
 print(f"Output: {result.info['tool_results'][0].output}")
@@ -230,18 +230,18 @@ efficiency_reward = ToolEfficiencyReward(
 )
 ```
 
-## ToolTrajectoryRunner
+## Running Tool Environments
 
-For running tool-enabled evaluations:
+`TrajectoryRunner` auto-detects tool environments via `available_tools` on the observation and handles tool calling automatically:
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.evaluation import ToolTrajectoryRunner
+from llenvs.evaluation import TrajectoryRunner
 
-env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem")
+env = environment_registry.get(name="math:GSM8K", adapter="gem", tool_types=("python",))
 backend = OpenAIBackend(model="gpt-4o")
 
-runner = ToolTrajectoryRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0),

@@ -13,9 +13,7 @@ from typing import Any, Protocol, TypeVar
 
 from llenvs.core.state import State
 
-ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")
-ActionT = TypeVar("ActionT")
 
 
 class RewardType(Enum):
@@ -117,9 +115,9 @@ class FormatReward:
 
     def compute(
         self,
-        state: State[Any, Any],
+        state: State[Any],
         action: Any,
-        next_state: State[Any, Any],
+        next_state: State[Any],
     ) -> RewardSignal:
         """Compute format reward (1.0 if answer extracted, 0.0 otherwise)."""
         extracted, extraction_meta = self._answer_extractor.extract(action.text)
@@ -132,7 +130,7 @@ class FormatReward:
         )
 
 
-class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
+class RewardFunction(Protocol[HiddenT]):
     """Protocol for computing reward signals.
 
     Reward functions are composable - an environment can have multiple
@@ -151,9 +149,9 @@ class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
 
     def compute(
         self,
-        state: State[ObsT, HiddenT],
-        action: ActionT,
-        next_state: State[ObsT, HiddenT],
+        state: State[HiddenT],
+        action: Any,
+        next_state: State[HiddenT],
     ) -> RewardSignal:
         """Compute the reward signal for a transition.
 

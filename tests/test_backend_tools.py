@@ -91,7 +91,7 @@ class TestGenerationResultToolSupport:
         assert result.has_tool_calls is True
 
     def test_to_agent_action_text_only(self):
-        """Test conversion to AgentAction with text only."""
+        """Test conversion to Action with text only."""
         result = GenerationResult(text="Hello world")
         action = result.to_agent_action()
 
@@ -100,7 +100,7 @@ class TestGenerationResultToolSupport:
         assert action.is_text_only
 
     def test_to_agent_action_with_tools(self):
-        """Test conversion to AgentAction with tools."""
+        """Test conversion to Action with tools."""
         tool_calls = (
             ToolCall(id="1", name="search", arguments={"query": "test"}),
             ToolCall(id="2", name="get_weather", arguments={"city": "Paris"}),

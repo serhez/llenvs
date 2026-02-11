@@ -106,7 +106,7 @@ print(DATASET_PRESETS.keys())
 from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.inference import SamplingParams
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 env = environment_registry.get(name="HuggingFaceH4/aime_2024", adapter="huggingface")
 backend = OpenAIBackend(model="gpt-4o")
@@ -119,7 +119,7 @@ for i in range(len(env)):
     prompt = f"{state.observation.prompt}\n\nPut your answer in <answer>...</answer>."
     result = backend.generate_single(prompt, params)
 
-    action = TextAction(text=result.text)
+    action = Action(text=result.text)
     step_result = env.step(state, action)
 
     if step_result.rewards.by_name("correctness").value == 1.0:

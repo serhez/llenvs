@@ -255,6 +255,8 @@ The runner auto-selects the appropriate strategy based on segmenter type:
 For custom generation loops without the runner:
 
 ```python
+from llenvs.core import Action
+
 env = SegmentedEnvironment(base_env, SentenceSegmenter())
 state, _ = env.reset(options={"task_index": 0})
 
@@ -266,7 +268,7 @@ while not state.metadata.is_terminal:
         stop_at=env.segmenter.find_boundary,
     )
 
-    result = env.step(state, TextAction(text=partial))
+    result = env.step(state, Action(text=partial))
     accumulated += partial
     state = result.next_state
 

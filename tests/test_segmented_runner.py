@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.environment import StepResult
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
 from llenvs.core.segmentation import (
@@ -99,22 +99,22 @@ def _make_base_env(
     env.spec.name = "mock_env"
     env.spec.adapter = "mock"
     env.spec.max_steps = 1
-    env.spec.observation_type = TextObservation
-    env.spec.action_type = TextAction
+    env.spec.observation_type = Observation
+    env.spec.action_type = Action
     env.spec.is_multi_turn = False
     env.spec.metadata = {}
     env.reward_functions = ()
 
     # Reset returns a state with the question
     base_state = State(
-        observation=TextObservation(prompt="What is 6 * 7?"),
+        observation=Observation(prompt="What is 6 * 7?"),
         hidden={"answer": correct_answer},
         metadata=StateMetadata(step=0, episode_id="ep_0", is_terminal=False),
     )
     env.reset.return_value = (base_state, {"task_index": 0})
 
     # Step checks for correct answer in accumulated text
-    def mock_step(state: State, action: TextAction) -> StepResult:
+    def mock_step(state: State, action: Action) -> StepResult:
         is_correct = correct_answer in action.text
         reward = reward_value if is_correct else 0.0
         return StepResult(
@@ -1181,10 +1181,10 @@ class TestPrefixReplay:
 
         # First run a trajectory to get state-action pairs
         state, _ = env.reset(options={"task_index": 0})
-        action1 = TextAction(text="First step.")
+        action1 = Action(text="First step.")
         result1 = env.step(state, action1)
         state2 = result1.next_state
-        action2 = TextAction(text="Second step.")
+        action2 = Action(text="Second step.")
         result2 = env.step(state2, action2)
 
         # Use the state-action pairs as structured prefix
@@ -1286,7 +1286,7 @@ class TestPrefixReplay:
             ),
         )
         prefix_pairs = [
-            (terminal_state, TextAction(text="Some text.")),
+            (terminal_state, Action(text="Some text.")),
         ]
 
         runner = SegmentedTrajectoryRunner(

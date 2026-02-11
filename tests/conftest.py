@@ -3,7 +3,7 @@
 import pytest
 from typing import Any
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
 from llenvs.core.trajectory import Trajectory, Transition
 
@@ -20,9 +20,9 @@ def sample_metadata() -> StateMetadata:
 
 
 @pytest.fixture
-def sample_observation() -> TextObservation:
+def sample_observation() -> Observation:
     """Create sample text observation."""
-    return TextObservation(
+    return Observation(
         prompt="What is 2 + 2?",
         messages=(),
     )
@@ -39,10 +39,10 @@ def sample_hidden() -> dict[str, Any]:
 
 @pytest.fixture
 def sample_state(
-    sample_observation: TextObservation,
+    sample_observation: Observation,
     sample_hidden: dict[str, Any],
     sample_metadata: StateMetadata,
-) -> State[TextObservation, dict[str, Any]]:
+) -> State[dict[str, Any]]:
     """Create sample state."""
     return State(
         observation=sample_observation,
@@ -52,9 +52,9 @@ def sample_state(
 
 
 @pytest.fixture
-def sample_action() -> TextAction:
+def sample_action() -> Action:
     """Create sample action."""
-    return TextAction(text="The answer is <answer>4</answer>")
+    return Action(text="The answer is <answer>4</answer>")
 
 
 @pytest.fixture
@@ -81,9 +81,9 @@ def sample_reward_bundle(sample_reward_signal: RewardSignal) -> RewardBundle:
 
 @pytest.fixture
 def terminal_state(
-    sample_observation: TextObservation,
+    sample_observation: Observation,
     sample_hidden: dict[str, Any],
-) -> State[TextObservation, dict[str, Any]]:
+) -> State[dict[str, Any]]:
     """Create terminal state."""
     return State(
         observation=sample_observation,
@@ -99,7 +99,7 @@ def terminal_state(
 @pytest.fixture
 def sample_transition(
     sample_state: State,
-    sample_action: TextAction,
+    sample_action: Action,
     terminal_state: State,
     sample_reward_bundle: RewardBundle,
 ) -> Transition:

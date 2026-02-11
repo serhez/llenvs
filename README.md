@@ -6,7 +6,7 @@ LLEnvs wraps evaluation benchmarks — reasoning tasks, math datasets, multi-tur
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 state, _ = env.reset(options={"task_index": 0})
@@ -14,7 +14,7 @@ state, _ = env.reset(options={"task_index": 0})
 print(state.observation.prompt)
 # "A farmer has 3 cows and 2 chickens. How many legs in total?"
 
-result = env.step(state, TextAction(text="<answer>16</answer>"))
+result = env.step(state, Action(text="<answer>16</answer>"))
 print(result.rewards.total)  # 1.0
 ```
 
@@ -109,9 +109,8 @@ First-class support for tool-using agents, including MCP server integration:
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.evaluation import ToolTrajectoryRunner
 
-env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem", tool_types=("python",))
+env = environment_registry.get(name="math:GSM8K", adapter="gem", tool_types=("python",))
 
 state, _ = env.reset(options={"task_index": 0})
 print([t.name for t in state.observation.available_tools])

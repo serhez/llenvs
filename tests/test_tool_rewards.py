@@ -3,16 +3,16 @@
 import pytest
 from typing import Any
 
-from llenvs.core.state import State, StateMetadata, AgentObservation, AgentAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.tools import ToolCall, ToolResult, ToolResultStatus
 from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
 from llenvs.core.reward import RewardType
 
 
 @pytest.fixture
-def sample_state() -> State[AgentObservation, Any]:
+def sample_state() -> State[Any]:
     """Create a sample state for tests."""
-    obs = AgentObservation(
+    obs = Observation(
         prompt="Test prompt",
         messages=(),
         tool_results=(),
@@ -24,9 +24,9 @@ def sample_state() -> State[AgentObservation, Any]:
 
 def make_next_state(
     state: State, tool_results: tuple[ToolResult, ...]
-) -> State[AgentObservation, Any]:
+) -> State[Any]:
     """Create a next state with tool results."""
-    next_obs = AgentObservation(
+    next_obs = Observation(
         prompt=state.observation.prompt,
         messages=(),
         tool_results=tool_results,
@@ -52,7 +52,7 @@ class TestToolValidityReward:
     def test_no_tool_calls(self, sample_state):
         """Test reward when no tool calls are made."""
         reward = ToolValidityReward()
-        action = AgentAction(text="Just some text")
+        action = Action(text="Just some text")
         next_state = make_next_state(sample_state, ())
 
         signal = reward.compute(sample_state, action, next_state)
@@ -63,7 +63,7 @@ class TestToolValidityReward:
     def test_all_valid_calls(self, sample_state):
         """Test reward when all tool calls are valid."""
         reward = ToolValidityReward()
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
                 ToolCall(id="2", name="multiply", arguments={"a": 3, "b": 4}),
@@ -84,7 +84,7 @@ class TestToolValidityReward:
     def test_partial_valid_calls(self, sample_state):
         """Test partial credit when some calls fail."""
         reward = ToolValidityReward()
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
                 ToolCall(id="2", name="unknown", arguments={}),
@@ -107,7 +107,7 @@ class TestToolValidityReward:
     def test_all_invalid_calls(self, sample_state):
         """Test zero reward when all calls fail."""
         reward = ToolValidityReward()
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="unknown1", arguments={}),
                 ToolCall(id="2", name="unknown2", arguments={}),
@@ -141,7 +141,7 @@ class TestToolEfficiencyReward:
     def test_no_tool_calls(self, sample_state):
         """Test perfect efficiency when no tool calls."""
         reward = ToolEfficiencyReward()
-        action = AgentAction(text="No tools needed")
+        action = Action(text="No tools needed")
         next_state = make_next_state(sample_state, ())
 
         signal = reward.compute(sample_state, action, next_state)
@@ -152,7 +152,7 @@ class TestToolEfficiencyReward:
     def test_under_max_calls(self, sample_state):
         """Test full reward when under max calls."""
         reward = ToolEfficiencyReward(max_calls_per_step=5)
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
                 ToolCall(id="2", name="multiply", arguments={"a": 3, "b": 4}),
@@ -168,7 +168,7 @@ class TestToolEfficiencyReward:
     def test_excess_calls_penalty(self, sample_state):
         """Test penalty for excess calls."""
         reward = ToolEfficiencyReward(max_calls_per_step=2, penalty_per_excess=0.2)
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="a", arguments={}),
                 ToolCall(id="2", name="b", arguments={}),
@@ -187,7 +187,7 @@ class TestToolEfficiencyReward:
     def test_duplicate_calls_penalty(self, sample_state):
         """Test penalty for duplicate calls."""
         reward = ToolEfficiencyReward(duplicate_penalty=0.2)
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
                 ToolCall(id="2", name="add", arguments={"a": 1, "b": 2}),  # Duplicate
@@ -205,7 +205,7 @@ class TestToolEfficiencyReward:
     def test_different_args_not_duplicates(self, sample_state):
         """Test that same tool with different args is not duplicate."""
         reward = ToolEfficiencyReward(duplicate_penalty=0.5)
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
                 ToolCall(id="2", name="add", arguments={"a": 3, "b": 4}),  # Different args
@@ -225,7 +225,7 @@ class TestToolEfficiencyReward:
             penalty_per_excess=0.1,
             duplicate_penalty=0.2,
         )
-        action = AgentAction(
+        action = Action(
             tool_calls=(
                 ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
                 ToolCall(id="2", name="add", arguments={"a": 1, "b": 2}),  # Duplicate
@@ -248,7 +248,7 @@ class TestToolEfficiencyReward:
             max_calls_per_step=1,
             penalty_per_excess=0.5,
         )
-        action = AgentAction(
+        action = Action(
             tool_calls=tuple(
                 ToolCall(id=str(i), name="tool", arguments={"i": i})
                 for i in range(10)

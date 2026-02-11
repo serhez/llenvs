@@ -14,10 +14,9 @@ import logging
 if TYPE_CHECKING:
     from llenvs.inference.prompts import ModelProfile, PromptTemplate
 
-from llenvs.core.state import State, TextObservation, TextAction, AgentObservation, AgentAction
+from llenvs.core.state import State, Observation, Action
 from llenvs.core.environment import Environment, StepResult
 from llenvs.core.segmented_environment import SegmentedEnvironment
-from llenvs.core.tool_environment import ToolEnvironment
 from llenvs.core.trajectory import Trajectory, Transition
 from llenvs.core.reward import RewardBundle
 from llenvs.inference.protocol import (
@@ -68,7 +67,7 @@ class TrajectoryResult:
         metadata: Additional result metadata.
     """
 
-    trajectory: Trajectory[Any, Any, Any]
+    trajectory: Trajectory[Any]
     total_reward: float
     success: bool
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -97,9 +96,9 @@ class _ActiveTrajectory:
 
     position: int
     task_index: int
-    state: State[Any, Any]
+    state: State[Any]
     reset_info: dict[str, Any]
-    trajectory: Trajectory[Any, Any, Any]
+    trajectory: Trajectory[Any]
     done: bool = False
     error: str | None = None
     step_count: int = 0
@@ -111,9 +110,9 @@ class _ActiveSegmentedTrajectory:
 
     position: int
     task_index: int
-    state: State[Any, Any]
+    state: State[Any]
     reset_info: dict[str, Any]
-    trajectory: Trajectory[Any, Any, Any]
+    trajectory: Trajectory[Any]
     messages: list[ChatMessage]
     accumulated: str = ""
     buffer: str = ""
@@ -231,7 +230,8 @@ class TrajectoryRunner:
     """Runs trajectories through an environment with a model backend.
 
     Handles the interaction loop between model and environment,
-    collecting trajectories and computing results.
+    collecting trajectories and computing results. Supports both
+    text-only and tool-aware environments.
 
     Attributes:
         environment: The environment to run trajectories in.
@@ -241,7 +241,7 @@ class TrajectoryRunner:
         system_prompt: Optional system prompt to include.
     """
 
-    environment: Environment[Any, Any, Any]
+    environment: Environment[Any]
     backend: ModelBackend
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     prompt_pipeline: PromptPipeline | None = None
@@ -251,9 +251,9 @@ class TrajectoryRunner:
 
     def _build_messages(
         self,
-        state: State[TextObservation, Any],
+        state: State[Any],
     ) -> list[ChatMessage]:
-        """Build chat messages from state.
+        """Build chat messages from state including tool results.
 
         Args:
             state: Current environment state.
@@ -261,23 +261,63 @@ class TrajectoryRunner:
         Returns:
             List of ChatMessages for the model.
         """
-        messages = []
+        messages: list[ChatMessage] = []
 
         # Add system prompt if provided
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
 
-        # Add observation as user message
-        if isinstance(state.observation, TextObservation):
-            # Include any message history
-            for msg in state.observation.messages:
-                messages.append(ChatMessage(role=msg["role"], content=msg["content"]))
+        obs = state.observation
 
-            # Add current prompt
-            messages.append(ChatMessage(role="user", content=state.observation.prompt))
+        # Add initial prompt as user message
+        if not obs.messages:
+            messages.append(ChatMessage(role="user", content=obs.prompt))
         else:
-            # Fallback for other observation types
-            messages.append(ChatMessage(role="user", content=str(state.observation)))
+            # First message should be user with prompt
+            messages.append(ChatMessage(role="user", content=obs.prompt))
+
+            # Then add message history
+            for msg in obs.messages:
+                role = msg.get("role", "user")
+
+                if role == "assistant":
+                    # Check for tool calls
+                    tool_calls_data = msg.get("tool_calls", [])
+                    if tool_calls_data:
+                        from llenvs.core.tools import ToolCall
+
+                        tool_calls = tuple(
+                            ToolCall(
+                                id=tc["id"],
+                                name=tc["name"],
+                                arguments=tc["arguments"],
+                            )
+                            for tc in tool_calls_data
+                        )
+                        messages.append(
+                            ChatMessage(
+                                role="assistant",
+                                content=msg.get("content"),
+                                tool_calls=tool_calls,
+                            )
+                        )
+                    else:
+                        messages.append(
+                            ChatMessage(role="assistant", content=msg.get("content", ""))
+                        )
+
+                elif role == "tool":
+                    messages.append(
+                        ChatMessage(
+                            role="tool",
+                            content=msg.get("content", ""),
+                            tool_call_id=msg.get("tool_call_id"),
+                            name=msg.get("name"),
+                        )
+                    )
+
+                elif role == "user":
+                    messages.append(ChatMessage(role="user", content=msg.get("content", "")))
 
         # Apply prompt template to wrap the question
         if self.prompt_template is not None:
@@ -297,20 +337,29 @@ class TrajectoryRunner:
 
     def _generate_action(
         self,
-        state: State[TextObservation, Any],
-    ) -> tuple[TextAction, GenerationResult]:
+        state: State[Any],
+    ) -> tuple[Action, GenerationResult]:
         """Generate an action (model response) for the current state.
+
+        Uses generate_with_tools if the backend supports it and tools are available.
 
         Args:
             state: Current environment state.
 
         Returns:
-            Tuple of (TextAction, GenerationResult).
+            Tuple of (Action, GenerationResult).
         """
         messages = self._build_messages(state)
-        result = self.backend.generate_chat(messages, self.sampling_params)
-        action = TextAction(text=result.text)
-        return action, result
+        tools = list(state.observation.available_tools)
+
+        if tools and self.backend.capabilities.supports_function_calling:
+            result = self.backend.generate_with_tools(
+                messages, tools, self.sampling_params
+            )
+        else:
+            result = self.backend.generate_chat(messages, self.sampling_params)
+
+        return result.to_agent_action(), result
 
     def run_trajectory(
         self,
@@ -334,7 +383,7 @@ class TrajectoryRunner:
             options["episode_id"] = trajectory_id
 
         state, reset_info = self.environment.reset(options=options)
-        trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+        trajectory: Trajectory[Any] = Trajectory.create(state)
 
         max_steps = max_steps or self.environment.spec.max_steps or 100
 
@@ -348,17 +397,22 @@ class TrajectoryRunner:
             step_result = self.environment.step(state, action)
 
             # Record transition
-            transition: Transition[Any, Any, Any] = Transition(
+            gen_info: dict[str, Any] = {
+                "prompt_tokens": gen_result.prompt_tokens,
+                "completion_tokens": gen_result.completion_tokens,
+                "finish_reason": gen_result.finish_reason.name,
+            }
+            if gen_result.has_tool_calls:
+                gen_info["has_tool_calls"] = True
+                gen_info["num_tool_calls"] = len(gen_result.tool_calls)
+
+            transition: Transition[Any] = Transition(
                 state=state,
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
                 info={
-                    "generation": {
-                        "prompt_tokens": gen_result.prompt_tokens,
-                        "completion_tokens": gen_result.completion_tokens,
-                        "finish_reason": gen_result.finish_reason.name,
-                    },
+                    "generation": gen_info,
                     "step": step_result.info,
                 },
             )
@@ -433,7 +487,7 @@ class TrajectoryRunner:
                 state, reset_info = self.environment.reset(
                     options={"task_index": task_index}
                 )
-                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                trajectory: Trajectory[Any] = Trajectory.create(state)
                 active.append(
                     _ActiveTrajectory(
                         position=pos,
@@ -449,7 +503,7 @@ class TrajectoryRunner:
                     trajectory=Trajectory(
                         episode_id=f"error_{task_index}",
                         initial_state=State(
-                            observation=TextObservation(prompt=""),
+                            observation=Observation(prompt=""),
                             hidden=None,
                             metadata=_error_metadata(task_index),
                         ),
@@ -468,26 +522,42 @@ class TrajectoryRunner:
                 break
 
             messages_batch = [self._build_messages(t.state) for t in remaining]
-            gen_results = self.backend.generate_chat_batch(
-                messages_batch, self.sampling_params
-            )
+
+            # Use tool calling if tools available and backend supports it
+            first_obs = remaining[0].state.observation
+            tools = list(first_obs.available_tools)
+            use_tools = tools and self.backend.capabilities.supports_function_calling
+
+            if use_tools:
+                gen_results = self.backend.generate_with_tools_batch(
+                    messages_batch, tools, self.sampling_params
+                )
+            else:
+                gen_results = self.backend.generate_chat_batch(
+                    messages_batch, self.sampling_params
+                )
 
             for t, gen_result in zip(remaining, gen_results):
                 try:
-                    action = TextAction(text=gen_result.text)
+                    action = gen_result.to_agent_action()
                     step_result = self.environment.step(t.state, action)
 
-                    transition: Transition[Any, Any, Any] = Transition(
+                    gen_info: dict[str, Any] = {
+                        "prompt_tokens": gen_result.prompt_tokens,
+                        "completion_tokens": gen_result.completion_tokens,
+                        "finish_reason": gen_result.finish_reason.name,
+                    }
+                    if gen_result.has_tool_calls:
+                        gen_info["has_tool_calls"] = True
+                        gen_info["num_tool_calls"] = len(gen_result.tool_calls)
+
+                    transition: Transition[Any] = Transition(
                         state=t.state,
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
                         info={
-                            "generation": {
-                                "prompt_tokens": gen_result.prompt_tokens,
-                                "completion_tokens": gen_result.completion_tokens,
-                                "finish_reason": gen_result.finish_reason.name,
-                            },
+                            "generation": gen_info,
                             "step": step_result.info,
                         },
                     )
@@ -556,10 +626,10 @@ def _run_multi_lockstep(
 
         for t, gen_result in zip(remaining, gen_results):
             try:
-                action = TextAction(text=gen_result.text)
+                action = gen_result.to_agent_action()
                 step_result = t.runner.environment.step(t.inner.state, action)
 
-                transition: Transition[Any, Any, Any] = Transition(
+                transition: Transition[Any] = Transition(
                     state=t.inner.state,
                     action=action,
                     next_state=step_result.next_state,
@@ -657,7 +727,7 @@ def run_multi_evaluation(
                 state, reset_info = entry.runner.environment.reset(
                     options={"task_index": task_index}
                 )
-                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                trajectory: Trajectory[Any] = Trajectory.create(state)
                 inner = _ActiveTrajectory(
                     position=len(all_trajectories),
                     task_index=task_index,
@@ -679,7 +749,7 @@ def run_multi_evaluation(
                         trajectory=Trajectory(
                             episode_id=f"error_{task_index}",
                             initial_state=State(
-                                observation=TextObservation(prompt=""),
+                                observation=Observation(prompt=""),
                                 hidden=None,
                                 metadata=_error_metadata(task_index),
                             ),
@@ -726,7 +796,7 @@ def run_multi_evaluation(
 
 
 def run_evaluation(
-    environment: Environment[Any, Any, Any],
+    environment: Environment[Any],
     backend: ModelBackend,
     num_tasks: int | None = None,
     task_indices: list[int] | None = None,
@@ -777,411 +847,6 @@ def run_evaluation(
 
 
 @dataclass
-class ToolTrajectoryRunner:
-    """Runs trajectories through a tool-aware environment with a model backend.
-
-    Similar to TrajectoryRunner but supports tool calling via the
-    generate_with_tools backend method.
-
-    Attributes:
-        environment: The tool environment to run trajectories in.
-        backend: The model backend for generation.
-        sampling_params: Parameters for text generation.
-        prompt_pipeline: Optional pipeline to transform prompts.
-        system_prompt: Optional system prompt to include.
-    """
-
-    environment: ToolEnvironment[Any]
-    backend: ModelBackend
-    sampling_params: SamplingParams = field(default_factory=SamplingParams)
-    prompt_pipeline: PromptPipeline | None = None
-    system_prompt: str | None = None
-    prompt_template: PromptTemplate | None = None
-    model_profile: ModelProfile | None = None
-
-    def _build_messages(
-        self,
-        state: State[AgentObservation, Any],
-    ) -> list[ChatMessage]:
-        """Build chat messages from state including tool results.
-
-        Args:
-            state: Current environment state.
-
-        Returns:
-            List of ChatMessages for the model.
-        """
-        messages: list[ChatMessage] = []
-
-        # Add system prompt if provided
-        if self.system_prompt:
-            messages.append(ChatMessage(role="system", content=self.system_prompt))
-
-        obs = state.observation
-
-        # Add initial prompt as user message if no messages yet
-        if not obs.messages:
-            messages.append(ChatMessage(role="user", content=obs.prompt))
-        else:
-            # First message should be user with prompt
-            messages.append(ChatMessage(role="user", content=obs.prompt))
-
-            # Then add message history
-            for msg in obs.messages:
-                role = msg.get("role", "user")
-
-                if role == "assistant":
-                    # Check for tool calls
-                    tool_calls_data = msg.get("tool_calls", [])
-                    if tool_calls_data:
-                        from llenvs.core.tools import ToolCall
-
-                        tool_calls = tuple(
-                            ToolCall(
-                                id=tc["id"],
-                                name=tc["name"],
-                                arguments=tc["arguments"],
-                            )
-                            for tc in tool_calls_data
-                        )
-                        messages.append(
-                            ChatMessage(
-                                role="assistant",
-                                content=msg.get("content"),
-                                tool_calls=tool_calls,
-                            )
-                        )
-                    else:
-                        messages.append(
-                            ChatMessage(role="assistant", content=msg.get("content", ""))
-                        )
-
-                elif role == "tool":
-                    messages.append(
-                        ChatMessage(
-                            role="tool",
-                            content=msg.get("content", ""),
-                            tool_call_id=msg.get("tool_call_id"),
-                            name=msg.get("name"),
-                        )
-                    )
-
-                elif role == "user":
-                    messages.append(ChatMessage(role="user", content=msg.get("content", "")))
-
-        # Apply prompt template to wrap the question
-        if self.prompt_template is not None:
-            transformer = PromptTemplateTransformer(template=self.prompt_template)
-            messages = transformer.transform(messages)
-
-        # Apply model profile transformers
-        if self.model_profile is not None:
-            for t in self.model_profile.build_transformers():
-                messages = t.transform(messages)
-
-        # Apply prompt pipeline if configured
-        if self.prompt_pipeline:
-            messages = self.prompt_pipeline.transform(messages)
-
-        return messages
-
-    def _generate_action(
-        self,
-        state: State[AgentObservation, Any],
-    ) -> tuple[AgentAction, GenerationResult]:
-        """Generate an action (model response) for the current state.
-
-        Uses generate_with_tools if the backend supports it and tools are available.
-
-        Args:
-            state: Current environment state.
-
-        Returns:
-            Tuple of (AgentAction, GenerationResult).
-        """
-        messages = self._build_messages(state)
-        tools = list(state.observation.available_tools)
-
-        if tools and self.backend.capabilities.supports_function_calling:
-            result = self.backend.generate_with_tools(
-                messages, tools, self.sampling_params
-            )
-        else:
-            result = self.backend.generate_chat(messages, self.sampling_params)
-
-        return result.to_agent_action(), result
-
-    def run_trajectory(
-        self,
-        task_index: int,
-        trajectory_id: str | None = None,
-        max_steps: int | None = None,
-    ) -> TrajectoryResult:
-        """Run a single trajectory.
-
-        Args:
-            task_index: Index of the task in the environment.
-            trajectory_id: Optional custom trajectory ID.
-            max_steps: Maximum steps (overrides environment spec).
-
-        Returns:
-            TrajectoryResult with trajectory and metrics.
-        """
-        # Reset environment
-        options = {"task_index": task_index}
-        if trajectory_id:
-            options["episode_id"] = trajectory_id
-
-        state, reset_info = self.environment.reset(options=options)
-        trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
-
-        max_steps = max_steps or self.environment.spec.max_steps or 100
-
-        # Run trajectory loop
-        step_count = 0
-        while not state.metadata.is_terminal and step_count < max_steps:
-            # Generate action
-            action, gen_result = self._generate_action(state)
-
-            # Take step (apply transition function)
-            step_result = self.environment.step(state, action)
-
-            # Record transition
-            transition: Transition[Any, Any, Any] = Transition(
-                state=state,
-                action=action,
-                next_state=step_result.next_state,
-                rewards=step_result.rewards,
-                info={
-                    "generation": {
-                        "prompt_tokens": gen_result.prompt_tokens,
-                        "completion_tokens": gen_result.completion_tokens,
-                        "finish_reason": gen_result.finish_reason.name,
-                        "has_tool_calls": gen_result.has_tool_calls,
-                        "num_tool_calls": len(gen_result.tool_calls),
-                    },
-                    "step": step_result.info,
-                },
-            )
-            trajectory.add_transition(transition)
-
-            state = step_result.next_state
-            step_count += 1
-
-            if step_result.done:
-                break
-
-        # Determine success from correctness reward
-        success = False
-        if trajectory.transitions:
-            last_rewards = trajectory.transitions[-1].rewards
-            correctness = last_rewards.by_name("correctness")
-            if correctness:
-                success = correctness.value >= 1.0
-
-        return TrajectoryResult(
-            trajectory=trajectory,
-            total_reward=trajectory.total_reward,
-            success=success,
-            metadata={
-                "task_index": task_index,
-                "num_steps": len(trajectory),
-                "reset_info": reset_info,
-            },
-        )
-
-    def run_batch(
-        self,
-        task_indices: list[int],
-        batch_size: int | None = None,
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> BatchResult:
-        """Run a batch of tool trajectories with lockstep batched generation.
-
-        All trajectories advance one step together. Uses
-        generate_with_tools_batch() when the backend supports function calling
-        and tools are available, otherwise falls back to generate_chat_batch().
-
-        Args:
-            task_indices: List of task indices to run.
-            batch_size: Maximum trajectories per lockstep batch. When set,
-                task_indices are chunked and each chunk is processed
-                independently. None means all tasks in one batch.
-            progress_callback: Optional callback(completed, total) for progress.
-
-        Returns:
-            BatchResult with all trajectory results and aggregate metrics.
-        """
-        if batch_size is not None and len(task_indices) > batch_size:
-            return _run_in_chunks(
-                lambda indices, cb: self.run_batch(indices, progress_callback=cb),
-                task_indices,
-                batch_size,
-                progress_callback,
-            )
-
-        if not task_indices:
-            return _aggregate_results([])
-
-        max_steps = self.environment.spec.max_steps or 100
-        total = len(task_indices)
-        result_slots: list[TrajectoryResult | None] = [None] * total
-
-        # Phase 1: Reset all tasks
-        active: list[_ActiveTrajectory] = []
-        for pos, task_index in enumerate(task_indices):
-            try:
-                state, reset_info = self.environment.reset(
-                    options={"task_index": task_index}
-                )
-                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
-                active.append(
-                    _ActiveTrajectory(
-                        position=pos,
-                        task_index=task_index,
-                        state=state,
-                        reset_info=reset_info,
-                        trajectory=trajectory,
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Error resetting task {task_index}: {e}")
-                result_slots[pos] = TrajectoryResult(
-                    trajectory=Trajectory(
-                        episode_id=f"error_{task_index}",
-                        initial_state=State(
-                            observation=AgentObservation(prompt=""),
-                            hidden=None,
-                            metadata=_error_metadata(task_index),
-                        ),
-                    ),
-                    total_reward=0.0,
-                    success=False,
-                    metadata={"error": str(e), "task_index": task_index},
-                )
-
-        reset_errors = total - len(active)
-
-        # Phase 2: Lockstep generation
-        while True:
-            remaining = [t for t in active if not t.done]
-            if not remaining:
-                break
-
-            messages_batch = [self._build_messages(t.state) for t in remaining]
-
-            # Use tool calling if tools available and backend supports it
-            first_obs = remaining[0].state.observation
-            tools = list(first_obs.available_tools)
-            use_tools = tools and self.backend.capabilities.supports_function_calling
-
-            if use_tools:
-                gen_results = self.backend.generate_with_tools_batch(
-                    messages_batch, tools, self.sampling_params
-                )
-            else:
-                gen_results = self.backend.generate_chat_batch(
-                    messages_batch, self.sampling_params
-                )
-
-            for t, gen_result in zip(remaining, gen_results):
-                try:
-                    action = gen_result.to_agent_action()
-                    step_result = self.environment.step(t.state, action)
-
-                    transition: Transition[Any, Any, Any] = Transition(
-                        state=t.state,
-                        action=action,
-                        next_state=step_result.next_state,
-                        rewards=step_result.rewards,
-                        info={
-                            "generation": {
-                                "prompt_tokens": gen_result.prompt_tokens,
-                                "completion_tokens": gen_result.completion_tokens,
-                                "finish_reason": gen_result.finish_reason.name,
-                                "has_tool_calls": gen_result.has_tool_calls,
-                                "num_tool_calls": len(gen_result.tool_calls),
-                            },
-                            "step": step_result.info,
-                        },
-                    )
-                    t.trajectory.add_transition(transition)
-                    t.state = step_result.next_state
-                    t.step_count += 1
-
-                    if step_result.done or t.step_count >= max_steps:
-                        t.done = True
-                except Exception as e:
-                    logger.error(f"Error stepping task {t.task_index}: {e}")
-                    t.done = True
-                    t.error = str(e)
-
-            if progress_callback:
-                done_count = reset_errors + sum(1 for t in active if t.done)
-                progress_callback(done_count, total)
-
-        # Phase 3: Build results
-        for t in active:
-            result_slots[t.position] = _finalize_trajectory(t)
-
-        if progress_callback:
-            progress_callback(total, total)
-
-        return _aggregate_results([r for r in result_slots if r is not None])
-
-
-def run_tool_evaluation(
-    environment: ToolEnvironment[Any],
-    backend: ModelBackend,
-    num_tasks: int | None = None,
-    task_indices: list[int] | None = None,
-    sampling_params: SamplingParams | None = None,
-    prompt_pipeline: PromptPipeline | None = None,
-    system_prompt: str | None = None,
-    prompt_template: PromptTemplate | None = None,
-    model_profile: ModelProfile | None = None,
-    batch_size: int | None = None,
-    progress_callback: Callable[[int, int], None] | None = None,
-) -> BatchResult:
-    """Convenience function to run a tool-aware evaluation.
-
-    Args:
-        environment: The tool environment to evaluate on.
-        backend: Model backend for generation.
-        num_tasks: Number of tasks to run (from start).
-        task_indices: Specific task indices (overrides num_tasks).
-        sampling_params: Generation parameters.
-        prompt_pipeline: Optional prompt pipeline.
-        system_prompt: Optional system prompt.
-        prompt_template: Optional prompt template for wrapping questions.
-        model_profile: Optional model profile for model-specific adjustments.
-        batch_size: Maximum trajectories per lockstep batch.
-        progress_callback: Optional progress callback.
-
-    Returns:
-        BatchResult with evaluation results.
-    """
-    if task_indices is None:
-        max_tasks = len(environment) if hasattr(environment, "__len__") else 100
-        num_tasks = num_tasks or max_tasks
-        task_indices = list(range(min(num_tasks, max_tasks)))
-
-    runner = ToolTrajectoryRunner(
-        environment=environment,
-        backend=backend,
-        sampling_params=sampling_params or SamplingParams(),
-        prompt_pipeline=prompt_pipeline,
-        system_prompt=system_prompt,
-        prompt_template=prompt_template,
-        model_profile=model_profile,
-    )
-
-    return runner.run_batch(
-        task_indices, batch_size=batch_size, progress_callback=progress_callback,
-    )
-
-
-@dataclass
 class SegmentedTrajectoryRunner:
     """Runs trajectories with segment-at-a-time generation.
 
@@ -1201,7 +866,7 @@ class SegmentedTrajectoryRunner:
         chunk_max_tokens: Max tokens per chunk for boundary-based strategies.
     """
 
-    environment: SegmentedEnvironment[Any, Any]
+    environment: SegmentedEnvironment[Any]
     backend: ModelBackend
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     prompt_pipeline: PromptPipeline | None = None
@@ -1212,7 +877,7 @@ class SegmentedTrajectoryRunner:
 
     def _build_messages(
         self,
-        state: State[TextObservation, Any],
+        state: State[Any],
     ) -> list[ChatMessage]:
         """Build chat messages from state.
 
@@ -1227,12 +892,9 @@ class SegmentedTrajectoryRunner:
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
 
-        if isinstance(state.observation, TextObservation):
-            for msg in state.observation.messages:
-                messages.append(ChatMessage(role=msg["role"], content=msg["content"]))
-            messages.append(ChatMessage(role="user", content=state.observation.prompt))
-        else:
-            messages.append(ChatMessage(role="user", content=str(state.observation)))
+        for msg in state.observation.messages:
+            messages.append(ChatMessage(role=msg["role"], content=msg["content"]))
+        messages.append(ChatMessage(role="user", content=state.observation.prompt))
 
         if self.prompt_template is not None:
             transformer = PromptTemplateTransformer(template=self.prompt_template)
@@ -1257,12 +919,12 @@ class SegmentedTrajectoryRunner:
 
     def _complete_remainder(
         self,
-        env: SegmentedEnvironment[Any, Any],
-        trajectory: Trajectory[Any, Any, Any],
-        state: State[Any, Any],
+        env: SegmentedEnvironment[Any],
+        trajectory: Trajectory[Any],
+        state: State[Any],
         messages: list[ChatMessage],
         accumulated: str,
-    ) -> tuple[State[Any, Any], bool]:
+    ) -> tuple[State[Any], bool]:
         """Generate the rest of the response in one LLM call and replay segments.
 
         Called when the step_callback returns COMPLETE. Makes a single
@@ -1294,10 +956,10 @@ class SegmentedTrajectoryRunner:
             segments = []
 
         for segment in segments:
-            action = TextAction(text=segment)
+            action = Action(text=segment)
             step_result = env.step(state, action)
 
-            transition: Transition[Any, Any, Any] = Transition(
+            transition: Transition[Any] = Transition(
                 state=state,
                 action=action,
                 next_state=step_result.next_state,
@@ -1324,8 +986,8 @@ class SegmentedTrajectoryRunner:
         task_index: int,
         trajectory_id: str | None = None,
         max_steps: int | None = None,
-        step_callback: Callable[[StepResult[Any, Any]], str | ForceAction | None] | None = None,
-        prefix: str | Sequence[tuple[State[Any, Any], TextAction]] | None = None,
+        step_callback: Callable[[StepResult[Any]], str | ForceAction | None] | None = None,
+        prefix: str | Sequence[tuple[State[Any], Action]] | None = None,
     ) -> TrajectoryResult:
         """Run a single trajectory with segment-at-a-time generation.
 
@@ -1344,7 +1006,7 @@ class SegmentedTrajectoryRunner:
             prefix: Predetermined content to replay before generation.
                 - ``str``: auto-segmented via the environment's segmenter
                   and stepped from the reset state.
-                - ``Sequence[tuple[State, TextAction]]``: state-action pairs
+                - ``Sequence[tuple[State, Action]]``: state-action pairs
                   stepped using the provided states (for exact replay).
 
         Returns:
@@ -1359,7 +1021,7 @@ class SegmentedTrajectoryRunner:
             options["episode_id"] = trajectory_id
 
         state, reset_info = env.reset(options=options)
-        trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+        trajectory: Trajectory[Any] = Trajectory.create(state)
 
         max_steps = max_steps or 1000
         messages = self._build_messages(state)
@@ -1376,10 +1038,10 @@ class SegmentedTrajectoryRunner:
                 # Text form: auto-segment and step from reset state
                 segments = env.segmenter.segment(prefix)
                 for seg in segments:
-                    action = TextAction(text=seg)
+                    action = Action(text=seg)
                     step_result = env.step(state, action)
 
-                    transition: Transition[Any, Any, Any] = Transition(
+                    transition: Transition[Any] = Transition(
                         state=state,
                         action=action,
                         next_state=step_result.next_state,
@@ -1448,7 +1110,7 @@ class SegmentedTrajectoryRunner:
                     break
 
             # Step the environment with this segment
-            action = TextAction(text=segment)
+            action = Action(text=segment)
             step_result = env.step(state, action)
 
             # Build transition info
@@ -1504,7 +1166,7 @@ class SegmentedTrajectoryRunner:
 
         # Drain remaining buffer as final segment
         if buffer and not terminal and not complete_early:
-            action = TextAction(text=buffer)
+            action = Action(text=buffer)
             step_result = env.step(state, action)
 
             transition = Transition(
@@ -1536,7 +1198,7 @@ class SegmentedTrajectoryRunner:
 
             transition = Transition(
                 state=state,
-                action=TextAction(text=""),
+                action=Action(text=""),
                 next_state=finalize_result.next_state,
                 rewards=finalize_result.rewards,
                 info={"step": finalize_result.info, "finalize": True},
@@ -1567,7 +1229,7 @@ class SegmentedTrajectoryRunner:
     def run_batch(
         self,
         task_indices: list[int],
-        step_callback: Callable[[StepResult[Any, Any]], str | ForceAction | None] | None = None,
+        step_callback: Callable[[StepResult[Any]], str | ForceAction | None] | None = None,
         max_steps: int | None = None,
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
@@ -1617,7 +1279,7 @@ class SegmentedTrajectoryRunner:
         for pos, task_index in enumerate(task_indices):
             try:
                 state, reset_info = env.reset(options={"task_index": task_index})
-                trajectory: Trajectory[Any, Any, Any] = Trajectory.create(state)
+                trajectory: Trajectory[Any] = Trajectory.create(state)
                 messages = self._build_messages(state)
                 active.append(
                     _ActiveSegmentedTrajectory(
@@ -1635,7 +1297,7 @@ class SegmentedTrajectoryRunner:
                     trajectory=Trajectory(
                         episode_id=f"error_{task_index}",
                         initial_state=State(
-                            observation=TextObservation(prompt=""),
+                            observation=Observation(prompt=""),
                             hidden=None,
                             metadata=_error_metadata(task_index),
                         ),
@@ -1697,7 +1359,7 @@ class SegmentedTrajectoryRunner:
                             continue
 
                     # Step the environment
-                    action = TextAction(text=segment)
+                    action = Action(text=segment)
                     step_result = env.step(t.state, action)
 
                     # Build transition info
@@ -1716,7 +1378,7 @@ class SegmentedTrajectoryRunner:
                             "step": step_result.info,
                         }
 
-                    transition: Transition[Any, Any, Any] = Transition(
+                    transition: Transition[Any] = Transition(
                         state=t.state,
                         action=action,
                         next_state=step_result.next_state,
@@ -1774,7 +1436,7 @@ class SegmentedTrajectoryRunner:
         for t in active:
             if t.buffer and not t.done and not t.complete_early:
                 try:
-                    action = TextAction(text=t.buffer)
+                    action = Action(text=t.buffer)
                     step_result = env.step(t.state, action)
 
                     transition = Transition(
@@ -1821,7 +1483,7 @@ class SegmentedTrajectoryRunner:
 
                     transition = Transition(
                         state=t.state,
-                        action=TextAction(text=""),
+                        action=Action(text=""),
                         next_state=finalize_result.next_state,
                         rewards=finalize_result.rewards,
                         info={"step": finalize_result.info, "finalize": True},
@@ -1845,7 +1507,7 @@ class SegmentedTrajectoryRunner:
 
 
 def run_segmented_evaluation(
-    environment: SegmentedEnvironment[Any, Any],
+    environment: SegmentedEnvironment[Any],
     backend: ModelBackend,
     num_tasks: int | None = None,
     task_indices: list[int] | None = None,
@@ -1854,7 +1516,7 @@ def run_segmented_evaluation(
     system_prompt: str | None = None,
     prompt_template: "PromptTemplate | None" = None,
     model_profile: "ModelProfile | None" = None,
-    step_callback: Callable[[StepResult[Any, Any]], str | ForceAction | None] | None = None,
+    step_callback: Callable[[StepResult[Any]], str | ForceAction | None] | None = None,
     max_steps: int | None = None,
     chunk_max_tokens: int = 256,
     batch_size: int | None = None,

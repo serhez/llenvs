@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Generic, TypeVar
 if TYPE_CHECKING:
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
-ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")
 
 
@@ -35,7 +34,7 @@ class StateMetadata:
 
 
 @dataclass(frozen=True)
-class State(Generic[ObsT, HiddenT]):
+class State(Generic[HiddenT]):
     """Immutable state representing a point in an episode.
 
     The separation of observation and hidden state enables:
@@ -49,11 +48,11 @@ class State(Generic[ObsT, HiddenT]):
         metadata: Step count, episode ID, terminal flag, etc.
     """
 
-    observation: ObsT
+    observation: Observation
     hidden: HiddenT
     metadata: StateMetadata
 
-    def with_metadata(self, **kwargs: Any) -> "State[ObsT, HiddenT]":
+    def with_metadata(self, **kwargs: Any) -> "State[HiddenT]":
         """Create a new state with updated metadata fields."""
         current = {
             "step": self.metadata.step,
@@ -70,35 +69,11 @@ class State(Generic[ObsT, HiddenT]):
 
 
 @dataclass(frozen=True)
-class TextObservation:
-    """Simple text-based observation.
+class Observation:
+    """Unified observation for all environments.
 
-    Attributes:
-        prompt: The question or prompt text.
-        messages: Optional chat message history.
-    """
-
-    prompt: str
-    messages: tuple[dict[str, str], ...] = ()
-
-
-@dataclass(frozen=True)
-class TextAction:
-    """Simple text-based action (model response).
-
-    Attributes:
-        text: The generated text response.
-    """
-
-    text: str
-
-
-@dataclass(frozen=True)
-class AgentObservation:
-    """Tool-aware observation for agent environments.
-
-    Extends TextObservation with tool-related information, allowing
-    models to see available tools and results of previous tool calls.
+    Supports both text-only and tool-aware environments. Text-only
+    environments leave tool_results and available_tools as empty tuples.
 
     Attributes:
         prompt: The question or prompt text.
@@ -114,11 +89,11 @@ class AgentObservation:
 
 
 @dataclass(frozen=True)
-class AgentAction:
-    """Hybrid action supporting both text and tool calls.
+class Action:
+    """Unified action supporting both text and tool calls.
 
     Models can respond with just text, just tool calls, or both.
-    This provides flexibility for different interaction patterns.
+    Text-only environments use Action(text="...") with empty tool_calls.
 
     Attributes:
         text: Optional text response.
@@ -129,17 +104,17 @@ class AgentAction:
     tool_calls: tuple["ToolCall", ...] = ()
 
     @classmethod
-    def from_text(cls, text: str) -> "AgentAction":
+    def from_text(cls, text: str) -> "Action":
         """Create an action with only text."""
         return cls(text=text, tool_calls=())
 
     @classmethod
-    def from_tool_call(cls, call: "ToolCall") -> "AgentAction":
+    def from_tool_call(cls, call: "ToolCall") -> "Action":
         """Create an action with a single tool call."""
         return cls(text=None, tool_calls=(call,))
 
     @classmethod
-    def from_tool_calls(cls, calls: tuple["ToolCall", ...]) -> "AgentAction":
+    def from_tool_calls(cls, calls: tuple["ToolCall", ...]) -> "Action":
         """Create an action with multiple tool calls."""
         return cls(text=None, tool_calls=calls)
 

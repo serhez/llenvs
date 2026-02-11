@@ -3,7 +3,7 @@
 import pytest
 from typing import Any
 
-from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.state import Observation, Action
 from llenvs.core.reward import RewardType
 from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
 from llenvs.adapters.gem import (
@@ -280,7 +280,7 @@ class TestGemEnvironment:
         state, info = env.reset(seed=42)
 
         # Check observation
-        assert isinstance(state.observation, TextObservation)
+        assert isinstance(state.observation, Observation)
         assert "number" in state.observation.prompt.lower()
 
         # Check hidden state
@@ -303,7 +303,7 @@ class TestGemEnvironment:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="50")
+        action = Action(text="50")
         result = env.step(state, action)
 
         # Check termination
@@ -326,7 +326,7 @@ class TestGemEnvironment:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="25")
+        action = Action(text="25")
         result = env.step(state, action)
 
         # Check not terminated
@@ -355,7 +355,7 @@ class TestGemEnvironment:
         # Binary search
         guesses = ["50"]  # Direct hit
         for guess in guesses:
-            action = TextAction(text=guess)
+            action = Action(text=guess)
             result = env.step(state, action)
             state = result.next_state
 
@@ -375,7 +375,7 @@ class TestGemEnvironment:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="<answer>4</answer>")
+        action = Action(text="<answer>4</answer>")
         result = env.step(state, action)
 
         assert result.terminated is True
@@ -393,7 +393,7 @@ class TestGemEnvironment:
         state, _ = env.reset()
 
         # With tags
-        action = TextAction(text="The answer is <answer>4</answer>")
+        action = Action(text="The answer is <answer>4</answer>")
         result = env.step(state, action)
 
         format_reward = result.rewards.by_name("format")
@@ -409,7 +409,7 @@ class TestGemEnvironment:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="The answer is 4")
+        action = Action(text="The answer is 4")
         result = env.step(state, action)
 
         # No format reward by default
@@ -426,7 +426,7 @@ class TestGemEnvironment:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="The answer is 4")
+        action = Action(text="The answer is 4")
         result = env.step(state, action)
 
         assert result.info["extracted_answer"] == "4"
@@ -453,7 +453,7 @@ class TestGemEnvironment:
         state, _ = env.reset()
 
         # Take a step
-        action1 = TextAction(text="25")
+        action1 = Action(text="25")
         result1 = env.step(state, action1)
 
         # Take same step from same state (should give same result)
@@ -544,8 +544,8 @@ class TestGemEnvironmentSpec:
         assert spec.adapter == "gem"
         assert spec.max_steps == 20
         assert spec.is_multi_turn is True
-        assert spec.observation_type == TextObservation
-        assert spec.action_type == TextAction
+        assert spec.observation_type == Observation
+        assert spec.action_type == Action
 
     def test_spec_single_turn(self, mock_single_turn_env):
         """Test spec for single-turn environment."""
@@ -573,7 +573,7 @@ class TestRewardBundle:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="<answer>4</answer>")
+        action = Action(text="<answer>4</answer>")
         result = env.step(state, action)
 
         # Only correctness (native) reward
@@ -590,7 +590,7 @@ class TestRewardBundle:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="<answer>4</answer>")
+        action = Action(text="<answer>4</answer>")
         result = env.step(state, action)
 
         # correctness + format = 1.0 + 1.0 = 2.0
@@ -607,7 +607,7 @@ class TestRewardBundle:
         )
         state, _ = env.reset()
 
-        action = TextAction(text="<answer>4</answer>")
+        action = Action(text="<answer>4</answer>")
         result = env.step(state, action)
 
         outcome_rewards = result.rewards.by_type(RewardType.OUTCOME)

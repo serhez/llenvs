@@ -1,7 +1,7 @@
 """Tests for the ReasoningGym adapter."""
 
 import pytest
-from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.state import Observation, Action
 from llenvs.core.reward import RewardType
 from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
 from llenvs.adapters.reasoning_gym import (
@@ -33,7 +33,7 @@ class TestReasoningGymEnvironment:
 
         # Use the environment
         state, _ = env.reset(options={"task_index": 0})
-        result = env.step(state, TextAction(text="The answer is 4"))
+        result = env.step(state, Action(text="The answer is 4"))
 
         assert result.info["extracted_answer"] == "4"
 
@@ -42,8 +42,8 @@ class TestReasoningGymEnvironment:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         spec = env.spec
 
-        assert spec.observation_type == TextObservation
-        assert spec.action_type == TextAction
+        assert spec.observation_type == Observation
+        assert spec.action_type == Action
         assert spec.metadata["dataset_size"] == 3
 
     def test_reward_functions_default_native_only(self, mock_dataset):
@@ -70,7 +70,7 @@ class TestReasoningGymEnvironment:
         state, info = env.reset(options={"task_index": 1})
 
         # Check observation
-        assert isinstance(state.observation, TextObservation)
+        assert isinstance(state.observation, Observation)
         assert state.observation.prompt == "What is 3 * 3?"
 
         # Check hidden state
@@ -115,7 +115,7 @@ class TestReasoningGymEnvironment:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="The answer is <answer>4</answer>")
+        action = Action(text="The answer is <answer>4</answer>")
         result = env.step(state, action)
 
         # Check termination
@@ -140,7 +140,7 @@ class TestReasoningGymEnvironment:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="The answer is <answer>5</answer>")
+        action = Action(text="The answer is <answer>5</answer>")
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
@@ -152,7 +152,7 @@ class TestReasoningGymEnvironment:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="I don't know the answer")
+        action = Action(text="I don't know the answer")
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
@@ -168,7 +168,7 @@ class TestReasoningGymEnvironment:
         original_step = state.metadata.step
         original_terminal = state.metadata.is_terminal
 
-        env.step(state, TextAction(text="<answer>4</answer>"))
+        env.step(state, Action(text="<answer>4</answer>"))
 
         # Original state unchanged
         assert state.metadata.step == original_step
@@ -179,7 +179,7 @@ class TestReasoningGymEnvironment:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        result = env.step(state, TextAction(text="<answer>4</answer>"))
+        result = env.step(state, Action(text="<answer>4</answer>"))
 
         assert result.next_state.metadata.step == 1
         assert result.next_state.metadata.is_terminal is True
@@ -190,7 +190,7 @@ class TestReasoningGymEnvironment:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="<answer>4</answer>")
+        action = Action(text="<answer>4</answer>")
         rewards = env.compute_rewards(state, action, state)
 
         assert rewards.total == 1.0  # correctness only (native-only default)
@@ -207,7 +207,7 @@ class TestCorrectnessRewardFunction:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="<answer>4</answer>")
+        action = Action(text="<answer>4</answer>")
         signal = reward_fn.compute(state, action, state)
 
         assert signal.value == 1.0
@@ -223,7 +223,7 @@ class TestCorrectnessRewardFunction:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="<answer>wrong</answer>")
+        action = Action(text="<answer>wrong</answer>")
         signal = reward_fn.compute(state, action, state)
 
         assert signal.value == 0.0
@@ -236,7 +236,7 @@ class TestCorrectnessRewardFunction:
         env = ReasoningGymEnvironment(dataset=mock_dataset)
         state, _ = env.reset(options={"task_index": 0})
 
-        action = TextAction(text="No tags here")
+        action = Action(text="No tags here")
         signal = reward_fn.compute(state, action, state)
 
         assert signal.value == 0.0
@@ -254,14 +254,14 @@ class TestFormatReward:
         from llenvs.core.state import State, StateMetadata
 
         state = State(
-            observation=TextObservation(prompt="test"),
+            observation=Observation(prompt="test"),
             hidden=ReasoningGymHidden(
                 entry={}, expected_answer="", task_index=0, dataset_name="test"
             ),
             metadata=StateMetadata(step=0, episode_id="test", is_terminal=False),
         )
 
-        action = TextAction(text="<answer>anything</answer>")
+        action = Action(text="<answer>anything</answer>")
         signal = reward_fn.compute(state, action, state)
 
         assert signal.value == 1.0
@@ -276,14 +276,14 @@ class TestFormatReward:
         from llenvs.core.state import State, StateMetadata
 
         state = State(
-            observation=TextObservation(prompt="test"),
+            observation=Observation(prompt="test"),
             hidden=ReasoningGymHidden(
                 entry={}, expected_answer="", task_index=0, dataset_name="test"
             ),
             metadata=StateMetadata(step=0, episode_id="test", is_terminal=False),
         )
 
-        action = TextAction(text="No proper tags")
+        action = Action(text="No proper tags")
         signal = reward_fn.compute(state, action, state)
 
         assert signal.value == 0.0

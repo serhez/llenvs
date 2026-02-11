@@ -14,7 +14,7 @@ pip install llenvs[gem]
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 # Create a multi-turn game
 env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
@@ -29,7 +29,7 @@ GEM provides native multi-turn games where the model interacts across multiple s
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 # GuessTheNumber - binary search game
 env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
@@ -41,7 +41,7 @@ print(f"Game: {state.observation.prompt}")
 # Play the game
 while not state.metadata.is_terminal:
     # Model generates a guess
-    action = TextAction(text="50")
+    action = Action(text="50")
     result = env.step(state, action)
 
     print(f"Response: {result.next_state.observation.prompt}")
@@ -73,7 +73,7 @@ GEM also wraps standard benchmarks as single-turn environments:
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 # Math benchmark
 env = environment_registry.get(name="math:GSM8K", adapter="gem")
@@ -82,7 +82,7 @@ state, _ = env.reset(options={"task_index": 0})
 print(f"Problem: {state.observation.prompt}")
 
 # Model solves the problem
-action = TextAction(text="Let me solve this step by step... <answer>42</answer>")
+action = Action(text="Let me solve this step by step... <answer>42</answer>")
 result = env.step(state, action)
 
 print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
@@ -110,28 +110,28 @@ print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
 
 ## Tool-Enabled Environments
 
-GEM environments like `math:*` and `qa:*` support tools (Python execution, search). Use `environment_registry.get_tool_environment()` for structured function calling:
+GEM environments like `math:*` and `qa:*` support tools (Python execution, search). Use `environment_registry.get()` with `tool_types` for structured function calling:
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import AgentAction, ToolCall
+from llenvs.core import Action, ToolCall
 
 # Create tool-enabled environment
-env = environment_registry.get_tool_environment(
+env = environment_registry.get(
     name="math:GSM8K",
     adapter="gem",
     tool_types=("python",),  # Enable Python execution
     max_steps=10,
 )
 
-# Reset returns AgentObservation with available tools
+# Reset returns Observation with available tools
 state, _ = env.reset(options={"task_index": 0})
 print(f"Tools: {[t.name for t in state.observation.available_tools]}")
 # ['python', 'submit_answer']
 
 # Use Python tool to compute
 call = ToolCall(id="1", name="python", arguments={"code": "print(0.15 * 80)"})
-action = AgentAction(tool_calls=(call,))
+action = Action(tool_calls=(call,))
 result = env.step(state, action)
 
 print(f"Output: {result.info['tool_results'][0].output}")
@@ -139,7 +139,7 @@ print(f"Output: {result.info['tool_results'][0].output}")
 
 # Submit final answer
 call = ToolCall(id="2", name="submit_answer", arguments={"answer": "12"})
-action = AgentAction(tool_calls=(call,))
+action = Action(tool_calls=(call,))
 result = env.step(result.next_state, action)
 
 print(f"Correct: {result.info['gem_reward'] == 1.0}")
@@ -156,7 +156,7 @@ print(f"Correct: {result.info['gem_reward'] == 1.0}")
 ### QA Environments with Search
 
 ```python
-env = environment_registry.get_tool_environment(
+env = environment_registry.get(
     name="qa:HotpotQA",
     adapter="gem",
     tool_types=("search",),
@@ -168,23 +168,23 @@ state, _ = env.reset()
 
 # Search for information
 call = ToolCall(id="1", name="search", arguments={"query": "capital of France"})
-action = AgentAction(tool_calls=(call,))
+action = Action(tool_calls=(call,))
 result = env.step(state, action)
 # Tool result contains search results
 ```
 
-### Using with ToolTrajectoryRunner
+### Using with TrajectoryRunner
 
 ```python
 from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
-from llenvs.evaluation import ToolTrajectoryRunner
+from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
 
-env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem", tool_types=("python",))
+env = environment_registry.get(name="math:GSM8K", adapter="gem", tool_types=("python",))
 backend = OpenAIBackend(model="gpt-4o")
 
-runner = ToolTrajectoryRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0),

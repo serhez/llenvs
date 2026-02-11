@@ -1,7 +1,7 @@
 """Tests for metric computation."""
 
 import pytest
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.trajectory import Trajectory, Transition
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
 from llenvs.evaluation.runner import TrajectoryResult, BatchResult
@@ -26,10 +26,10 @@ def make_state(
     step: int = 0,
     trajectory_id: str = "traj_0",
     is_terminal: bool = False,
-) -> State[TextObservation, dict]:
+) -> State[dict]:
     """Helper to create states for testing."""
     return State(
-        observation=TextObservation(prompt="test"),
+        observation=Observation(prompt="test"),
         hidden={},
         metadata=StateMetadata(
             step=step,
@@ -51,7 +51,7 @@ def make_transition(
 
     return Transition(
         state=state,
-        action=TextAction(text="test response"),
+        action=Action(text="test response"),
         next_state=next_state,
         rewards=RewardBundle(
             signals=(

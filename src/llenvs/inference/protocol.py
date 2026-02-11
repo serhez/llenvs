@@ -12,7 +12,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from llenvs.core.state import AgentAction
+    from llenvs.core.state import Action
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 
@@ -114,11 +114,11 @@ class GenerationResult:
         """Check if this result contains tool calls."""
         return len(self.tool_calls) > 0
 
-    def to_agent_action(self) -> "AgentAction":
-        """Convert to AgentAction for use with tool environments."""
-        from llenvs.core.state import AgentAction
+    def to_agent_action(self) -> "Action":
+        """Convert to Action for use with environments."""
+        from llenvs.core.state import Action
 
-        return AgentAction(text=self.text, tool_calls=self.tool_calls)
+        return Action(text=self.text, tool_calls=self.tool_calls)
 
 
 @dataclass(frozen=True)

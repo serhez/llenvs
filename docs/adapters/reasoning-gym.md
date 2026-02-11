@@ -14,7 +14,7 @@ pip install llenvs[reasoning-gym]
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.core import TextAction
+from llenvs.core import Action
 
 env = environment_registry.get(
     name="leg_counting",
@@ -27,7 +27,7 @@ state, info = env.reset(options={"task_index": 0})
 print(state.observation.prompt)
 # "How many legs do 2 dogs and 3 birds have in total?"
 
-action = TextAction(text="<answer>14</answer>")
+action = Action(text="<answer>14</answer>")
 result = env.step(state, action)
 print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
 ```

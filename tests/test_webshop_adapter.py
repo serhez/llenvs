@@ -4,7 +4,7 @@ import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import TextObservation, TextAction
+from llenvs.core.state import Observation, Action
 from llenvs.core.reward import RewardType
 from llenvs.adapters.webshop import (
     WebShopEnvironment,
@@ -207,7 +207,7 @@ class TestWebShopEnvironment:
         state, info = env.reset(options={"task_index": 0})
 
         # Check observation
-        assert isinstance(state.observation, TextObservation)
+        assert isinstance(state.observation, Observation)
         assert "Instruction:" in state.observation.prompt
         assert "red wireless headphone" in state.observation.prompt.lower()
 
@@ -228,7 +228,7 @@ class TestWebShopEnvironment:
         env = WebShopEnvironment(webshop_env=mock_webshop_env)
         state, _ = env.reset()
 
-        action = TextAction(text="search[red headphones]")
+        action = Action(text="search[red headphones]")
         result = env.step(state, action)
 
         # Check not terminated
@@ -249,11 +249,11 @@ class TestWebShopEnvironment:
         state, _ = env.reset()
 
         # Search first
-        action1 = TextAction(text="search[headphones]")
+        action1 = Action(text="search[headphones]")
         result1 = env.step(state, action1)
 
         # Click on product
-        action2 = TextAction(text="click[Product 1 - Red Headphones $45]")
+        action2 = Action(text="click[Product 1 - Red Headphones $45]")
         result2 = env.step(result1.next_state, action2)
 
         # Check not terminated
@@ -269,15 +269,15 @@ class TestWebShopEnvironment:
         state, _ = env.reset()
 
         # Search
-        action1 = TextAction(text="search[headphones]")
+        action1 = Action(text="search[headphones]")
         result1 = env.step(state, action1)
 
         # Click product
-        action2 = TextAction(text="click[Product 1 - Red Headphones $45]")
+        action2 = Action(text="click[Product 1 - Red Headphones $45]")
         result2 = env.step(result1.next_state, action2)
 
         # Buy
-        action3 = TextAction(text="click[Buy Now]")
+        action3 = Action(text="click[Buy Now]")
         result3 = env.step(result2.next_state, action3)
 
         # Check terminated
@@ -299,7 +299,7 @@ class TestWebShopEnvironment:
         state, _ = env.reset()
 
         # Take max_steps without buying
-        action = TextAction(text="search[headphones]")
+        action = Action(text="search[headphones]")
         result1 = env.step(state, action)
         result2 = env.step(result1.next_state, action)
 
@@ -326,7 +326,7 @@ class TestWebShopEnvironment:
 
         assert "[Step 0]" in state.observation.prompt
 
-        action = TextAction(text="search[test]")
+        action = Action(text="search[test]")
         result = env.step(state, action)
 
         assert "[Step 1]" in result.next_state.observation.prompt
@@ -452,19 +452,19 @@ class TestWebShopMultiStepEpisode:
         assert state.metadata.step == 0
 
         # Step 1: Search
-        action1 = TextAction(text="search[red wireless headphones]")
+        action1 = Action(text="search[red wireless headphones]")
         result1 = env.step(state, action1)
         assert not result1.terminated
         assert result1.next_state.metadata.step == 1
 
         # Step 2: Click on product
-        action2 = TextAction(text="click[Product 1 - Red Headphones $45]")
+        action2 = Action(text="click[Product 1 - Red Headphones $45]")
         result2 = env.step(result1.next_state, action2)
         assert not result2.terminated
         assert result2.next_state.metadata.step == 2
 
         # Step 3: Buy
-        action3 = TextAction(text="click[Buy Now]")
+        action3 = Action(text="click[Buy Now]")
         result3 = env.step(result2.next_state, action3)
         assert result3.terminated
         assert result3.next_state.metadata.step == 3
@@ -478,11 +478,11 @@ class TestWebShopMultiStepEpisode:
         state, _ = env.reset()
 
         # Search
-        action1 = TextAction(text="search[headphones]")
+        action1 = Action(text="search[headphones]")
         result1 = env.step(state, action1)
 
         # Click wrong product (blue instead of red)
-        action2 = TextAction(text="click[Product 2 - Blue Headphones $30]")
+        action2 = Action(text="click[Product 2 - Blue Headphones $30]")
         result2 = env.step(result1.next_state, action2)
 
         # Episode continues (mock doesn't simulate wrong product details)

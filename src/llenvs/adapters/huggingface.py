@@ -13,7 +13,7 @@ import uuid
 if TYPE_CHECKING:
     from llenvs.inference.prompts import PromptTemplate
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import (
@@ -173,9 +173,9 @@ class HuggingFaceCorrectnessReward:
 
     def compute(
         self,
-        state: State[TextObservation, HuggingFaceHidden],
-        action: TextAction,
-        next_state: State[TextObservation, HuggingFaceHidden],
+        state: State[HuggingFaceHidden],
+        action: Action,
+        next_state: State[HuggingFaceHidden],
     ) -> RewardSignal:
         """Compute correctness reward."""
         # Extract answer from model response
@@ -296,14 +296,19 @@ class HuggingFaceEnvironment:
         return {}
 
     @property
+    def available_tools(self) -> tuple:
+        """No tools available for HuggingFace dataset environments."""
+        return ()
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
             name=self._dataset_name,
             adapter="huggingface",
             max_steps=1,
-            observation_type=TextObservation,
-            action_type=TextAction,
+            observation_type=Observation,
+            action_type=Action,
             is_multi_turn=False,
             metadata={
                 "dataset_size": len(self._dataset),
@@ -316,7 +321,7 @@ class HuggingFaceEnvironment:
     @property
     def reward_functions(
         self,
-    ) -> tuple[RewardFunction[TextObservation, HuggingFaceHidden, TextAction], ...]:
+    ) -> tuple[RewardFunction[HuggingFaceHidden], ...]:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
@@ -330,7 +335,7 @@ class HuggingFaceEnvironment:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[TextObservation, HuggingFaceHidden], dict[str, Any]]:
+    ) -> tuple[State[HuggingFaceHidden], dict[str, Any]]:
         """Reset environment and return initial state.
 
         Args:
@@ -381,7 +386,7 @@ class HuggingFaceEnvironment:
             expected_answer = str(raw_answer).strip()
 
         # Create observation
-        observation = TextObservation(prompt=question)
+        observation = Observation(prompt=question)
 
         # Create hidden state
         hidden = HuggingFaceHidden(
@@ -422,9 +427,9 @@ class HuggingFaceEnvironment:
 
     def step(
         self,
-        state: State[TextObservation, HuggingFaceHidden],
-        action: TextAction,
-    ) -> StepResult[TextObservation, HuggingFaceHidden]:
+        state: State[HuggingFaceHidden],
+        action: Action,
+    ) -> StepResult[HuggingFaceHidden]:
         """Take an action (model response) and return result.
 
         For HuggingFace datasets, a single step always terminates the episode.
@@ -473,9 +478,9 @@ class HuggingFaceEnvironment:
 
     def compute_rewards(
         self,
-        state: State[TextObservation, HuggingFaceHidden],
-        action: TextAction,
-        next_state: State[TextObservation, HuggingFaceHidden],
+        state: State[HuggingFaceHidden],
+        action: Action,
+        next_state: State[HuggingFaceHidden],
     ) -> RewardBundle:
         """Compute rewards for a transition."""
         signals = []
@@ -650,9 +655,6 @@ class HuggingFaceAdapter:
             extra_rewards=extra_rewards,
             metadata_columns=metadata_columns,
         )
-
-    def get_tool_environment(self, name: str, **kwargs: Any) -> Any:
-        raise NotImplementedError(f"{self.name} adapter does not support tool environments")
 
     def get_default_system_prompt(self, name: str) -> None:
         """HuggingFace datasets are raw, no default system prompt."""

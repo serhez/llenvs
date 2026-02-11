@@ -153,7 +153,7 @@ print("Core imports: OK")
 # Test tool imports
 from llenvs.core import (
     ToolDefinition, ToolParameter, ToolParameterType,
-    ToolCall, ToolResult, AgentObservation, AgentAction,
+    ToolCall, ToolResult, Observation, Action,
     SimpleToolExecutor, AsyncToolExecutor,
     MCPToolExecutor, MCPServerConfig,
 )
@@ -203,12 +203,12 @@ After installation, the package provides:
 ```
 llenvs/
 ├── core/           # Core abstractions
-│   ├── state.py            # State, TextObservation, AgentObservation, AgentAction
+│   ├── state.py            # State, Observation, Action
 │   ├── environment.py      # Environment protocol
 │   ├── tools.py            # ToolDefinition, ToolCall, ToolResult, SimpleToolExecutor
 │   ├── async_executor.py   # AsyncToolExecutor for parallel execution
 │   ├── mcp_executor.py     # MCPToolExecutor for MCP server integration
-│   ├── tool_environment.py # ToolEnvironment protocol, BaseToolEnvironment
+│   ├── tool_environment.py # BaseToolEnvironment base class
 │   ├── tool_rewards.py     # ToolValidityReward, ToolEfficiencyReward
 │   ├── adapter.py
 │   ├── trajectory.py
@@ -228,7 +228,7 @@ llenvs/
 │       ├── huggingface.py # HuggingFace Transformers backend
 │       └── api.py         # OpenAI, Anthropic, OpenRouter (with tool support)
 ├── evaluation/     # Evaluation tools
-│   ├── runner.py          # TrajectoryRunner, ToolTrajectoryRunner
+│   ├── runner.py          # TrajectoryRunner, SegmentedTrajectoryRunner
 │   ├── metrics.py
 │   └── results.py
 └── cli/            # Command-line interface

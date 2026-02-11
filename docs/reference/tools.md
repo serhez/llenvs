@@ -210,39 +210,9 @@ with MCPToolExecutor(config) as executor:
 
 **Location**: `llenvs/core/tool_environment.py`
 
-### ToolEnvironment Protocol
-
-```python
-@runtime_checkable
-class ToolEnvironment(Protocol[HiddenT]):
-    @property
-    def available_tools(self) -> tuple[ToolDefinition, ...]: ...
-
-    def reset(
-        self,
-        *,
-        seed: int | None = None,
-        options: dict[str, Any] | None = None,
-    ) -> tuple[State[AgentObservation, HiddenT], dict[str, Any]]: ...
-
-    def step(
-        self,
-        state: State[AgentObservation, HiddenT],
-        action: AgentAction,
-    ) -> StepResult[AgentObservation, HiddenT]: ...
-
-    def execute_tools(
-        self,
-        calls: tuple[ToolCall, ...],
-    ) -> tuple[ToolResult, ...]: ...
-```
-
-Key differences from base `Environment`:
-- Returns `AgentObservation` with `available_tools` and `tool_results`
-- Accepts `AgentAction` with optional `tool_calls`
-- Executes tools internally via `execute_tools()`
-
 ### BaseToolEnvironment
+
+Base class for environments that support tool calling. Uses the unified `Observation`, `Action`, `State[HiddenT]`, and `StepResult[HiddenT]` types.
 
 ```python
 @dataclass
@@ -260,9 +230,11 @@ class BaseToolEnvironment(Generic[HiddenT]):
     def _check_terminal_tools(self, calls) -> bool:
         # Returns True if any called tool is terminal
 
-    def _build_next_observation(self, current_obs, action, tool_results) -> AgentObservation:
+    def _build_next_observation(self, current_obs, action, tool_results) -> Observation:
         # Builds observation with updated message history and tool results
 ```
+
+All environments (text-only and tool-enabled) share the same `Environment` protocol. Tool environments populate `Observation.available_tools` and `Observation.tool_results`; text-only environments leave them as empty tuples.
 
 ## Tool-Specific Rewards
 
@@ -304,6 +276,6 @@ if result.has_tool_calls:
     for call in result.tool_calls:
         print(f"Tool: {call.name}, Args: {call.arguments}")
 
-# Convert to AgentAction for tool environments
+# Convert to Action for use with environments
 action = result.to_agent_action()
 ```

@@ -39,15 +39,15 @@ class ToolValidityReward:
 
     def compute(
         self,
-        state: State[Any, Any],
+        state: State[Any],
         action: Any,
-        next_state: State[Any, Any],
+        next_state: State[Any],
     ) -> RewardSignal:
         """Compute validity reward for tool calls in action.
 
         Args:
             state: State before action.
-            action: Action taken (should be AgentAction).
+            action: Action taken.
             next_state: State after action.
 
         Returns:
@@ -128,15 +128,15 @@ class ToolEfficiencyReward:
 
     def compute(
         self,
-        state: State[Any, Any],
+        state: State[Any],
         action: Any,
-        next_state: State[Any, Any],
+        next_state: State[Any],
     ) -> RewardSignal:
         """Compute efficiency reward for tool usage.
 
         Args:
             state: State before action.
-            action: Action taken (should be AgentAction).
+            action: Action taken.
             next_state: State after action.
 
         Returns:

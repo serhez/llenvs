@@ -4,7 +4,7 @@ import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import AgentObservation, AgentAction
+from llenvs.core.state import Observation, Action
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -342,8 +342,8 @@ class TestGemToolEnvironment:
         assert "submit_answer" in tool_names
 
     @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
-    def test_reset_returns_agent_observation(self, mock_create_tools, mock_gem_env):
-        """Test reset returns AgentObservation with tools."""
+    def test_reset_returns_observation(self, mock_create_tools, mock_gem_env):
+        """Test reset returns Observation with tools."""
         mock_create_tools.return_value = {"python": MockPythonCodeTool()}
 
         env = GemToolEnvironment(
@@ -355,7 +355,7 @@ class TestGemToolEnvironment:
         state, info = env.reset(options={"task_index": 0})
 
         # Check observation type
-        assert isinstance(state.observation, AgentObservation)
+        assert isinstance(state.observation, Observation)
 
         # Check observation content
         assert "15% of 80" in state.observation.prompt
@@ -388,7 +388,7 @@ class TestGemToolEnvironment:
 
         # Make a tool call
         call = ToolCall(id="1", name="python", arguments={"code": "print(0.15 * 80)"})
-        action = AgentAction(tool_calls=(call,))
+        action = Action(tool_calls=(call,))
         result = env.step(state, action)
 
         # Check tool results
@@ -419,7 +419,7 @@ class TestGemToolEnvironment:
 
         # Submit correct answer
         call = ToolCall(id="1", name="submit_answer", arguments={"answer": "12"})
-        action = AgentAction(tool_calls=(call,))
+        action = Action(tool_calls=(call,))
         result = env.step(state, action)
 
         # Check terminated
@@ -444,7 +444,7 @@ class TestGemToolEnvironment:
 
         # Submit wrong answer
         call = ToolCall(id="1", name="submit_answer", arguments={"answer": "10"})
-        action = AgentAction(tool_calls=(call,))
+        action = Action(tool_calls=(call,))
         result = env.step(state, action)
 
         # Still terminated
@@ -467,7 +467,7 @@ class TestGemToolEnvironment:
         state, _ = env.reset()
 
         # Text action treated as direct answer
-        action = AgentAction.from_text("12")
+        action = Action.from_text("12")
         result = env.step(state, action)
 
         assert result.terminated is True
@@ -488,7 +488,7 @@ class TestGemToolEnvironment:
 
         # Call non-existent tool
         call = ToolCall(id="1", name="invalid_tool", arguments={})
-        action = AgentAction(tool_calls=(call,))
+        action = Action(tool_calls=(call,))
         result = env.step(state, action)
 
         # Check tool result shows error
@@ -512,7 +512,7 @@ class TestGemToolEnvironment:
 
         # Step 1: Use Python to calculate
         call1 = ToolCall(id="1", name="python", arguments={"code": "print(0.15 * 80)"})
-        action1 = AgentAction(tool_calls=(call1,))
+        action1 = Action(tool_calls=(call1,))
         result1 = env.step(state, action1)
 
         assert not result1.terminated
@@ -520,7 +520,7 @@ class TestGemToolEnvironment:
 
         # Step 2: Submit the answer
         call2 = ToolCall(id="2", name="submit_answer", arguments={"answer": "12"})
-        action2 = AgentAction(tool_calls=(call2,))
+        action2 = Action(tool_calls=(call2,))
         result2 = env.step(result1.next_state, action2)
 
         assert result2.terminated
@@ -545,7 +545,7 @@ class TestGemToolEnvironment:
             call = ToolCall(
                 id="1", name="python", arguments={"code": "print('thinking...')"}
             )
-            action = AgentAction(tool_calls=(call,))
+            action = Action(tool_calls=(call,))
             result = env.step(state, action)
             state = result.next_state
 
@@ -585,7 +585,7 @@ class TestGemToolEnvironment:
 
         # Take a step
         call = ToolCall(id="1", name="python", arguments={"code": "print(1+1)"})
-        action = AgentAction(tool_calls=(call,))
+        action = Action(tool_calls=(call,))
         result1 = env.step(state, action)
 
         # Replay from same state
@@ -639,7 +639,7 @@ class TestGemToolEnvironmentWithSearchTool:
         call = ToolCall(
             id="1", name="search", arguments={"query": "capital of France"}
         )
-        action = AgentAction(tool_calls=(call,))
+        action = Action(tool_calls=(call,))
         result = env.step(state, action)
 
         tool_results = result.info["tool_results"]
@@ -649,10 +649,10 @@ class TestGemToolEnvironmentWithSearchTool:
 
 
 class TestGemAdapterToolEnvironment:
-    """Tests for GemAdapter.get_tool_environment method."""
+    """Tests for GemAdapter.get_environment method with tool_types."""
 
     @patch("llenvs.adapters.gem.GemAdapter._get_gem")
-    def test_get_tool_environment(self, mock_get_gem):
+    def test_get_environment(self, mock_get_gem):
         """Test creating tool environment via adapter."""
         mock_gem = MagicMock()
         mock_gem.make.return_value = MockGemEnvWithTools()
@@ -665,8 +665,8 @@ class TestGemAdapterToolEnvironment:
             "_create_gem_tools",
             return_value={"python": MockPythonCodeTool()},
         ):
-            env = adapter.get_tool_environment(
-                "math:GSM8K",
+            env = adapter.get_environment(
+                name="math:GSM8K",
                 tool_types=("python",),
                 max_steps=5,
             )
@@ -675,8 +675,8 @@ class TestGemAdapterToolEnvironment:
         assert env.spec.max_steps == 5
 
     @patch("llenvs.adapters.gem.GemAdapter._get_gem")
-    def test_adapter_get_tool_environment(self, mock_get_gem):
-        """Test adapter.get_tool_environment creates tool environment."""
+    def test_adapter_get_environment(self, mock_get_gem):
+        """Test adapter.get_environment creates tool environment."""
         mock_gem = MagicMock()
         mock_gem.make.return_value = MockGemEnvWithTools()
         mock_get_gem.return_value = mock_gem
@@ -686,8 +686,8 @@ class TestGemAdapterToolEnvironment:
             "_create_gem_tools",
             return_value={"python": MockPythonCodeTool()},
         ):
-            env = GemAdapter().get_tool_environment(
-                "math:GSM8K",
+            env = GemAdapter().get_environment(
+                name="math:GSM8K",
                 tool_types=("python",),
                 max_steps=10,
             )

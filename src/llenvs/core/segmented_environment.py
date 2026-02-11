@@ -8,12 +8,11 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 import copy
 
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.segmentation import Segmenter
 
-ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")
 
 
@@ -39,7 +38,7 @@ class SegmentedHidden(Generic[HiddenT]):
 
 
 @dataclass
-class SegmentedEnvironment(Generic[ObsT, HiddenT]):
+class SegmentedEnvironment(Generic[HiddenT]):
     """Wrapper that segments single-step environments into multi-step.
 
     Takes a single-step environment and a segmenter, and exposes a multi-step
@@ -63,11 +62,11 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
         >>> state, _ = env.reset(options={"task_index": 0})
         >>> while not state.metadata.is_terminal:
         ...     segment = model.generate_until_boundary(state, env.segmenter)
-        ...     result = env.step(state, TextAction(text=segment))
+        ...     result = env.step(state, Action(text=segment))
         ...     state = result.next_state
     """
 
-    _env: Environment[ObsT, HiddenT, TextAction]
+    _env: Environment[HiddenT]
     _segmenter: Segmenter
     _reward_functions: tuple[RewardFunction, ...] | None = None
 
@@ -89,7 +88,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
             adapter=base_spec.adapter,
             max_steps=None,  # Variable based on response
             observation_type=base_spec.observation_type,
-            action_type=TextAction,
+            action_type=Action,
             is_multi_turn=True,
             metadata={
                 **base_spec.metadata,
@@ -97,6 +96,11 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
                 "segmenter": type(self._segmenter).__name__,
             },
         )
+
+    @property
+    def available_tools(self) -> tuple:
+        """No tools available in segmented environments."""
+        return ()
 
     @property
     def reward_functions(self) -> tuple[RewardFunction, ...]:
@@ -109,7 +113,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
         return self._segmenter
 
     @property
-    def base_env(self) -> Environment[ObsT, HiddenT, TextAction]:
+    def base_env(self) -> Environment[HiddenT]:
         """Get the underlying single-step environment."""
         return self._env
 
@@ -118,7 +122,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[ObsT, SegmentedHidden[HiddenT]], dict[str, Any]]:
+    ) -> tuple[State[SegmentedHidden[HiddenT]], dict[str, Any]]:
         """Reset the environment and return initial state.
 
         Initializes the underlying environment and wraps its hidden state
@@ -152,9 +156,9 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
     def step(
         self,
-        state: State[ObsT, SegmentedHidden[HiddenT]],
-        action: TextAction,
-    ) -> StepResult[ObsT, SegmentedHidden[HiddenT]]:
+        state: State[SegmentedHidden[HiddenT]],
+        action: Action,
+    ) -> StepResult[SegmentedHidden[HiddenT]]:
         """Process one segment of the response.
 
         Accumulates the segment to the state and computes intermediate rewards.
@@ -167,7 +171,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
         Args:
             state: Current state.
-            action: TextAction containing one segment of text.
+            action: Action containing one segment of text.
 
         Returns:
             StepResult with next state, rewards, and done flags.
@@ -230,8 +234,8 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
     def finalize(
         self,
-        state: State[ObsT, SegmentedHidden[HiddenT]],
-    ) -> StepResult[ObsT, SegmentedHidden[HiddenT]]:
+        state: State[SegmentedHidden[HiddenT]],
+    ) -> StepResult[SegmentedHidden[HiddenT]]:
         """Explicitly end the episode with accumulated text.
 
         Useful in generation-time mode when the model has finished generating
@@ -251,10 +255,10 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
     def _finalize_episode(
         self,
-        state: State[ObsT, SegmentedHidden[HiddenT]],
+        state: State[SegmentedHidden[HiddenT]],
         accumulated_text: str,
         segments: tuple[str, ...],
-    ) -> StepResult[ObsT, SegmentedHidden[HiddenT]]:
+    ) -> StepResult[SegmentedHidden[HiddenT]]:
         """Finalize the episode by calling the underlying environment.
 
         Args:
@@ -273,7 +277,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
         )
 
         # Call underlying environment with full accumulated text
-        full_action = TextAction(text=accumulated_text)
+        full_action = Action(text=accumulated_text)
         base_result = self._env.step(base_state, full_action)
 
         # Wrap the result's hidden state
@@ -316,9 +320,9 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
     def replay(
         self,
-        state: State[ObsT, SegmentedHidden[HiddenT]],
+        state: State[SegmentedHidden[HiddenT]],
         full_response: str,
-    ) -> list[StepResult[ObsT, SegmentedHidden[HiddenT]]]:
+    ) -> list[StepResult[SegmentedHidden[HiddenT]]]:
         """Segment a full response and step through all segments.
 
         Convenience method for post-hoc analysis. Segments the full response
@@ -359,7 +363,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
         results = []
         for segment in segments:
-            result = self.step(current_state, TextAction(text=segment))
+            result = self.step(current_state, Action(text=segment))
             results.append(result)
             current_state = result.next_state
 
@@ -367,9 +371,9 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
 
     def compute_rewards(
         self,
-        state: State[ObsT, SegmentedHidden[HiddenT]],
-        action: TextAction,
-        next_state: State[ObsT, SegmentedHidden[HiddenT]],
+        state: State[SegmentedHidden[HiddenT]],
+        action: Action,
+        next_state: State[SegmentedHidden[HiddenT]],
     ) -> RewardBundle:
         """Compute rewards for a transition.
 

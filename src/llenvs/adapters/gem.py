@@ -11,10 +11,8 @@ import uuid
 from llenvs.core.state import (
     State,
     StateMetadata,
-    TextObservation,
-    TextAction,
-    AgentObservation,
-    AgentAction,
+    Observation,
+    Action,
 )
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
@@ -195,9 +193,9 @@ class GemCorrectnessReward:
 
     def compute(
         self,
-        state: State[TextObservation, GemHidden],
-        action: TextAction,
-        next_state: State[TextObservation, GemHidden],
+        state: State[GemHidden],
+        action: Action,
+        next_state: State[GemHidden],
     ) -> RewardSignal:
         """Compute reward from GEM's native reward."""
         gem_reward = next_state.metadata.info.get("gem_reward", 0.0)
@@ -234,7 +232,7 @@ class GemEnvironment:
         >>> env = adapter.get_environment("game:GuessTheNumber-v0")
         >>> state, _ = env.reset(seed=42)
         >>> while not state.metadata.is_terminal:
-        ...     result = env.step(state, TextAction(text="50"))
+        ...     result = env.step(state, Action(text="50"))
         ...     state = result.next_state
     """
 
@@ -275,14 +273,19 @@ class GemEnvironment:
         return {}
 
     @property
+    def available_tools(self) -> tuple[()]:
+        """No tools available for standard GEM environments."""
+        return ()
+
+    @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
         return EnvironmentSpec(
             name=self._env_id,
             adapter="gem",
             max_steps=self._max_steps if self._is_multi_turn else 1,
-            observation_type=TextObservation,
-            action_type=TextAction,
+            observation_type=Observation,
+            action_type=Action,
             is_multi_turn=self._is_multi_turn,
             metadata={"env_id": self._env_id},
         )
@@ -290,7 +293,7 @@ class GemEnvironment:
     @property
     def reward_functions(
         self,
-    ) -> tuple[RewardFunction[TextObservation, GemHidden, TextAction], ...]:
+    ) -> tuple[RewardFunction[GemHidden], ...]:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
@@ -309,7 +312,7 @@ class GemEnvironment:
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[TextObservation, GemHidden], dict[str, Any]]:
+    ) -> tuple[State[GemHidden], dict[str, Any]]:
         """Reset environment and return initial state.
 
         Args:
@@ -339,7 +342,7 @@ class GemEnvironment:
             episode_step=0,
         )
 
-        observation = TextObservation(prompt=str(obs))
+        observation = Observation(prompt=str(obs))
 
         metadata = StateMetadata(
             step=0,
@@ -353,9 +356,9 @@ class GemEnvironment:
 
     def step(
         self,
-        state: State[TextObservation, GemHidden],
-        action: TextAction,
-    ) -> StepResult[TextObservation, GemHidden]:
+        state: State[GemHidden],
+        action: Action,
+    ) -> StepResult[GemHidden]:
         """Take an action from the given state.
 
         This is a pure function - the same state and action always
@@ -387,7 +390,7 @@ class GemEnvironment:
             episode_step=state.hidden.episode_step + 1,
         )
 
-        new_observation = TextObservation(prompt=str(obs))
+        new_observation = Observation(prompt=str(obs))
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -427,9 +430,9 @@ class GemEnvironment:
 
     def compute_rewards(
         self,
-        state: State[TextObservation, GemHidden],
-        action: TextAction,
-        next_state: State[TextObservation, GemHidden],
+        state: State[GemHidden],
+        action: Action,
+        next_state: State[GemHidden],
     ) -> RewardBundle:
         """Compute rewards for a transition."""
         signals = []
@@ -497,8 +500,12 @@ class GemAdapter:
         extra_rewards: tuple[RewardFunction, ...] = (),
         max_steps: int | None = None,
         **kwargs: Any,
-    ) -> GemEnvironment:
+    ) -> "GemEnvironment | GemToolEnvironment":
         """Create an environment by name.
+
+        When ``tool_types`` is passed in kwargs, returns a GemToolEnvironment
+        with structured tool support. Otherwise returns a standard
+        GemEnvironment.
 
         Args:
             name: Environment ID (e.g., "game:Sudoku-v0", "math:GSM8K").
@@ -506,10 +513,12 @@ class GemAdapter:
             answer_extractor: Extractor for model responses.
             extra_rewards: Additional reward functions appended after native rewards.
             max_steps: Maximum steps per episode (None = unlimited).
-            **kwargs: Additional arguments passed to gem.make().
+            **kwargs: Additional arguments. If ``tool_types`` is present,
+                a GemToolEnvironment is created with those tool types.
+                Remaining kwargs are passed to gem.make() or tool creation.
 
         Returns:
-            Configured GemEnvironment.
+            GemEnvironment or GemToolEnvironment.
 
         Raises:
             ImportError: If GEM is not installed.
@@ -517,7 +526,22 @@ class GemAdapter:
         """
         gem = self._get_gem()
 
-        # Create GEM env
+        # Check for tool_types to decide which environment to create
+        tool_types = kwargs.pop("tool_types", None)
+
+        if tool_types is not None:
+            # Create tool environment
+            gem_env = gem.make(name, **kwargs)
+            return GemToolEnvironment(
+                gem_env=gem_env,
+                env_id=name,
+                tool_types=tool_types,
+                max_steps=max_steps or 10,
+                extra_rewards=extra_rewards,
+                **kwargs,
+            )
+
+        # Create standard GEM env
         gem_env = gem.make(name, **kwargs)
 
         # Detect if multi-turn
@@ -567,38 +591,6 @@ class GemAdapter:
             "type": "multi_turn" if is_multi_turn else "single_turn",
             "description": f"GEM environment: {name}",
         }
-
-    def get_tool_environment(
-        self,
-        name: str,
-        tool_types: tuple[str, ...] = ("python",),
-        max_steps: int = 10,
-        extra_rewards: tuple[RewardFunction, ...] = (),
-        **kwargs: Any,
-    ) -> "GemToolEnvironment":
-        """Create a tool-enabled GEM environment.
-
-        Args:
-            name: Environment ID (e.g., "math:GSM8K", "qa:HotpotQA")
-            tool_types: Which tools to enable ("python", "search")
-            max_steps: Max steps per episode
-            extra_rewards: Additional reward functions appended after native rewards.
-            **kwargs: Additional args (search_url, search_topk)
-
-        Returns:
-            GemToolEnvironment with structured tool support
-        """
-        gem = self._get_gem()
-        gem_env = gem.make(name, **kwargs)
-
-        return GemToolEnvironment(
-            gem_env=gem_env,
-            env_id=name,
-            tool_types=tool_types,
-            max_steps=max_steps,
-            extra_rewards=extra_rewards,
-            **kwargs,
-        )
 
 
 # =============================================================================
@@ -728,7 +720,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         >>> env = GemToolEnvironment(gem_env, "math:GSM8K", tool_types=("python",))
         >>> state, _ = env.reset()
         >>> call = ToolCall(id="1", name="python", arguments={"code": "print(2+2)"})
-        >>> action = AgentAction(tool_calls=(call,))
+        >>> action = Action(tool_calls=(call,))
         >>> result = env.step(state, action)
         >>> print(result.info["tool_results"][0].output)
         '4'
@@ -848,8 +840,8 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             name=self._env_id,
             adapter="gem",
             max_steps=self._max_steps,
-            observation_type=AgentObservation,
-            action_type=AgentAction,
+            observation_type=Observation,
+            action_type=Action,
             is_multi_turn=True,
             metadata={"env_id": self._env_id, "tools": self._tool_types},
         )
@@ -857,7 +849,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
     @property
     def reward_functions(
         self,
-    ) -> tuple[RewardFunction[AgentObservation, GemToolHidden, AgentAction], ...]:
+    ) -> tuple[RewardFunction[GemToolHidden], ...]:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
@@ -876,7 +868,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[AgentObservation, GemToolHidden], dict[str, Any]]:
+    ) -> tuple[State[GemToolHidden], dict[str, Any]]:
         """Reset environment and return initial state.
 
         Args:
@@ -886,7 +878,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
                 - episode_id: Override the generated episode ID.
 
         Returns:
-            Tuple of (initial_state with AgentObservation, info_dict).
+            Tuple of (initial_state with Observation, info_dict).
         """
         options = options or {}
         task_index = options.get("task_index", 0)
@@ -906,7 +898,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             tool_types=self._tool_types,
         )
 
-        observation = AgentObservation(
+        observation = Observation(
             prompt=str(obs),
             messages=(),
             tool_results=(),
@@ -928,9 +920,9 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
 
     def step(
         self,
-        state: State[AgentObservation, GemToolHidden],
-        action: AgentAction,
-    ) -> StepResult[AgentObservation, GemToolHidden]:
+        state: State[GemToolHidden],
+        action: Action,
+    ) -> StepResult[GemToolHidden]:
         """Take an action from the given state.
 
         This is a pure function - the same state and action always
@@ -938,7 +930,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
 
         Args:
             state: Current state.
-            action: AgentAction with optional tool calls.
+            action: Action with optional tool calls.
 
         Returns:
             StepResult with next state containing tool results.
@@ -1050,9 +1042,9 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
 
     def _compute_rewards(
         self,
-        state: State[AgentObservation, GemToolHidden],
-        action: AgentAction,
-        next_state: State[AgentObservation, GemToolHidden],
+        state: State[GemToolHidden],
+        action: Action,
+        next_state: State[GemToolHidden],
     ) -> RewardBundle:
         """Compute rewards for a transition."""
         signals = []
@@ -1062,4 +1054,3 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             signals.append(signal)
 
         return RewardBundle(signals=tuple(signals))
-

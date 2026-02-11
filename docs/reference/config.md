@@ -192,7 +192,7 @@ env = environment_registry.get(
 )
 
 # Tool-enabled environment
-env = environment_registry.get_tool_environment(
+env = environment_registry.get_environment(
     name="math:GSM8K",
     adapter="gem",
     tool_types=("python",),        # Tools to enable
@@ -390,10 +390,11 @@ pipeline = (
 ## Evaluation Runner Configuration
 
 ```python
-from llenvs.evaluation import TrajectoryRunner, ToolTrajectoryRunner
+from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import TEMPLATE_REGISTRY, PROFILE_REGISTRY
 
-# Basic runner
+# TrajectoryRunner handles both text-only and tool environments.
+# It auto-detects available tools and uses generate_with_tools when tools are present.
 runner = TrajectoryRunner(
     environment=env,
     backend=backend,
@@ -402,15 +403,6 @@ runner = TrajectoryRunner(
     prompt_template=TEMPLATE_REGISTRY["math"],  # Optional template
     model_profile=PROFILE_REGISTRY["deepseek_r1"],  # Optional profile
     prompt_pipeline=pipeline,        # Optional low-level pipeline
-)
-
-# Tool-aware runner
-runner = ToolTrajectoryRunner(
-    environment=env,
-    backend=backend,
-    sampling_params=params,
-    system_prompt="Use tools to solve problems.",
-    prompt_template=TEMPLATE_REGISTRY["reasoning"],
 )
 
 # Run evaluation

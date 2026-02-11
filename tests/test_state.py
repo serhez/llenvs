@@ -1,7 +1,7 @@
 """Tests for core state abstractions."""
 
 import pytest
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 
 
 class TestStateMetadata:
@@ -37,12 +37,12 @@ class TestStateMetadata:
             meta.step = 1  # type: ignore
 
 
-class TestTextObservation:
-    """Tests for TextObservation."""
+class TestObservation:
+    """Tests for Observation."""
 
     def test_creation(self):
         """Test basic observation creation."""
-        obs = TextObservation(prompt="Hello, world!")
+        obs = Observation(prompt="Hello, world!")
         assert obs.prompt == "Hello, world!"
         assert obs.messages == ()
 
@@ -52,33 +52,33 @@ class TestTextObservation:
             {"role": "user", "content": "Hi"},
             {"role": "assistant", "content": "Hello!"},
         )
-        obs = TextObservation(prompt="How are you?", messages=messages)
+        obs = Observation(prompt="How are you?", messages=messages)
         assert len(obs.messages) == 2
         assert obs.messages[0]["role"] == "user"
 
     def test_immutability(self):
         """Test that observation is frozen."""
-        obs = TextObservation(prompt="test")
+        obs = Observation(prompt="test")
         with pytest.raises(AttributeError):
             obs.prompt = "changed"  # type: ignore
 
 
-class TestTextAction:
-    """Tests for TextAction."""
+class TestAction:
+    """Tests for Action."""
 
     def test_creation(self):
         """Test basic action creation."""
-        action = TextAction(text="The answer is 42")
+        action = Action(text="The answer is 42")
         assert action.text == "The answer is 42"
 
     def test_empty_text(self):
         """Test action with empty text."""
-        action = TextAction(text="")
+        action = Action(text="")
         assert action.text == ""
 
     def test_immutability(self):
         """Test that action is frozen."""
-        action = TextAction(text="test")
+        action = Action(text="test")
         with pytest.raises(AttributeError):
             action.text = "changed"  # type: ignore
 
@@ -127,19 +127,19 @@ class TestState:
     def test_generic_types(self):
         """Test state with different generic types."""
         # String observation, int hidden
-        state: State[str, int] = State(
-            observation="prompt",
+        state: State[int] = State(
+            observation=Observation(prompt="prompt"),
             hidden=42,
             metadata=StateMetadata(step=0, episode_id="test", is_terminal=False),
         )
-        assert state.observation == "prompt"
+        assert state.observation.prompt == "prompt"
         assert state.hidden == 42
 
-        # List observation, dict hidden
-        state2: State[list[str], dict[str, int]] = State(
-            observation=["a", "b"],
+        # Dict hidden
+        state2: State[dict[str, int]] = State(
+            observation=Observation(prompt="test"),
             hidden={"count": 5},
             metadata=StateMetadata(step=0, episode_id="test", is_terminal=False),
         )
-        assert state2.observation == ["a", "b"]
+        assert state2.observation.prompt == "test"
         assert state2.hidden["count"] == 5

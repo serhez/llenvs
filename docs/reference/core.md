@@ -6,15 +6,15 @@ This document covers the core abstractions in llenvs.
 
 ```python
 @dataclass(frozen=True)
-class State(Generic[ObsT, HiddenT]):
-    observation: ObsT
+class State(Generic[HiddenT]):
+    observation: Observation
     hidden: HiddenT
     metadata: StateMetadata
 ```
 
 **Location**: `llenvs/core/state.py`
 
-States are immutable (frozen dataclass). The generic type parameters allow environments to define their own observation and hidden state types.
+States are immutable (frozen dataclass). The generic type parameter allows environments to define their own hidden state type.
 
 ### StateMetadata
 
@@ -27,46 +27,31 @@ class StateMetadata:
     info: dict[str, Any]   # Additional metadata
 ```
 
-### TextObservation
+### Observation
 
 ```python
 @dataclass(frozen=True)
-class TextObservation:
-    prompt: str                           # The question/prompt text
-    messages: tuple[dict[str, str], ...]  # Optional chat history
+class Observation:
+    prompt: str                                          # The question/prompt text
+    messages: tuple[dict[str, Any], ...] = ()            # Chat history (including tool calls/results)
+    tool_results: tuple[ToolResult, ...] = ()            # Results from most recent tool calls
+    available_tools: tuple[ToolDefinition, ...] = ()     # Tools the model can call
 ```
 
-### TextAction
+All environments use `Observation`. Text-only environments return observations with `tool_results=()` and `available_tools=()`. Tool-enabled environments populate these fields.
+
+### Action
 
 ```python
 @dataclass(frozen=True)
-class TextAction:
-    text: str  # Model's response
-```
-
-### AgentObservation (Tool-Aware)
-
-```python
-@dataclass(frozen=True)
-class AgentObservation:
-    prompt: str                                   # The question/prompt text
-    messages: tuple[dict[str, Any], ...]         # Chat history (including tool calls/results)
-    tool_results: tuple[ToolResult, ...]         # Results from most recent tool calls
-    available_tools: tuple[ToolDefinition, ...]  # Tools the model can call
-```
-
-### AgentAction (Tool-Aware)
-
-```python
-@dataclass(frozen=True)
-class AgentAction:
+class Action:
     text: str | None = None                # Optional text response
     tool_calls: tuple[ToolCall, ...] = ()  # Optional tool calls
 
     @classmethod
-    def from_text(cls, text: str) -> AgentAction: ...
+    def from_text(cls, text: str) -> Action: ...
     @classmethod
-    def from_tool_call(cls, call: ToolCall) -> AgentAction: ...
+    def from_tool_call(cls, call: ToolCall) -> Action: ...
 
     @property
     def is_text_only(self) -> bool: ...
@@ -74,41 +59,47 @@ class AgentAction:
     def has_tool_calls(self) -> bool: ...
 ```
 
+All environments accept `Action`. For text-only environments, use `Action.from_text(...)`. For tool environments, actions can include `tool_calls`.
+
 ## Environment Protocol
 
 ```python
-class Environment(Protocol[ObsT, HiddenT, ActionT]):
+class Environment(Protocol[HiddenT]):
     @property
     def spec(self) -> EnvironmentSpec: ...
 
     @property
     def reward_functions(self) -> tuple[RewardFunction, ...]: ...
 
+    @property
+    def available_tools(self) -> tuple[ToolDefinition, ...]: ...
+
     def reset(
         self,
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[ObsT, HiddenT], dict[str, Any]]: ...
+    ) -> tuple[State[HiddenT], dict[str, Any]]: ...
 
     def step(
         self,
-        state: State[ObsT, HiddenT],
-        action: ActionT,
-    ) -> StepResult[ObsT, HiddenT]: ...
+        state: State[HiddenT],
+        action: Action,
+    ) -> StepResult[HiddenT]: ...
 
     def compute_rewards(
         self,
-        state: State[ObsT, HiddenT],
-        action: ActionT,
-        next_state: State[ObsT, HiddenT],
+        state: State[HiddenT],
+        action: Action,
+        next_state: State[HiddenT],
     ) -> RewardBundle: ...
 ```
 
 **Location**: `llenvs/core/environment.py`
 
-| Method | Description |
+| Member | Description |
 |--------|-------------|
+| `available_tools` | Tools available in this environment; text-only environments return `()` |
 | `reset()` | Initialize a new episode, returns initial state |
 | `step()` | Take action from state, returns `StepResult` with next state and rewards |
 | `compute_rewards()` | Compute rewards for a transition |
@@ -117,8 +108,8 @@ class Environment(Protocol[ObsT, HiddenT, ActionT]):
 
 ```python
 @dataclass(frozen=True)
-class StepResult(Generic[ObsT, HiddenT]):
-    next_state: State[ObsT, HiddenT]
+class StepResult(Generic[HiddenT]):
+    next_state: State[HiddenT]
     rewards: RewardBundle
     terminated: bool  # Episode ended naturally
     truncated: bool   # Episode cut off (max steps, etc.)
@@ -137,8 +128,6 @@ class EnvironmentSpec:
     name: str
     adapter: str                 # Which adapter (e.g., "reasoning_gym")
     max_steps: int | None        # None = unlimited
-    observation_type: type | None
-    action_type: type | None
     is_multi_turn: bool
     metadata: dict[str, Any]
 ```
@@ -197,7 +186,7 @@ class RewardBundle:
 ### RewardFunction Protocol
 
 ```python
-class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
+class RewardFunction(Protocol[HiddenT]):
     @property
     def name(self) -> str: ...
 
@@ -206,9 +195,9 @@ class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
 
     def compute(
         self,
-        state: State[ObsT, HiddenT],
-        action: ActionT,
-        next_state: State[ObsT, HiddenT],
+        state: State[HiddenT],
+        action: Action,
+        next_state: State[HiddenT],
     ) -> RewardSignal: ...
 ```
 
@@ -218,9 +207,9 @@ class RewardFunction(Protocol[ObsT, HiddenT, ActionT]):
 
 ```python
 @dataclass
-class Trajectory(Generic[ObsT, HiddenT, ActionT]):
+class Trajectory(Generic[HiddenT]):
     episode_id: str
-    initial_state: State[ObsT, HiddenT]
+    initial_state: State[HiddenT]
 
     @classmethod
     def create(cls, initial_state: State) -> Trajectory: ...
@@ -250,10 +239,10 @@ class Trajectory(Generic[ObsT, HiddenT, ActionT]):
 
 ```python
 @dataclass(frozen=True)
-class Transition(Generic[ObsT, HiddenT, ActionT]):
-    state: State[ObsT, HiddenT]
-    action: ActionT
-    next_state: State[ObsT, HiddenT]
+class Transition(Generic[HiddenT]):
+    state: State[HiddenT]
+    action: Action
+    next_state: State[HiddenT]
     rewards: RewardBundle
     info: dict[str, Any]
 ```
@@ -262,11 +251,11 @@ class Transition(Generic[ObsT, HiddenT, ActionT]):
 
 ```python
 @dataclass(frozen=True)
-class Checkpoint(Generic[ObsT, HiddenT, ActionT]):
+class Checkpoint(Generic[HiddenT]):
     name: str
     trajectory_id: str
     step_index: int
-    state: State[ObsT, HiddenT]
+    state: State[HiddenT]
 ```
 
 ## Answer Extraction

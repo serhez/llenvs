@@ -11,16 +11,14 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, TypeVar
 import uuid
 
-from llenvs.core.state import State
+from llenvs.core.state import Action, State
 from llenvs.core.reward import RewardBundle
 
-ObsT = TypeVar("ObsT")
 HiddenT = TypeVar("HiddenT")
-ActionT = TypeVar("ActionT")
 
 
 @dataclass(frozen=True)
-class Transition(Generic[ObsT, HiddenT, ActionT]):
+class Transition(Generic[HiddenT]):
     """A single state-action-reward transition.
 
     Attributes:
@@ -31,15 +29,15 @@ class Transition(Generic[ObsT, HiddenT, ActionT]):
         info: Additional transition metadata.
     """
 
-    state: State[ObsT, HiddenT]
-    action: ActionT
-    next_state: State[ObsT, HiddenT]
+    state: State[HiddenT]
+    action: Any
+    next_state: State[HiddenT]
     rewards: RewardBundle
     info: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class Checkpoint(Generic[ObsT, HiddenT, ActionT]):
+class Checkpoint(Generic[HiddenT]):
     """A saved point in a trajectory for later branching.
 
     Attributes:
@@ -52,11 +50,11 @@ class Checkpoint(Generic[ObsT, HiddenT, ActionT]):
     name: str
     trajectory_id: str
     step_index: int
-    state: State[ObsT, HiddenT]
+    state: State[HiddenT]
 
 
 @dataclass
-class Trajectory(Generic[ObsT, HiddenT, ActionT]):
+class Trajectory(Generic[HiddenT]):
     """A sequence of transitions with checkpointing support.
 
     Trajectories are mutable (transitions can be appended) but individual
@@ -69,24 +67,24 @@ class Trajectory(Generic[ObsT, HiddenT, ActionT]):
     """
 
     episode_id: str
-    initial_state: State[ObsT, HiddenT]
-    _transitions: list[Transition[ObsT, HiddenT, ActionT]] = field(default_factory=list)
-    _checkpoints: dict[str, Checkpoint[ObsT, HiddenT, ActionT]] = field(default_factory=dict)
+    initial_state: State[HiddenT]
+    _transitions: list[Transition[HiddenT]] = field(default_factory=list)
+    _checkpoints: dict[str, Checkpoint[HiddenT]] = field(default_factory=dict)
     _parent_trajectory_id: str | None = field(default=None)
 
     @classmethod
-    def create(cls, initial_state: State[ObsT, HiddenT]) -> "Trajectory[ObsT, HiddenT, ActionT]":
+    def create(cls, initial_state: State[HiddenT]) -> "Trajectory[HiddenT]":
         """Create a new trajectory starting from the given state."""
         return cls(
             episode_id=initial_state.metadata.episode_id,
             initial_state=initial_state,
         )
 
-    def add_transition(self, transition: Transition[ObsT, HiddenT, ActionT]) -> None:
+    def add_transition(self, transition: Transition[HiddenT]) -> None:
         """Append a transition to the trajectory."""
         self._transitions.append(transition)
 
-    def checkpoint(self, name: str) -> Checkpoint[ObsT, HiddenT, ActionT]:
+    def checkpoint(self, name: str) -> Checkpoint[HiddenT]:
         """Create a named checkpoint at the current position.
 
         Args:
@@ -111,7 +109,7 @@ class Trajectory(Generic[ObsT, HiddenT, ActionT]):
         self._checkpoints[name] = checkpoint
         return checkpoint
 
-    def branch(self, checkpoint_name: str) -> "Trajectory[ObsT, HiddenT, ActionT]":
+    def branch(self, checkpoint_name: str) -> "Trajectory[HiddenT]":
         """Create a new trajectory branching from a checkpoint.
 
         The new trajectory shares history up to the checkpoint but can
@@ -132,7 +130,7 @@ class Trajectory(Generic[ObsT, HiddenT, ActionT]):
         checkpoint = self._checkpoints[checkpoint_name]
 
         # Create new trajectory with copied history up to checkpoint
-        new_trajectory: Trajectory[ObsT, HiddenT, ActionT] = Trajectory(
+        new_trajectory: Trajectory[HiddenT] = Trajectory(
             episode_id=str(uuid.uuid4()),
             initial_state=self.initial_state,
             _parent_trajectory_id=self.episode_id,
@@ -144,7 +142,7 @@ class Trajectory(Generic[ObsT, HiddenT, ActionT]):
 
         return new_trajectory
 
-    def state_at(self, index: int) -> State[ObsT, HiddenT]:
+    def state_at(self, index: int) -> State[HiddenT]:
         """Get the state at a specific step index.
 
         Args:
@@ -165,19 +163,19 @@ class Trajectory(Generic[ObsT, HiddenT, ActionT]):
         return self._transitions[index - 1].next_state
 
     @property
-    def current_state(self) -> State[ObsT, HiddenT]:
+    def current_state(self) -> State[HiddenT]:
         """Get the current (most recent) state."""
         if not self._transitions:
             return self.initial_state
         return self._transitions[-1].next_state
 
     @property
-    def transitions(self) -> tuple[Transition[ObsT, HiddenT, ActionT], ...]:
+    def transitions(self) -> tuple[Transition[HiddenT], ...]:
         """Get all transitions as an immutable tuple."""
         return tuple(self._transitions)
 
     @property
-    def checkpoints(self) -> dict[str, Checkpoint[ObsT, HiddenT, ActionT]]:
+    def checkpoints(self) -> dict[str, Checkpoint[HiddenT]]:
         """Get all checkpoints."""
         return dict(self._checkpoints)
 

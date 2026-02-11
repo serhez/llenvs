@@ -1,15 +1,13 @@
-"""Tool-aware environment protocol and base implementation.
+"""Base implementation for tool-aware environments.
 
-Extends the base Environment protocol to support tool/function calling,
-where the environment executes tools and returns results in observations.
+Provides common tool execution logic that can be inherited by
+concrete tool environments.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import Any, Generic, TypeVar
 
-from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardFunction
-from llenvs.core.state import State
+from llenvs.core.state import Observation
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -19,100 +17,6 @@ from llenvs.core.tools import (
 )
 
 HiddenT = TypeVar("HiddenT")
-
-
-# Forward reference for AgentObservation - import at runtime to avoid circular import
-def _get_agent_observation_class():
-    from llenvs.core.state import AgentObservation
-
-    return AgentObservation
-
-
-def _get_agent_action_class():
-    from llenvs.core.state import AgentAction
-
-    return AgentAction
-
-
-@runtime_checkable
-class ToolEnvironment(Protocol[HiddenT]):
-    """Protocol for environments that support tool calling.
-
-    Extends the base Environment protocol with tool-specific methods.
-    Models receive available tools in their observations and can call
-    them via AgentAction. The environment executes tools internally.
-
-    Type Parameters:
-        HiddenT: Hidden state type (for reward computation).
-    """
-
-    @property
-    def spec(self) -> EnvironmentSpec:
-        """Get the environment specification."""
-        ...
-
-    @property
-    def reward_functions(self) -> tuple[RewardFunction[Any, HiddenT, Any], ...]:
-        """Get the reward functions used by this environment."""
-        ...
-
-    @property
-    def available_tools(self) -> tuple[ToolDefinition, ...]:
-        """Get the tools available in this environment."""
-        ...
-
-    def reset(
-        self,
-        *,
-        seed: int | None = None,
-        options: dict[str, Any] | None = None,
-    ) -> tuple[State[Any, HiddenT], dict[str, Any]]:
-        """Reset the environment and return initial state.
-
-        Args:
-            seed: Random seed for reproducibility.
-            options: Environment-specific options (e.g., task_index).
-
-        Returns:
-            Tuple of (initial_state with AgentObservation, info_dict).
-        """
-        ...
-
-    def step(
-        self,
-        state: State[Any, HiddenT],
-        action: Any,
-    ) -> StepResult[Any, HiddenT]:
-        """Take an action from the given state.
-
-        For tool-calling actions, this executes the tools internally
-        and includes results in the next observation.
-
-        Args:
-            state: Current state.
-            action: AgentAction with optional tool calls.
-
-        Returns:
-            StepResult with next state containing tool results.
-        """
-        ...
-
-    def execute_tools(
-        self,
-        calls: tuple[ToolCall, ...],
-    ) -> tuple[ToolResult, ...]:
-        """Execute tool calls and return results.
-
-        This is called internally by step() but can also be used
-        directly for testing or probing.
-
-        Args:
-            calls: Tuple of tool calls to execute.
-
-        Returns:
-            Tuple of results in the same order as calls.
-        """
-        ...
 
 
 @dataclass
@@ -215,22 +119,20 @@ class BaseToolEnvironment(Generic[HiddenT]):
 
     def _build_next_observation(
         self,
-        current_obs: Any,
+        current_obs: Observation,
         action: Any,
         tool_results: tuple[ToolResult, ...],
-    ) -> Any:
+    ) -> Observation:
         """Build the next observation including tool results.
 
         Args:
-            current_obs: Current AgentObservation.
-            action: The AgentAction taken.
+            current_obs: Current Observation.
+            action: The Action taken.
             tool_results: Results of any tool calls.
 
         Returns:
-            New AgentObservation with updated messages and tool results.
+            New Observation with updated messages and tool results.
         """
-        AgentObservation = _get_agent_observation_class()
-
         # Build the new message history
         messages = list(current_obs.messages)
 
@@ -256,7 +158,7 @@ class BaseToolEnvironment(Generic[HiddenT]):
                 }
             )
 
-        return AgentObservation(
+        return Observation(
             prompt=current_obs.prompt,
             messages=tuple(messages),
             tool_results=tool_results,

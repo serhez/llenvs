@@ -1,7 +1,7 @@
 """Tests for trajectory tracking with checkpointing and branching."""
 
 import pytest
-from llenvs.core.state import State, StateMetadata, TextObservation, TextAction
+from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 
@@ -90,7 +90,7 @@ class TestTrajectory:
             next_state = current.with_metadata(step=i + 1)
             transition = Transition(
                 state=current,
-                action=TextAction(text=f"action_{i}"),
+                action=Action(text=f"action_{i}"),
                 next_state=next_state,
                 rewards=RewardBundle.single(value=0.5),
                 info={},
@@ -112,7 +112,7 @@ class TestTrajectory:
             states.append(next_state)
             transition = Transition(
                 state=current,
-                action=TextAction(text="action"),
+                action=Action(text="action"),
                 next_state=next_state,
                 rewards=RewardBundle.empty(),
                 info={},
@@ -142,7 +142,7 @@ class TestTrajectory:
             next_state = current.with_metadata(step=i + 1)
             transition = Transition(
                 state=current,
-                action=TextAction(text="action"),
+                action=Action(text="action"),
                 next_state=next_state,
                 rewards=RewardBundle.single(value=r),
                 info={},
@@ -161,7 +161,7 @@ class TestTrajectory:
         trajectory.add_transition(
             Transition(
                 state=sample_state,
-                action=TextAction(text="action"),
+                action=Action(text="action"),
                 next_state=next_state,
                 rewards=RewardBundle.empty(),
                 info={},
@@ -174,7 +174,7 @@ class TestTrajectory:
         trajectory.add_transition(
             Transition(
                 state=next_state,
-                action=TextAction(text="final"),
+                action=Action(text="final"),
                 next_state=terminal,
                 rewards=RewardBundle.empty(),
                 info={},
@@ -218,7 +218,7 @@ class TestTrajectory:
             trajectory.add_transition(
                 Transition(
                     state=current,
-                    action=TextAction(text=f"action_{i}"),
+                    action=Action(text=f"action_{i}"),
                     next_state=next_state,
                     rewards=RewardBundle.single(value=1.0),
                     info={},
@@ -232,7 +232,7 @@ class TestTrajectory:
         trajectory.add_transition(
             Transition(
                 state=trajectory.current_state,
-                action=TextAction(text="original_path"),
+                action=Action(text="original_path"),
                 next_state=trajectory.current_state.with_metadata(step=4),
                 rewards=RewardBundle.single(value=0.5),
                 info={},
@@ -262,7 +262,7 @@ class TestTrajectory:
         trajectory.add_transition(
             Transition(
                 state=sample_state,
-                action=TextAction(text="step1"),
+                action=Action(text="step1"),
                 next_state=next_state,
                 rewards=RewardBundle.single(value=1.0),
                 info={},
@@ -277,7 +277,7 @@ class TestTrajectory:
         trajectory.add_transition(
             Transition(
                 state=trajectory.current_state,
-                action=TextAction(text="original_action"),
+                action=Action(text="original_action"),
                 next_state=trajectory.current_state.with_metadata(step=2),
                 rewards=RewardBundle.single(value=0.0),
                 info={},
@@ -287,7 +287,7 @@ class TestTrajectory:
         branched.add_transition(
             Transition(
                 state=branched.current_state,
-                action=TextAction(text="branched_action"),
+                action=Action(text="branched_action"),
                 next_state=branched.current_state.with_metadata(step=2),
                 rewards=RewardBundle.single(value=1.0),
                 info={},

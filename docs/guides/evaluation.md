@@ -39,17 +39,17 @@ batch_result = runner.run_batch(
 print(f"\nSuccess rate: {batch_result.success_rate:.2%}")
 ```
 
-## ToolTrajectoryRunner
+## Tool Environments
 
-For tool-enabled environments:
+`TrajectoryRunner` auto-detects tool environments via `available_tools` on the observation and uses `generate_with_tools_batch()` automatically:
 
 ```python
 from llenvs.core.registry import environment_registry
-from llenvs.evaluation import ToolTrajectoryRunner
+from llenvs.evaluation import TrajectoryRunner
 
-env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem", tool_types=("python",))
+env = environment_registry.get(name="math:GSM8K", adapter="gem", tool_types=("python",))
 
-runner = ToolTrajectoryRunner(
+runner = TrajectoryRunner(
     environment=env,
     backend=backend,
     sampling_params=SamplingParams(temperature=0.0),
@@ -63,9 +63,8 @@ result = runner.run_trajectory(task_index=0)
 
 `run_batch()` automatically batches inference calls using lockstep execution. All active trajectories advance one step together, and the backend's `generate_chat_batch()` (or `generate_with_tools_batch()`) is called once per step with all active conversations. Trajectories that finish early drop out of subsequent batches.
 
-This applies to all three runner types:
-- **`TrajectoryRunner`**: Batches `generate_chat_batch()` calls per step.
-- **`ToolTrajectoryRunner`**: Batches `generate_with_tools_batch()` (or `generate_chat_batch()` fallback) per step.
+This applies to both runner types:
+- **`TrajectoryRunner`**: Batches `generate_chat_batch()` calls per step. For tool environments, uses `generate_with_tools_batch()` automatically.
 - **`SegmentedTrajectoryRunner`**: Batches segment generation via `generate_segment_batch()` on the continuation strategy. Callbacks (`step_callback`) still run per-trajectory after each step.
 
 This gives significant speedups:

@@ -13,11 +13,10 @@ import pytest
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import RewardBundle
 from llenvs.core.state import (
-    AgentObservation,
+    Action,
+    Observation,
     State,
     StateMetadata,
-    TextAction,
-    TextObservation,
 )
 from llenvs.core.tools import ToolDefinition
 from llenvs.core.segmentation import LineSegmenter, TokenSegmenter
@@ -33,7 +32,6 @@ from llenvs.evaluation.runner import (
     ForceAction,
     MultiEvalEntry,
     SegmentedTrajectoryRunner,
-    ToolTrajectoryRunner,
     TrajectoryRunner,
     run_multi_evaluation,
 )
@@ -589,7 +587,7 @@ class MockSingleTurnEnv:
     def reset(self, *, seed=None, options=None):
         idx = (options or {}).get("task_index", 0)
         return State(
-            observation=TextObservation(prompt=f"Question {idx}?"),
+            observation=Observation(prompt=f"Question {idx}?"),
             hidden={"answer": str(idx)},
             metadata=StateMetadata(step=0, episode_id=f"ep_{idx}"),
         ), {"task_index": idx}
@@ -629,7 +627,7 @@ class MockMultiTurnEnv:
     def reset(self, *, seed=None, options=None):
         idx = (options or {}).get("task_index", 0)
         return State(
-            observation=TextObservation(prompt=f"Q{idx}"),
+            observation=Observation(prompt=f"Q{idx}"),
             hidden={"task_index": idx, "target_steps": self._steps_per_task.get(idx, 1)},
             metadata=StateMetadata(step=0, episode_id=f"ep_{idx}"),
         ), {"task_index": idx}
@@ -838,7 +836,7 @@ class TestTrajectoryRunnerBatch:
         assert result.trajectory_results[2].success
 
 
-# --- ToolTrajectoryRunner batch tests ---
+# --- TrajectoryRunner tool batch tests ---
 
 
 class ToolBatchTrackingBackend(BatchTrackingBackend):
@@ -893,7 +891,7 @@ class MockSingleTurnToolEnv:
     def reset(self, *, seed=None, options=None):
         idx = (options or {}).get("task_index", 0)
         return State(
-            observation=AgentObservation(
+            observation=Observation(
                 prompt=f"Tool question {idx}?",
                 available_tools=self._tools,
             ),
@@ -912,14 +910,14 @@ class MockSingleTurnToolEnv:
         return ()
 
 
-class TestToolTrajectoryRunnerBatch:
-    """Phase 2: ToolTrajectoryRunner.run_batch() lockstep batching."""
+class TestTrajectoryRunnerToolBatch:
+    """Phase 2: TrajectoryRunner.run_batch() with tools lockstep batching."""
 
     def test_uses_generate_with_tools_batch(self):
         """Should use generate_with_tools_batch when tools are available."""
         env = MockSingleTurnToolEnv(num_tasks=3)
         backend = ToolBatchTrackingBackend()
-        runner = ToolTrajectoryRunner(environment=env, backend=backend)
+        runner = TrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2])
 
@@ -932,7 +930,7 @@ class TestToolTrajectoryRunnerBatch:
         """Without function calling support, should use generate_chat_batch."""
         env = MockSingleTurnToolEnv(num_tasks=3)
         backend = BatchTrackingBackend()  # No function calling
-        runner = ToolTrajectoryRunner(environment=env, backend=backend)
+        runner = TrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2])
 
@@ -983,7 +981,7 @@ class MockBaseEnvForSegmented:
     def reset(self, *, seed=None, options=None):
         idx = (options or {}).get("task_index", 0)
         return State(
-            observation=TextObservation(prompt=f"Question {idx}?"),
+            observation=Observation(prompt=f"Question {idx}?"),
             hidden={"task_index": idx},
             metadata=StateMetadata(step=0, episode_id=f"ep_{idx}"),
         ), {"task_index": idx}
@@ -1449,10 +1447,10 @@ class TestBatchSizeChunking:
         assert completions == sorted(completions)
 
     def test_tool_runner_batch_size_chunks(self):
-        """ToolTrajectoryRunner.run_batch with batch_size chunks correctly."""
+        """TrajectoryRunner.run_batch with batch_size chunks correctly."""
         env = MockSingleTurnToolEnv(num_tasks=4)
         backend = ToolBatchTrackingBackend()
-        runner = ToolTrajectoryRunner(environment=env, backend=backend)
+        runner = TrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2, 3], batch_size=2)
 

@@ -3,10 +3,8 @@
 from llenvs.core.state import (
     State,
     StateMetadata,
-    TextObservation,
-    TextAction,
-    AgentObservation,
-    AgentAction,
+    Observation,
+    Action,
 )
 from llenvs.core.tools import (
     ToolDefinition,
@@ -20,7 +18,7 @@ from llenvs.core.tools import (
 )
 from llenvs.core.async_executor import AsyncToolExecutor
 from llenvs.core.mcp_executor import MCPToolExecutor, MCPServerConfig, MCPConnectionError
-from llenvs.core.tool_environment import ToolEnvironment, BaseToolEnvironment
+from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
 from llenvs.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
@@ -74,10 +72,8 @@ __all__ = [
     # State
     "State",
     "StateMetadata",
-    "TextObservation",
-    "TextAction",
-    "AgentObservation",
-    "AgentAction",
+    "Observation",
+    "Action",
     # Tools
     "ToolDefinition",
     "ToolParameter",
@@ -92,7 +88,6 @@ __all__ = [
     "MCPServerConfig",
     "MCPConnectionError",
     # Tool Environment
-    "ToolEnvironment",
     "BaseToolEnvironment",
     # Tool Rewards
     "ToolValidityReward",

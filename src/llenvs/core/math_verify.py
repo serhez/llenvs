@@ -10,7 +10,7 @@ from typing import Any
 
 from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.reward import RewardSignal, RewardType
-from llenvs.core.state import State, TextAction, TextObservation
+from llenvs.core.state import State, Action, Observation
 
 try:
     from math_verify import parse, verify
@@ -84,9 +84,9 @@ class MathVerifyRewardFunction:
 
     def compute(
         self,
-        state: State[TextObservation, Any],
-        action: TextAction,
-        next_state: State[TextObservation, Any],
+        state: State[Any],
+        action: Action,
+        next_state: State[Any],
     ) -> RewardSignal:
         """Compute math-correctness reward.
 
