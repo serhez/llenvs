@@ -1,4 +1,4 @@
-# Configuration Reference
+# Configuration
 
 This document covers configuration options for llenvs.
 

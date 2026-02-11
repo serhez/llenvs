@@ -1,4 +1,4 @@
-# Parallelization & Batching
+# Parallelization
 
 Both runners (`TrajectoryRunner`, `SegmentedTrajectoryRunner`) automatically batch inference calls when using `run_batch()`. No code changes are needed to benefit from parallelism.
 

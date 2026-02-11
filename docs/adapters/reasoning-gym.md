@@ -1,4 +1,4 @@
-# ReasoningGym Adapter
+# ReasoningGym
 
 The [reasoning-gym](https://github.com/open-thought/reasoning-gym) adapter provides access to procedural reasoning tasks.
 

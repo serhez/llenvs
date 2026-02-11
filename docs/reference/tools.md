@@ -1,4 +1,4 @@
-# Tools API Reference
+# Tools API
 
 This document covers tool/function calling support in llenvs.
 

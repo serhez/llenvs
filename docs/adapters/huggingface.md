@@ -1,4 +1,4 @@
-# HuggingFace Adapter
+# HuggingFace
 
 Access thousands of datasets on the HuggingFace Hub, including AIME, GSM8K, MATH, and more.
 

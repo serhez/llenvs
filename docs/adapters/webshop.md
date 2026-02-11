@@ -1,4 +1,4 @@
-# WebShop Adapter
+# WebShop
 
 [WebShop](https://github.com/princeton-nlp/WebShop) (Yao et al., NeurIPS 2022) is a simulated e-commerce environment with 1.18M real products and 12K instructions. Agents navigate a website to find and purchase products matching natural language instructions.
 

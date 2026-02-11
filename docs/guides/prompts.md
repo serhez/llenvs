@@ -1,4 +1,4 @@
-# Prompt Management
+# Prompts
 
 llenvs provides composable building blocks for prompt engineering: reusable fragments, pre-built system prompts, question templates, and model-family profiles.
 

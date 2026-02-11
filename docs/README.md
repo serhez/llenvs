@@ -15,6 +15,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[Segmentation](guides/segmentation.md)** - Multi-step reasoning with segmenters
 - **[Evaluation](guides/evaluation.md)** - Running evaluations and computing metrics
 - **[Inference Backends](guides/backends.md)** - Configure model backends and prompting
+- **[RL Training](guides/rl-training.md)** - Integrate with veRL, TRL, and OpenRLHF
 
 ## Environment Adapters
 

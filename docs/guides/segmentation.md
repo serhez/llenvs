@@ -1,4 +1,4 @@
-# Multi-Step Segmentation
+# Segmentation
 
 The segmentation system turns single-step environments into multi-step environments by breaking responses into segments. This enables:
 

@@ -1,4 +1,4 @@
-# Running Evaluations
+# Evaluation
 
 This guide covers running evaluations, computing metrics, and saving results.
 

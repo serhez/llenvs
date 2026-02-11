@@ -1,4 +1,4 @@
-# Inference Backends
+# Backends
 
 `llenvs` supports multiple inference backends with a unified interface.
 

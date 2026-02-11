@@ -1,4 +1,4 @@
-# Core API Reference
+# Core API
 
 This document covers the core abstractions in llenvs.
 
@@ -375,3 +375,50 @@ env = environment_registry.get(
 # Register custom adapter
 environment_registry.register_adapter(MyCustomAdapter())
 ```
+
+## RL Training Integrations
+
+**Location**: `llenvs/integrations/`
+
+### Scorer
+
+Scores responses against environment tasks for RL training.
+
+```python
+from llenvs.integrations import Scorer, ScoringResult
+
+scorer = Scorer(environment)
+result = scorer.score(task_index=0, response="<answer>42</answer>")
+# result.total, result.signals, result.extracted_answer, result.metadata
+
+results = scorer.score_batch([0, 1, 2], ["a", "b", "c"])
+```
+
+Raises `TypeError` for multi-turn environments.
+
+### DatasetProvider
+
+Provides prompts and ground truths from environment tasks.
+
+```python
+from llenvs.integrations import DatasetProvider, TaskItem
+
+provider = DatasetProvider(environment)
+item = provider[0]       # TaskItem
+items = provider.get_items([0, 1, 2])
+hf_ds = provider.to_hf_dataset()  # requires datasets package
+```
+
+### TrajectoryMasker
+
+Converts trajectories into token-level masks for multi-turn RL training.
+
+```python
+from llenvs.integrations import TrajectoryMasker, MaskedTrajectory
+
+masker = TrajectoryMasker(tokenizer)
+masked = masker.mask_trajectory(trajectory)
+# masked.prompt_ids, masked.response_ids, masked.response_mask, masked.rewards
+```
+
+See **[RL Training Guide](../guides/rl-training.md)** for framework-specific recipes.

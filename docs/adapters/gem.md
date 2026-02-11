@@ -1,4 +1,4 @@
-# GEM Adapter
+# GEM
 
 The GEM (General Experience Maker) adapter provides access to ~40+ environments for training and evaluating LLMs, including native multi-turn games and single-turn benchmarks.
 

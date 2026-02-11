@@ -1,4 +1,4 @@
-# Tools & Function Calling
+# Tools
 
 llenvs provides first-class support for tool/function calling, enabling models to interact with environments through structured tool calls.
 

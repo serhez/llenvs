@@ -27,29 +27,6 @@ theme:
     - search.highlight
     - content.code.copy
 
-nav:
-  - Home: README.md
-  - Getting Started:
-    - Installation: getting-started/install.md
-    - Quick Start: getting-started/quickstart.md
-  - Guides:
-    - Environments: guides/environments.md
-    - Prompts: guides/prompts.md
-    - Tools: guides/tools.md
-    - Segmentation: guides/segmentation.md
-    - Evaluation: guides/evaluation.md
-    - Backends: guides/backends.md
-    - Parallelization: guides/parallelization.md
-  - Adapters:
-    - ReasoningGym: adapters/reasoning-gym.md
-    - HuggingFace: adapters/huggingface.md
-    - GEM: adapters/gem.md
-    - WebShop: adapters/webshop.md
-  - Reference:
-    - Configuration: reference/config.md
-    - Core Abstractions: reference/core.md
-    - Tools: reference/tools.md
-
 markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
