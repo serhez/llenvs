@@ -56,8 +56,15 @@ anthropic = [
 math-verify = [
     "math-verify[antlr4-13-2]>=0.7",
 ]
+rl = [
+    "datasets>=2.14",
+]
+trl = [
+    "trl>=0.7",
+    "datasets>=2.14",
+]
 all = [
-    "llenvs[reasoning-gym,huggingface,gem,vllm,openai,anthropic,transformers,math-verify]",
+    "llenvs[reasoning-gym,huggingface,gem,vllm,openai,anthropic,transformers,math-verify,rl]",
 ]
 dev = [
     "pytest>=7.0",

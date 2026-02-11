@@ -19,6 +19,8 @@ from llenvs.core.extraction import (
     MultipleChoiceExtractor,
 )
 from llenvs.core.config import EvalConfig
+from llenvs.integrations.scoring import Scorer, ScoringResult
+from llenvs.integrations.dataset_provider import DatasetProvider, TaskItem
 
 __version__ = "0.1.0"
 
@@ -49,4 +51,9 @@ __all__ = [
     "MultipleChoiceExtractor",
     # Config
     "EvalConfig",
+    # Integrations
+    "Scorer",
+    "ScoringResult",
+    "DatasetProvider",
+    "TaskItem",
 ]
