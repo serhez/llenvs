@@ -356,13 +356,9 @@ class TestReasoningGymAdapter:
 
     def test_get_environment_with_mock(self, mock_dataset, monkeypatch):
         """Test get_environment creates an environment."""
-        # Patch the create_reasoning_gym_environment function
-        def mock_create(dataset_name, **kwargs):
-            from llenvs.adapters.reasoning_gym import ReasoningGymEnvironment
-            return ReasoningGymEnvironment(dataset=mock_dataset)
+        import reasoning_gym as rg_module
 
-        from llenvs.adapters import reasoning_gym
-        monkeypatch.setattr(reasoning_gym, "create_reasoning_gym_environment", mock_create)
+        monkeypatch.setattr(rg_module, "create_dataset", lambda name, **kwargs: mock_dataset)
 
         adapter = ReasoningGymAdapter()
         env = adapter.get_environment("test_dataset")

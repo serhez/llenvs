@@ -68,7 +68,9 @@ env = adapter.get_environment("sudoku", size=50)
 Agent provides one response, receives final reward:
 
 ```python
-env = create_reasoning_gym_environment("leg_counting")
+from llenvs.core.registry import environment_registry
+
+env = environment_registry.get(name="leg_counting", adapter="reasoning_gym")
 state, _ = env.reset(options={"task_index": 0})
 
 # One action completes the episode
@@ -82,7 +84,9 @@ assert result.terminated  # Episode done
 Agent interacts over multiple steps:
 
 ```python
-env = create_gem_environment("game:GuessTheNumber-v0")
+from llenvs.core.registry import environment_registry
+
+env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
 state, _ = env.reset(seed=42)
 
 while not state.metadata.is_terminal:

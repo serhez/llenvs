@@ -94,13 +94,13 @@ print(f"Extracted answer: {step_result.info['extracted_answer']}")
 For running multiple trajectories with proper orchestration:
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.inference import SamplingParams, build_standard_pipeline
 from llenvs.evaluation import TrajectoryRunner
 
-# Create environment and backend
-env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+# Create environment via registry
+env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 backend = OpenAIBackend(model="gpt-4o")
 
 # Create prompt pipeline

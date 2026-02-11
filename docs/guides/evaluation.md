@@ -7,12 +7,12 @@ This guide covers running evaluations, computing metrics, and saving results.
 The `TrajectoryRunner` orchestrates evaluation trajectories:
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.inference import SamplingParams, build_standard_pipeline
 from llenvs.evaluation import TrajectoryRunner
 
-env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 backend = OpenAIBackend(model="gpt-4o")
 
 runner = TrajectoryRunner(
@@ -44,10 +44,10 @@ print(f"\nSuccess rate: {batch_result.success_rate:.2%}")
 For tool-enabled environments:
 
 ```python
-from llenvs.adapters import create_gem_tool_environment
+from llenvs.core.registry import environment_registry
 from llenvs.evaluation import ToolTrajectoryRunner
 
-env = create_gem_tool_environment("math:GSM8K", tool_types=("python",))
+env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem", tool_types=("python",))
 
 runner = ToolTrajectoryRunner(
     environment=env,

@@ -13,16 +13,16 @@ pip install llenvs[huggingface]
 ## Quick Start with Presets
 
 ```python
-from llenvs.adapters import create_huggingface_environment
+from llenvs.core.registry import environment_registry
 
 # AIME 2024 - Competition math (30 problems)
-env = create_huggingface_environment("HuggingFaceH4/aime_2024")
+env = environment_registry.get(name="HuggingFaceH4/aime_2024", adapter="huggingface")
 
 # GSM8K - Grade school math (~1300 test problems)
-env = create_huggingface_environment("gsm8k")
+env = environment_registry.get(name="gsm8k", adapter="huggingface")
 
 # Historical AIME (1983-2024)
-env = create_huggingface_environment("di-zhang-fdu/AIME_1983_2024")
+env = environment_registry.get(name="di-zhang-fdu/AIME_1983_2024", adapter="huggingface")
 ```
 
 ## Custom Configuration
@@ -103,12 +103,12 @@ print(DATASET_PRESETS.keys())
 ## Example: AIME Evaluation
 
 ```python
-from llenvs.adapters import create_huggingface_environment
+from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.inference import SamplingParams
 from llenvs.core import TextAction
 
-env = create_huggingface_environment("HuggingFaceH4/aime_2024")
+env = environment_registry.get(name="HuggingFaceH4/aime_2024", adapter="huggingface")
 backend = OpenAIBackend(model="gpt-4o")
 params = SamplingParams(temperature=0.0, max_tokens=4096)
 

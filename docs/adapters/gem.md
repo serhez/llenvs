@@ -13,14 +13,14 @@ pip install llenvs[gem]
 ## Quick Start
 
 ```python
-from llenvs.adapters import create_gem_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import TextAction
 
 # Create a multi-turn game
-env = create_gem_environment("game:GuessTheNumber-v0")
+env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
 
 # Create a single-turn math problem
-env = create_gem_environment("math:GSM8K")
+env = environment_registry.get(name="math:GSM8K", adapter="gem")
 ```
 
 ## Multi-Turn Games
@@ -28,11 +28,11 @@ env = create_gem_environment("math:GSM8K")
 GEM provides native multi-turn games where the model interacts across multiple steps:
 
 ```python
-from llenvs.adapters import create_gem_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import TextAction
 
 # GuessTheNumber - binary search game
-env = create_gem_environment("game:GuessTheNumber-v0")
+env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
 state, info = env.reset(seed=42)
 
 print(f"Game: {state.observation.prompt}")
@@ -72,11 +72,11 @@ Most games have difficulty variants: `-easy`, `-hard`, `-random`.
 GEM also wraps standard benchmarks as single-turn environments:
 
 ```python
-from llenvs.adapters import create_gem_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import TextAction
 
 # Math benchmark
-env = create_gem_environment("math:GSM8K")
+env = environment_registry.get(name="math:GSM8K", adapter="gem")
 state, _ = env.reset(options={"task_index": 0})
 
 print(f"Problem: {state.observation.prompt}")
@@ -110,15 +110,16 @@ print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
 
 ## Tool-Enabled Environments
 
-GEM environments like `math:*` and `qa:*` support tools (Python execution, search). Use `create_gem_tool_environment` for structured function calling:
+GEM environments like `math:*` and `qa:*` support tools (Python execution, search). Use `environment_registry.get_tool_environment()` for structured function calling:
 
 ```python
-from llenvs.adapters import create_gem_tool_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import AgentAction, ToolCall
 
 # Create tool-enabled environment
-env = create_gem_tool_environment(
-    "math:GSM8K",
+env = environment_registry.get_tool_environment(
+    name="math:GSM8K",
+    adapter="gem",
     tool_types=("python",),  # Enable Python execution
     max_steps=10,
 )
@@ -155,8 +156,9 @@ print(f"Correct: {result.info['gem_reward'] == 1.0}")
 ### QA Environments with Search
 
 ```python
-env = create_gem_tool_environment(
-    "qa:HotpotQA",
+env = environment_registry.get_tool_environment(
+    name="qa:HotpotQA",
+    adapter="gem",
     tool_types=("search",),
     search_url="http://localhost:8000/retrieve",
     search_topk=3,
@@ -174,12 +176,12 @@ result = env.step(state, action)
 ### Using with ToolTrajectoryRunner
 
 ```python
-from llenvs.adapters import create_gem_tool_environment
+from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.evaluation import ToolTrajectoryRunner
 from llenvs.inference import SamplingParams
 
-env = create_gem_tool_environment("math:GSM8K", tool_types=("python",))
+env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem", tool_types=("python",))
 backend = OpenAIBackend(model="gpt-4o")
 
 runner = ToolTrajectoryRunner(
@@ -229,12 +231,13 @@ env_with_format = adapter.get_environment(
 GEM internally wraps reasoning-gym, so some environments are available through both adapters:
 
 ```python
+from llenvs.core.registry import environment_registry
+
 # Via GEM adapter
-env1 = create_gem_environment("reasoning_gym:leg_counting")
+env1 = environment_registry.get(name="reasoning_gym:leg_counting", adapter="gem")
 
 # Via ReasoningGym adapter (native)
-from llenvs.adapters import create_reasoning_gym_environment
-env2 = create_reasoning_gym_environment("leg_counting")
+env2 = environment_registry.get(name="leg_counting", adapter="reasoning_gym")
 ```
 
 Use whichever adapter fits your workflow. GEM provides a unified interface across all environment types.

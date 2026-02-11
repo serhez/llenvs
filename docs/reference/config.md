@@ -139,10 +139,11 @@ print(f"Tools: {caps.supports_function_calling}")
 ### Reasoning-Gym
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 
-env = create_reasoning_gym_environment(
-    dataset_name="leg_counting",
+env = environment_registry.get(
+    name="leg_counting",
+    adapter="reasoning_gym",
     size=100,                      # Number of samples
     seed=42,                       # Random seed
     answer_extractor=None,         # Use default TagBasedExtractor
@@ -151,8 +152,9 @@ env = create_reasoning_gym_environment(
 
 # Add optional extra rewards (e.g., format compliance)
 from llenvs.core.reward import FormatReward
-env_with_format = create_reasoning_gym_environment(
-    dataset_name="leg_counting",
+env_with_format = environment_registry.get(
+    name="leg_counting",
+    adapter="reasoning_gym",
     size=100,
     extra_rewards=(FormatReward(env._answer_extractor),),
 )
@@ -161,11 +163,11 @@ env_with_format = create_reasoning_gym_environment(
 ### HuggingFace
 
 ```python
-from llenvs.adapters import HuggingFaceAdapter
+from llenvs.core.registry import environment_registry
 
-adapter = HuggingFaceAdapter()
-env = adapter.get_environment(
+env = environment_registry.get(
     name="gsm8k",
+    adapter="huggingface",
     subset="main",                 # Dataset subset/config
     split="test",                  # train, test, validation
     question_column="question",    # Column with questions
@@ -180,17 +182,19 @@ env = adapter.get_environment(
 ### GEM
 
 ```python
-from llenvs.adapters import create_gem_environment, create_gem_tool_environment
+from llenvs.core.registry import environment_registry
 
 # Basic environment
-env = create_gem_environment(
-    env_id="game:Wordle-v0",
+env = environment_registry.get(
+    name="game:Wordle-v0",
+    adapter="gem",
     max_steps=6,
 )
 
 # Tool-enabled environment
-env = create_gem_tool_environment(
-    env_id="math:GSM8K",
+env = environment_registry.get_tool_environment(
+    name="math:GSM8K",
+    adapter="gem",
     tool_types=("python",),        # Tools to enable
     max_steps=10,
     # For search tool:
@@ -202,10 +206,11 @@ env = create_gem_tool_environment(
 ### WebShop
 
 ```python
-from llenvs.adapters import create_webshop_environment
+from llenvs.core.registry import environment_registry
 
-env = create_webshop_environment(
-    observation_mode="text_rich",  # text_rich, text, html
+env = environment_registry.get(
+    name="webshop:text_rich",
+    adapter="webshop",
     max_steps=15,
     num_products=1000,             # None for full dataset
     human_goals=True,              # Use human-written goals

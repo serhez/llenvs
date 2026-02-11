@@ -181,14 +181,14 @@ except ImportError:
 
 # Test HuggingFace adapter (if installed)
 try:
-    from llenvs.adapters import create_huggingface_environment
+    from llenvs.adapters import HuggingFaceAdapter
     print("HuggingFace adapter: OK")
 except ImportError:
     print("HuggingFace adapter: Not installed")
 
 # Test reasoning-gym adapter (if installed)
 try:
-    from llenvs.adapters import create_reasoning_gym_environment
+    from llenvs.adapters import ReasoningGymAdapter
     print("reasoning-gym adapter: OK")
 except ImportError:
     print("reasoning-gym adapter: Not installed")

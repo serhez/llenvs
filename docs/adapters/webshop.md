@@ -13,12 +13,13 @@ pip install webshop
 ## Quick Start
 
 ```python
-from llenvs.adapters import create_webshop_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import TextAction
 
 # Create environment (use num_products=1000 for fast preview)
-env = create_webshop_environment(
-    observation_mode="text_rich",
+env = environment_registry.get(
+    name="webshop:text_rich",
+    adapter="webshop",
     max_steps=15,
     num_products=1000,
 )
@@ -88,12 +89,12 @@ print(info)
 ## Running with TrajectoryRunner
 
 ```python
-from llenvs.adapters import create_webshop_environment
+from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
 
-env = create_webshop_environment(max_steps=15)
+env = environment_registry.get(name="webshop:text_rich", adapter="webshop", max_steps=15)
 backend = OpenAIBackend(model="gpt-4o")
 
 runner = TrajectoryRunner(

@@ -14,6 +14,7 @@ from llenvs.core.tools import (
 )
 from llenvs.core.reward import RewardType
 from llenvs.adapters.gem import (
+    GemAdapter,
     GemToolEnvironment,
     GemToolHidden,
     GemToolExecutor,
@@ -657,8 +658,6 @@ class TestGemAdapterToolEnvironment:
         mock_gem.make.return_value = MockGemEnvWithTools()
         mock_get_gem.return_value = mock_gem
 
-        from llenvs.adapters.gem import GemAdapter
-
         adapter = GemAdapter()
 
         with patch.object(
@@ -676,20 +675,18 @@ class TestGemAdapterToolEnvironment:
         assert env.spec.max_steps == 5
 
     @patch("llenvs.adapters.gem.GemAdapter._get_gem")
-    def test_create_gem_tool_environment_factory(self, mock_get_gem):
-        """Test factory function for creating tool environments."""
+    def test_adapter_get_tool_environment(self, mock_get_gem):
+        """Test adapter.get_tool_environment creates tool environment."""
         mock_gem = MagicMock()
         mock_gem.make.return_value = MockGemEnvWithTools()
         mock_get_gem.return_value = mock_gem
-
-        from llenvs.adapters.gem import create_gem_tool_environment
 
         with patch.object(
             GemToolEnvironment,
             "_create_gem_tools",
             return_value={"python": MockPythonCodeTool()},
         ):
-            env = create_gem_tool_environment(
+            env = GemAdapter().get_tool_environment(
                 "math:GSM8K",
                 tool_types=("python",),
                 max_steps=10,

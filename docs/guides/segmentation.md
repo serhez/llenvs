@@ -12,11 +12,11 @@ The segmentation system turns single-step environments into multi-step environme
 Segment a complete response and analyze per-step:
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import SegmentedEnvironment, SentenceSegmenter
 
 # Create single-step environment
-base_env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+base_env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 
 # Wrap with segmentation
 env = SegmentedEnvironment(base_env, SentenceSegmenter())
@@ -50,7 +50,7 @@ from llenvs.core import SegmentedEnvironment, TokenSegmenter
 from llenvs.evaluation import SegmentedTrajectoryRunner, run_segmented_evaluation
 from llenvs.inference.protocol import SamplingParams
 
-base_env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+base_env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 
 tokenizer = ...  # Any tokenizer with encode/decode
 segmenter = TokenSegmenter(tokenizer=tokenizer, token_size=64)
@@ -457,11 +457,11 @@ class SegmentedHidden(Generic[HiddenT]):
 ## Example: AIME with Step Analysis
 
 ```python
-from llenvs.adapters import create_huggingface_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import SegmentedEnvironment, PatternSegmenter
 
 # Load AIME problems
-base_env = create_huggingface_environment("HuggingFaceH4/aime_2024")
+base_env = environment_registry.get(name="HuggingFaceH4/aime_2024", adapter="huggingface")
 
 # Wrap with step-based segmentation
 env = SegmentedEnvironment(base_env, PatternSegmenter())

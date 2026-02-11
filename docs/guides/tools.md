@@ -191,12 +191,13 @@ async with MCPToolExecutor(config) as executor:
 For environments with built-in tools, use `ToolEnvironment`:
 
 ```python
-from llenvs.adapters import create_gem_tool_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import AgentAction, ToolCall
 
 # Create tool-enabled environment
-env = create_gem_tool_environment(
-    "math:GSM8K",
+env = environment_registry.get_tool_environment(
+    name="math:GSM8K",
+    adapter="gem",
     tool_types=("python",),
 )
 
@@ -234,9 +235,10 @@ efficiency_reward = ToolEfficiencyReward(
 For running tool-enabled evaluations:
 
 ```python
+from llenvs.core.registry import environment_registry
 from llenvs.evaluation import ToolTrajectoryRunner
 
-env = create_gem_tool_environment("math:GSM8K")
+env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem")
 backend = OpenAIBackend(model="gpt-4o")
 
 runner = ToolTrajectoryRunner(

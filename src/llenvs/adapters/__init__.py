@@ -8,13 +8,11 @@ from llenvs.adapters.reasoning_gym import (
     ReasoningGymEnvironment,
     ReasoningGymHidden,
     ReasoningGymAdapter,
-    create_reasoning_gym_environment,
 )
 from llenvs.adapters.huggingface import (
     HuggingFaceEnvironment,
     HuggingFaceHidden,
     HuggingFaceAdapter,
-    create_huggingface_environment,
     DATASET_PRESETS,
 )
 from llenvs.adapters.gem import (
@@ -24,8 +22,6 @@ from llenvs.adapters.gem import (
     GemToolHidden,
     GemToolExecutor,
     GemAdapter,
-    create_gem_environment,
-    create_gem_tool_environment,
     MULTI_TURN_ENVS,
     GEM_PYTHON_TOOL,
     GEM_SEARCH_TOOL,
@@ -36,7 +32,6 @@ from llenvs.adapters.webshop import (
     WebShopHidden,
     WebShopAdapter,
     WebShopReward,
-    create_webshop_environment,
 )
 
 __all__ = [
@@ -44,12 +39,10 @@ __all__ = [
     "ReasoningGymEnvironment",
     "ReasoningGymHidden",
     "ReasoningGymAdapter",
-    "create_reasoning_gym_environment",
     # HuggingFace
     "HuggingFaceEnvironment",
     "HuggingFaceHidden",
     "HuggingFaceAdapter",
-    "create_huggingface_environment",
     "DATASET_PRESETS",
     # GEM
     "GemEnvironment",
@@ -58,8 +51,6 @@ __all__ = [
     "GemToolHidden",
     "GemToolExecutor",
     "GemAdapter",
-    "create_gem_environment",
-    "create_gem_tool_environment",
     "MULTI_TURN_ENVS",
     "GEM_PYTHON_TOOL",
     "GEM_SEARCH_TOOL",
@@ -69,7 +60,6 @@ __all__ = [
     "WebShopHidden",
     "WebShopAdapter",
     "WebShopReward",
-    "create_webshop_environment",
 ]
 
 

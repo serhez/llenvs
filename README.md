@@ -5,10 +5,10 @@
 LLEnvs wraps evaluation benchmarks — reasoning tasks, math datasets, multi-turn games, e-commerce simulations — in a unified `Environment` protocol inspired by Gymnasium. Every benchmark becomes a stateless MDP with typed observations, actions, and multi-signal rewards, so you can run evaluations, build RL training loops, or do fine-grained reasoning analysis with the same interface.
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import TextAction
 
-env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 state, _ = env.reset(options={"task_index": 0})
 
 print(state.observation.prompt)
@@ -108,10 +108,10 @@ llenvs run config.yaml
 First-class support for tool-using agents, including MCP server integration:
 
 ```python
-from llenvs.adapters import create_gem_tool_environment
+from llenvs.core.registry import environment_registry
 from llenvs.evaluation import ToolTrajectoryRunner
 
-env = create_gem_tool_environment("math:GSM8K", tool_types=("python",))
+env = environment_registry.get_tool_environment(name="math:GSM8K", adapter="gem", tool_types=("python",))
 
 state, _ = env.reset(options={"task_index": 0})
 print([t.name for t in state.observation.available_tools])

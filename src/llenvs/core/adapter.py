@@ -109,6 +109,19 @@ class Adapter(Protocol):
         """
         ...
 
+    def get_tool_environment(
+        self,
+        name: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Create a tool-enabled environment by name.
+
+        Returns a ToolEnvironment with structured tool calling support.
+        Not all adapters support tool environments — raises NotImplementedError
+        if the adapter doesn't have tool support.
+        """
+        ...
+
     def get_environment_info(self, name: str) -> dict[str, Any]:
         """Get metadata about an environment without creating it.
 

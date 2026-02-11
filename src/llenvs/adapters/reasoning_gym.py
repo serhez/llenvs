@@ -302,54 +302,6 @@ class ReasoningGymEnvironment:
         return len(self._dataset)
 
 
-def create_reasoning_gym_environment(
-    dataset_name: str,
-    size: int | None = None,
-    seed: int | None = None,
-    answer_extractor: AnswerExtractor | None = None,
-    extra_rewards: tuple[RewardFunction, ...] = (),
-    **dataset_kwargs: Any,
-) -> ReasoningGymEnvironment:
-    """Factory function to create a ReasoningGymEnvironment.
-
-    Args:
-        dataset_name: Name of the reasoning-gym dataset.
-        size: Number of samples to include (None = all).
-        seed: Random seed for dataset generation.
-        answer_extractor: AnswerExtractor for parsing responses.
-        extra_rewards: Additional reward functions appended after native rewards.
-        **dataset_kwargs: Additional kwargs passed to dataset creation.
-
-    Returns:
-        Configured ReasoningGymEnvironment.
-
-    Raises:
-        ImportError: If reasoning-gym is not installed.
-    """
-    try:
-        import reasoning_gym
-    except ImportError as e:
-        raise ImportError(
-            "reasoning-gym is required for ReasoningGymEnvironment. "
-            "Install with: pip install reasoning-gym"
-        ) from e
-
-    # Create the dataset
-    create_kwargs: dict[str, Any] = {**dataset_kwargs}
-    if size is not None:
-        create_kwargs["size"] = size
-    if seed is not None:
-        create_kwargs["seed"] = seed
-
-    dataset = reasoning_gym.create_dataset(dataset_name, **create_kwargs)
-
-    return ReasoningGymEnvironment(
-        dataset=dataset,
-        answer_extractor=answer_extractor,
-        extra_rewards=extra_rewards,
-    )
-
-
 class ReasoningGymAdapter:
     """Adapter for the reasoning-gym library.
 
@@ -429,14 +381,25 @@ class ReasoningGymAdapter:
             ValueError: If the environment name is not recognized.
             ImportError: If reasoning-gym is not installed.
         """
-        return create_reasoning_gym_environment(
-            dataset_name=name,
-            size=size,
-            seed=seed,
+        rg = self._get_reasoning_gym()
+
+        # Create the dataset
+        create_kwargs: dict[str, Any] = {**kwargs}
+        if size is not None:
+            create_kwargs["size"] = size
+        if seed is not None:
+            create_kwargs["seed"] = seed
+
+        dataset = rg.create_dataset(name, **create_kwargs)
+
+        return ReasoningGymEnvironment(
+            dataset=dataset,
             answer_extractor=answer_extractor,
             extra_rewards=extra_rewards,
-            **kwargs,
         )
+
+    def get_tool_environment(self, name: str, **kwargs: Any) -> Any:
+        raise NotImplementedError(f"{self.name} adapter does not support tool environments")
 
     def get_native_answer_extractor(self, task_name: str) -> AnswerExtractor:
         """Return reasoning-gym's native extraction function.

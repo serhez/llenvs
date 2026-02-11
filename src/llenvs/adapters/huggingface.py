@@ -651,6 +651,9 @@ class HuggingFaceAdapter:
             metadata_columns=metadata_columns,
         )
 
+    def get_tool_environment(self, name: str, **kwargs: Any) -> Any:
+        raise NotImplementedError(f"{self.name} adapter does not support tool environments")
+
     def get_default_system_prompt(self, name: str) -> None:
         """HuggingFace datasets are raw, no default system prompt."""
         return None
@@ -774,40 +777,3 @@ DATASET_PRESETS: dict[str, dict[str, Any]] = {
         "scoring": "numeric",
     },
 }
-
-
-def create_huggingface_environment(
-    dataset_name: str,
-    split: str | None = None,
-    preset: bool = True,
-    **kwargs: Any,
-) -> HuggingFaceEnvironment:
-    """Factory function to create a HuggingFaceEnvironment.
-
-    Args:
-        dataset_name: Name of the HuggingFace dataset.
-        split: Dataset split to use. If None, uses preset default or "test".
-        preset: Whether to use preset configuration if available.
-        **kwargs: Override any preset or default parameters.
-
-    Returns:
-        Configured HuggingFaceEnvironment.
-
-    Raises:
-        ImportError: If datasets library is not installed.
-    """
-    adapter = HuggingFaceAdapter()
-
-    # Merge preset config if available and requested
-    if preset and dataset_name in DATASET_PRESETS:
-        config = {**DATASET_PRESETS[dataset_name], **kwargs}
-    else:
-        config = kwargs
-
-    # Only override split if explicitly provided
-    if split is not None:
-        config["split"] = split
-    elif "split" not in config:
-        config["split"] = "test"
-
-    return adapter.get_environment(dataset_name, **config)

@@ -13,11 +13,12 @@ pip install llenvs[reasoning-gym]
 ## Quick Start
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 from llenvs.core import TextAction
 
-env = create_reasoning_gym_environment(
-    dataset_name="leg_counting",
+env = environment_registry.get(
+    name="leg_counting",
+    adapter="reasoning_gym",
     size=100,
     seed=42,
 )
@@ -115,12 +116,12 @@ By default, only native rewards are included. Extra rewards (like format checkin
 ## Example: Running Evaluation
 
 ```python
-from llenvs.adapters import create_reasoning_gym_environment
+from llenvs.core.registry import environment_registry
 from llenvs.inference.backends import OpenAIBackend
 from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
 
-env = create_reasoning_gym_environment("leg_counting", size=100, seed=42)
+env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 backend = OpenAIBackend(model="gpt-4o")
 
 runner = TrajectoryRunner(

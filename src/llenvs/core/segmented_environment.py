@@ -52,7 +52,7 @@ class SegmentedEnvironment(Generic[ObsT, HiddenT]):
     - Analysis of reasoning traces
 
     Example (replay mode):
-        >>> base_env = create_huggingface_environment("gsm8k", size=1)
+        >>> base_env = HuggingFaceAdapter().get_environment("gsm8k", size=1)
         >>> env = SegmentedEnvironment(base_env, SentenceSegmenter())
         >>> state, _ = env.reset(options={"task_index": 0})
         >>> results = env.replay(state, "Step 1: Add. Step 2: Get 42. <answer>42</answer>")

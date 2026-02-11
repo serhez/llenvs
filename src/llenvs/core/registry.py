@@ -229,6 +229,29 @@ class EnvironmentRegistry:
         adapter_instance = self.get_adapter(adapter)
         return adapter_instance.get_environment(name, **kwargs)
 
+    def get_tool_environment(
+        self,
+        name: str,
+        adapter: str,
+        **kwargs: Any,
+    ) -> Any:
+        """Get a tool-enabled environment by name and adapter.
+
+        Args:
+            name: Environment name (e.g., "math:GSM8K").
+            adapter: Adapter name (e.g., "gem").
+            **kwargs: Additional arguments passed to the adapter.
+
+        Returns:
+            Configured ToolEnvironment instance.
+
+        Raises:
+            KeyError: If adapter is not registered.
+            NotImplementedError: If the adapter doesn't support tool environments.
+        """
+        adapter_instance = self.get_adapter(adapter)
+        return adapter_instance.get_tool_environment(name, **kwargs)
+
     def list_adapters(self) -> list[str]:
         """List all registered adapter names."""
         return list(self._adapters.keys())

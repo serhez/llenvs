@@ -505,6 +505,9 @@ class WebShopAdapter:
             prompts=prompts,
         )
 
+    def get_tool_environment(self, name: str, **kwargs: Any) -> Any:
+        raise NotImplementedError(f"{self.name} adapter does not support tool environments")
+
     def get_default_system_prompt(self, name: str) -> None:
         """WebShop observations include built-in instructions."""
         return None
@@ -544,51 +547,3 @@ class WebShopAdapter:
             "actions": ["search[keywords]", "click[element]"],
             "reference": "https://github.com/princeton-nlp/WebShop",
         }
-
-
-def create_webshop_environment(
-    observation_mode: str = "text_rich",
-    max_steps: int = 15,
-    num_products: int | None = None,
-    human_goals: bool = True,
-    prompts: dict[str, str] | None = None,
-    **kwargs: Any,
-) -> WebShopEnvironment:
-    """Factory function to create a WebShop environment.
-
-    Convenience function that creates an adapter and gets the environment.
-
-    Args:
-        observation_mode: How to format observations:
-            - "text": Simple text with separators
-            - "text_rich": Tagged buttons and clickables (recommended)
-            - "html": Raw HTML
-        max_steps: Maximum steps per episode.
-        num_products: Number of products to load (None = all, 1000 = fast preview).
-        human_goals: Use human-written goals (True) or templates.
-        **kwargs: Additional arguments passed to WebAgentTextEnv.
-
-    Returns:
-        Configured WebShopEnvironment.
-
-    Raises:
-        ImportError: If webshop is not installed.
-
-    Example:
-        >>> env = create_webshop_environment(num_products=1000)  # Fast preview
-        >>> state, info = env.reset(options={"task_index": 0})
-        >>> print(info["instruction"])
-        "Find me a red wireless headphone under $50"
-
-        >>> action = TextAction(text="search[red wireless headphone]")
-        >>> result = env.step(state, action)
-    """
-    adapter = WebShopAdapter()
-    return adapter.get_environment(
-        observation_mode=observation_mode,
-        max_steps=max_steps,
-        num_products=num_products,
-        human_goals=human_goals,
-        prompts=prompts,
-        **kwargs,
-    )

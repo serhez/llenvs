@@ -12,7 +12,6 @@ from llenvs.adapters.webshop import (
     WebShopAdapter,
     WebShopReward,
     DEFAULT_WEBSHOP_PROMPTS,
-    create_webshop_environment,
 )
 
 
@@ -430,7 +429,7 @@ class TestCreateWebShopEnvironment:
         mock_gym.make.return_value = MockWebShopEnv()
         mock_get_webshop.return_value = (mock_gym, mock_env_class)
 
-        env = create_webshop_environment(
+        env = WebShopAdapter().get_environment(
             observation_mode="text_rich",
             max_steps=20,
             num_products=1000,
