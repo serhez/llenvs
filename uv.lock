@@ -29,6 +29,18 @@ wheels = [
 ]
 
 [[package]]
+name = "agentenv"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+    { name = "transformers" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/41/14/70cd11329b6d1d18810b2adbace2676a3a09538a211a938047a9f56f332a/agentenv-0.0.1-py3-none-any.whl", hash = "sha256:a4da5fd9b5efbae567cc888aacc0dc23671fd256877a6c205a554668d9e8285a", size = 1320, upload-time = "2024-04-26T18:01:29.994Z" },
+]
+
+[[package]]
 name = "aiohappyeyeballs"
 version = "2.6.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1861,8 +1873,12 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+agentgym = [
+    { name = "agentenv" },
+]
 all = [
     { name = "accelerate" },
+    { name = "agentenv" },
     { name = "anthropic" },
     { name = "datasets" },
     { name = "gem-llm" },
@@ -1920,13 +1936,14 @@ vllm = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'transformers'", specifier = ">=0.25" },
+    { name = "agentenv", marker = "extra == 'agentgym'", specifier = ">=0.0.1" },
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.20" },
     { name = "datasets", marker = "extra == 'huggingface'", specifier = ">=2.14" },
     { name = "datasets", marker = "extra == 'rl'", specifier = ">=2.14" },
     { name = "datasets", marker = "extra == 'trl'", specifier = ">=2.14" },
     { name = "gem-llm", marker = "extra == 'gem'", specifier = ">=0.1.0" },
     { name = "huggingface-hub", marker = "extra == 'huggingface'", specifier = ">=0.20" },
-    { name = "llenvs", extras = ["reasoning-gym", "huggingface", "gem", "vllm", "openai", "anthropic", "transformers", "math-verify", "rl"], marker = "extra == 'all'" },
+    { name = "llenvs", extras = ["reasoning-gym", "huggingface", "gem", "agentgym", "vllm", "openai", "anthropic", "transformers", "math-verify", "rl"], marker = "extra == 'all'" },
     { name = "math-verify", extras = ["antlr4-13-2"], marker = "extra == 'math-verify'", specifier = ">=0.7" },
     { name = "mkdocs", marker = "extra == 'dev'", specifier = ">=1.6" },
     { name = "mkdocs-material", marker = "extra == 'dev'", specifier = ">=9.5" },
@@ -1942,7 +1959,7 @@ requires-dist = [
     { name = "trl", marker = "extra == 'trl'", specifier = ">=0.7" },
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.4" },
 ]
-provides-extras = ["reasoning-gym", "huggingface", "gem", "vllm", "transformers", "openai", "anthropic", "math-verify", "rl", "trl", "all", "dev"]
+provides-extras = ["reasoning-gym", "huggingface", "gem", "vllm", "transformers", "openai", "anthropic", "agentgym", "math-verify", "rl", "trl", "all", "dev"]
 
 [[package]]
 name = "llguidance"

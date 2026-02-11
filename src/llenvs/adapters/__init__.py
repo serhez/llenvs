@@ -33,6 +33,12 @@ from llenvs.adapters.webshop import (
     WebShopAdapter,
     WebShopReward,
 )
+from llenvs.adapters.agentgym import (
+    AgentGymEnvironment,
+    AgentGymHidden,
+    AgentGymAdapter,
+    AgentGymReward,
+)
 
 __all__ = [
     # ReasoningGym
@@ -60,6 +66,11 @@ __all__ = [
     "WebShopHidden",
     "WebShopAdapter",
     "WebShopReward",
+    # AgentGym
+    "AgentGymEnvironment",
+    "AgentGymHidden",
+    "AgentGymAdapter",
+    "AgentGymReward",
 ]
 
 
@@ -112,6 +123,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # webshop not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register AgentGym adapter if available
+    try:
+        adapter = AgentGymAdapter()
+        adapter._get_agentenv()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # agentenv not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
