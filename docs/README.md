@@ -24,6 +24,9 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[HuggingFace](adapters/huggingface.md)** - AIME, GSM8K, and other HF datasets
 - **[GEM](adapters/gem.md)** - Multi-turn games and benchmarks with tool support
 - **[WebShop](adapters/webshop.md)** - E-commerce product search and purchase
+- **[AgentGym](adapters/agentgym.md)** - 15 multi-turn agent environments
+- **[Verifiers](adapters/verifiers.md)** - Single-turn and tool environments with rubric scoring
+- **[OpenEnv](adapters/openenv.md)** - Session-based server environments with MCP tools
 
 ## Reference
 
@@ -57,11 +60,12 @@ State(
 
 ### Multi-Signal Rewards
 
-Transitions produce `RewardBundle` with multiple named signals:
+Transitions produce `RewardBundle` with multiple named, weighted signals:
 
 ```python
 RewardBundle(signals=(
-    RewardSignal(value=1.0, name="correctness", type=OUTCOME),
-    RewardSignal(value=1.0, name="format", type=FORMAT),
+    RewardSignal(value=1.0, name="correctness", type=OUTCOME, weight=1.0),
+    RewardSignal(value=1.0, name="format", type=FORMAT, weight=0.5),
 ))
+# bundle.total = 1.0*1.0 + 1.0*0.5 = 1.5
 ```

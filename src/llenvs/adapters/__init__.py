@@ -39,6 +39,22 @@ from llenvs.adapters.agentgym import (
     AgentGymAdapter,
     AgentGymReward,
 )
+from llenvs.adapters.verifiers import (
+    VerifiersSingleTurnEnvironment,
+    VerifiersToolEnvironment,
+    VerifiersHidden,
+    VerifiersToolHidden,
+    VerifiersToolExecutor,
+    VerifiersRubricReward,
+    VerifiersAdapter,
+)
+from llenvs.adapters.openenv import (
+    OpenEnvEnvironment,
+    OpenEnvToolEnvironment,
+    OpenEnvHidden,
+    OpenEnvReward,
+    OpenEnvAdapter,
+)
 
 __all__ = [
     # ReasoningGym
@@ -71,6 +87,20 @@ __all__ = [
     "AgentGymHidden",
     "AgentGymAdapter",
     "AgentGymReward",
+    # Verifiers
+    "VerifiersSingleTurnEnvironment",
+    "VerifiersToolEnvironment",
+    "VerifiersHidden",
+    "VerifiersToolHidden",
+    "VerifiersToolExecutor",
+    "VerifiersRubricReward",
+    "VerifiersAdapter",
+    # OpenEnv
+    "OpenEnvEnvironment",
+    "OpenEnvToolEnvironment",
+    "OpenEnvHidden",
+    "OpenEnvReward",
+    "OpenEnvAdapter",
 ]
 
 
@@ -133,6 +163,26 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # agentenv not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register verifiers adapter if available
+    try:
+        adapter = VerifiersAdapter()
+        adapter._get_verifiers()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # verifiers not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register OpenEnv adapter if available
+    try:
+        adapter = OpenEnvAdapter()
+        adapter._get_openenv()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # openenv-core not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

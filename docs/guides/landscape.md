@@ -128,16 +128,17 @@ For math and reasoning evaluation where parsing `\boxed{}`, `#### answers`, mult
 
 ### llenvs
 
-Multi-signal typed rewards. Each transition produces a `RewardBundle` with named `RewardSignal` instances:
+Multi-signal typed rewards. Each transition produces a `RewardBundle` with named, weighted `RewardSignal` instances:
 
 ```python
 RewardBundle(signals=(
-    RewardSignal(value=1.0, name="correctness", type=OUTCOME),
-    RewardSignal(value=0.5, name="format", type=FORMAT),
+    RewardSignal(value=1.0, name="correctness", type=OUTCOME, weight=2.0),
+    RewardSignal(value=0.5, name="format", type=FORMAT, weight=0.5),
 ))
+# bundle.total = 1.0*2.0 + 0.5*0.5 = 2.25
 ```
 
-Adapters provide only native rewards by default (wrapper fidelity). Additional rewards (`FormatReward`, `ToolValidityReward`, `ToolEfficiencyReward`) are opt-in via `extra_rewards`. Signals are queryable by name or type.
+Adapters provide only native rewards by default (wrapper fidelity). Additional rewards (`FormatReward`, `ToolValidityReward`, `ToolEfficiencyReward`) are opt-in via `extra_rewards`. Signals are queryable by name or type. The `weight` field (default 1.0) allows expressing relative importance.
 
 ### OpenEnv
 
@@ -240,7 +241,7 @@ llenvs's `TrajectoryMasker` — providing per-token source attribution (which to
 
 **verifiers**: ~3.8k GitHub stars, 65 contributors. Community-driven Environments Hub with 400+ environments. Bounty program ($100–$5,000 per environment). RL residency program with 500+ applicants. Active ecosystem with categories spanning autonomous research, browser automation, theorem proving, legal/finance, and more.
 
-**llenvs**: Internal library, comprehensive documentation and test suite (1042+ tests), 5 adapters wrapping established libraries (reasoning-gym, HuggingFace datasets, GEM, WebShop, AgentGym).
+**llenvs**: Internal library, comprehensive documentation and test suite (1100+ tests), 7 adapters wrapping established libraries (reasoning-gym, HuggingFace datasets, GEM, WebShop, AgentGym, verifiers, OpenEnv). The verifiers and OpenEnv adapters enable using those ecosystems' environments through llenvs's stateless MDP interface, extraction system, and evaluation runners.
 
 ## Positioning Summary
 

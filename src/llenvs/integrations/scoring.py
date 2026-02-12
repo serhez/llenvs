@@ -53,6 +53,11 @@ class Scorer:
                 f"'{environment.spec.name}' is multi-turn. Use the AgentLoop "
                 f"or rollout_func integration for multi-turn training."
             )
+        if not environment.spec.supports_task_index:
+            raise TypeError(
+                f"Scorer requires an environment that supports task indexing, but "
+                f"'{environment.spec.name}' does not (supports_task_index=False)."
+            )
         self._env = environment
 
     def score(self, task_index: int, response: str) -> ScoringResult:

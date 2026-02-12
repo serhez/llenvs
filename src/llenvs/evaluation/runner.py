@@ -18,7 +18,7 @@ from llenvs.core.state import State, Observation, Action
 from llenvs.core.environment import Environment, StepResult
 from llenvs.core.segmented_environment import SegmentedEnvironment
 from llenvs.core.trajectory import Trajectory, Transition
-from llenvs.core.reward import RewardBundle
+from llenvs.core.reward import RewardBundle, RewardType
 from llenvs.inference.protocol import (
     ModelBackend,
     SamplingParams,
@@ -209,9 +209,9 @@ def _finalize_trajectory(t: _ActiveTrajectory | _ActiveSegmentedTrajectory) -> T
     success = False
     if t.trajectory.transitions:
         last_rewards = t.trajectory.transitions[-1].rewards
-        correctness = last_rewards.by_name("correctness")
-        if correctness:
-            success = correctness.value >= 1.0
+        outcome_rewards = last_rewards.by_type(RewardType.OUTCOME)
+        if outcome_rewards:
+            success = outcome_rewards[-1].value >= 1.0
 
     return TrajectoryResult(
         trajectory=t.trajectory,
@@ -424,13 +424,13 @@ class TrajectoryRunner:
             if step_result.done:
                 break
 
-        # Determine success from correctness reward
+        # Determine success from OUTCOME-type reward
         success = False
         if trajectory.transitions:
             last_rewards = trajectory.transitions[-1].rewards
-            correctness = last_rewards.by_name("correctness")
-            if correctness:
-                success = correctness.value >= 1.0
+            outcome_rewards = last_rewards.by_type(RewardType.OUTCOME)
+            if outcome_rewards:
+                success = outcome_rewards[-1].value >= 1.0
 
         return TrajectoryResult(
             trajectory=trajectory,
@@ -1206,13 +1206,13 @@ class SegmentedTrajectoryRunner:
             trajectory.add_transition(transition)
             state = finalize_result.next_state
 
-        # Determine success from correctness reward
+        # Determine success from OUTCOME-type reward
         success = False
         if trajectory.transitions:
             last_rewards = trajectory.transitions[-1].rewards
-            correctness = last_rewards.by_name("correctness")
-            if correctness:
-                success = correctness.value >= 1.0
+            outcome_rewards = last_rewards.by_type(RewardType.OUTCOME)
+            if outcome_rewards:
+                success = outcome_rewards[-1].value >= 1.0
 
         return TrajectoryResult(
             trajectory=trajectory,

@@ -40,6 +40,7 @@ class RewardSignal:
     name: str
     reward_type: RewardType
     metadata: dict[str, Any] | None = None
+    weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,8 @@ class RewardBundle:
 
     @property
     def total(self) -> float:
-        """Sum of all reward values."""
-        return sum(s.value for s in self.signals)
+        """Weighted sum of all reward values."""
+        return sum(s.value * s.weight for s in self.signals)
 
     def by_name(self, name: str) -> RewardSignal | None:
         """Get a reward signal by name."""

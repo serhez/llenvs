@@ -129,8 +129,13 @@ class EnvironmentSpec:
     adapter: str                 # Which adapter (e.g., "reasoning_gym")
     max_steps: int | None        # None = unlimited
     is_multi_turn: bool
+    supports_task_index: bool = True   # Supports task_index in reset options
+    supports_len: bool = True          # Supports __len__
+    supports_seed: bool = True         # Supports seed in reset
     metadata: dict[str, Any]
 ```
+
+Capability flags allow integrations to check compatibility at init time. For example, `Scorer` requires `supports_task_index=True` and `DatasetProvider` requires both `supports_task_index` and `supports_len`.
 
 ## Rewards
 
@@ -155,6 +160,7 @@ class RewardSignal:
     name: str           # e.g., "correctness", "format"
     reward_type: RewardType
     metadata: dict[str, Any] | None = None
+    weight: float = 1.0  # Importance weight for total computation
 ```
 
 ### RewardBundle
@@ -166,7 +172,7 @@ class RewardBundle:
 
     @property
     def total(self) -> float:
-        """Sum of all signal values."""
+        """Weighted sum of all signal values (value * weight)."""
 
     def by_name(self, name: str) -> RewardSignal | None:
         """Get signal by name."""

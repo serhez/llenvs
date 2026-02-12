@@ -43,6 +43,16 @@ class DatasetProvider:
     """
 
     def __init__(self, environment: Environment[Any]) -> None:
+        if not environment.spec.supports_task_index:
+            raise TypeError(
+                f"DatasetProvider requires an environment that supports task indexing, "
+                f"but '{environment.spec.name}' does not (supports_task_index=False)."
+            )
+        if not environment.spec.supports_len:
+            raise TypeError(
+                f"DatasetProvider requires an environment that supports len(), "
+                f"but '{environment.spec.name}' does not (supports_len=False)."
+            )
         self._env = environment
 
     def __len__(self) -> int:

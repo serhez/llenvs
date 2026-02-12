@@ -10,6 +10,9 @@ llenvs provides a unified interface to multiple environment sources through adap
 | `huggingface` | `datasets` | AIME, GSM8K, MATH, etc. |
 | `gem` | `gem-llm` | Multi-turn games, math, QA |
 | `webshop` | `webshop` | E-commerce simulation |
+| `agentgym` | `agentenv` | 15 multi-turn agent environments |
+| `verifiers` | `verifiers` | Single-turn and tool envs with rubric scoring |
+| `openenv` | `openenv-core` | Session-based server environments with MCP tools |
 
 ## Using the Registry
 
@@ -21,7 +24,7 @@ from llenvs.core.registry import environment_registry
 # List all registered adapters
 adapters = environment_registry.list_adapters()
 print(f"Available adapters: {adapters}")
-# ["reasoning_gym", "huggingface", "gem", "webshop"]
+# ["reasoning_gym", "huggingface", "gem", "webshop", "agentgym", "verifiers", "openenv"]
 
 # List all environments across all adapters
 all_envs = environment_registry.list_environments()
@@ -183,3 +186,6 @@ print(f"Path B: {alt_trajectory.total_reward}")
 - **[HuggingFace Adapter](../adapters/huggingface.md)**
 - **[GEM Adapter](../adapters/gem.md)**
 - **[WebShop Adapter](../adapters/webshop.md)**
+- **[AgentGym Adapter](../adapters/agentgym.md)**
+- **[Verifiers Adapter](../adapters/verifiers.md)**
+- **[OpenEnv Adapter](../adapters/openenv.md)**

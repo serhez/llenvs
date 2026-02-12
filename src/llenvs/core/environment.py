@@ -58,6 +58,9 @@ class EnvironmentSpec:
     observation_type: type | None = None
     action_type: type | None = None
     is_multi_turn: bool = False
+    supports_task_index: bool = True
+    supports_len: bool = True
+    supports_seed: bool = True
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
