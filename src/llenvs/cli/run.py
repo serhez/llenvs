@@ -17,6 +17,7 @@ from llenvs.core.config import (
     BackendFactory,
     create_sampling_params,
 )
+from llenvs.evaluation.logging import LogConfig
 from llenvs.evaluation.runner import run_evaluation
 from llenvs.evaluation.results import (
     create_evaluation_result,
@@ -67,6 +68,12 @@ def create_parser() -> argparse.ArgumentParser:
         "--quiet",
         action="store_true",
         help="Suppress progress output",
+    )
+    run_parser.add_argument(
+        "--log",
+        type=str,
+        default=None,
+        help="Comma-separated log targets: console, file, wandb",
     )
 
     # List command
@@ -136,6 +143,12 @@ def run_command(args: argparse.Namespace) -> int:
             pct = (current / total * 100) if total > 0 else 0
             print(f"\r  Progress: {current}/{total} ({pct:.1f}%)", end="", flush=True)
 
+    # Log config
+    log_config: LogConfig | None = None
+    if args.log:
+        targets = tuple(t.strip() for t in args.log.split(",") if t.strip())
+        log_config = LogConfig(targets=targets)
+
     # Run each environment
     all_results = []
     for env_config in config.environments:
@@ -166,6 +179,7 @@ def run_command(args: argparse.Namespace) -> int:
                 sampling_params=sampling_params,
                 system_prompt=config.system_prompt,
                 progress_callback=progress_callback if not args.quiet else None,
+                log=log_config,
             )
         except Exception as e:
             print(f"\n  Error running evaluation: {e}")

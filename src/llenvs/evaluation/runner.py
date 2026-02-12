@@ -15,6 +15,16 @@ if TYPE_CHECKING:
     from llenvs.core.tool_parsing import ToolCallParser
     from llenvs.inference.prompts import ModelProfile, PromptTemplate
 
+from llenvs.evaluation.logging import (
+    LogConfig,
+    _BatchEndEvent,
+    _BatchStartEvent,
+    _ErrorEvent,
+    _EvaluationLogger as _EvalLogger,
+    _StepEvent,
+    _TrajectoryEndEvent,
+)
+
 from llenvs.core.state import State, Observation, Action
 from llenvs.core.environment import Environment, StepResult
 from llenvs.core.segmented_environment import SegmentedEnvironment
@@ -250,6 +260,7 @@ class TrajectoryRunner:
     prompt_template: "PromptTemplate | None" = None
     model_profile: "ModelProfile | None" = None
     tool_call_parser: "ToolCallParser | None" = None
+    log: LogConfig | None = None
 
     def _build_messages(
         self,
@@ -439,6 +450,25 @@ class TrajectoryRunner:
         Returns:
             TrajectoryResult with trajectory and metrics.
         """
+        eval_logger: _EvalLogger | None = None
+        if self.log is not None:
+            eval_logger = _EvalLogger(self.log, self.environment.spec.name)
+
+        try:
+            return self._run_trajectory_impl(
+                task_index, trajectory_id, max_steps, eval_logger,
+            )
+        finally:
+            if eval_logger:
+                eval_logger.close()
+
+    def _run_trajectory_impl(
+        self,
+        task_index: int,
+        trajectory_id: str | None,
+        max_steps: int | None,
+        eval_logger: "_EvalLogger | None",
+    ) -> TrajectoryResult:
         # Reset environment
         options = {"task_index": task_index}
         if trajectory_id:
@@ -483,6 +513,17 @@ class TrajectoryRunner:
             state = step_result.next_state
             step_count += 1
 
+            if eval_logger:
+                eval_logger.on_step(_StepEvent(
+                    task_index=task_index,
+                    step_num=step_count,
+                    reward_total=step_result.rewards.total,
+                    prompt_tokens=gen_result.prompt_tokens,
+                    completion_tokens=gen_result.completion_tokens,
+                    has_tool_calls=gen_result.has_tool_calls,
+                    num_tool_calls=len(gen_result.tool_calls) if gen_result.has_tool_calls else 0,
+                ))
+
             if step_result.done:
                 break
 
@@ -493,6 +534,16 @@ class TrajectoryRunner:
             outcome_rewards = last_rewards.by_type(RewardType.OUTCOME)
             if outcome_rewards:
                 success = outcome_rewards[-1].value >= 1.0
+
+        if eval_logger:
+            eval_logger.on_trajectory_end(_TrajectoryEndEvent(
+                task_index=task_index,
+                success=success,
+                total_reward=trajectory.total_reward,
+                num_steps=len(trajectory),
+                completed_count=1,
+                total_count=1,
+            ))
 
         return TrajectoryResult(
             trajectory=trajectory,
@@ -527,14 +578,62 @@ class TrajectoryRunner:
         Returns:
             BatchResult with all trajectory results and aggregate metrics.
         """
+        eval_logger: _EvalLogger | None = None
+        if self.log is not None:
+            eval_logger = _EvalLogger(self.log, self.environment.spec.name)
+
+        try:
+            return self._run_batch_impl(
+                task_indices, batch_size, progress_callback, eval_logger,
+            )
+        finally:
+            if eval_logger:
+                eval_logger.close()
+
+    def _run_batch_impl(
+        self,
+        task_indices: list[int],
+        batch_size: int | None,
+        progress_callback: Callable[[int, int], None] | None,
+        eval_logger: "_EvalLogger | None",
+    ) -> BatchResult:
+        if not task_indices:
+            return _aggregate_results([])
+
+        max_steps = self.environment.spec.max_steps or 100
+
+        if eval_logger:
+            eval_logger.on_batch_start(_BatchStartEvent(
+                num_tasks=len(task_indices),
+                environment_name=self.environment.spec.name,
+                max_steps=max_steps,
+            ))
+
         if batch_size is not None and len(task_indices) > batch_size:
-            return _run_in_chunks(
-                lambda indices, cb: self.run_batch(indices, progress_callback=cb),
+            result = _run_in_chunks(
+                lambda indices, cb: self._run_batch_inner(indices, cb, eval_logger),
                 task_indices,
                 batch_size,
                 progress_callback,
             )
+        else:
+            result = self._run_batch_inner(task_indices, progress_callback, eval_logger)
 
+        if eval_logger:
+            eval_logger.on_batch_end(_BatchEndEvent(
+                success_rate=result.success_rate,
+                mean_reward=result.mean_reward,
+                num_tasks=len(task_indices),
+            ))
+
+        return result
+
+    def _run_batch_inner(
+        self,
+        task_indices: list[int],
+        progress_callback: Callable[[int, int], None] | None,
+        eval_logger: "_EvalLogger | None",
+    ) -> BatchResult:
         if not task_indices:
             return _aggregate_results([])
 
@@ -561,6 +660,10 @@ class TrajectoryRunner:
                 )
             except Exception as e:
                 logger.error(f"Error resetting task {task_index}: {e}")
+                if eval_logger:
+                    eval_logger.on_error(_ErrorEvent(
+                        task_index=task_index, phase="reset", error=str(e),
+                    ))
                 result_slots[pos] = TrajectoryResult(
                     trajectory=Trajectory(
                         episode_id=f"error_{task_index}",
@@ -578,6 +681,7 @@ class TrajectoryRunner:
         reset_errors = total - len(active)
 
         # Phase 2: Lockstep generation
+        completed_count = reset_errors
         while True:
             remaining = [t for t in active if not t.done]
             if not remaining:
@@ -663,12 +767,39 @@ class TrajectoryRunner:
                     t.state = step_result.next_state
                     t.step_count += 1
 
+                    if eval_logger:
+                        eval_logger.on_step(_StepEvent(
+                            task_index=t.task_index,
+                            step_num=t.step_count,
+                            reward_total=step_result.rewards.total,
+                            prompt_tokens=gen_result.prompt_tokens,
+                            completion_tokens=gen_result.completion_tokens,
+                            has_tool_calls=gen_result.has_tool_calls,
+                            num_tool_calls=len(gen_result.tool_calls) if gen_result.has_tool_calls else 0,
+                        ))
+
                     if step_result.done or t.step_count >= max_steps:
                         t.done = True
+                        completed_count += 1
+                        if eval_logger:
+                            result = _finalize_trajectory(t)
+                            eval_logger.on_trajectory_end(_TrajectoryEndEvent(
+                                task_index=t.task_index,
+                                success=result.success,
+                                total_reward=result.total_reward,
+                                num_steps=len(t.trajectory),
+                                completed_count=completed_count,
+                                total_count=total,
+                            ))
                 except Exception as e:
                     logger.error(f"Error stepping task {t.task_index}: {e}")
                     t.done = True
                     t.error = str(e)
+                    completed_count += 1
+                    if eval_logger:
+                        eval_logger.on_error(_ErrorEvent(
+                            task_index=t.task_index, phase="step", error=str(e),
+                        ))
 
             if progress_callback:
                 done_count = reset_errors + sum(1 for t in active if t.done)
@@ -772,6 +903,9 @@ def run_multi_evaluation(
     All entries must share the same backend and sampling_params. Only
     TrajectoryRunner is supported (tool and segmented runners are not).
 
+    Each entry's runner may have its own ``log`` configuration. Loggers
+    are created per-entry and closed after results are finalized.
+
     Args:
         entries: List of MultiEvalEntry, each pairing a TrajectoryRunner
             with task indices.
@@ -807,12 +941,47 @@ def run_multi_evaluation(
     backend = first.backend
     sampling_params = first.sampling_params
 
+    # Create per-entry loggers
+    entry_loggers: dict[int, _EvalLogger] = {}
+    for i, entry in enumerate(entries):
+        if entry.runner.log is not None:
+            entry_loggers[i] = _EvalLogger(
+                entry.runner.log, entry.runner.environment.spec.name,
+            )
+
+    try:
+        return _run_multi_eval_impl(
+            entries, backend, sampling_params, batch_size,
+            progress_callback, entry_loggers,
+        )
+    finally:
+        for el in entry_loggers.values():
+            el.close()
+
+
+def _run_multi_eval_impl(
+    entries: list[MultiEvalEntry],
+    backend: ModelBackend,
+    sampling_params: SamplingParams,
+    batch_size: int | None,
+    progress_callback: Callable[[int, int], None] | None,
+    entry_loggers: dict[int, "_EvalLogger"],
+) -> list[BatchResult]:
     # Compute max_steps per entry
     max_steps_per_entry: dict[int, int] = {}
     for i, entry in enumerate(entries):
         max_steps_per_entry[i] = entry.runner.environment.spec.max_steps or 100
 
     total = sum(len(e.task_indices) for e in entries)
+
+    # Emit batch_start for each entry
+    for i, entry in enumerate(entries):
+        if i in entry_loggers:
+            entry_loggers[i].on_batch_start(_BatchStartEvent(
+                num_tasks=len(entry.task_indices),
+                environment_name=entry.runner.environment.spec.name,
+                max_steps=max_steps_per_entry[i],
+            ))
 
     # Reset all tasks across all entries
     all_trajectories: list[_MultiActiveTrajectory] = []
@@ -842,6 +1011,10 @@ def run_multi_evaluation(
                 )
             except Exception as e:
                 logger.error(f"Error resetting task {task_index} in entry {entry_idx}: {e}")
+                if entry_idx in entry_loggers:
+                    entry_loggers[entry_idx].on_error(_ErrorEvent(
+                        task_index=task_index, phase="reset", error=str(e),
+                    ))
                 reset_error_results[entry_idx].append(
                     TrajectoryResult(
                         trajectory=Trajectory(
@@ -862,7 +1035,6 @@ def run_multi_evaluation(
         # Chunk trajectories and process each chunk
         for start in range(0, len(all_trajectories), batch_size):
             chunk = all_trajectories[start:start + batch_size]
-            offset = start  # reset errors already handled outside lockstep
             _run_multi_lockstep(
                 chunk, backend, sampling_params, max_steps_per_entry,
                 progress_callback=progress_callback,
@@ -890,7 +1062,19 @@ def run_multi_evaluation(
     if progress_callback:
         progress_callback(total, total)
 
-    return [_aggregate_results(per_entry_results[i]) for i in range(len(entries))]
+    # Build batch results and emit batch_end events
+    results = []
+    for i in range(len(entries)):
+        batch_result = _aggregate_results(per_entry_results[i])
+        if i in entry_loggers:
+            entry_loggers[i].on_batch_end(_BatchEndEvent(
+                success_rate=batch_result.success_rate,
+                mean_reward=batch_result.mean_reward,
+                num_tasks=len(per_entry_results[i]),
+            ))
+        results.append(batch_result)
+
+    return results
 
 
 def run_evaluation(
@@ -906,6 +1090,7 @@ def run_evaluation(
     batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     tool_call_parser: "ToolCallParser | None" = None,
+    log: LogConfig | None = None,
 ) -> BatchResult:
     """Convenience function to run an evaluation.
 
@@ -923,6 +1108,7 @@ def run_evaluation(
         progress_callback: Optional progress callback.
         tool_call_parser: Optional text-based tool call parser for backends
             that don't support native function calling.
+        log: Optional logging configuration.
 
     Returns:
         BatchResult with evaluation results.
@@ -941,6 +1127,7 @@ def run_evaluation(
         prompt_template=prompt_template,
         model_profile=model_profile,
         tool_call_parser=tool_call_parser,
+        log=log,
     )
 
     return runner.run_batch(
@@ -976,6 +1163,7 @@ class SegmentedTrajectoryRunner:
     prompt_template: "PromptTemplate | None" = None
     model_profile: "ModelProfile | None" = None
     chunk_max_tokens: int = 256
+    log: LogConfig | None = None
 
     def _build_messages(
         self,
@@ -1623,6 +1811,7 @@ def run_segmented_evaluation(
     chunk_max_tokens: int = 256,
     batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    log: LogConfig | None = None,
 ) -> BatchResult:
     """Convenience function to run a segmented evaluation.
 
@@ -1641,6 +1830,7 @@ def run_segmented_evaluation(
         chunk_max_tokens: Max tokens per chunk for boundary strategies.
         batch_size: Maximum trajectories per lockstep batch.
         progress_callback: Optional progress callback.
+        log: Optional logging configuration.
 
     Returns:
         BatchResult with evaluation results.
@@ -1659,6 +1849,7 @@ def run_segmented_evaluation(
         prompt_template=prompt_template,
         model_profile=model_profile,
         chunk_max_tokens=chunk_max_tokens,
+        log=log,
     )
 
     return runner.run_batch(

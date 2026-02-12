@@ -95,6 +95,42 @@ For cross-environment batching (interleaving trajectories from multiple environm
 
 See the [Parallelization guide](parallelization.md) for architecture details, `max_concurrency` tuning, and performance tips.
 
+## Logging
+
+Structured logging during evaluation runs is configured via `LogConfig`. Three targets are available: console (Python `logging`), file (JSONL), and W&B.
+
+```python
+from llenvs.evaluation import LogConfig
+
+# Console logging (uses Python logging at INFO/DEBUG levels)
+result = run_evaluation(env, backend, log=LogConfig(targets=("console",)))
+
+# File logging (JSONL in .logs/{env_name}/)
+result = run_evaluation(env, backend, log=LogConfig(targets=("file",)))
+
+# W&B logging
+result = run_evaluation(env, backend, log=LogConfig(targets=("wandb",), wandb_project="my-evals"))
+
+# Multiple targets
+result = run_evaluation(env, backend, log=LogConfig(targets=("console", "file", "wandb")))
+
+# W&B with existing run (e.g. from verl)
+result = run_evaluation(env, backend, log=LogConfig(targets=("wandb",), wandb_run=existing_run))
+```
+
+The `log` parameter is available on `TrajectoryRunner`, `SegmentedTrajectoryRunner`, `run_evaluation()`, `run_segmented_evaluation()`, and `run_multi_evaluation()` (via per-entry runner configs).
+
+File logging writes JSONL to `{log_dir}/{env_name}/{timestamp}.jsonl` with one JSON object per line. Each line has an `"event"` key (`batch_start`, `step`, `trajectory_end`, `batch_end`, `error`).
+
+Console logging uses `logging.getLogger("llenvs.evaluation")`. To see step-level details, set the logger to DEBUG:
+
+```python
+import logging
+logging.getLogger("llenvs.evaluation").setLevel(logging.DEBUG)
+```
+
+`progress_callback` is unchanged and orthogonal to logging.
+
 ## Metrics and Statistics
 
 The evaluation module separates **metrics** (what we measure) from **statistics** (how we summarize):

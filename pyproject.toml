@@ -65,6 +65,9 @@ openenv = [
 math-verify = [
     "math-verify[antlr4-13-2]>=0.7",
 ]
+wandb = [
+    "wandb>=0.16",
+]
 rl = [
     "datasets>=2.14",
 ]
@@ -73,7 +76,7 @@ trl = [
     "datasets>=2.14",
 ]
 all = [
-    "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,vllm,openai,anthropic,transformers,math-verify,rl]",
+    "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,vllm,openai,anthropic,transformers,math-verify,rl,wandb]",
 ]
 dev = [
     "pytest>=7.0",

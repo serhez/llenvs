@@ -1,5 +1,6 @@
 """Evaluation orchestration and metrics."""
 
+from llenvs.evaluation.logging import LogConfig
 from llenvs.evaluation.runner import (
     COMPLETE,
     ForceAction,
@@ -42,18 +43,18 @@ from llenvs.evaluation.results import (
 )
 
 __all__ = [
+    # Logging
+    "LogConfig",
     # Runner
     "COMPLETE",
     "ForceAction",
     "MultiEvalEntry",
     "TrajectoryRunner",
     "TrajectoryResult",
-
     "SegmentedTrajectoryRunner",
     "BatchResult",
     "run_evaluation",
     "run_multi_evaluation",
-
     "run_segmented_evaluation",
     # Continuation strategies
     "ContinuationStrategy",

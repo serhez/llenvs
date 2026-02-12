@@ -387,6 +387,30 @@ pipeline = (
 )
 ```
 
+## Log Configuration
+
+```python
+from llenvs.evaluation import LogConfig
+
+LogConfig(
+    targets=("console",),        # Log targets: "console", "file", "wandb"
+    log_dir=".logs",             # Directory for JSONL file logs
+    wandb_run=None,              # Existing wandb.Run (skips init)
+    wandb_project=None,          # W&B project name (auto-creates run)
+    wandb_name=None,             # W&B run name (auto-generated if None)
+    wandb_config=None,           # Extra config dict for W&B
+)
+```
+
+Pass `log=LogConfig(...)` to `TrajectoryRunner`, `SegmentedTrajectoryRunner`, `run_evaluation()`, or `run_segmented_evaluation()`. See the [Evaluation guide](../guides/evaluation.md#logging) for usage examples.
+
+CLI usage:
+
+```bash
+llenvs run config.yaml --log console,file
+llenvs run config.yaml --log wandb
+```
+
 ## Evaluation Runner Configuration
 
 ```python
