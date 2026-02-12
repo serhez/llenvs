@@ -12,6 +12,8 @@ Tool calling allows models to:
 
 ## Defining Tools
 
+### Manual Definition
+
 ```python
 from llenvs.core import (
     ToolDefinition,
@@ -53,6 +55,36 @@ submit_tool = ToolDefinition(
 openai_schema = weather_tool.to_openai_schema()
 anthropic_schema = weather_tool.to_anthropic_schema()
 ```
+
+### From Python Functions
+
+`ToolDefinition.from_callable()` generates a tool definition by inspecting a Python function's signature and docstring:
+
+```python
+from llenvs.core import ToolDefinition
+
+def get_weather(city: str, units: str = "celsius") -> str:
+    """Get the current weather for a city.
+
+    Args:
+        city: The city name.
+        units: Temperature units (celsius or fahrenheit).
+    """
+    ...
+
+# Auto-generate definition from function
+weather_tool = ToolDefinition.from_callable(get_weather)
+# name="get_weather", description="Get the current weather for a city."
+# city: STRING, required=True, description="The city name."
+# units: STRING, required=False, description="Temperature units (celsius or fahrenheit)."
+
+# Override name/description, mark as terminal
+submit_tool = ToolDefinition.from_callable(
+    submit_answer, name="submit", is_terminal=True
+)
+```
+
+Type mapping: `str`→STRING, `int`→INTEGER, `float`→NUMBER, `bool`→BOOLEAN, `list`→ARRAY, `dict`→OBJECT. Generic types (`list[int]`, `dict[str, Any]`) map via their origin. Unannotated parameters default to STRING. Google-style `Args:` docstring sections are parsed for parameter descriptions.
 
 ## Using generate_with_tools
 
@@ -230,6 +262,18 @@ efficiency_reward = ToolEfficiencyReward(
 )
 ```
 
+Both reward classes accept a `_weight` parameter. With `_weight=0.0`, the signal appears in the `RewardBundle` for inspection but contributes nothing to the total. This is used for auto-monitoring (see below).
+
+### Auto-Monitoring
+
+All tool environments (GEM, verifiers, OpenEnv) auto-attach `ToolValidityReward` and `ToolEfficiencyReward` with `weight=0.0`. These monitoring rewards:
+
+- Track tool call validity and efficiency on every step
+- Contribute nothing to the total reward (weight=0)
+- Are accessible via `reward_bundle.by_type(RewardType.STEP)` for inspection
+
+No configuration is needed — monitoring is always on.
+
 ## Running Tool Environments
 
 `TrajectoryRunner` auto-detects tool environments via `available_tools` on the observation and handles tool calling automatically:
@@ -250,6 +294,74 @@ runner = TrajectoryRunner(
 
 result = runner.run_trajectory(task_index=0)
 print(f"Success: {result.success}")
+```
+
+## Text-Based Tool Calling
+
+API backends (OpenAI, Anthropic) support native function calling. Local GPU backends (vLLM, HuggingFace) do not. When a tool environment is used with a non-function-calling backend, the runner needs a `ToolCallParser` to bridge the gap.
+
+Without a parser, tools are silently ignored and a warning is logged:
+
+```
+WARNING: Environment provides 2 tools but backend 'VLLMBackend' does not
+support function calling and no tool_call_parser is configured. Tools will
+be ignored.
+```
+
+### HermesToolCallParser
+
+The built-in `HermesToolCallParser` implements the Hermes format used by many open-source tool-calling models (NousResearch Hermes, Qwen, and other fine-tunes):
+
+```python
+from llenvs.core import HermesToolCallParser
+from llenvs.evaluation import TrajectoryRunner
+
+parser = HermesToolCallParser()
+
+runner = TrajectoryRunner(
+    environment=env,
+    backend=vllm_backend,  # No native function calling
+    tool_call_parser=parser,
+)
+
+# Also works with run_evaluation()
+from llenvs.evaluation.runner import run_evaluation
+
+result = run_evaluation(
+    environment=env,
+    backend=vllm_backend,
+    tool_call_parser=parser,
+)
+```
+
+The parser:
+1. **Injects** formatted tool definitions into the system message as XML (`<tools>...</tools>`)
+2. **Generates** using standard text generation (`generate_chat`)
+3. **Parses** tool calls from `<tool_call>...</tool_call>` blocks in the response
+
+### How the Runner Chooses
+
+The runner uses a three-way priority:
+
+1. **Native function calling** — if the backend supports it (`capabilities.supports_function_calling`), native tool calling is used regardless of whether a parser is configured
+2. **Text-based parsing** — if tools are available and a `tool_call_parser` is set, tools are formatted as text and parsed from the response
+3. **No tools** — if neither is available, tools are ignored and a warning is logged
+
+### Custom Parsers
+
+Implement the `ToolCallParser` protocol to support other formats:
+
+```python
+from llenvs.core.tool_parsing import ToolCallParser, ParsedToolResponse
+
+class MyCustomParser:
+    def format_tools(self, tools: tuple[ToolDefinition, ...]) -> str:
+        # Format tools as text for the prompt
+        ...
+
+    def parse(self, text: str, available_tools: tuple[ToolDefinition, ...]) -> ParsedToolResponse:
+        # Parse tool calls from model output
+        ...
 ```
 
 ## Next Steps

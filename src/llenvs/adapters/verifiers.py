@@ -495,6 +495,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
 
         self._native_rewards: tuple[RewardFunction, ...] = (
             VerifiersRubricReward(rubric=vf_env.rubric, env_id=self._env_id),
+            *self._tool_monitoring_rewards(),
         )
         self._extra_rewards = extra_rewards
 

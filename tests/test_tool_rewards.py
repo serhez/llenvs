@@ -6,7 +6,8 @@ from typing import Any
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.tools import ToolCall, ToolResult, ToolResultStatus
 from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
-from llenvs.core.reward import RewardType
+from llenvs.core.tool_environment import BaseToolEnvironment
+from llenvs.core.reward import RewardBundle, RewardType
 
 
 @pytest.fixture
@@ -273,3 +274,70 @@ class TestToolEfficiencyReward:
         assert reward.max_calls_per_step == 3
         assert reward.penalty_per_excess == 0.25
         assert reward.duplicate_penalty == 0.15
+
+
+class TestToolMonitoringRewards:
+    """Tests for auto-attached monitoring rewards with weight=0."""
+
+    def test_monitoring_rewards_have_zero_weight(self):
+        """Test that monitoring rewards have weight=0."""
+        rewards = BaseToolEnvironment._tool_monitoring_rewards()
+
+        assert len(rewards) == 2
+        validity, efficiency = rewards
+
+        assert isinstance(validity, ToolValidityReward)
+        assert isinstance(efficiency, ToolEfficiencyReward)
+        assert validity._weight == 0.0
+        assert efficiency._weight == 0.0
+
+    def test_zero_weight_contributes_nothing_to_total(self, sample_state):
+        """Test that weight=0 signals don't affect RewardBundle.total."""
+        validity = ToolValidityReward(_weight=0.0)
+        efficiency = ToolEfficiencyReward(_weight=0.0)
+
+        action = Action(
+            tool_calls=(
+                ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
+            )
+        )
+        tool_results = (ToolResult.success("1", "add", "3"),)
+        next_state = make_next_state(sample_state, tool_results)
+
+        v_signal = validity.compute(sample_state, action, next_state)
+        e_signal = efficiency.compute(sample_state, action, next_state)
+
+        assert v_signal.weight == 0.0
+        assert e_signal.weight == 0.0
+
+        bundle = RewardBundle(signals=(v_signal, e_signal))
+        assert bundle.total == 0.0
+
+    def test_monitoring_signals_still_inspectable(self, sample_state):
+        """Test that zero-weight signals are present in bundle for inspection."""
+        validity = ToolValidityReward(_weight=0.0)
+        action = Action(
+            tool_calls=(
+                ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
+            )
+        )
+        tool_results = (ToolResult.success("1", "add", "3"),)
+        next_state = make_next_state(sample_state, tool_results)
+
+        signal = validity.compute(sample_state, action, next_state)
+
+        bundle = RewardBundle(signals=(signal,))
+        step_signals = bundle.by_type(RewardType.STEP)
+
+        assert len(step_signals) == 1
+        assert step_signals[0].value == 1.0
+        assert step_signals[0].weight == 0.0
+        assert step_signals[0].metadata["num_valid"] == 1
+
+    def test_default_weight_is_one(self):
+        """Test that default weight is 1.0 (backward compat)."""
+        validity = ToolValidityReward()
+        efficiency = ToolEfficiencyReward()
+
+        assert validity._weight == 1.0
+        assert efficiency._weight == 1.0

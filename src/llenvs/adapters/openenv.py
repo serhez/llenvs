@@ -372,7 +372,10 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
         self._env_name = env_name
         self._max_steps = max_steps
 
-        self._native_rewards: tuple[RewardFunction, ...] = (OpenEnvReward(),)
+        self._native_rewards: tuple[RewardFunction, ...] = (
+            OpenEnvReward(),
+            *self._tool_monitoring_rewards(),
+        )
         self._extra_rewards = extra_rewards
         self._tools: tuple[ToolDefinition, ...] = ()
 

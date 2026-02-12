@@ -7,6 +7,8 @@ and handling tool results.
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Callable, Protocol
+import inspect
+import re
 
 
 class ToolParameterType(Enum):
@@ -88,6 +90,64 @@ class ToolDefinition:
             },
         }
 
+    @classmethod
+    def from_callable(
+        cls,
+        func: Callable[..., Any],
+        *,
+        is_terminal: bool = False,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> "ToolDefinition":
+        """Create a ToolDefinition from a Python callable.
+
+        Inspects the function's signature for parameter types and defaults,
+        and parses Google-style docstring Args for descriptions.
+
+        Args:
+            func: The callable to create a definition from.
+            is_terminal: Whether calling this tool ends the episode.
+            name: Override the tool name (defaults to func.__name__).
+            description: Override the description (defaults to first line of docstring).
+        """
+        sig = inspect.signature(func)
+        docstring = inspect.getdoc(func)
+        param_docs = _parse_param_docs(docstring)
+
+        tool_name = name or func.__name__
+
+        if description is not None:
+            tool_desc = description
+        elif docstring:
+            tool_desc = docstring.split("\n")[0].strip()
+        else:
+            tool_desc = tool_name
+
+        parameters: list[ToolParameter] = []
+        for param_name, param in sig.parameters.items():
+            if param_name in ("self", "cls"):
+                continue
+
+            param_type = _python_type_to_tool_type(param.annotation)
+            param_desc = param_docs.get(param_name, param_name)
+            required = param.default is inspect.Parameter.empty
+
+            parameters.append(
+                ToolParameter(
+                    name=param_name,
+                    type=param_type,
+                    description=param_desc,
+                    required=required,
+                )
+            )
+
+        return cls(
+            name=tool_name,
+            description=tool_desc,
+            parameters=tuple(parameters),
+            is_terminal=is_terminal,
+        )
+
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Convert to Anthropic tool schema format."""
         properties = {}
@@ -107,6 +167,89 @@ class ToolDefinition:
                 "required": required,
             },
         }
+
+
+def _python_type_to_tool_type(annotation: Any) -> ToolParameterType:
+    """Map a Python type annotation to a ToolParameterType.
+
+    Handles basic types, typing generics (list[...], dict[...]), and
+    falls back to STRING for unknown types.
+    """
+    if annotation is inspect.Parameter.empty:
+        return ToolParameterType.STRING
+
+    # Handle typing generics (list[int], dict[str, Any], etc.)
+    origin = getattr(annotation, "__origin__", None)
+    if origin is not None:
+        if origin is list:
+            return ToolParameterType.ARRAY
+        if origin is dict:
+            return ToolParameterType.OBJECT
+        return ToolParameterType.STRING
+
+    _TYPE_MAP = {
+        str: ToolParameterType.STRING,
+        int: ToolParameterType.INTEGER,
+        float: ToolParameterType.NUMBER,
+        bool: ToolParameterType.BOOLEAN,
+        list: ToolParameterType.ARRAY,
+        dict: ToolParameterType.OBJECT,
+    }
+    return _TYPE_MAP.get(annotation, ToolParameterType.STRING)
+
+
+def _parse_param_docs(docstring: str | None) -> dict[str, str]:
+    """Parse Google-style Args section from a docstring.
+
+    Returns a mapping of parameter name to description.
+    """
+    if not docstring:
+        return {}
+
+    result: dict[str, str] = {}
+    in_args = False
+    current_name: str | None = None
+    current_desc_lines: list[str] = []
+
+    for line in docstring.splitlines():
+        stripped = line.strip()
+
+        # Detect start of Args section
+        if stripped in ("Args:", "Arguments:", "Parameters:"):
+            in_args = True
+            continue
+
+        # Detect end of Args section (next section header)
+        if in_args and stripped and not stripped.startswith(" ") and stripped.endswith(":"):
+            # Could be a new section like "Returns:", "Raises:", etc.
+            if re.match(r"^[A-Z][a-z]+:$", stripped):
+                break
+
+        if not in_args:
+            continue
+
+        if not stripped:
+            continue
+
+        # Check for new parameter line: "param_name: description" or "param_name (type): description"
+        param_match = re.match(r"^(\w+)\s*(?:\([^)]*\))?\s*:\s*(.*)$", stripped)
+        if param_match:
+            # Save previous param
+            if current_name is not None:
+                result[current_name] = " ".join(current_desc_lines).strip()
+
+            current_name = param_match.group(1)
+            desc = param_match.group(2).strip()
+            current_desc_lines = [desc] if desc else []
+        elif current_name is not None:
+            # Continuation line for current parameter
+            current_desc_lines.append(stripped)
+
+    # Save last param
+    if current_name is not None:
+        result[current_name] = " ".join(current_desc_lines).strip()
+
+    return result
 
 
 @dataclass(frozen=True)

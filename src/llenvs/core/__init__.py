@@ -20,6 +20,7 @@ from llenvs.core.async_executor import AsyncToolExecutor
 from llenvs.core.mcp_executor import MCPToolExecutor, MCPServerConfig, MCPConnectionError
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
+from llenvs.core.tool_parsing import ToolCallParser, ParsedToolResponse, HermesToolCallParser
 from llenvs.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
@@ -95,6 +96,10 @@ __all__ = [
     # Tool Rewards
     "ToolValidityReward",
     "ToolEfficiencyReward",
+    # Tool Parsing
+    "ToolCallParser",
+    "ParsedToolResponse",
+    "HermesToolCallParser",
     # Rewards
     "RewardSignal",
     "RewardBundle",

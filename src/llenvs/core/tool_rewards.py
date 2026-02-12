@@ -22,10 +22,12 @@ class ToolValidityReward:
     Attributes:
         _name: Name of this reward function.
         _reward_type: Type of reward (STEP by default).
+        _weight: Weight for the reward signal (default 1.0).
     """
 
     _name: str = "tool_validity"
     _reward_type: RewardType = field(default=RewardType.STEP)
+    _weight: float = 1.0
 
     @property
     def name(self) -> str:
@@ -61,6 +63,7 @@ class ToolValidityReward:
                 name=self._name,
                 reward_type=self._reward_type,
                 metadata={"num_calls": 0, "num_valid": 0},
+                weight=self._weight,
             )
 
         # Check if next observation has tool results
@@ -72,6 +75,7 @@ class ToolValidityReward:
                 name=self._name,
                 reward_type=self._reward_type,
                 metadata={"num_calls": len(action.tool_calls), "num_valid": len(action.tool_calls)},
+                weight=self._weight,
             )
 
         # Count successful tool calls
@@ -92,6 +96,7 @@ class ToolValidityReward:
                 "num_valid": num_valid,
                 "statuses": [r.status.name for r in obs.tool_results],
             },
+            weight=self._weight,
         )
 
 
@@ -105,6 +110,7 @@ class ToolEfficiencyReward:
     Attributes:
         _name: Name of this reward function.
         _reward_type: Type of reward (STEP by default).
+        _weight: Weight for the reward signal (default 1.0).
         max_calls_per_step: Target maximum calls per step.
         penalty_per_excess: Penalty per call beyond max.
         duplicate_penalty: Extra penalty for duplicate calls.
@@ -112,6 +118,7 @@ class ToolEfficiencyReward:
 
     _name: str = "tool_efficiency"
     _reward_type: RewardType = field(default=RewardType.STEP)
+    _weight: float = 1.0
     max_calls_per_step: int = 5
     penalty_per_excess: float = 0.1
     duplicate_penalty: float = 0.2
@@ -150,6 +157,7 @@ class ToolEfficiencyReward:
                 name=self._name,
                 reward_type=self._reward_type,
                 metadata={"num_calls": 0, "excess": 0, "duplicates": 0},
+                weight=self._weight,
             )
 
         num_calls = len(action.tool_calls)
@@ -184,4 +192,5 @@ class ToolEfficiencyReward:
                 "excess": excess,
                 "duplicates": duplicates,
             },
+            weight=self._weight,
         )

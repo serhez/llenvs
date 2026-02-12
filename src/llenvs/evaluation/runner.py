@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import logging
 
 if TYPE_CHECKING:
+    from llenvs.core.tool_parsing import ToolCallParser
     from llenvs.inference.prompts import ModelProfile, PromptTemplate
 
 from llenvs.core.state import State, Observation, Action
@@ -248,6 +249,7 @@ class TrajectoryRunner:
     system_prompt: str | None = None
     prompt_template: "PromptTemplate | None" = None
     model_profile: "ModelProfile | None" = None
+    tool_call_parser: "ToolCallParser | None" = None
 
     def _build_messages(
         self,
@@ -353,13 +355,73 @@ class TrajectoryRunner:
         tools = list(state.observation.available_tools)
 
         if tools and self.backend.capabilities.supports_function_calling:
+            # Native function calling (API backends)
             result = self.backend.generate_with_tools(
                 messages, tools, self.sampling_params
             )
+        elif tools and self.tool_call_parser:
+            # Text-based tool calling (vLLM/HF with parser)
+            result = self._generate_with_text_tools(messages, tuple(tools))
         else:
+            if tools:
+                logger.warning(
+                    "Environment provides %d tools but backend '%s' does not "
+                    "support function calling and no tool_call_parser is "
+                    "configured. Tools will be ignored.",
+                    len(tools),
+                    type(self.backend).__name__,
+                )
             result = self.backend.generate_chat(messages, self.sampling_params)
 
         return result.to_agent_action(), result
+
+    @staticmethod
+    def _inject_tools_in_messages(
+        messages: list[ChatMessage], tools_text: str
+    ) -> list[ChatMessage]:
+        """Inject tool definitions text into the message list.
+
+        If a system message exists (first message), appends the tools
+        text to it. Otherwise inserts a new system message at position 0.
+        """
+        messages = list(messages)
+        if messages and messages[0].role == "system":
+            original = messages[0].content or ""
+            messages[0] = ChatMessage(
+                role="system",
+                content=f"{original}\n\n{tools_text}" if original else tools_text,
+            )
+        else:
+            messages.insert(0, ChatMessage(role="system", content=tools_text))
+        return messages
+
+    def _generate_with_text_tools(
+        self,
+        messages: list[ChatMessage],
+        tools: tuple["ToolDefinition", ...],
+    ) -> GenerationResult:
+        """Generate with text-based tool calling.
+
+        Injects formatted tool definitions into the system message,
+        generates text, then parses tool calls from the output.
+        """
+        assert self.tool_call_parser is not None
+
+        tools_text = self.tool_call_parser.format_tools(tools)
+        modified = self._inject_tools_in_messages(messages, tools_text)
+        gen_result = self.backend.generate_chat(modified, self.sampling_params)
+
+        parsed = self.tool_call_parser.parse(gen_result.text or "", tools)
+
+        return GenerationResult(
+            text=parsed.text,
+            finish_reason=gen_result.finish_reason,
+            tool_calls=parsed.tool_calls,
+            token_logprobs=gen_result.token_logprobs,
+            prompt_tokens=gen_result.prompt_tokens,
+            completion_tokens=gen_result.completion_tokens,
+            metadata=gen_result.metadata,
+        )
 
     def run_trajectory(
         self,
@@ -526,13 +588,49 @@ class TrajectoryRunner:
             # Use tool calling if tools available and backend supports it
             first_obs = remaining[0].state.observation
             tools = list(first_obs.available_tools)
-            use_tools = tools and self.backend.capabilities.supports_function_calling
+            use_native_tools = tools and self.backend.capabilities.supports_function_calling
+            use_text_tools = tools and not use_native_tools and self.tool_call_parser is not None
 
-            if use_tools:
+            if use_native_tools:
                 gen_results = self.backend.generate_with_tools_batch(
                     messages_batch, tools, self.sampling_params
                 )
+            elif use_text_tools:
+                assert self.tool_call_parser is not None
+                tools_text = self.tool_call_parser.format_tools(tuple(tools))
+                modified_batch = [
+                    self._inject_tools_in_messages(msgs, tools_text)
+                    for msgs in messages_batch
+                ]
+                raw_results = self.backend.generate_chat_batch(
+                    modified_batch, self.sampling_params
+                )
+                gen_results = []
+                for raw in raw_results:
+                    parsed = self.tool_call_parser.parse(
+                        raw.text or "", tuple(tools)
+                    )
+                    gen_results.append(
+                        GenerationResult(
+                            text=parsed.text,
+                            finish_reason=raw.finish_reason,
+                            tool_calls=parsed.tool_calls,
+                            token_logprobs=raw.token_logprobs,
+                            prompt_tokens=raw.prompt_tokens,
+                            completion_tokens=raw.completion_tokens,
+                            metadata=raw.metadata,
+                        )
+                    )
             else:
+                if tools and not hasattr(self, "_batch_tool_warning_logged"):
+                    logger.warning(
+                        "Environment provides %d tools but backend '%s' does "
+                        "not support function calling and no tool_call_parser "
+                        "is configured. Tools will be ignored.",
+                        len(tools),
+                        type(self.backend).__name__,
+                    )
+                    self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
                 gen_results = self.backend.generate_chat_batch(
                     messages_batch, self.sampling_params
                 )
@@ -803,10 +901,11 @@ def run_evaluation(
     sampling_params: SamplingParams | None = None,
     prompt_pipeline: PromptPipeline | None = None,
     system_prompt: str | None = None,
-    prompt_template: PromptTemplate | None = None,
-    model_profile: ModelProfile | None = None,
+    prompt_template: "PromptTemplate | None" = None,
+    model_profile: "ModelProfile | None" = None,
     batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    tool_call_parser: "ToolCallParser | None" = None,
 ) -> BatchResult:
     """Convenience function to run an evaluation.
 
@@ -822,6 +921,8 @@ def run_evaluation(
         model_profile: Optional model profile for model-specific adjustments.
         batch_size: Maximum trajectories per lockstep batch.
         progress_callback: Optional progress callback.
+        tool_call_parser: Optional text-based tool call parser for backends
+            that don't support native function calling.
 
     Returns:
         BatchResult with evaluation results.
@@ -839,6 +940,7 @@ def run_evaluation(
         system_prompt=system_prompt,
         prompt_template=prompt_template,
         model_profile=model_profile,
+        tool_call_parser=tool_call_parser,
     )
 
     return runner.run_batch(

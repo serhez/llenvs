@@ -224,6 +224,167 @@ class TestToolResult:
         assert isinstance(result.output, dict)
 
 
+class TestFromCallable:
+    """Tests for ToolDefinition.from_callable()."""
+
+    def test_basic_typed_params(self):
+        """Test from_callable with typed parameters."""
+
+        def greet(name: str, age: int) -> str:
+            """Greet a person."""
+            return f"Hello {name}, you are {age}"
+
+        tool = ToolDefinition.from_callable(greet)
+
+        assert tool.name == "greet"
+        assert tool.description == "Greet a person."
+        assert len(tool.parameters) == 2
+        assert tool.parameters[0].name == "name"
+        assert tool.parameters[0].type == ToolParameterType.STRING
+        assert tool.parameters[0].required is True
+        assert tool.parameters[1].name == "age"
+        assert tool.parameters[1].type == ToolParameterType.INTEGER
+        assert tool.parameters[1].required is True
+
+    def test_defaults_make_optional(self):
+        """Test that params with defaults are not required."""
+
+        def search(query: str, limit: int = 10) -> str:
+            """Search for items."""
+            return ""
+
+        tool = ToolDefinition.from_callable(search)
+
+        assert tool.parameters[0].required is True  # query
+        assert tool.parameters[1].required is False  # limit
+
+    def test_no_annotations_fallback_to_string(self):
+        """Test that unannotated params default to STRING."""
+
+        def mystery(x, y):
+            return ""
+
+        tool = ToolDefinition.from_callable(mystery)
+
+        assert len(tool.parameters) == 2
+        assert tool.parameters[0].type == ToolParameterType.STRING
+        assert tool.parameters[1].type == ToolParameterType.STRING
+
+    def test_name_and_description_overrides(self):
+        """Test overriding name and description."""
+
+        def internal_fn(x: str) -> str:
+            """Original description."""
+            return x
+
+        tool = ToolDefinition.from_callable(
+            internal_fn, name="my_tool", description="Custom description"
+        )
+
+        assert tool.name == "my_tool"
+        assert tool.description == "Custom description"
+
+    def test_is_terminal(self):
+        """Test is_terminal flag."""
+
+        def submit(answer: str) -> str:
+            """Submit answer."""
+            return answer
+
+        tool = ToolDefinition.from_callable(submit, is_terminal=True)
+        assert tool.is_terminal is True
+
+    def test_self_cls_skipping(self):
+        """Test that self and cls are skipped."""
+
+        class MyClass:
+            def method(self, x: str) -> str:
+                """A method."""
+                return x
+
+            @classmethod
+            def class_method(cls, x: str) -> str:
+                """A classmethod."""
+                return x
+
+        tool = ToolDefinition.from_callable(MyClass.method)
+        assert len(tool.parameters) == 1
+        assert tool.parameters[0].name == "x"
+
+        tool2 = ToolDefinition.from_callable(MyClass.class_method)
+        assert len(tool2.parameters) == 1
+        assert tool2.parameters[0].name == "x"
+
+    def test_generic_types(self):
+        """Test typing generics like list[int] and dict[str, Any]."""
+
+        def process(items: list[int], config: dict[str, Any]) -> str:
+            """Process items."""
+            return ""
+
+        tool = ToolDefinition.from_callable(process)
+
+        assert tool.parameters[0].type == ToolParameterType.ARRAY
+        assert tool.parameters[1].type == ToolParameterType.OBJECT
+
+    def test_all_basic_types(self):
+        """Test all basic type mappings."""
+
+        def typed(
+            s: str, i: int, f: float, b: bool, l: list, d: dict
+        ) -> str:
+            """All types."""
+            return ""
+
+        tool = ToolDefinition.from_callable(typed)
+
+        assert tool.parameters[0].type == ToolParameterType.STRING
+        assert tool.parameters[1].type == ToolParameterType.INTEGER
+        assert tool.parameters[2].type == ToolParameterType.NUMBER
+        assert tool.parameters[3].type == ToolParameterType.BOOLEAN
+        assert tool.parameters[4].type == ToolParameterType.ARRAY
+        assert tool.parameters[5].type == ToolParameterType.OBJECT
+
+    def test_docstring_args_parsing(self):
+        """Test Google-style docstring Args parsing for param descriptions."""
+
+        def fetch(url: str, timeout: int = 30) -> str:
+            """Fetch a URL.
+
+            Args:
+                url: The URL to fetch.
+                timeout: Request timeout in seconds.
+
+            Returns:
+                The response body.
+            """
+            return ""
+
+        tool = ToolDefinition.from_callable(fetch)
+
+        assert tool.parameters[0].description == "The URL to fetch."
+        assert tool.parameters[1].description == "Request timeout in seconds."
+
+    def test_no_docstring(self):
+        """Test function with no docstring."""
+
+        def bare(x: str) -> str:
+            return x
+
+        tool = ToolDefinition.from_callable(bare)
+
+        assert tool.name == "bare"
+        assert tool.description == "bare"  # falls back to name
+
+    def test_lambda(self):
+        """Test from_callable with a lambda (needs name override)."""
+        fn = lambda x: x  # noqa: E731
+        tool = ToolDefinition.from_callable(fn, name="identity", description="Return input")
+
+        assert tool.name == "identity"
+        assert tool.description == "Return input"
+
+
 class TestSimpleToolExecutor:
     """Tests for SimpleToolExecutor."""
 

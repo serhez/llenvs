@@ -40,6 +40,18 @@ class BaseToolEnvironment(Generic[HiddenT]):
     _tools: tuple[ToolDefinition, ...] = field(default_factory=tuple)
     _executor: ToolExecutor | None = None
 
+    @staticmethod
+    def _tool_monitoring_rewards() -> tuple:
+        """Create weight-0 monitoring rewards for tool usage diagnostics.
+
+        These rewards are auto-attached to tool environments. With weight=0,
+        they contribute nothing to the total reward but appear in the
+        RewardBundle for inspection.
+        """
+        from llenvs.core.tool_rewards import ToolEfficiencyReward, ToolValidityReward
+
+        return (ToolValidityReward(_weight=0.0), ToolEfficiencyReward(_weight=0.0))
+
     @property
     def available_tools(self) -> tuple[ToolDefinition, ...]:
         """Get the tools available in this environment."""

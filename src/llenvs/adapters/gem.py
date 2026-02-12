@@ -761,7 +761,10 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         self._executor = GemToolExecutor(self._gem_tools)
 
         # Reward functions
-        self._native_rewards: tuple[RewardFunction, ...] = (GemCorrectnessReward(),)
+        self._native_rewards: tuple[RewardFunction, ...] = (
+            GemCorrectnessReward(),
+            *self._tool_monitoring_rewards(),
+        )
         self._extra_rewards = extra_rewards
 
     def _get_gem(self) -> Any:
