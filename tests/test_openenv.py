@@ -294,7 +294,7 @@ class TestOpenEnvEnvironment:
         assert spec.supports_len is False
         assert spec.supports_seed is False
         assert spec.is_multi_turn is True
-        assert spec.supports_branching is False
+        assert spec.pure_step is False
 
     def test_prompts_empty(self):
         env = self._make_env()
@@ -324,7 +324,7 @@ class TestOpenEnvEnvironment:
 
         env.step(state_0, Action(text="go north"))
 
-        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+        with pytest.raises(NotImplementedError, match="pure_step=False"):
             env.step(state_0, Action(text="go north"))
 
     def test_reset(self):
@@ -529,7 +529,7 @@ class TestOpenEnvToolEnvironment:
         assert spec.supports_task_index is False
         assert spec.supports_len is False
         assert spec.supports_seed is False
-        assert spec.supports_branching is False
+        assert spec.pure_step is False
 
     def test_step_raises_on_stale_state(self):
         """Replaying the initial state after a step raises NotImplementedError."""
@@ -538,7 +538,7 @@ class TestOpenEnvToolEnvironment:
 
         env.step(state_0, Action(text="go north"))
 
-        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+        with pytest.raises(NotImplementedError, match="pure_step=False"):
             env.step(state_0, Action(text="go north"))
 
 

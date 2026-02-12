@@ -177,9 +177,9 @@ class TestAgentGymEnvironment:
         )
         assert env.spec.metadata["action_format"] == "function_calling"
 
-    def test_spec_supports_branching_false(self):
+    def test_spec_pure_step_false(self):
         env = self._make_env()
-        assert env.spec.supports_branching is False
+        assert env.spec.pure_step is False
 
     # -- stale-state detection ------------------------------------------------
 
@@ -191,7 +191,7 @@ class TestAgentGymEnvironment:
 
         result = env.step(state_0, Action(text="go north"))
 
-        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+        with pytest.raises(NotImplementedError, match="pure_step=False"):
             env.step(state_0, Action(text="go north"))
 
     # -- __len__ --------------------------------------------------------------

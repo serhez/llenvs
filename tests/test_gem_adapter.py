@@ -546,7 +546,7 @@ class TestGemEnvironmentSpec:
         assert spec.is_multi_turn is True
         assert spec.observation_type == Observation
         assert spec.action_type == Action
-        assert spec.supports_branching is True
+        assert spec.pure_step is True
 
     def test_spec_single_turn(self, mock_single_turn_env):
         """Test spec for single-turn environment."""
@@ -560,7 +560,7 @@ class TestGemEnvironmentSpec:
         assert spec.name == "math:GSM8K"
         assert spec.max_steps == 1
         assert spec.is_multi_turn is False
-        assert spec.supports_branching is True
+        assert spec.pure_step is True
 
 
 class TestRewardBundle:
@@ -617,3 +617,154 @@ class TestRewardBundle:
 
         assert len(outcome_rewards) == 1
         assert len(format_rewards) == 1
+
+
+class MockStatelessGemEnv:
+    """Mock GEM environment without get_state/set_state (like some game envs)."""
+
+    def __init__(self, target: int = 50, max_guesses: int = 10):
+        self.target = target
+        self.max_guesses = max_guesses
+        self._guesses = 0
+        self._terminated = False
+
+    def reset(self, seed: int | None = None) -> tuple[str, dict[str, Any]]:
+        self._guesses = 0
+        self._terminated = False
+        return f"Guess a number between 1 and 100. You have {self.max_guesses} guesses.", {}
+
+    def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
+        self._guesses += 1
+        try:
+            guess = int(action.strip())
+        except ValueError:
+            return "Invalid number.", 0.0, False, False, {}
+
+        if guess == self.target:
+            self._terminated = True
+            return f"Correct! It was {self.target}.", 1.0, True, False, {}
+        elif guess < self.target:
+            return f"{guess} is too low.", 0.0, False, False, {}
+        else:
+            return f"{guess} is too high.", 0.0, False, False, {}
+
+
+@pytest.fixture
+def mock_stateless_env() -> MockStatelessGemEnv:
+    return MockStatelessGemEnv()
+
+
+class TestStatelessGemEnvironment:
+    """Tests for GEM environments without get_state/set_state support."""
+
+    def test_reset_works_without_state_methods(self, mock_stateless_env):
+        """Reset should work even without get_state/set_state."""
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, info = env.reset(seed=42)
+
+        assert isinstance(state.observation, Observation)
+        assert state.hidden.gem_state == ()
+        assert state.metadata.is_terminal is False
+
+    def test_step_works_without_state_methods(self, mock_stateless_env):
+        """Step should work even without get_state/set_state."""
+        mock_stateless_env.target = 50
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+
+        result = env.step(state, Action(text="50"))
+        assert result.terminated is True
+        assert result.rewards.by_name("correctness").value == 1.0
+
+    def test_multi_step_without_state_methods(self, mock_stateless_env):
+        """Multi-step gameplay should work without state methods."""
+        mock_stateless_env.target = 50
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+
+        # Step 1: too low
+        result = env.step(state, Action(text="25"))
+        assert "too low" in result.next_state.observation.prompt.lower()
+        state = result.next_state
+
+        # Step 2: correct
+        result = env.step(state, Action(text="50"))
+        assert result.terminated is True
+
+    def test_no_direct_branching_without_state_methods(self, mock_stateless_env):
+        """Without state methods, pure_step=False (no DirectStrategy)."""
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        assert env.spec.pure_step is False
+
+    def test_direct_branching_with_state_methods(self, mock_gem_env):
+        """With state methods, pure_step=True (DirectStrategy)."""
+        env = GemEnvironment(
+            gem_env=mock_gem_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        assert env.spec.pure_step is True
+
+    def test_gem_state_empty_tuple_without_state_methods(self, mock_stateless_env):
+        """Hidden gem_state should be empty tuple when no state support."""
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+        assert state.hidden.gem_state == ()
+
+        result = env.step(state, Action(text="25"))
+        assert result.next_state.hidden.gem_state == ()
+
+    def test_action_replay_branching_without_state_methods(self):
+        """ActionReplayStrategy works for stateless GEM envs."""
+        from llenvs.core.branching import BranchManager
+
+        def env_factory():
+            return GemEnvironment(
+                gem_env=MockStatelessGemEnv(target=50),
+                env_id="game:GuessTheNumber-v0",
+                is_multi_turn=True,
+            )
+
+        env = env_factory()
+        with BranchManager.create(
+            env, strategy="action_replay", env_factory=env_factory
+        ) as mgr:
+            state, _ = env.reset(seed=42)
+            actions = []
+
+            # Step 1: guess too low
+            a1 = Action(text="25")
+            result1 = env.step(state, a1)
+            state = result1.next_state
+            actions.append(a1)
+
+            # Checkpoint after first guess
+            mgr.checkpoint(
+                "after_guess1", state, tuple(actions), {"seed": 42}
+            )
+
+            # Branch and try a different second guess
+            branch_env, branch_state = mgr.branch("after_guess1")
+            result_branch = branch_env.step(branch_state, Action(text="50"))
+            assert result_branch.terminated is True
+            assert result_branch.rewards.by_name("correctness").value == 1.0

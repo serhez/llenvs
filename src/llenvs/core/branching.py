@@ -125,7 +125,7 @@ class BranchingStrategy(Protocol):
 class DirectStrategy:
     """Zero-cost branching for pure-function environments.
 
-    For environments with ``spec.supports_branching=True``, ``step()`` is a
+    For environments with ``spec.pure_step=True``, ``step()`` is a
     pure function. The same environment instance can process any state, so
     branching simply returns the same env with the stored state.
     """
@@ -138,7 +138,7 @@ class DirectStrategy:
         return "direct"
 
     def can_branch(self, env: Any) -> bool:
-        return getattr(getattr(env, "spec", None), "supports_branching", False)
+        return getattr(getattr(env, "spec", None), "pure_step", False)
 
     def create_checkpoint(
         self,
@@ -439,7 +439,7 @@ def resolve_strategy(
     """Auto-resolve the best branching strategy for an environment.
 
     Priority (when no preference):
-    1. DirectStrategy — if ``spec.supports_branching``
+    1. DirectStrategy — if ``spec.pure_step``
     2. ProcessForkStrategy — if Unix (added in Phase 2)
     3. ActionReplayStrategy — if ``spec.supports_seed`` and ``supports_task_index``
 
@@ -468,7 +468,7 @@ def resolve_strategy(
     spec = getattr(env, "spec", None)
 
     # 1. Direct
-    if spec is not None and getattr(spec, "supports_branching", False):
+    if spec is not None and getattr(spec, "pure_step", False):
         return DirectStrategy()
 
     # 2. ProcessForkStrategy (Unix only)
@@ -490,7 +490,7 @@ def resolve_strategy(
 
     raise NotImplementedError(
         f"No branching strategy available for {type(env).__name__} "
-        f"(supports_branching={getattr(spec, 'supports_branching', '?')}, "
+        f"(pure_step={getattr(spec, 'pure_step', '?')}, "
         f"supports_seed={getattr(spec, 'supports_seed', '?')}, "
         f"supports_task_index={getattr(spec, 'supports_task_index', '?')}). "
         f"Consider using a container with ProcessForkStrategy."

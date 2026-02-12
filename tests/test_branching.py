@@ -45,7 +45,7 @@ class TestStateContinuityTracker:
 
         tracker.track(state_a)
 
-        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+        with pytest.raises(NotImplementedError, match="pure_step=False"):
             tracker.validate(state_b, "TestEnv")
 
     def test_validate_raises_on_wrong_step(self):
@@ -55,7 +55,7 @@ class TestStateContinuityTracker:
 
         tracker.track(state_1)
 
-        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+        with pytest.raises(NotImplementedError, match="pure_step=False"):
             tracker.validate(state_0, "TestEnv")
 
     def test_validate_is_noop_before_first_track(self):
@@ -100,24 +100,24 @@ class TestStateContinuityTracker:
 
 
 # ---------------------------------------------------------------------------
-# EnvironmentSpec.supports_branching tests
+# EnvironmentSpec.pure_step tests
 # ---------------------------------------------------------------------------
 
 
 class TestEnvironmentSpecBranching:
-    """Tests for EnvironmentSpec.supports_branching."""
+    """Tests for EnvironmentSpec.pure_step."""
 
     def test_default_is_false(self):
         spec = EnvironmentSpec(name="test")
-        assert spec.supports_branching is False
+        assert spec.pure_step is False
 
     def test_explicit_true(self):
-        spec = EnvironmentSpec(name="test", supports_branching=True)
-        assert spec.supports_branching is True
+        spec = EnvironmentSpec(name="test", pure_step=True)
+        assert spec.pure_step is True
 
     def test_explicit_false(self):
-        spec = EnvironmentSpec(name="test", supports_branching=False)
-        assert spec.supports_branching is False
+        spec = EnvironmentSpec(name="test", pure_step=False)
+        assert spec.pure_step is False
 
 
 # ---------------------------------------------------------------------------
@@ -126,7 +126,7 @@ class TestEnvironmentSpecBranching:
 
 
 class TestBranchingSerializationRoundTrip:
-    """Tests for EnvironmentSpec serialization with supports_branching."""
+    """Tests for EnvironmentSpec serialization with pure_step."""
 
     def test_round_trip_true(self):
         from llenvs.container.serialization import (
@@ -134,11 +134,11 @@ class TestBranchingSerializationRoundTrip:
             deserialize_env_spec,
         )
 
-        spec = EnvironmentSpec(name="test", supports_branching=True)
+        spec = EnvironmentSpec(name="test", pure_step=True)
         data = serialize_env_spec(spec)
         restored = deserialize_env_spec(data)
 
-        assert restored.supports_branching is True
+        assert restored.pure_step is True
 
     def test_round_trip_false(self):
         from llenvs.container.serialization import (
@@ -146,16 +146,16 @@ class TestBranchingSerializationRoundTrip:
             deserialize_env_spec,
         )
 
-        spec = EnvironmentSpec(name="test", supports_branching=False)
+        spec = EnvironmentSpec(name="test", pure_step=False)
         data = serialize_env_spec(spec)
         restored = deserialize_env_spec(data)
 
-        assert restored.supports_branching is False
+        assert restored.pure_step is False
 
     def test_backward_compat_missing_field(self):
-        """Deserialization of old data without supports_branching defaults to False."""
+        """Deserialization of old data without pure_step defaults to False."""
         from llenvs.container.serialization import deserialize_env_spec
 
         data = {"name": "legacy", "adapter": "old"}
         spec = deserialize_env_spec(data)
-        assert spec.supports_branching is False
+        assert spec.pure_step is False

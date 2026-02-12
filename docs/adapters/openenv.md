@@ -132,10 +132,10 @@ env = OpenEnvEnvironment(
 | `seed` | No |
 | `compute_rewards` | Yes (from native step reward) |
 | `Scorer` / `DatasetProvider` | No (no task indices or ground truth) |
-| `supports_branching` | No (mutable server-side state) |
+| `pure_step` | No (mutable server-side state) |
 | MCP tools | Yes (via `list_tools()` / `call_tool()`) |
 
-Both `OpenEnvEnvironment` and `OpenEnvToolEnvironment` have `supports_branching=False`. State lives server-side; passing a stale state to `step()` raises `NotImplementedError`.
+Both `OpenEnvEnvironment` and `OpenEnvToolEnvironment` have `pure_step=False`. State lives server-side; passing a stale state to `step()` raises `NotImplementedError`.
 
 ## Limitations
 

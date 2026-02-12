@@ -15,7 +15,7 @@ llenvs auto-selects the best strategy for each environment:
 
 | Rank | Strategy | Overhead | Fidelity | Applicability |
 |------|----------|----------|----------|---------------|
-| 1 | **Direct** | Zero | Perfect | `supports_branching=True` envs (ReasoningGym, HF, Verifiers ST, Dialogue, GEM) |
+| 1 | **Direct** | Zero | Perfect | `pure_step=True` envs (ReasoningGym, HF, Verifiers ST, Dialogue, GEM) |
 | 2 | **ProcessFork** | Fork cost (fast, COW) | Perfect | Any env on Unix (macOS/Linux) |
 | 3 | **ActionReplay** | O(K) per branch | Perfect if deterministic | Envs with seed + task_index support |
 
@@ -51,7 +51,7 @@ with BranchManager.create(env) as mgr:
 
 ### DirectStrategy
 
-For environments with `spec.supports_branching=True`. `step()` is a pure function, so the same environment instance handles all branches. Zero cost.
+For environments with `spec.pure_step=True`. `step()` is a pure function, so the same environment instance handles all branches. Zero cost.
 
 ```python
 with BranchManager.create(env) as mgr:  # auto-selects Direct
@@ -176,7 +176,7 @@ When `None` (default), `BranchManager.create()` auto-resolves the best strategy.
 
 ## Per-Adapter Capabilities
 
-| Adapter | `supports_branching` | Direct | ProcessFork | ActionReplay |
+| Adapter | `pure_step` | Direct | ProcessFork | ActionReplay |
 |---------|---------------------|--------|-------------|--------------|
 | reasoning_gym | True | Yes | Yes | Yes |
 | huggingface | True | Yes | Yes | Yes |

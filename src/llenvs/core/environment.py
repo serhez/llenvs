@@ -2,7 +2,7 @@
 
 The Environment protocol defines the MDP interface for evaluation environments.
 Key design: step() takes explicit state rather than maintaining internal state.
-Environments with ``supports_branching=True`` are genuine pure functions;
+Environments with ``pure_step=True`` are genuine pure functions;
 others enforce sequential continuity and raise on stale states.
 """
 
@@ -50,10 +50,12 @@ class EnvironmentSpec:
         observation_type: Type hint for observations.
         action_type: Type hint for actions.
         is_multi_turn: Whether the environment supports multi-turn interaction.
-        supports_branching: Whether ``step()`` can be called with any prior
-            state (True) or only the most recent state from ``reset()``/
-            ``step()`` (False). Non-branchable environments raise
-            ``NotImplementedError`` on stale states.
+        pure_step: Whether ``step()`` is a pure function that can be
+            called with any prior state (True) or only the most recent
+            state from ``reset()``/``step()`` (False). Pure-step
+            environments enable zero-cost DirectStrategy branching.
+            Non-pure environments can still branch via ProcessFork or
+            ActionReplay strategies.
         metadata: Additional environment-specific metadata.
     """
 
@@ -66,7 +68,7 @@ class EnvironmentSpec:
     supports_task_index: bool = True
     supports_len: bool = True
     supports_seed: bool = True
-    supports_branching: bool = False
+    pure_step: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -114,7 +116,7 @@ class _StateContinuityTracker:
 
         if state.metadata.episode_id != self._expected_episode_id:
             raise NotImplementedError(
-                f"{env_name} has supports_branching=False and cannot step "
+                f"{env_name} has pure_step=False and cannot step "
                 f"from a state belonging to a different episode "
                 f"(expected episode {self._expected_episode_id!r}, "
                 f"got {state.metadata.episode_id!r}). "
@@ -123,7 +125,7 @@ class _StateContinuityTracker:
 
         if state.metadata.step != self._expected_step:
             raise NotImplementedError(
-                f"{env_name} has supports_branching=False and cannot step "
+                f"{env_name} has pure_step=False and cannot step "
                 f"from a stale state (expected step {self._expected_step}, "
                 f"got {state.metadata.step}). "
                 f"Only the most recent state from reset()/step() is valid."
@@ -135,7 +137,7 @@ class Environment(Protocol[HiddenT]):
     """Protocol for MDP-style evaluation environments.
 
     State is passed explicitly to ``step()``. Environments with
-    ``spec.supports_branching == True`` are genuine pure functions
+    ``spec.pure_step == True`` are genuine pure functions
     supporting tree search and branching. Others enforce sequential
     continuity and raise on stale states.
 
@@ -202,7 +204,7 @@ class Environment(Protocol[HiddenT]):
     ) -> StepResult[HiddenT]:
         """Take an action from the given state.
 
-        On environments with ``supports_branching=True``, this is a pure
+        On environments with ``pure_step=True``, this is a pure
         function — the same state and action always produce the same
         result. Non-branchable environments raise ``NotImplementedError``
         if *state* is not the most recent state from ``reset()``/``step()``.

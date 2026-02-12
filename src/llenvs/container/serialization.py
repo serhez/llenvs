@@ -368,7 +368,7 @@ def serialize_env_spec(spec: EnvironmentSpec) -> dict[str, Any]:
         "supports_task_index": spec.supports_task_index,
         "supports_len": spec.supports_len,
         "supports_seed": spec.supports_seed,
-        "supports_branching": spec.supports_branching,
+        "pure_step": spec.pure_step,
         "metadata": spec.metadata,
         # observation_type and action_type are type objects — not serialized
     }
@@ -383,6 +383,6 @@ def deserialize_env_spec(data: dict[str, Any]) -> EnvironmentSpec:
         supports_task_index=data.get("supports_task_index", True),
         supports_len=data.get("supports_len", True),
         supports_seed=data.get("supports_seed", True),
-        supports_branching=data.get("supports_branching", False),
+        pure_step=data.get("pure_step", False),
         metadata=data.get("metadata", {}),
     )

@@ -242,13 +242,39 @@ env2 = environment_registry.get(name="leg_counting", adapter="reasoning_gym")
 
 Use whichever adapter fits your workflow. GEM provides a unified interface across all environment types.
 
+## State Snapshotting and Branching
+
+GEM environments that implement `get_state()`/`set_state()` get full state snapshotting:
+
+- **Pure function semantics**: `step(state, action)` always produces the same result for the same inputs
+- **DirectStrategy branching**: `pure_step=True` enables zero-cost tree search via `BranchManager`
+
+GEM environments that **lack** `get_state()`/`set_state()` (some game environments) still work and still support branching, but via fallback strategies:
+
+- **ProcessForkStrategy** (Unix): Forks the process to create independent copies — works for any environment
+- **ActionReplayStrategy**: Creates a fresh env and replays actions to reach the checkpoint state — requires `env_factory`
+
+`BranchManager.create(env)` auto-resolves the best available strategy:
+
+```python
+from llenvs import BranchManager
+
+env = adapter.get_environment("game:GuessTheNumber-v0")
+
+# Auto-resolves: DirectStrategy if get_state/set_state available,
+# otherwise ProcessForkStrategy (Unix) or ActionReplayStrategy
+with BranchManager.create(env) as mgr:
+    state, _ = env.reset(seed=42)
+    # ... checkpoint and branch as usual
+```
+
 ## Hidden State
 
 ```python
 @dataclass(frozen=True)
 class GemHidden:
     env_id: str
-    gem_state: tuple[tuple[str, Any], ...]  # Frozen env state
+    gem_state: tuple[tuple[str, Any], ...]  # Frozen env state (empty if unsupported)
     task_index: int
     is_multi_turn: bool
     episode_step: int

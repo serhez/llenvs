@@ -151,7 +151,7 @@ class ReasoningGymEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=False,
-            supports_branching=True,
+            pure_step=True,
             metadata={
                 "dataset_size": len(self._dataset),
                 "dataset_name": self._dataset_name,

@@ -45,7 +45,7 @@ class PureFunctionEnv:
         return EnvironmentSpec(
             name="pure_mock",
             adapter="test",
-            supports_branching=True,
+            pure_step=True,
             supports_seed=True,
             supports_task_index=True,
         )
@@ -124,7 +124,7 @@ class MutableEnv:
         return EnvironmentSpec(
             name="mutable_mock",
             adapter="test",
-            supports_branching=False,
+            pure_step=False,
             supports_seed=True,
             supports_task_index=True,
         )
@@ -193,7 +193,7 @@ class NoBranchNoSeedEnv:
         return EnvironmentSpec(
             name="no_branch_no_seed",
             adapter="test",
-            supports_branching=False,
+            pure_step=False,
             supports_seed=False,
             supports_task_index=False,
         )
@@ -794,7 +794,7 @@ class _MutableCounterEnv:
             name="mutable_counter",
             adapter="test",
             max_steps=10,
-            supports_branching=False,
+            pure_step=False,
             supports_seed=True,
             supports_task_index=True,
         )

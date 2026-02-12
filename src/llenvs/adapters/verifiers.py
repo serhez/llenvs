@@ -299,7 +299,7 @@ class VerifiersSingleTurnEnvironment:
             supports_task_index=True,
             supports_len=True,
             supports_seed=False,
-            supports_branching=True,
+            pure_step=True,
             metadata={
                 "dataset_size": len(self._dataset),
                 "env_id": self._env_id,

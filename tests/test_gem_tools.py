@@ -323,7 +323,7 @@ class TestGemToolEnvironment:
         assert env.spec.adapter == "gem"
         assert env.spec.is_multi_turn is True
         assert env.spec.max_steps == 10
-        assert env.spec.supports_branching is True
+        assert env.spec.pure_step is True
 
     @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_available_tools_property(self, mock_create_tools, mock_gem_env):

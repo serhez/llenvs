@@ -558,7 +558,7 @@ class TestDialogueSpec:
         assert spec.adapter == "dialogue"
         assert spec.max_steps == 10
         assert spec.is_multi_turn is True
-        assert spec.supports_branching is True
+        assert spec.pure_step is True
 
     def test_prompts_empty(self):
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment

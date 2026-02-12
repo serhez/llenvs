@@ -260,6 +260,9 @@ class GemEnvironment:
         self._is_multi_turn = is_multi_turn
         self._answer_extractor = answer_extractor or TagBasedExtractor()
         self._max_steps = max_steps
+        self._supports_state = hasattr(gem_env, "get_state") and hasattr(
+            gem_env, "set_state"
+        )
 
         self._native_rewards: tuple[RewardFunction, ...] = (GemCorrectnessReward(),)
         self._extra_rewards = extra_rewards
@@ -287,7 +290,7 @@ class GemEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=self._is_multi_turn,
-            supports_branching=True,
+            pure_step=self._supports_state,
             metadata={"env_id": self._env_id},
         )
 
@@ -300,11 +303,15 @@ class GemEnvironment:
 
     def _snapshot_state(self) -> tuple[tuple[str, Any], ...]:
         """Capture GEM env state as frozen structure."""
+        if not self._supports_state:
+            return ()
         state_dict = self._gem_env.get_state()
         return _freeze_dict(state_dict)
 
     def _restore_state(self, frozen_state: tuple[tuple[str, Any], ...]) -> None:
         """Restore GEM env from frozen structure."""
+        if not self._supports_state:
+            return
         state_dict = _unfreeze_dict(frozen_state)
         self._gem_env.set_state(state_dict)
 
@@ -751,6 +758,9 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         self._env_id = env_id
         self._max_steps = max_steps or 10
         self._tool_types = tool_types
+        self._supports_state = hasattr(gem_env, "get_state") and hasattr(
+            gem_env, "set_state"
+        )
 
         # Initialize GEM tools
         self._gem_tools = self._create_gem_tools(tool_types, **tool_kwargs)
@@ -847,7 +857,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
-            supports_branching=True,
+            pure_step=self._supports_state,
             metadata={"env_id": self._env_id, "tools": self._tool_types},
         )
 
@@ -860,11 +870,15 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
 
     def _snapshot_state(self) -> tuple[tuple[str, Any], ...]:
         """Capture GEM env state as frozen structure."""
+        if not self._supports_state:
+            return ()
         state_dict = self._gem_env.get_state()
         return _freeze_dict(state_dict)
 
     def _restore_state(self, frozen_state: tuple[tuple[str, Any], ...]) -> None:
         """Restore GEM env from frozen structure."""
+        if not self._supports_state:
+            return
         state_dict = _unfreeze_dict(frozen_state)
         self._gem_env.set_state(state_dict)
 

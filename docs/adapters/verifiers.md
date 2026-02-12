@@ -118,11 +118,11 @@ For `ToolEnv`, the adapter converts OpenAI-format tool schemas to llenvs `ToolDe
 | `seed` | No | No |
 | `compute_rewards` | Yes | Yes |
 | `Scorer` / `DatasetProvider` | Yes | No (multi-turn) |
-| `supports_branching` | Yes | No (tool callables may have side effects) |
+| `pure_step` | Yes | No (tool callables may have side effects) |
 | System prompt | Yes | Yes |
 | Answer extraction | Optional | Optional |
 
-`VerifiersToolEnvironment` has `supports_branching=False` because tool callables may mutate external state. Passing a stale state raises `NotImplementedError`.
+`VerifiersToolEnvironment` has `pure_step=False` because tool callables may mutate external state. Passing a stale state raises `NotImplementedError`.
 
 ## Limitations
 

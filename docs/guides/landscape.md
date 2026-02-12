@@ -45,9 +45,9 @@ State is immutable and passed explicitly to `step()`:
 result = env.step(state, action)  # state is not modified
 ```
 
-Environments with `spec.supports_branching == True` (single-turn adapters, GEM via snapshot/restore, Dialogue via message reconstruction) are genuine pure functions — any state can be snapshotted and resumed from, and multiple branches can diverge from the same checkpoint.
+Environments with `spec.pure_step == True` (single-turn adapters, GEM via snapshot/restore, Dialogue via message reconstruction) are genuine pure functions — any state can be snapshotted and resumed from, and multiple branches can diverge from the same checkpoint.
 
-Multi-turn adapters wrapping stateful backends (WebShop, AgentGym, OpenEnv, verifiers tool) have `supports_branching=False` and enforce sequential continuity: only the most recent state from `reset()`/`step()` is valid. Passing a stale state raises `NotImplementedError`. However, the `BranchManager` system provides universal branching for all environments via a tiered strategy system: `DirectStrategy` (zero-cost for pure-function envs), `ProcessForkStrategy` (via `os.fork()` for mutable-backend envs on Unix), and `ActionReplayStrategy` (replays actions on a fresh env for deterministic envs).
+Multi-turn adapters wrapping stateful backends (WebShop, AgentGym, OpenEnv, verifiers tool) have `pure_step=False` and enforce sequential continuity: only the most recent state from `reset()`/`step()` is valid. Passing a stale state raises `NotImplementedError`. However, the `BranchManager` system provides universal branching for all environments via a tiered strategy system: `DirectStrategy` (zero-cost for pure-function envs), `ProcessForkStrategy` (via `os.fork()` for mutable-backend envs on Unix), and `ActionReplayStrategy` (replays actions on a fresh env for deterministic envs).
 
 ### OpenEnv — Client-Server with Docker Isolation
 

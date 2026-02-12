@@ -180,7 +180,7 @@ class TestHuggingFaceEnvironment:
         assert spec.metadata["split"] == "test"
         assert spec.observation_type == Observation
         assert spec.action_type == Action
-        assert spec.supports_branching is True
+        assert spec.pure_step is True
 
     def test_reset(self, mock_hf_dataset):
         """Test environment reset."""

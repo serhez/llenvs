@@ -160,7 +160,7 @@ class DialogueEnvironment:
             adapter="dialogue",
             max_steps=self._max_steps,
             is_multi_turn=True,
-            supports_branching=True,
+            pure_step=True,
         )
 
     @property
