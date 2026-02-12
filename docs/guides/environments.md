@@ -180,6 +180,28 @@ print(f"Path A: {trajectory.total_reward}")
 print(f"Path B: {alt_trajectory.total_reward}")
 ```
 
+## Running in Containers
+
+Any environment can run inside a Docker container or isolated subprocess by setting the `container` field on `EnvironmentConfig`:
+
+```python
+from llenvs.core.config import EnvironmentConfig, EnvironmentFactory
+from llenvs.container.config import ContainerConfig
+
+config = EnvironmentConfig(
+    name="sudoku",
+    adapter="reasoning_gym",
+    size=100,
+    container=ContainerConfig(runtime="process"),  # or runtime="docker"
+)
+env = EnvironmentFactory.create(config)
+# env is a ContainerEnvironment proxy — works identically to a local env
+```
+
+The proxy forwards `reset()`, `step()`, and `compute_rewards()` over HTTP to a server running inside the container. All existing code (runners, Scorer, DatasetProvider) works unchanged.
+
+See **[Containers Guide](containers.md)** for full details.
+
 ## Next Steps
 
 - **[ReasoningGym Adapter](../adapters/reasoning-gym.md)**
@@ -189,3 +211,4 @@ print(f"Path B: {alt_trajectory.total_reward}")
 - **[AgentGym Adapter](../adapters/agentgym.md)**
 - **[Verifiers Adapter](../adapters/verifiers.md)**
 - **[OpenEnv Adapter](../adapters/openenv.md)**
+- **[Containers](containers.md)**

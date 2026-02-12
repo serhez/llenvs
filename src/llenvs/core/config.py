@@ -4,11 +4,16 @@ Supports loading evaluation configurations from YAML files
 and creating environments/backends from configuration.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from llenvs.container.config import ContainerConfig
 
 
 @dataclass
@@ -29,6 +34,8 @@ class EnvironmentConfig:
             or list of fragment/prompt names.
         prompts: Per-env prompt component overrides for multi-step environments.
         params: Additional environment-specific parameters.
+        container: Optional container configuration. When set, the environment
+            runs inside a container or subprocess instead of in-process.
     """
 
     name: str
@@ -44,6 +51,7 @@ class EnvironmentConfig:
     system_prompt: str | list[str] | None = None
     prompts: dict[str, str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
+    container: ContainerConfig | None = None
 
 
 @dataclass
@@ -147,6 +155,22 @@ class EvalConfig:
             pre_cleaners = env_data.get("pre_cleaners")  # None if not in dict
             post_cleaners = env_data.get("post_cleaners")  # None if not in dict
 
+            # Parse container config
+            container_data = env_data.get("container")
+            container = None
+            if container_data is not None:
+                from llenvs.container.config import ContainerConfig
+
+                container = ContainerConfig(
+                    runtime=container_data.get("runtime", "docker"),
+                    image=container_data.get("image"),
+                    port=container_data.get("port"),
+                    timeout=container_data.get("timeout", 60.0),
+                    env_vars=container_data.get("env_vars", {}),
+                    volumes=container_data.get("volumes", {}),
+                    docker_command=container_data.get("docker_command", "docker"),
+                )
+
             environments.append(
                 EnvironmentConfig(
                     name=env_data["name"],
@@ -162,6 +186,7 @@ class EvalConfig:
                     system_prompt=env_data.get("system_prompt"),
                     prompts=env_data.get("prompts"),
                     params=env_data.get("params", {}),
+                    container=container,
                 )
             )
 
@@ -226,6 +251,21 @@ class EvalConfig:
                 d["system_prompt"] = env.system_prompt
             if env.prompts is not None:
                 d["prompts"] = env.prompts
+            if env.container is not None:
+                c: dict[str, Any] = {"runtime": env.container.runtime}
+                if env.container.image is not None:
+                    c["image"] = env.container.image
+                if env.container.port is not None:
+                    c["port"] = env.container.port
+                if env.container.timeout != 60.0:
+                    c["timeout"] = env.container.timeout
+                if env.container.env_vars:
+                    c["env_vars"] = env.container.env_vars
+                if env.container.volumes:
+                    c["volumes"] = env.container.volumes
+                if env.container.docker_command != "docker":
+                    c["docker_command"] = env.container.docker_command
+                d["container"] = c
             env_dicts.append(d)
 
         result: dict[str, Any] = {
@@ -262,17 +302,25 @@ class EnvironmentFactory:
     def create(config: EnvironmentConfig) -> Any:
         """Create an environment from configuration.
 
+        If ``config.container`` is set, the environment is created inside a
+        container or subprocess and a proxy is returned.
+
         Args:
             config: Environment configuration.
 
         Returns:
-            Environment instance.
+            Environment instance (or ``ContainerEnvironment`` proxy).
 
         Raises:
             KeyError: If adapter is not registered.
             ValueError: If environment name is not recognized by adapter,
                 or if "native" extraction is requested but not available.
         """
+        if config.container is not None:
+            from llenvs.container import create_container_environment
+
+            return create_container_environment(config)
+
         from llenvs.core.registry import environment_registry, answer_extractor_registry
         from llenvs.core.extraction import CompositeExtractor, CleanedExtractor
         from llenvs.core.cleaning import resolve_cleaners

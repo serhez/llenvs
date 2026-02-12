@@ -137,6 +137,10 @@ class EnvironmentSpec:
 
 Capability flags allow integrations to check compatibility at init time. For example, `Scorer` requires `supports_task_index=True` and `DatasetProvider` requires both `supports_task_index` and `supports_len`.
 
+### ContainerEnvironment
+
+`ContainerEnvironment` (`llenvs/container/client.py`) implements the `Environment[OpaqueHidden]` protocol as a proxy to a remote server. Hidden state is deserialized as `OpaqueHidden`, which supports attribute access (e.g., `state.hidden.expected_answer`) but is immutable. `reward_functions` returns `()` because reward computation happens server-side. See the **[Containers Guide](../guides/containers.md)**.
+
 ## Rewards
 
 **Location**: `llenvs/core/reward.py`

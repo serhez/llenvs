@@ -413,6 +413,41 @@ batch = runner.run_batch(
 )
 ```
 
+## Container Configuration
+
+Run any environment inside a container or subprocess by adding a `container` field:
+
+```yaml
+environments:
+  - name: sudoku
+    adapter: reasoning_gym
+    size: 100
+    container:
+      runtime: docker           # or "process"
+      image: llenvs-rg:latest   # required for docker runtime
+      timeout: 60
+      env_vars:
+        CACHE_DIR: /data/cache
+      volumes:
+        /host/data: /data
+```
+
+```python
+from llenvs.container.config import ContainerConfig
+
+ContainerConfig(
+    runtime="docker",           # "docker" or "process"
+    image="llenvs-rg:latest",   # Docker image (required for docker)
+    port=None,                  # Host port (None = auto-select)
+    timeout=60.0,               # Startup timeout in seconds
+    env_vars={},                # Environment variables
+    volumes={},                 # Volume mounts (host -> container)
+    docker_command="docker",    # Path to docker CLI
+)
+```
+
+When `container` is set, `EnvironmentFactory.create()` starts the runtime and returns a `ContainerEnvironment` proxy. See the **[Containers Guide](../guides/containers.md)** for details.
+
 ## MCP Server Configuration
 
 ```python
