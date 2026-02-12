@@ -190,13 +190,14 @@ class TestVLLMBatchChat:
         mock_tokenizer = MagicMock()
         prompts_seen = []
 
-        def fake_apply_template(messages, tokenize=False, add_generation_prompt=True):
+        def fake_apply_template(messages, tokenize=False, add_generation_prompt=True, **kwargs):
             prompt = f"formatted:{messages[0]['content']}"
             prompts_seen.append(prompt)
             return prompt
 
         mock_tokenizer.apply_chat_template = fake_apply_template
         backend._tokenizer = mock_tokenizer
+        backend._chat_template_kwargs = {}
 
         # Mock generate to return results
         def fake_generate(prompts, params):
@@ -235,13 +236,14 @@ class TestHuggingFaceBatchChat:
         mock_tokenizer.chat_template = "some_template"
         prompts_seen = []
 
-        def fake_apply_template(messages, tokenize=False, add_generation_prompt=True):
+        def fake_apply_template(messages, tokenize=False, add_generation_prompt=True, **kwargs):
             prompt = f"hf:{messages[0]['content']}"
             prompts_seen.append(prompt)
             return prompt
 
         mock_tokenizer.apply_chat_template = fake_apply_template
         backend._tokenizer = mock_tokenizer
+        backend._chat_template_kwargs = {}
 
         # Mock generate
         def fake_generate(prompts, params):

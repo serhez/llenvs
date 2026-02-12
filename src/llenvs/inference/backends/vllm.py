@@ -53,6 +53,7 @@ class VLLMBackend(ModelBackend):
         max_model_len: int | None = None,
         gpu_memory_utilization: float = 0.9,
         seed: int = 42,
+        chat_template_kwargs: dict[str, Any] | None = None,
         **vllm_kwargs: Any,
     ) -> None:
         """Initialize vLLM backend.
@@ -64,6 +65,8 @@ class VLLMBackend(ModelBackend):
             max_model_len: Maximum sequence length.
             gpu_memory_utilization: Fraction of GPU memory to use.
             seed: Random seed.
+            chat_template_kwargs: Extra keyword arguments passed to
+                ``tokenizer.apply_chat_template()`` (e.g. ``enable_thinking``).
             **vllm_kwargs: Additional arguments passed to vLLM LLM.
 
         Raises:
@@ -78,6 +81,7 @@ class VLLMBackend(ModelBackend):
 
         self._model_path = model_path
         self._VLLMSamplingParams = VLLMSamplingParams
+        self._chat_template_kwargs = chat_template_kwargs or {}
 
         # Initialize vLLM engine
         llm_kwargs: dict[str, Any] = {
@@ -148,7 +152,16 @@ class VLLMBackend(ModelBackend):
 
         # Merge backend-specific extra params (these take precedence)
         if params.extra:
-            kwargs.update(params.extra)
+            extra = dict(params.extra)
+            thinking_budget = extra.pop("thinking_budget", None)
+            kwargs.update(extra)
+
+            if thinking_budget is not None:
+                from llenvs.inference.thinking import ThinkingBudgetProcessor
+
+                processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
+                processors = kwargs.get("logits_processors", [])
+                kwargs["logits_processors"] = list(processors) + [processor.vllm_processor]
 
         return self._VLLMSamplingParams(**kwargs)
 
@@ -242,6 +255,7 @@ class VLLMBackend(ModelBackend):
                 [m.to_dict() for m in msgs],
                 tokenize=False,
                 add_generation_prompt=True,
+                **self._chat_template_kwargs,
             )
             for msgs in messages_batch
         ]
@@ -269,6 +283,7 @@ class VLLMBackend(ModelBackend):
             message_dicts,
             tokenize=False,
             add_generation_prompt=True,
+            **self._chat_template_kwargs,
         )
 
         results = self.generate([prompt], params)

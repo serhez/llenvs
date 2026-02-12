@@ -71,6 +71,7 @@ class TestHuggingFaceBackendUnit:
                 backend._model = mock_model
                 backend._device = "cpu"
                 backend._max_context_length = 2048
+                backend._chat_template_kwargs = {}
 
                 return backend, mock_tokenizer, mock_model, mock_torch
 
@@ -115,7 +116,8 @@ class TestHuggingFaceBackendUnit:
         assert kwargs["max_new_tokens"] == 100
         assert kwargs["do_sample"] is False
         assert kwargs["num_return_sequences"] == 1
-        assert "temperature" not in kwargs  # Not set for greedy
+        assert kwargs["temperature"] == 1.0  # Neutral default overrides model config
+        assert kwargs["top_p"] == 1.0
 
     def test_to_generate_kwargs_sampling(self):
         """Test conversion of SamplingParams to generate kwargs (sampling)."""
@@ -544,3 +546,136 @@ class TestHuggingFaceBackendMockedGeneration:
 
             assert len(results) == 1
             mock_model.generate.assert_called_once()
+
+
+class TestHuggingFaceChatTemplateKwargs:
+    """Tests for chat_template_kwargs on HuggingFaceBackend."""
+
+    def _create_mock_backend(self, chat_template_kwargs=None):
+        """Create a HuggingFaceBackend with mocked dependencies."""
+        from llenvs.inference.backends.huggingface import HuggingFaceBackend
+
+        backend = HuggingFaceBackend.__new__(HuggingFaceBackend)
+        backend._model_path = "test-model"
+        backend._torch = MagicMock()
+        backend._tokenizer = MagicMock()
+        backend._tokenizer.pad_token_id = 0
+        backend._tokenizer.eos_token_id = 1
+        backend._tokenizer.chat_template = "some_template"
+        backend._tokenizer.apply_chat_template.return_value = "formatted"
+        backend._model = MagicMock()
+        backend._model.device = "cpu"
+        backend._device = "cpu"
+        backend._max_context_length = 2048
+        backend._chat_template_kwargs = chat_template_kwargs or {}
+        return backend
+
+    def test_stored_correctly(self):
+        """chat_template_kwargs stored on the backend instance."""
+        backend = self._create_mock_backend({"enable_thinking": True})
+        assert backend._chat_template_kwargs == {"enable_thinking": True}
+
+    def test_passed_to_generate_chat(self):
+        """chat_template_kwargs spread into apply_chat_template in generate_chat."""
+        backend = self._create_mock_backend({"enable_thinking": True})
+        backend._tokenizer.apply_chat_template.return_value = "prompt"
+        backend._model.generate.return_value = MagicMock()
+
+        # Mock generate to avoid the full pipeline
+        with patch.object(backend, "generate", return_value=[GenerationResult(
+            text="ok", finish_reason=StopReason.END_OF_TEXT,
+        )]):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")],
+                SamplingParams(max_tokens=10),
+            )
+
+        backend._tokenizer.apply_chat_template.assert_called_once()
+        call_kwargs = backend._tokenizer.apply_chat_template.call_args
+        assert call_kwargs[1].get("enable_thinking") is True
+
+    def test_passed_to_generate_chat_batch(self):
+        """chat_template_kwargs spread into apply_chat_template in generate_chat_batch."""
+        backend = self._create_mock_backend({"enable_thinking": True})
+
+        with patch.object(backend, "generate", return_value=[GenerationResult(
+            text="ok", finish_reason=StopReason.END_OF_TEXT,
+        )]):
+            backend.generate_chat_batch(
+                [[ChatMessage(role="user", content="hi")]],
+                SamplingParams(max_tokens=10),
+            )
+
+        backend._tokenizer.apply_chat_template.assert_called_once()
+        call_kwargs = backend._tokenizer.apply_chat_template.call_args
+        assert call_kwargs[1].get("enable_thinking") is True
+
+    def test_empty_kwargs_no_extra_args(self):
+        """Empty chat_template_kwargs doesn't add extra args."""
+        backend = self._create_mock_backend({})
+
+        with patch.object(backend, "generate", return_value=[GenerationResult(
+            text="ok", finish_reason=StopReason.END_OF_TEXT,
+        )]):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")],
+                SamplingParams(max_tokens=10),
+            )
+
+        call_kwargs = backend._tokenizer.apply_chat_template.call_args[1]
+        assert "enable_thinking" not in call_kwargs
+
+
+class TestHuggingFaceThinkingBudget:
+    """Tests for thinking_budget interception in HuggingFaceBackend."""
+
+    def _create_mock_backend(self):
+        from llenvs.inference.backends.huggingface import HuggingFaceBackend
+
+        backend = HuggingFaceBackend.__new__(HuggingFaceBackend)
+        backend._model_path = "test-model"
+        backend._torch = MagicMock()
+        backend._tokenizer = MagicMock()
+        backend._tokenizer.pad_token_id = 0
+        backend._tokenizer.eos_token_id = 1
+        backend._tokenizer.get_vocab.return_value = {"<think>": 100, "</think>": 101}
+        backend._model = MagicMock()
+        backend._model.device = "cpu"
+        backend._device = "cpu"
+        backend._max_context_length = 2048
+        backend._chat_template_kwargs = {}
+        return backend
+
+    def test_thinking_budget_popped_from_extra(self):
+        """thinking_budget is removed from extra and not passed to generate()."""
+        backend = self._create_mock_backend()
+        params = SamplingParams(
+            max_tokens=100,
+            extra={"thinking_budget": 512, "some_other": "value"},
+        )
+        kwargs = backend._to_generate_kwargs(params)
+        assert "thinking_budget" not in kwargs
+        assert kwargs["some_other"] == "value"
+
+    def test_thinking_budget_adds_logits_processor(self):
+        """thinking_budget creates a logits processor in generate kwargs."""
+        backend = self._create_mock_backend()
+        params = SamplingParams(
+            max_tokens=100,
+            extra={"thinking_budget": 512},
+        )
+        kwargs = backend._to_generate_kwargs(params)
+        assert "logits_processor" in kwargs
+        assert len(kwargs["logits_processor"]) == 1
+
+    def test_thinking_budget_preserves_existing_processors(self):
+        """thinking_budget appends to existing logits_processor list."""
+        backend = self._create_mock_backend()
+        existing_proc = lambda input_ids, scores: scores
+        params = SamplingParams(
+            max_tokens=100,
+            extra={"thinking_budget": 512, "logits_processor": [existing_proc]},
+        )
+        kwargs = backend._to_generate_kwargs(params)
+        assert len(kwargs["logits_processor"]) == 2
+        assert kwargs["logits_processor"][0] is existing_proc

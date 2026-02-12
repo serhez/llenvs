@@ -388,6 +388,7 @@ class EvalConfig:
             top_p=inference_data.get("top_p", 1.0),
             top_k=inference_data.get("top_k", 0),
             stop_sequences=inference_data.get("stop_sequences", []),
+            extra=inference_data.get("extra", {}),
         )
 
         return cls(
@@ -483,6 +484,7 @@ class EvalConfig:
                 "top_p": self.inference.top_p,
                 "top_k": self.inference.top_k,
                 "stop_sequences": self.inference.stop_sequences,
+                "extra": self.inference.extra,
             },
             "system_prompt": self.system_prompt,
             "model_profile": self.model_profile,

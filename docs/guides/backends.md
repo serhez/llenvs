@@ -263,6 +263,55 @@ params = SamplingParams(
 
 > **Note:** Parameters in `extra` take precedence over the common parameters if there's a conflict. Unknown parameters may cause errors from the underlying API.
 
+### Chat Template Parameters
+
+Local backends (vLLM and HuggingFace) support passing extra keyword arguments to `tokenizer.apply_chat_template()` via `chat_template_kwargs`. This is useful for models like Qwen3 that use special template parameters (e.g., `enable_thinking=True`).
+
+```yaml
+model:
+  backend: vllm
+  model: Qwen/Qwen3-8B
+  params:
+    chat_template_kwargs:
+      enable_thinking: true
+```
+
+```python
+from llenvs.inference.backends import VLLMBackend
+
+backend = VLLMBackend(
+    model_path="Qwen/Qwen3-8B",
+    chat_template_kwargs={"enable_thinking": True},
+)
+```
+
+The kwargs are spread into every `apply_chat_template()` call — both `generate_chat()` and `generate_chat_batch()`.
+
+### Thinking Budget
+
+For models that produce `<think>...</think>` reasoning blocks (e.g., Qwen3 with `enable_thinking=True`), you can cap the number of tokens generated inside each thinking block using `thinking_budget` in `SamplingParams.extra`:
+
+```python
+params = SamplingParams(
+    max_tokens=4096,
+    extra={"thinking_budget": 512},
+)
+```
+
+```yaml
+inference:
+  max_tokens: 4096
+  extra:
+    thinking_budget: 512
+```
+
+When the budget is reached, all logits are masked to `-inf` except the `</think>` token, forcing the model to close the thinking block and continue with its answer. Each `<think>` block gets an independent budget — if the model opens a second thinking block, the counter resets.
+
+Requirements:
+- The tokenizer must have `<think>` and `</think>` as single dedicated tokens
+- Works with both vLLM (`logits_processors`) and HuggingFace (`logits_processor`) backends
+- The processor is stateless and safe for batched generation
+
 ## Batch Generation
 
 All backends support `generate_chat_batch()` for processing multiple independent conversations efficiently. This is the foundation for parallel evaluation.

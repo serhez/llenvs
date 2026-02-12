@@ -696,3 +696,55 @@ class TestPromptsConfig:
         config = EvalConfig.from_dict(original)
         result = config.to_dict()
         assert result["environments"][0]["prompts"] == original["environments"][0]["prompts"]
+
+
+class TestInferenceConfigExtra:
+    """Tests for InferenceConfig.extra YAML round-trip."""
+
+    def test_from_dict_parses_extra(self):
+        """from_dict parses extra from inference section."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "gpt-4o"},
+            "inference": {
+                "temperature": 0.7,
+                "max_tokens": 1024,
+                "extra": {"thinking_budget": 512, "repetition_penalty": 1.2},
+            },
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.inference.extra == {"thinking_budget": 512, "repetition_penalty": 1.2}
+
+    def test_from_dict_extra_default_empty(self):
+        """from_dict defaults extra to empty dict."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "gpt-4o"},
+            "inference": {"temperature": 0.5},
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.inference.extra == {}
+
+    def test_to_dict_serializes_extra(self):
+        """to_dict includes extra in inference section."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(),
+            inference=InferenceConfig(extra={"thinking_budget": 256}),
+        )
+        data = config.to_dict()
+        assert data["inference"]["extra"] == {"thinking_budget": 256}
+
+    def test_roundtrip_with_extra(self):
+        """Roundtrip preserves inference.extra."""
+        original = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "test-model"},
+            "inference": {
+                "temperature": 0.7,
+                "extra": {"thinking_budget": 512},
+            },
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+        assert result["inference"]["extra"] == {"thinking_budget": 512}

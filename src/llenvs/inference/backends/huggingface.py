@@ -60,6 +60,7 @@ class HuggingFaceBackend(ModelBackend):
         dtype: str = "auto",
         device_map: str | None = None,
         torch_compile: bool = False,
+        chat_template_kwargs: dict[str, Any] | None = None,
         **model_kwargs: Any,
     ) -> None:
         """Initialize HuggingFace backend.
@@ -71,6 +72,8 @@ class HuggingFaceBackend(ModelBackend):
             device_map: Device map for multi-GPU or offloading (e.g., "auto").
                        If set, overrides the device parameter.
             torch_compile: Enable torch.compile() for optimization.
+            chat_template_kwargs: Extra keyword arguments passed to
+                ``tokenizer.apply_chat_template()`` (e.g. ``enable_thinking``).
             **model_kwargs: Additional arguments passed to from_pretrained().
 
         Raises:
@@ -87,6 +90,7 @@ class HuggingFaceBackend(ModelBackend):
 
         self._model_path = model_path
         self._torch = torch
+        self._chat_template_kwargs = chat_template_kwargs or {}
 
         # Resolve dtype
         dtype_map = {
@@ -113,6 +117,7 @@ class HuggingFaceBackend(ModelBackend):
         self._tokenizer = AutoTokenizer.from_pretrained(model_path)
         if self._tokenizer.pad_token is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
+        self._tokenizer.padding_side = "left"
 
         # Load model
         load_kwargs: dict[str, Any] = {
@@ -174,19 +179,21 @@ class HuggingFaceBackend(ModelBackend):
         Maps common SamplingParams fields to HuggingFace generate() arguments,
         then merges any backend-specific params from `extra`.
         """
+        do_sample = params.temperature > 0
         kwargs: dict[str, Any] = {
             "max_new_tokens": params.max_tokens,
-            "do_sample": params.temperature > 0,
+            "do_sample": do_sample,
             "num_return_sequences": params.n,
             "pad_token_id": self._tokenizer.pad_token_id,
             "eos_token_id": self._tokenizer.eos_token_id,
+            # Always set explicitly to override model generation_config
+            # defaults that would conflict with do_sample=False.
+            "temperature": params.temperature if do_sample else 1.0,
+            "top_p": params.top_p if do_sample else 1.0,
         }
 
-        if params.temperature > 0:
-            kwargs["temperature"] = params.temperature
-            kwargs["top_p"] = params.top_p
-            if params.top_k > 0:
-                kwargs["top_k"] = params.top_k
+        if do_sample and params.top_k > 0:
+            kwargs["top_k"] = params.top_k
 
         # Map frequency_penalty to repetition_penalty if set
         # Note: HF repetition_penalty is multiplicative (1.0 = no penalty, >1 = penalty)
@@ -218,7 +225,16 @@ class HuggingFaceBackend(ModelBackend):
 
         # Merge backend-specific extra params (these take precedence)
         if params.extra:
-            kwargs.update(params.extra)
+            extra = dict(params.extra)
+            thinking_budget = extra.pop("thinking_budget", None)
+            kwargs.update(extra)
+
+            if thinking_budget is not None:
+                from llenvs.inference.thinking import ThinkingBudgetProcessor
+
+                processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
+                processors = kwargs.get("logits_processor", [])
+                kwargs["logits_processor"] = list(processors) + [processor.hf_processor]
 
         return kwargs
 
@@ -376,6 +392,7 @@ class HuggingFaceBackend(ModelBackend):
                     [m.to_dict() for m in msgs],
                     tokenize=False,
                     add_generation_prompt=True,
+                    **self._chat_template_kwargs,
                 )
                 for msgs in messages_batch
             ]
@@ -427,6 +444,7 @@ class HuggingFaceBackend(ModelBackend):
                 message_dicts,
                 tokenize=False,
                 add_generation_prompt=True,
+                **self._chat_template_kwargs,
             )
         else:
             # Fallback for base models without chat templates (e.g., GPT-2)
