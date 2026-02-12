@@ -472,6 +472,80 @@ ContainerConfig(
 
 When `container` is set, `EnvironmentFactory.create()` starts the runtime and returns a `ContainerEnvironment` proxy. See the **[Containers Guide](../guides/containers.md)** for details.
 
+## Judge Configuration
+
+Add LLM-as-a-judge scoring at the eval level or per-environment. See the **[Judge guide](../guides/judge.md)** for full details.
+
+```yaml
+judge:
+  model:
+    backend: openai
+    model: gpt-4o-mini
+  template: correctness             # correctness, helpfulness, safety, or literal
+  system_prompt: null               # Override template default
+  score_range: [1, 10]              # For normalization to [0,1]
+  name: judge                       # Reward signal name
+  reward_type: outcome              # outcome, step, format, process
+  weight: 1.0                       # Reward signal weight
+  normalize: true                   # Normalize to [0,1]
+  inference:                        # Judge sampling params
+    temperature: 0.0
+    max_tokens: 512
+```
+
+```python
+from llenvs.core.config import JudgeConfig, ModelConfig
+
+JudgeConfig(
+    model=ModelConfig(backend="openai", model="gpt-4o-mini"),
+    template="correctness",
+    system_prompt=None,
+    score_range=(1.0, 10.0),
+    name="judge",
+    reward_type="outcome",
+    weight=1.0,
+    normalize=True,
+    inference=None,
+)
+```
+
+Per-env overrides eval-level. Set `judge` on `EnvironmentConfig` or `EvalConfig`. Supports a single `JudgeConfig` or a list for multiple judges.
+
+## Environment LLM Configuration
+
+Configure an environment-internal LLM for environments that use an LLM in their transition function (e.g., `DialogueEnvironment`). See the **[Dialogue guide](../guides/dialogue.md)** for full details.
+
+```yaml
+environments:
+  - name: twenty_questions
+    adapter: dialogue
+    params:
+      words: [cat, dog, elephant]
+    env_llm:
+      model:
+        backend: openai
+        model: gpt-4o-mini
+      system_prompt: ""               # Base system prompt (preset provides default)
+      inference:                      # Env LLM sampling params
+        temperature: 0.0
+        max_tokens: 256
+```
+
+```python
+from llenvs.core.config import EnvironmentLLMConfig, ModelConfig, InferenceConfig
+
+EnvironmentLLMConfig(
+    model=ModelConfig(backend="openai", model="gpt-4o-mini"),
+    system_prompt="",                     # Base system prompt
+    inference=InferenceConfig(            # Defaults: temp=0, max_tokens=512
+        temperature=0.0,
+        max_tokens=256,
+    ),
+)
+```
+
+When `env_llm` is set, `EnvironmentFactory.create()` creates a `ModelBackend` and passes it as `env_llm` along with `sampling_params` and `system_prompt` to the adapter.
+
 ## MCP Server Configuration
 
 ```python

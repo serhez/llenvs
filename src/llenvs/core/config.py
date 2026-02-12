@@ -36,6 +36,11 @@ class EnvironmentConfig:
         params: Additional environment-specific parameters.
         container: Optional container configuration. When set, the environment
             runs inside a container or subprocess instead of in-process.
+        judge: Optional LLM judge configuration. A single JudgeConfig or list
+            of JudgeConfigs for multiple judges. Per-env overrides eval-level.
+        env_llm: Optional environment LLM configuration. When set, creates a
+            ModelBackend for environments that use an LLM in their transition
+            function (e.g., DialogueEnvironment).
     """
 
     name: str
@@ -52,6 +57,8 @@ class EnvironmentConfig:
     prompts: dict[str, str] | None = None
     params: dict[str, Any] = field(default_factory=dict)
     container: ContainerConfig | None = None
+    judge: JudgeConfig | list[JudgeConfig] | None = None
+    env_llm: EnvironmentLLMConfig | None = None
 
 
 @dataclass
@@ -94,6 +101,51 @@ class InferenceConfig:
 
 
 @dataclass
+class EnvironmentLLMConfig:
+    """Configuration for an environment-internal LLM.
+
+    Used by environments (like ``DialogueEnvironment``) that call an LLM
+    as part of their transition function to generate observations.
+
+    Attributes:
+        model: Backend configuration for the env LLM.
+        system_prompt: Base system prompt for the env LLM.
+        inference: Sampling parameters. Defaults to temperature=0, max_tokens=512.
+    """
+
+    model: ModelConfig
+    system_prompt: str = ""
+    inference: InferenceConfig | None = None
+
+
+@dataclass
+class JudgeConfig:
+    """Configuration for an LLM-as-a-judge reward function.
+
+    Attributes:
+        model: Judge LLM backend configuration.
+        template: Built-in template name or literal template string.
+        system_prompt: Overrides the template's default system prompt.
+        score_range: Min and max of the scoring scale, for normalization.
+        name: Reward signal name.
+        reward_type: Maps to RewardType enum (outcome, step, format, process).
+        weight: Reward signal weight.
+        normalize: Whether to normalize scores to [0,1] via score_range.
+        inference: Judge sampling parameters. Defaults to temperature=0, max_tokens=512.
+    """
+
+    model: ModelConfig
+    template: str = "correctness"
+    system_prompt: str | None = None
+    score_range: tuple[float, float] = (1.0, 10.0)
+    name: str = "judge"
+    reward_type: str = "outcome"
+    weight: float = 1.0
+    normalize: bool = True
+    inference: InferenceConfig | None = None
+
+
+@dataclass
 class EvalConfig:
     """Complete evaluation configuration.
 
@@ -110,6 +162,8 @@ class EvalConfig:
         batch_size: Maximum trajectories per batch for run_batch(). None
             means all trajectories run in a single lockstep batch.
         save_detailed_results: Whether to save per-episode results.
+        judge: Optional eval-level LLM judge configuration. Applied to all
+            environments unless overridden at the environment level.
     """
 
     environments: list[EnvironmentConfig]
@@ -122,6 +176,92 @@ class EvalConfig:
     limit: int | None = None
     batch_size: int | None = None
     save_detailed_results: bool = True
+    judge: JudgeConfig | list[JudgeConfig] | None = None
+
+    @staticmethod
+    def _parse_judge(data: Any) -> JudgeConfig | list[JudgeConfig] | None:
+        """Parse judge config from dict data."""
+        if data is None:
+            return None
+        if isinstance(data, list):
+            return [EvalConfig._parse_single_judge(d) for d in data]
+        return EvalConfig._parse_single_judge(data)
+
+    @staticmethod
+    def _parse_single_judge(data: dict[str, Any]) -> JudgeConfig:
+        """Parse a single JudgeConfig from dict."""
+        model_data = data.get("model", {})
+        model = ModelConfig(
+            backend=model_data.get("backend", "vllm"),
+            model=model_data.get("model", model_data.get("path", "")),
+            max_concurrency=model_data.get("max_concurrency", 64),
+            params=model_data.get("params", {}),
+        )
+
+        inference = None
+        inference_data = data.get("inference")
+        if inference_data is not None:
+            inference = InferenceConfig(
+                temperature=inference_data.get("temperature", 0.0),
+                max_tokens=inference_data.get("max_tokens", 512),
+                top_p=inference_data.get("top_p", 1.0),
+                top_k=inference_data.get("top_k", 0),
+                stop_sequences=inference_data.get("stop_sequences", []),
+            )
+
+        score_range = data.get("score_range", (1.0, 10.0))
+        if isinstance(score_range, list):
+            score_range = (float(score_range[0]), float(score_range[1]))
+
+        return JudgeConfig(
+            model=model,
+            template=data.get("template", "correctness"),
+            system_prompt=data.get("system_prompt"),
+            score_range=score_range,
+            name=data.get("name", "judge"),
+            reward_type=data.get("reward_type", "outcome"),
+            weight=data.get("weight", 1.0),
+            normalize=data.get("normalize", True),
+            inference=inference,
+        )
+
+    @staticmethod
+    def _judge_to_dict(judge: JudgeConfig | list[JudgeConfig] | None) -> Any:
+        """Serialize judge config to dict."""
+        if judge is None:
+            return None
+        if isinstance(judge, list):
+            return [EvalConfig._single_judge_to_dict(j) for j in judge]
+        return EvalConfig._single_judge_to_dict(judge)
+
+    @staticmethod
+    def _single_judge_to_dict(j: JudgeConfig) -> dict[str, Any]:
+        """Serialize a single JudgeConfig to dict."""
+        d: dict[str, Any] = {
+            "model": {
+                "backend": j.model.backend,
+                "model": j.model.model,
+            },
+            "template": j.template,
+        }
+        if j.system_prompt is not None:
+            d["system_prompt"] = j.system_prompt
+        if j.score_range != (1.0, 10.0):
+            d["score_range"] = list(j.score_range)
+        if j.name != "judge":
+            d["name"] = j.name
+        if j.reward_type != "outcome":
+            d["reward_type"] = j.reward_type
+        if j.weight != 1.0:
+            d["weight"] = j.weight
+        if j.normalize is not True:
+            d["normalize"] = j.normalize
+        if j.inference is not None:
+            d["inference"] = {
+                "temperature": j.inference.temperature,
+                "max_tokens": j.inference.max_tokens,
+            }
+        return d
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> "EvalConfig":
@@ -171,6 +311,40 @@ class EvalConfig:
                     docker_command=container_data.get("docker_command", "docker"),
                 )
 
+            # Parse judge config
+            env_judge = cls._parse_judge(env_data.get("judge"))
+
+            # Parse env_llm config
+            env_llm_data = env_data.get("env_llm")
+            env_llm = None
+            if env_llm_data is not None:
+                env_llm_model_data = env_llm_data.get("model", {})
+                env_llm_model = ModelConfig(
+                    backend=env_llm_model_data.get("backend", "vllm"),
+                    model=env_llm_model_data.get(
+                        "model", env_llm_model_data.get("path", "")
+                    ),
+                    max_concurrency=env_llm_model_data.get("max_concurrency", 64),
+                    params=env_llm_model_data.get("params", {}),
+                )
+                env_llm_inference = None
+                env_llm_inference_data = env_llm_data.get("inference")
+                if env_llm_inference_data is not None:
+                    env_llm_inference = InferenceConfig(
+                        temperature=env_llm_inference_data.get("temperature", 0.0),
+                        max_tokens=env_llm_inference_data.get("max_tokens", 512),
+                        top_p=env_llm_inference_data.get("top_p", 1.0),
+                        top_k=env_llm_inference_data.get("top_k", 0),
+                        stop_sequences=env_llm_inference_data.get(
+                            "stop_sequences", []
+                        ),
+                    )
+                env_llm = EnvironmentLLMConfig(
+                    model=env_llm_model,
+                    system_prompt=env_llm_data.get("system_prompt", ""),
+                    inference=env_llm_inference,
+                )
+
             environments.append(
                 EnvironmentConfig(
                     name=env_data["name"],
@@ -187,6 +361,8 @@ class EvalConfig:
                     prompts=env_data.get("prompts"),
                     params=env_data.get("params", {}),
                     container=container,
+                    judge=env_judge,
+                    env_llm=env_llm,
                 )
             )
 
@@ -220,6 +396,7 @@ class EvalConfig:
             limit=data.get("limit"),
             batch_size=data.get("batch_size"),
             save_detailed_results=data.get("save_detailed_results", True),
+            judge=cls._parse_judge(data.get("judge")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,6 +443,23 @@ class EvalConfig:
                 if env.container.docker_command != "docker":
                     c["docker_command"] = env.container.docker_command
                 d["container"] = c
+            if env.judge is not None:
+                d["judge"] = self._judge_to_dict(env.judge)
+            if env.env_llm is not None:
+                env_llm_d: dict[str, Any] = {
+                    "model": {
+                        "backend": env.env_llm.model.backend,
+                        "model": env.env_llm.model.model,
+                    },
+                }
+                if env.env_llm.system_prompt:
+                    env_llm_d["system_prompt"] = env.env_llm.system_prompt
+                if env.env_llm.inference is not None:
+                    env_llm_d["inference"] = {
+                        "temperature": env.env_llm.inference.temperature,
+                        "max_tokens": env.env_llm.inference.max_tokens,
+                    }
+                d["env_llm"] = env_llm_d
             env_dicts.append(d)
 
         result: dict[str, Any] = {
@@ -292,6 +486,8 @@ class EvalConfig:
         }
         if self.batch_size is not None:
             result["batch_size"] = self.batch_size
+        if self.judge is not None:
+            result["judge"] = self._judge_to_dict(self.judge)
         return result
 
 
@@ -365,6 +561,16 @@ class EnvironmentFactory:
         env_kwargs: dict[str, Any] = {**config.params}
         if config.prompts is not None:
             env_kwargs["prompts"] = config.prompts
+
+        # Wire up environment LLM if configured
+        if config.env_llm is not None:
+            env_kwargs["env_llm"] = BackendFactory.create(config.env_llm.model)
+            env_llm_inference = config.env_llm.inference or InferenceConfig(
+                temperature=0.0, max_tokens=512
+            )
+            env_kwargs["sampling_params"] = create_sampling_params(env_llm_inference)
+            if config.env_llm.system_prompt:
+                env_kwargs["system_prompt"] = config.env_llm.system_prompt
 
         # Use the environment registry to get the environment
         return environment_registry.get(

@@ -55,6 +55,13 @@ from llenvs.adapters.openenv import (
     OpenEnvReward,
     OpenEnvAdapter,
 )
+from llenvs.adapters.dialogue import (
+    DialogueEnvironment,
+    DialogueHidden,
+    DialogueTask,
+    DialogueAdapter,
+    DIALOGUE_PRESETS,
+)
 
 __all__ = [
     # ReasoningGym
@@ -101,6 +108,12 @@ __all__ = [
     "OpenEnvHidden",
     "OpenEnvReward",
     "OpenEnvAdapter",
+    # Dialogue
+    "DialogueEnvironment",
+    "DialogueHidden",
+    "DialogueTask",
+    "DialogueAdapter",
+    "DIALOGUE_PRESETS",
 ]
 
 
@@ -183,6 +196,12 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # openenv-core not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register dialogue adapter (no third-party deps)
+    try:
+        environment_registry.register_adapter(DialogueAdapter())
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

@@ -211,6 +211,33 @@ class RewardFunction(Protocol[HiddenT]):
     ) -> RewardSignal: ...
 ```
 
+### JudgeReward
+
+**Location**: `llenvs/core/judge.py`
+
+LLM-as-a-judge reward function. Calls a judge LLM to score model responses.
+
+```python
+@dataclass
+class JudgeReward:
+    def __init__(
+        self,
+        backend: ModelBackend,
+        template: JudgePromptTemplate | str,   # Template instance or built-in name
+        sampling_params: SamplingParams | None = None,
+        name: str = "judge",
+        reward_type: RewardType = RewardType.OUTCOME,
+        weight: float = 1.0,
+        normalize: bool = True,                # Normalize to [0,1]
+        default_score: float = 0.0,            # Fallback on extraction failure
+        score_extractor: ScoreExtractor | None = None,
+    ) -> None: ...
+
+    def compute(self, state, action, next_state) -> RewardSignal: ...
+```
+
+Built-in templates: `"correctness"`, `"helpfulness"`, `"safety"` (available via `JUDGE_TEMPLATES` dict). See the **[Judge guide](../guides/judge.md)** for details.
+
 ## Trajectory
 
 **Location**: `llenvs/core/trajectory.py`
@@ -367,7 +394,7 @@ from llenvs.core.registry import environment_registry
 
 # List all registered adapters
 adapters = environment_registry.list_adapters()
-# ["reasoning_gym", "huggingface", "gem", "webshop"]
+# ["reasoning_gym", "huggingface", "gem", "webshop", "dialogue", ...]
 
 # List all environments
 all_envs = environment_registry.list_environments()

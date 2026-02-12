@@ -51,8 +51,16 @@ from llenvs.core.config import (
     EnvironmentConfig,
     ModelConfig,
     InferenceConfig,
+    JudgeConfig,
+    EnvironmentLLMConfig,
     EnvironmentFactory,
     BackendFactory,
+)
+from llenvs.core.judge import (
+    JudgeReward,
+    JudgePromptTemplate,
+    JUDGE_TEMPLATES,
+    extract_judge_score,
 )
 from llenvs.core.segmentation import (
     Segmenter,
@@ -138,8 +146,15 @@ __all__ = [
     "EnvironmentConfig",
     "ModelConfig",
     "InferenceConfig",
+    "JudgeConfig",
+    "EnvironmentLLMConfig",
     "EnvironmentFactory",
     "BackendFactory",
+    # Judge
+    "JudgeReward",
+    "JudgePromptTemplate",
+    "JUDGE_TEMPLATES",
+    "extract_judge_score",
     # Segmentation
     "Segmenter",
     "SentenceSegmenter",
