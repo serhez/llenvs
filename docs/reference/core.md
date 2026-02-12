@@ -303,6 +303,64 @@ class Checkpoint(Generic[HiddenT]):
     state: State[HiddenT]
 ```
 
+## Branching
+
+**Location**: `llenvs/core/branching.py`
+
+The branching system enables creating independent environment copies from intermediate states.
+
+### BranchManager
+
+```python
+from llenvs.core.branching import BranchManager
+
+# Auto-resolve best strategy
+mgr = BranchManager.create(env)
+
+# Explicit strategy
+mgr = BranchManager.create(env, strategy="direct")
+mgr = BranchManager.create(env, strategy="process_fork")
+mgr = BranchManager.create(env, strategy="action_replay", env_factory=MyEnv)
+
+# Checkpoint and branch
+with BranchManager.create(env) as mgr:
+    mgr.checkpoint("name", state, actions=(...), reset_options={...})
+    branch_env, branch_state = mgr.branch("name")
+    mgr.release("name")  # or close() / context manager exit
+```
+
+| Method | Description |
+|--------|-------------|
+| `create(env, strategy=None, env_factory=None)` | Factory with auto-resolution |
+| `checkpoint(name, state, actions, reset_options)` | Save named checkpoint |
+| `branch(name)` | Create independent `(env, state)` from checkpoint |
+| `release(name)` | Release one checkpoint's resources |
+| `close()` | Release all checkpoints |
+
+### Strategies
+
+| Strategy | Class | When Used |
+|----------|-------|-----------|
+| `"direct"` | `DirectStrategy` | `supports_branching=True` (pure-function envs) |
+| `"process_fork"` | `ProcessForkStrategy` | Any env on Unix (macOS/Linux) |
+| `"action_replay"` | `ActionReplayStrategy` | Envs with seed + task_index support |
+
+Auto-resolution priority: Direct > ProcessFork > ActionReplay.
+
+### BranchingStrategy Protocol
+
+```python
+class BranchingStrategy(Protocol):
+    @property
+    def name(self) -> str: ...
+    def can_branch(self, env) -> bool: ...
+    def create_checkpoint(self, env, state, actions, reset_options) -> CheckpointHandle: ...
+    def create_branch(self, handle) -> BranchHandle: ...
+    def release_checkpoint(self, handle) -> None: ...
+```
+
+See the **[Branching Guide](../guides/branching.md)** for usage examples and strategy details.
+
 ## Answer Extraction
 
 **Location**: `llenvs/core/extraction.py`

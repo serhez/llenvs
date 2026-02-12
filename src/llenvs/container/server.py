@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
+import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -61,6 +65,7 @@ class EnvironmentHandler(BaseHTTPRequestHandler):
             "/reset": self._handle_reset,
             "/step": self._handle_step,
             "/compute_rewards": self._handle_compute_rewards,
+            "/fork": self._handle_fork,
         }
         handler = routes.get(self.path)
         if handler is None:
@@ -141,6 +146,79 @@ class EnvironmentHandler(BaseHTTPRequestHandler):
         next_state = deserialize_state_typed(body["next_state"], cls.hidden_type)
         rewards = self.environment.compute_rewards(state, action, next_state)
         self._send_json(serialize_reward_bundle(rewards))
+
+    def _handle_fork(self, body: dict[str, Any]) -> None:
+        """Fork the current server process to create an independent copy.
+
+        The child inherits all environment state via ``os.fork()`` COW
+        semantics and listens on a new port. The parent returns the child's
+        URL and PID.
+
+        Only available on Unix (macOS/Linux).
+        """
+        if sys.platform == "win32":
+            raise RuntimeError("fork is not supported on Windows")
+
+        # Find a free port for the child
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            child_port = s.getsockname()[1]
+
+        pid = os.fork()
+        if pid == 0:
+            # ---- Child process ----
+            try:
+                # Close the parent's server socket so the parent can
+                # continue serving without interference.
+                parent_server = self.server
+                parent_server.server_close()
+
+                # Create a new handler class bound to the same environment
+                # (inherited via fork, independent copy-on-write).
+                cls = type(self)
+                child_handler = type(
+                    "ForkHandler",
+                    (EnvironmentHandler,),
+                    {
+                        "environment": cls.environment,
+                        "hidden_type": cls.hidden_type,
+                    },
+                )
+                child_server = HTTPServer(("127.0.0.1", child_port), child_handler)
+                child_server.serve_forever()
+            except Exception:
+                os._exit(1)
+            os._exit(0)
+        else:
+            # ---- Parent process ----
+            child_url = f"http://127.0.0.1:{child_port}"
+
+            # Wait for child to become healthy
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline:
+                try:
+                    import http.client
+                    conn = http.client.HTTPConnection("127.0.0.1", child_port, timeout=1)
+                    conn.request("GET", "/health")
+                    resp = conn.getresponse()
+                    resp.read()
+                    conn.close()
+                    if resp.status == 200:
+                        break
+                except Exception:
+                    time.sleep(0.05)
+            else:
+                # Timed out — kill child and report error
+                os.kill(pid, 9)
+                try:
+                    os.waitpid(pid, 0)
+                except ChildProcessError:
+                    pass
+                raise RuntimeError(
+                    f"Forked child on port {child_port} did not become healthy"
+                )
+
+            self._send_json({"url": child_url, "pid": pid})
 
     # ------------------------------------------------------------------
     # HTTP helpers

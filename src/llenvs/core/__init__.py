@@ -76,6 +76,15 @@ from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
     SegmentedHidden,
 )
+from llenvs.core.branching import (
+    BranchManager,
+    BranchHandle,
+    BranchingStrategy,
+    CheckpointHandle,
+    DirectStrategy,
+    ActionReplayStrategy,
+    ProcessForkStrategy,
+)
 from llenvs.integrations.scoring import ScoringResult
 from llenvs.integrations.dataset_provider import TaskItem
 from llenvs.integrations.token_mask import TrajectoryMasker, MaskedTrajectory, TokenSpan
@@ -166,6 +175,14 @@ __all__ = [
     "default_segment_parser",
     "SegmentedEnvironment",
     "SegmentedHidden",
+    # Branching
+    "BranchManager",
+    "BranchHandle",
+    "BranchingStrategy",
+    "CheckpointHandle",
+    "DirectStrategy",
+    "ActionReplayStrategy",
+    "ProcessForkStrategy",
     # Integrations
     "ScoringResult",
     "TaskItem",

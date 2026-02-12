@@ -47,7 +47,7 @@ result = env.step(state, action)  # state is not modified
 
 Environments with `spec.supports_branching == True` (single-turn adapters, GEM via snapshot/restore, Dialogue via message reconstruction) are genuine pure functions — any state can be snapshotted and resumed from, and multiple branches can diverge from the same checkpoint.
 
-Multi-turn adapters wrapping stateful backends (WebShop, AgentGym, OpenEnv, verifiers tool) have `supports_branching=False` and enforce sequential continuity: only the most recent state from `reset()`/`step()` is valid. Passing a stale state raises `NotImplementedError`.
+Multi-turn adapters wrapping stateful backends (WebShop, AgentGym, OpenEnv, verifiers tool) have `supports_branching=False` and enforce sequential continuity: only the most recent state from `reset()`/`step()` is valid. Passing a stale state raises `NotImplementedError`. However, the `BranchManager` system provides universal branching for all environments via a tiered strategy system: `DirectStrategy` (zero-cost for pure-function envs), `ProcessForkStrategy` (via `os.fork()` for mutable-backend envs on Unix), and `ActionReplayStrategy` (replays actions on a fresh env for deterministic envs).
 
 ### OpenEnv — Client-Server with Docker Isolation
 
@@ -72,8 +72,8 @@ The environment *drives* the conversation rather than being stepped through exte
 
 | Property | llenvs | OpenEnv | verifiers |
 |----------|--------|---------|-----------|
-| Tree search / MCTS from any state | On branchable environments | Not possible (server-side state) | Not possible (env owns loop) |
-| Trajectory branching / checkpointing | On branchable environments | Not supported | Not supported |
+| Tree search / MCTS from any state | All environments (via branching strategies) | Not possible (server-side state) | Not possible (env owns loop) |
+| Trajectory branching / checkpointing | All environments (Direct, ProcessFork, or ActionReplay) | Not supported | Not supported |
 | Custom sampling strategies mid-episode | Full control | Agent brings own | Limited (env calls model) |
 | Training-production environment parity | Not a goal | Core design goal | Not a goal |
 | Sandboxed execution | Not built-in | Docker isolation | Prime Sandboxes |

@@ -20,6 +20,7 @@ from llenvs.core.extraction import (
 )
 from llenvs.core.config import EvalConfig
 from llenvs.core.judge import JudgeReward
+from llenvs.core.branching import BranchManager
 from llenvs.integrations.scoring import Scorer, ScoringResult
 from llenvs.integrations.dataset_provider import DatasetProvider, TaskItem
 
@@ -54,6 +55,8 @@ __all__ = [
     "EvalConfig",
     # Judge
     "JudgeReward",
+    # Branching
+    "BranchManager",
     # Integrations
     "Scorer",
     "ScoringResult",

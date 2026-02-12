@@ -41,6 +41,9 @@ class EnvironmentConfig:
         env_llm: Optional environment LLM configuration. When set, creates a
             ModelBackend for environments that use an LLM in their transition
             function (e.g., DialogueEnvironment).
+        branching_strategy: Branching strategy preference for ``BranchManager``.
+            One of ``"direct"``, ``"action_replay"``, ``"process_fork"``, or
+            ``None`` for auto-resolution.
     """
 
     name: str
@@ -59,6 +62,7 @@ class EnvironmentConfig:
     container: ContainerConfig | None = None
     judge: JudgeConfig | list[JudgeConfig] | None = None
     env_llm: EnvironmentLLMConfig | None = None
+    branching_strategy: str | None = None
 
 
 @dataclass
@@ -363,6 +367,7 @@ class EvalConfig:
                     container=container,
                     judge=env_judge,
                     env_llm=env_llm,
+                    branching_strategy=env_data.get("branching_strategy"),
                 )
             )
 
@@ -460,6 +465,8 @@ class EvalConfig:
                         "max_tokens": env.env_llm.inference.max_tokens,
                     }
                 d["env_llm"] = env_llm_d
+            if env.branching_strategy is not None:
+                d["branching_strategy"] = env.branching_strategy
             env_dicts.append(d)
 
         result: dict[str, Any] = {

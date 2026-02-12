@@ -546,6 +546,29 @@ EnvironmentLLMConfig(
 
 When `env_llm` is set, `EnvironmentFactory.create()` creates a `ModelBackend` and passes it as `env_llm` along with `sampling_params` and `system_prompt` to the adapter.
 
+## Branching Configuration
+
+Set a branching strategy preference per environment:
+
+```yaml
+environments:
+  - name: webshop
+    adapter: webshop
+    branching_strategy: process_fork   # direct, action_replay, process_fork, or null
+```
+
+```python
+from llenvs.core.config import EnvironmentConfig
+
+config = EnvironmentConfig(
+    name="webshop",
+    adapter="webshop",
+    branching_strategy="process_fork",
+)
+```
+
+When `None` (default), `BranchManager.create()` auto-resolves the best strategy based on environment capabilities. See the **[Branching Guide](../guides/branching.md)** for details.
+
 ## MCP Server Configuration
 
 ```python

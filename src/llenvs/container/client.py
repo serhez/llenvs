@@ -183,6 +183,15 @@ class ContainerEnvironment:
             self._length = data["length"]
         return self._length
 
+    def fork(self) -> tuple[str, int]:
+        """Fork the remote server process, creating an independent copy.
+
+        Returns:
+            Tuple of (child_url, child_pid).
+        """
+        data = self._request("POST", "/fork", {})
+        return data["url"], data["pid"]
+
     def close(self) -> None:
         """Close the HTTP connection."""
         if self._conn is not None:
