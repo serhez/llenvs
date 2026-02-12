@@ -111,15 +111,18 @@ For `ToolEnv`, the adapter converts OpenAI-format tool schemas to llenvs `ToolDe
 
 ### Environment Capabilities
 
-| Feature | Supported |
-|---|---|
-| `__len__` | Yes (dataset size) |
-| `task_index` | Yes (dataset index) |
-| `seed` | No |
-| `compute_rewards` | Yes (via rubric) |
-| `Scorer` / `DatasetProvider` | Yes (single-turn) |
-| System prompt | Yes (from `env.system_prompt`) |
-| Answer extraction | Optional (pass `answer_extractor`) |
+| Feature | SingleTurn | Tool |
+|---|---|---|
+| `__len__` | Yes | Yes |
+| `task_index` | Yes | Yes |
+| `seed` | No | No |
+| `compute_rewards` | Yes | Yes |
+| `Scorer` / `DatasetProvider` | Yes | No (multi-turn) |
+| `supports_branching` | Yes | No (tool callables may have side effects) |
+| System prompt | Yes | Yes |
+| Answer extraction | Optional | Optional |
+
+`VerifiersToolEnvironment` has `supports_branching=False` because tool callables may mutate external state. Passing a stale state raises `NotImplementedError`.
 
 ## Limitations
 

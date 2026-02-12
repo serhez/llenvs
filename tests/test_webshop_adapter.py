@@ -200,6 +200,17 @@ class TestWebShopEnvironment:
         assert env.spec.adapter == "webshop"
         assert env.spec.is_multi_turn is True
         assert env.spec.max_steps == 15
+        assert env.spec.supports_branching is False
+
+    def test_step_raises_on_stale_state(self, mock_webshop_env):
+        """Replaying the initial state after a step raises NotImplementedError."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state_0, _ = env.reset()
+
+        env.step(state_0, Action(text="search[headphones]"))
+
+        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+            env.step(state_0, Action(text="search[headphones]"))
 
     def test_reset(self, mock_webshop_env):
         """Test environment reset."""

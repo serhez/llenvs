@@ -9,7 +9,7 @@ The two most comparable libraries are **OpenEnv** (Meta + HuggingFace) and **ver
 | | llenvs | OpenEnv | verifiers |
 |---|---|---|---|
 | **Core idea** | Unified eval & training lib with built-in inference | Isolated sandbox environments for agentic RL | Environment-as-package with OpenAI-protocol inference |
-| **Architecture** | In-process, stateless MDP | Client-server, Docker-isolated | In-process, rollout-based |
+| **Architecture** | In-process, explicit-state MDP | Client-server, Docker-isolated | In-process, rollout-based |
 | **Backing** | Internal | Meta + HuggingFace | PrimeIntellect |
 | **Repo** | — | [meta-pytorch/OpenEnv](https://github.com/meta-pytorch/OpenEnv) | [PrimeIntellect-ai/verifiers](https://github.com/PrimeIntellect-ai/verifiers) |
 
@@ -37,15 +37,17 @@ llenvs is the only library where `pip install` and a local model path are suffic
 
 The three libraries use fundamentally different paradigms.
 
-### llenvs — Stateless MDP
+### llenvs — Explicit-State MDP
 
-`step()` is a pure function. State is immutable and passed explicitly:
+State is immutable and passed explicitly to `step()`:
 
 ```python
 result = env.step(state, action)  # state is not modified
 ```
 
-This enables branching, checkpointing, and parallel exploration by construction. Any state can be snapshotted and resumed from, and multiple branches can diverge from the same checkpoint.
+Environments with `spec.supports_branching == True` (single-turn adapters, GEM via snapshot/restore, Dialogue via message reconstruction) are genuine pure functions — any state can be snapshotted and resumed from, and multiple branches can diverge from the same checkpoint.
+
+Multi-turn adapters wrapping stateful backends (WebShop, AgentGym, OpenEnv, verifiers tool) have `supports_branching=False` and enforce sequential continuity: only the most recent state from `reset()`/`step()` is valid. Passing a stale state raises `NotImplementedError`.
 
 ### OpenEnv — Client-Server with Docker Isolation
 
@@ -70,8 +72,8 @@ The environment *drives* the conversation rather than being stepped through exte
 
 | Property | llenvs | OpenEnv | verifiers |
 |----------|--------|---------|-----------|
-| Tree search / MCTS from any state | Native | Not possible (server-side state) | Not possible (env owns loop) |
-| Trajectory branching / checkpointing | Native | Not supported | Not supported |
+| Tree search / MCTS from any state | On branchable environments | Not possible (server-side state) | Not possible (env owns loop) |
+| Trajectory branching / checkpointing | On branchable environments | Not supported | Not supported |
 | Custom sampling strategies mid-episode | Full control | Agent brings own | Limited (env calls model) |
 | Training-production environment parity | Not a goal | Core design goal | Not a goal |
 | Sandboxed execution | Not built-in | Docker isolation | Prime Sandboxes |
@@ -247,7 +249,7 @@ llenvs's `TrajectoryMasker` — providing per-token source attribution (which to
 
 Each library occupies a distinct point in the design space:
 
-**llenvs** is a **research-oriented evaluation and training library** with integrated inference. Its stateless environment architecture, built-in backends, answer extraction system, segmented environments, and token-level trajectory masking are aimed at researchers who need fine-grained control over the full pipeline — from sampling to scoring — without orchestrating external services. The tradeoff is a smaller environment catalog and no sandboxed execution.
+**llenvs** is a **research-oriented evaluation and training library** with integrated inference. Its explicit-state environment architecture (with full branching on supported environments), built-in backends, answer extraction system, segmented environments, and token-level trajectory masking are aimed at researchers who need fine-grained control over the full pipeline — from sampling to scoring — without orchestrating external services. The tradeoff is a smaller environment catalog and no sandboxed execution.
 
 **OpenEnv** is an **environment creation and deployment standard** with a production-grade isolation model. Its client-server architecture, Docker sandboxing, MCP-native tools, and simulation/production duality target the workflow of building, training on, and deploying agentic environments. The tradeoff is that inference, RL training, and answer parsing are all external concerns.
 

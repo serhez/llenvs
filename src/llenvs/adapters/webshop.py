@@ -13,7 +13,7 @@ import uuid
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec
+from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
 
 
 @dataclass(frozen=True)
@@ -142,6 +142,7 @@ class WebShopEnvironment:
         self._prompts = {**DEFAULT_WEBSHOP_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
+        self._state_tracker = _StateContinuityTracker()
 
         # Track current instruction for observation building
         self._current_instruction: str = ""
@@ -301,6 +302,7 @@ class WebShopEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        self._state_tracker.track(state)
 
         return state, {
             "task_index": task_index,
@@ -324,6 +326,8 @@ class WebShopEnvironment:
         Returns:
             StepResult containing next state, rewards, and done flags.
         """
+        self._state_tracker.validate(state, "WebShopEnvironment")
+
         # Step WebShop environment
         raw_obs, reward, done, info = self._env.step(action.text)
 
@@ -369,6 +373,7 @@ class WebShopEnvironment:
 
         # Compute rewards
         rewards = self.compute_rewards(state, action, next_state)
+        self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,

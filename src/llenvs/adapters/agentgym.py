@@ -21,7 +21,7 @@ import uuid
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec
+from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +147,7 @@ class AgentGymEnvironment:
         self._native_rewards: tuple[RewardFunction, ...] = (AgentGymReward(),)
         self._extra_rewards = extra_rewards
         self._prompts: dict[str, str] = dict(prompts) if prompts else {}
+        self._state_tracker = _StateContinuityTracker()
 
     def __len__(self) -> int:
         """Number of tasks in the dataset."""
@@ -280,6 +281,7 @@ class AgentGymEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        self._state_tracker.track(state)
         return state, info
 
     def step(
@@ -287,6 +289,7 @@ class AgentGymEnvironment:
         state: State[AgentGymHidden],
         action: Action,
     ) -> StepResult[AgentGymHidden]:
+        self._state_tracker.validate(state, "AgentGymEnvironment")
         step_output = self._client.step(action.text)
 
         next_step = state.hidden.episode_step + 1
@@ -328,6 +331,7 @@ class AgentGymEnvironment:
         )
 
         rewards = self.compute_rewards(state, action, next_state)
+        self._state_tracker.track(next_state)
 
         # Build step info dict
         step_info: dict[str, Any] = {

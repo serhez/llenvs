@@ -177,6 +177,23 @@ class TestAgentGymEnvironment:
         )
         assert env.spec.metadata["action_format"] == "function_calling"
 
+    def test_spec_supports_branching_false(self):
+        env = self._make_env()
+        assert env.spec.supports_branching is False
+
+    # -- stale-state detection ------------------------------------------------
+
+    def test_step_raises_on_stale_state(self):
+        """Replaying the initial state after a step raises NotImplementedError."""
+        client = _make_mock_client(step_done=False)
+        env = self._make_env(client=client)
+        state_0, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state_0, Action(text="go north"))
+
+        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+            env.step(state_0, Action(text="go north"))
+
     # -- __len__ --------------------------------------------------------------
 
     def test_len(self):

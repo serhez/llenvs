@@ -281,6 +281,7 @@ class TestVerifiersSingleTurnEnvironment:
         assert spec.supports_task_index is True
         assert spec.supports_len is True
         assert spec.supports_seed is False
+        assert spec.supports_branching is True
 
     def test_prompts_empty(self):
         env = self._make_env()
@@ -553,6 +554,20 @@ class TestVerifiersToolEnvironment:
     def test_spec_max_steps(self):
         env = self._make_env()
         assert env.spec.max_steps == 10
+
+    def test_spec_supports_branching_false(self):
+        env = self._make_env()
+        assert env.spec.supports_branching is False
+
+    def test_step_raises_on_stale_state(self):
+        """Replaying the initial state after a step raises NotImplementedError."""
+        env = self._make_env()
+        state_0, _ = env.reset(options={"task_index": 0})
+
+        env.step(state_0, Action(text="Let me think..."))
+
+        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+            env.step(state_0, Action(text="Let me think..."))
 
     def test_available_tools(self):
         env = self._make_env()

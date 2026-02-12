@@ -294,6 +294,7 @@ class TestOpenEnvEnvironment:
         assert spec.supports_len is False
         assert spec.supports_seed is False
         assert spec.is_multi_turn is True
+        assert spec.supports_branching is False
 
     def test_prompts_empty(self):
         env = self._make_env()
@@ -307,6 +308,24 @@ class TestOpenEnvEnvironment:
         env = self._make_env()
         assert len(env.reward_functions) == 1
         assert env.reward_functions[0].name == "openenv_native"
+
+    def test_step_raises_on_stale_state(self):
+        """Replaying the initial state after a step raises NotImplementedError."""
+        client = MockSyncClient(
+            observations=[
+                {"text": "Welcome"},
+                {"text": "Moved north"},
+                {"text": "Moved south"},
+            ],
+            rewards=[None, 0.0, 0.0],
+        )
+        env = self._make_env(client=client)
+        state_0, _ = env.reset()
+
+        env.step(state_0, Action(text="go north"))
+
+        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+            env.step(state_0, Action(text="go north"))
 
     def test_reset(self):
         client = MockSyncClient(
@@ -510,6 +529,17 @@ class TestOpenEnvToolEnvironment:
         assert spec.supports_task_index is False
         assert spec.supports_len is False
         assert spec.supports_seed is False
+        assert spec.supports_branching is False
+
+    def test_step_raises_on_stale_state(self):
+        """Replaying the initial state after a step raises NotImplementedError."""
+        env = self._make_env()
+        state_0, _ = env.reset()
+
+        env.step(state_0, Action(text="go north"))
+
+        with pytest.raises(NotImplementedError, match="supports_branching=False"):
+            env.step(state_0, Action(text="go north"))
 
 
 # ── Adapter tests ───────────────────────────────────────────────────

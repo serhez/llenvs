@@ -546,6 +546,7 @@ class TestGemEnvironmentSpec:
         assert spec.is_multi_turn is True
         assert spec.observation_type == Observation
         assert spec.action_type == Action
+        assert spec.supports_branching is True
 
     def test_spec_single_turn(self, mock_single_turn_env):
         """Test spec for single-turn environment."""
@@ -559,6 +560,7 @@ class TestGemEnvironmentSpec:
         assert spec.name == "math:GSM8K"
         assert spec.max_steps == 1
         assert spec.is_multi_turn is False
+        assert spec.supports_branching is True
 
 
 class TestRewardBundle:

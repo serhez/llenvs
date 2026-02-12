@@ -287,6 +287,7 @@ class GemEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=self._is_multi_turn,
+            supports_branching=True,
             metadata={"env_id": self._env_id},
         )
 
@@ -846,6 +847,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
+            supports_branching=True,
             metadata={"env_id": self._env_id, "tools": self._tool_types},
         )
 

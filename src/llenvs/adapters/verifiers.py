@@ -22,7 +22,7 @@ from llenvs.core.reward import (
     RewardType,
     RewardFunction,
 )
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec, _StateContinuityTracker
 from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.tools import (
     ToolCall,
@@ -299,6 +299,7 @@ class VerifiersSingleTurnEnvironment:
             supports_task_index=True,
             supports_len=True,
             supports_seed=False,
+            supports_branching=True,
             metadata={
                 "dataset_size": len(self._dataset),
                 "env_id": self._env_id,
@@ -498,6 +499,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
             *self._tool_monitoring_rewards(),
         )
         self._extra_rewards = extra_rewards
+        self._state_tracker = _StateContinuityTracker()
 
     @property
     def system_prompt(self) -> str | None:
@@ -587,6 +589,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
             available_tools=self._tools,
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        self._state_tracker.track(state)
 
         info: dict[str, Any] = {
             "task_index": task_index,
@@ -601,6 +604,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
         state: State[VerifiersToolHidden],
         action: Action,
     ) -> StepResult[VerifiersToolHidden]:
+        self._state_tracker.validate(state, "VerifiersToolEnvironment")
         next_step = state.hidden.episode_step + 1
         truncated = next_step >= self._max_steps
 
@@ -666,6 +670,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
             hidden=next_hidden,
             metadata=next_metadata,
         )
+        self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,

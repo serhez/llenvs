@@ -132,10 +132,18 @@ class EnvironmentSpec:
     supports_task_index: bool = True   # Supports task_index in reset options
     supports_len: bool = True          # Supports __len__
     supports_seed: bool = True         # Supports seed in reset
+    supports_branching: bool = False   # Whether step() accepts any prior state
     metadata: dict[str, Any]
 ```
 
 Capability flags allow integrations to check compatibility at init time. For example, `Scorer` requires `supports_task_index=True` and `DatasetProvider` requires both `supports_task_index` and `supports_len`.
+
+| Flag | Description |
+|------|-------------|
+| `supports_task_index` | `reset(options={"task_index": i})` selects a specific task |
+| `supports_len` | `len(env)` returns the number of tasks |
+| `supports_seed` | `reset(seed=...)` seeds the environment |
+| `supports_branching` | Whether `step()` can be called with any prior state (`True`) or only the most recent state from `reset()`/`step()` (`False`). Non-branchable environments raise `NotImplementedError` on stale states. |
 
 ### ContainerEnvironment
 

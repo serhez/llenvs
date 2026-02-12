@@ -45,6 +45,7 @@ class TestReasoningGymEnvironment:
         assert spec.observation_type == Observation
         assert spec.action_type == Action
         assert spec.metadata["dataset_size"] == 3
+        assert spec.supports_branching is True
 
     def test_reward_functions_default_native_only(self, mock_dataset):
         """Test default reward functions are native-only."""

@@ -310,6 +310,7 @@ class HuggingFaceEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=False,
+            supports_branching=True,
             metadata={
                 "dataset_size": len(self._dataset),
                 "split": self._split,

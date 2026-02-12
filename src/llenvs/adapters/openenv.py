@@ -20,7 +20,7 @@ from llenvs.core.reward import (
     RewardType,
     RewardFunction,
 )
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.environment import Environment, StepResult, EnvironmentSpec, _StateContinuityTracker
 from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.tools import (
     ToolCall,
@@ -198,6 +198,7 @@ class OpenEnvEnvironment:
 
         self._native_rewards: tuple[RewardFunction, ...] = (OpenEnvReward(),)
         self._extra_rewards = extra_rewards
+        self._state_tracker = _StateContinuityTracker()
 
     @property
     def prompts(self) -> dict[str, str]:
@@ -254,6 +255,7 @@ class OpenEnvEnvironment:
 
         observation = Observation(prompt=obs_text)
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        self._state_tracker.track(state)
 
         info: dict[str, Any] = {
             "env_name": self._env_name,
@@ -267,6 +269,7 @@ class OpenEnvEnvironment:
         state: State[OpenEnvHidden],
         action: Action,
     ) -> StepResult[OpenEnvHidden]:
+        self._state_tracker.validate(state, "OpenEnvEnvironment")
         formatted = self._action_format(action.text)
         step_result = self._client.step(formatted)
 
@@ -326,6 +329,7 @@ class OpenEnvEnvironment:
         )
 
         rewards = self.compute_rewards(state, action, next_state)
+        self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,
@@ -378,6 +382,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
         )
         self._extra_rewards = extra_rewards
         self._tools: tuple[ToolDefinition, ...] = ()
+        self._state_tracker = _StateContinuityTracker()
 
     @property
     def prompts(self) -> dict[str, str]:
@@ -446,6 +451,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
             available_tools=self._tools,
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        self._state_tracker.track(state)
 
         info: dict[str, Any] = {
             "env_name": self._env_name,
@@ -495,6 +501,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
         state: State[OpenEnvHidden],
         action: Action,
     ) -> StepResult[OpenEnvHidden]:
+        self._state_tracker.validate(state, "OpenEnvToolEnvironment")
         next_step = state.hidden.episode_step + 1
 
         # Execute tool calls if present
@@ -559,6 +566,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
         )
 
         rewards = self.compute_rewards(state, action, next_state)
+        self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,

@@ -1,14 +1,15 @@
 """Environment protocol and related types.
 
 The Environment protocol defines the MDP interface for evaluation environments.
-Key design: step() takes explicit state (pure function) rather than maintaining
-internal state, enabling branching and parallel exploration.
+Key design: step() takes explicit state rather than maintaining internal state.
+Environments with ``supports_branching=True`` are genuine pure functions;
+others enforce sequential continuity and raise on stale states.
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from llenvs.core.state import Action, Observation, State
+from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.reward import RewardBundle, RewardFunction
 
 HiddenT = TypeVar("HiddenT")
@@ -49,6 +50,10 @@ class EnvironmentSpec:
         observation_type: Type hint for observations.
         action_type: Type hint for actions.
         is_multi_turn: Whether the environment supports multi-turn interaction.
+        supports_branching: Whether ``step()`` can be called with any prior
+            state (True) or only the most recent state from ``reset()``/
+            ``step()`` (False). Non-branchable environments raise
+            ``NotImplementedError`` on stale states.
         metadata: Additional environment-specific metadata.
     """
 
@@ -61,18 +66,78 @@ class EnvironmentSpec:
     supports_task_index: bool = True
     supports_len: bool = True
     supports_seed: bool = True
+    supports_branching: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class _StateContinuityTracker:
+    """Validates that stateful environments receive states in order.
+
+    Stateful adapters (those wrapping mutable backends) compose with this
+    tracker. It records the expected ``(episode_id, step)`` after each
+    ``reset()``/``step()`` and raises ``NotImplementedError`` when a stale
+    or branched state is passed.
+
+    Usage in adapters::
+
+        self._state_tracker = _StateContinuityTracker()
+
+        # At end of reset():
+        self._state_tracker.track(state)
+
+        # At start of step():
+        self._state_tracker.validate(state, "MyEnvironment")
+
+        # At end of step():
+        self._state_tracker.track(result.next_state)
+    """
+
+    def __init__(self) -> None:
+        self._expected_episode_id: str | None = None
+        self._expected_step: int | None = None
+
+    def track(self, state: "State") -> None:
+        """Record the expected state after reset/step."""
+        self._expected_episode_id = state.metadata.episode_id
+        self._expected_step = state.metadata.step
+
+    def validate(self, state: "State", env_name: str = "") -> None:
+        """Raise if *state* doesn't match what was last tracked.
+
+        No-op if ``track()`` has never been called (allows pre-reset use).
+
+        Raises:
+            NotImplementedError: On episode_id or step mismatch.
+        """
+        if self._expected_episode_id is None:
+            return  # No tracking yet
+
+        if state.metadata.episode_id != self._expected_episode_id:
+            raise NotImplementedError(
+                f"{env_name} has supports_branching=False and cannot step "
+                f"from a state belonging to a different episode "
+                f"(expected episode {self._expected_episode_id!r}, "
+                f"got {state.metadata.episode_id!r}). "
+                f"Call reset() to start a new episode."
+            )
+
+        if state.metadata.step != self._expected_step:
+            raise NotImplementedError(
+                f"{env_name} has supports_branching=False and cannot step "
+                f"from a stale state (expected step {self._expected_step}, "
+                f"got {state.metadata.step}). "
+                f"Only the most recent state from reset()/step() is valid."
+            )
 
 
 @runtime_checkable
 class Environment(Protocol[HiddenT]):
     """Protocol for MDP-style evaluation environments.
 
-    Environments are stateless - all state is passed explicitly to step().
-    This enables:
-    - Safe checkpointing and branching
-    - Parallel exploration of multiple trajectories
-    - Deterministic replay
+    State is passed explicitly to ``step()``. Environments with
+    ``spec.supports_branching == True`` are genuine pure functions
+    supporting tree search and branching. Others enforce sequential
+    continuity and raise on stale states.
 
     Type Parameters:
         HiddenT: Hidden state type (for reward computation).
@@ -137,8 +202,10 @@ class Environment(Protocol[HiddenT]):
     ) -> StepResult[HiddenT]:
         """Take an action from the given state.
 
-        This is a pure function - the same state and action always
-        produce the same result.
+        On environments with ``supports_branching=True``, this is a pure
+        function — the same state and action always produce the same
+        result. Non-branchable environments raise ``NotImplementedError``
+        if *state* is not the most recent state from ``reset()``/``step()``.
 
         Args:
             state: Current state.
