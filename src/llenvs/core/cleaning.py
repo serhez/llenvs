@@ -22,6 +22,22 @@ def strip_special_tokens(text: str) -> str:
     return _SPECIAL_TOKEN_PATTERN.sub("", text)
 
 
+_THINKING_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
+_UNCLOSED_THINKING_PATTERN = re.compile(r"<think>.*$", re.DOTALL)
+
+
+def strip_thinking_tokens(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks from text.
+
+    Handles both closed blocks and unclosed blocks (from MAX_TOKENS truncation).
+    """
+    # First remove closed blocks
+    text = _THINKING_BLOCK_PATTERN.sub("", text)
+    # Then remove any remaining unclosed block
+    text = _UNCLOSED_THINKING_PATTERN.sub("", text)
+    return text
+
+
 # ---------------------------------------------------------------------------
 # Post-cleaners (extracted answer -> cleaned answer)
 # ---------------------------------------------------------------------------
@@ -82,6 +98,7 @@ def strip_latex_dollars(text: str) -> str:
 
 PRE_CLEANERS: dict[str, Callable[[str], str]] = {
     "strip_special_tokens": strip_special_tokens,
+    "strip_thinking_tokens": strip_thinking_tokens,
 }
 
 POST_CLEANERS: dict[str, Callable[[str], str]] = {

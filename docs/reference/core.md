@@ -440,6 +440,7 @@ answer, meta = extractor.extract("<answer>42.</answer><|endoftext|>")
 | Name | Default | Description |
 |------|---------|-------------|
 | `strip_special_tokens` | Yes | Remove `<\|endoftext\|>`, `<pad>`, `</s>`, `<\|im_end\|>`, `<\|im_start\|>`, `<s>` |
+| `strip_thinking_tokens` | No | Remove `<think>...</think>` reasoning blocks (handles unclosed blocks from truncation) |
 
 **Post-cleaners** (extracted answer → cleaned answer):
 

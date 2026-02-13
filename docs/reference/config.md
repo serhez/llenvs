@@ -351,7 +351,7 @@ Semantics:
 - **Empty list** (`[]`) — disable cleaning entirely
 - **Explicit list** — use exactly those cleaners
 
-Available pre-cleaners: `strip_special_tokens`
+Available pre-cleaners: `strip_special_tokens`, `strip_thinking_tokens`
 
 Available post-cleaners: `strip_trailing_punctuation`, `strip_surrounding_quotes`, `strip_latex_dollars`
 

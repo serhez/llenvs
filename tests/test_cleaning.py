@@ -3,6 +3,7 @@
 import pytest
 from llenvs.core.cleaning import (
     strip_special_tokens,
+    strip_thinking_tokens,
     strip_trailing_punctuation,
     strip_surrounding_quotes,
     strip_latex_dollars,
@@ -56,6 +57,56 @@ class TestStripSpecialTokens:
 
     def test_empty_string(self):
         assert strip_special_tokens("") == ""
+
+
+class TestStripThinkingTokens:
+    """Tests for strip_thinking_tokens pre-cleaner."""
+
+    def test_closed_block_removed(self):
+        result = strip_thinking_tokens("before<think>reasoning here</think>after")
+        assert result == "beforeafter"
+
+    def test_unclosed_block_removed(self):
+        result = strip_thinking_tokens("answer text<think>truncated reasoning")
+        assert result == "answer text"
+
+    def test_multiple_closed_blocks(self):
+        result = strip_thinking_tokens(
+            "<think>first</think>middle<think>second</think>end"
+        )
+        assert result == "middleend"
+
+    def test_nested_content_removed(self):
+        """Newlines, code, and other content inside think block removed (DOTALL)."""
+        result = strip_thinking_tokens(
+            "hello<think>\nline1\nline2\ndef foo():\n    pass\n</think>world"
+        )
+        assert result == "helloworld"
+
+    def test_no_think_tokens_passthrough(self):
+        assert strip_thinking_tokens("hello world") == "hello world"
+
+    def test_empty_string_passthrough(self):
+        assert strip_thinking_tokens("") == ""
+
+    def test_mixed_closed_and_unclosed(self):
+        """Closed block + remaining text + unclosed block at end."""
+        result = strip_thinking_tokens(
+            "<think>closed</think>answer<think>unclosed reasoning"
+        )
+        assert result == "answer"
+
+    def test_think_block_at_start(self):
+        result = strip_thinking_tokens("<think>reasoning</think>the answer is 42")
+        assert result == "the answer is 42"
+
+    def test_think_block_in_middle(self):
+        result = strip_thinking_tokens("start<think>reasoning</think>end")
+        assert result == "startend"
+
+    def test_think_block_at_end(self):
+        result = strip_thinking_tokens("the answer is 42<think>reasoning</think>")
+        assert result == "the answer is 42"
 
 
 class TestStripTrailingPunctuation:
@@ -300,6 +351,8 @@ class TestCleanerRegistries:
     def test_pre_cleaners_registry(self):
         assert "strip_special_tokens" in PRE_CLEANERS
         assert PRE_CLEANERS["strip_special_tokens"] is strip_special_tokens
+        assert "strip_thinking_tokens" in PRE_CLEANERS
+        assert PRE_CLEANERS["strip_thinking_tokens"] is strip_thinking_tokens
 
     def test_post_cleaners_registry(self):
         assert "strip_trailing_punctuation" in POST_CLEANERS
