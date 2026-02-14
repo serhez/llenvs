@@ -4,6 +4,7 @@ GEM (General Experience Maker) provides a suite of environments for training
 and evaluating LLMs, including multi-turn games and single-turn benchmarks.
 """
 
+import copy
 from dataclasses import dataclass
 from typing import Any
 import uuid
@@ -159,14 +160,15 @@ class GemHidden:
 
     Attributes:
         env_id: GEM environment identifier.
-        gem_state: Serialized GEM env state via get_state(), frozen as tuple.
+        gem_state: Serialized GEM env state. Frozen tuple for get_state() envs,
+            deepcopy dict for stateless envs.
         task_index: Current task index (for dataset-based envs).
         is_multi_turn: Whether this is a multi-turn environment.
         episode_step: Current step within the episode.
     """
 
     env_id: str
-    gem_state: tuple[tuple[str, Any], ...]
+    gem_state: Any
     task_index: int
     is_multi_turn: bool
     episode_step: int
@@ -290,7 +292,7 @@ class GemEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=self._is_multi_turn,
-            pure_step=self._supports_state,
+            pure_step=True,
             metadata={"env_id": self._env_id},
         )
 
@@ -301,16 +303,17 @@ class GemEnvironment:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
-    def _snapshot_state(self) -> tuple[tuple[str, Any], ...]:
+    def _snapshot_state(self) -> Any:
         """Capture GEM env state as frozen structure."""
         if not self._supports_state:
-            return ()
+            return copy.deepcopy(self._gem_env.__dict__)
         state_dict = self._gem_env.get_state()
         return _freeze_dict(state_dict)
 
-    def _restore_state(self, frozen_state: tuple[tuple[str, Any], ...]) -> None:
+    def _restore_state(self, frozen_state: Any) -> None:
         """Restore GEM env from frozen structure."""
         if not self._supports_state:
+            self._gem_env.__dict__.update(copy.deepcopy(frozen_state))
             return
         state_dict = _unfreeze_dict(frozen_state)
         self._gem_env.set_state(state_dict)
@@ -398,7 +401,13 @@ class GemEnvironment:
             episode_step=state.hidden.episode_step + 1,
         )
 
-        new_observation = Observation(prompt=str(obs))
+        new_messages = tuple(state.observation.messages) + (
+            {"role": "assistant", "content": action.text or ""},
+            {"role": "user", "content": str(obs)},
+        )
+        new_observation = Observation(
+            prompt=state.observation.prompt, messages=new_messages
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -612,7 +621,8 @@ class GemToolHidden:
 
     Attributes:
         env_id: GEM environment identifier.
-        gem_state: Serialized GEM env state via get_state(), frozen as tuple.
+        gem_state: Serialized GEM env state. Frozen tuple for get_state() envs,
+            deepcopy dict for stateless envs.
         task_index: Current task index (for dataset-based envs).
         is_multi_turn: Whether this is a multi-turn environment.
         episode_step: Current step within the episode.
@@ -620,7 +630,7 @@ class GemToolHidden:
     """
 
     env_id: str
-    gem_state: tuple[tuple[str, Any], ...]
+    gem_state: Any
     task_index: int
     is_multi_turn: bool
     episode_step: int
@@ -857,7 +867,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
-            pure_step=self._supports_state,
+            pure_step=True,
             metadata={"env_id": self._env_id, "tools": self._tool_types},
         )
 
@@ -868,16 +878,17 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
-    def _snapshot_state(self) -> tuple[tuple[str, Any], ...]:
+    def _snapshot_state(self) -> Any:
         """Capture GEM env state as frozen structure."""
         if not self._supports_state:
-            return ()
+            return copy.deepcopy(self._gem_env.__dict__)
         state_dict = self._gem_env.get_state()
         return _freeze_dict(state_dict)
 
-    def _restore_state(self, frozen_state: tuple[tuple[str, Any], ...]) -> None:
+    def _restore_state(self, frozen_state: Any) -> None:
         """Restore GEM env from frozen structure."""
         if not self._supports_state:
+            self._gem_env.__dict__.update(copy.deepcopy(frozen_state))
             return
         state_dict = _unfreeze_dict(frozen_state)
         self._gem_env.set_state(state_dict)

@@ -25,12 +25,15 @@ adapter = AgentGymAdapter()
 env = adapter.get_environment("maze", max_steps=20)
 
 state, info = env.reset(options={"task_index": 0})
-print(state.observation.prompt)
+print(state.observation.prompt)  # Initial observation (stays constant)
 print(f"Dataset size: {len(env)}")
 
 action = Action(text="go north")
 result = env.step(state, action)
-print(result.next_state.observation.prompt)
+
+# Conversation history accumulates in messages
+print(result.next_state.observation.messages[-1]["content"])  # Latest feedback
+print(f"History length: {len(result.next_state.observation.messages)}")  # 2 per turn
 print(f"Reward: {result.rewards.total}")
 ```
 

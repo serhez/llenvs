@@ -310,7 +310,11 @@ class AgentGymEnvironment:
             available_actions=available_actions,
         )
 
-        new_observation = Observation(prompt=obs_text)
+        new_messages = tuple(state.observation.messages) + (
+            {"role": "assistant", "content": action.text or ""},
+            {"role": "user", "content": obs_text},
+        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,

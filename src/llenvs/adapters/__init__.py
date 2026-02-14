@@ -62,6 +62,16 @@ from llenvs.adapters.dialogue import (
     DialogueAdapter,
     DIALOGUE_PRESETS,
 )
+from llenvs.adapters.gymnasium import (
+    GymnasiumEnvironment,
+    GymnasiumHidden,
+    GymnasiumReward,
+    GymnasiumAdapter,
+    AutoObservationMapper,
+    AutoActionMapper,
+    GridObservationMapper,
+    GYMNASIUM_PRESETS,
+)
 
 __all__ = [
     # ReasoningGym
@@ -114,6 +124,15 @@ __all__ = [
     "DialogueTask",
     "DialogueAdapter",
     "DIALOGUE_PRESETS",
+    # Gymnasium
+    "GymnasiumEnvironment",
+    "GymnasiumHidden",
+    "GymnasiumReward",
+    "GymnasiumAdapter",
+    "AutoObservationMapper",
+    "AutoActionMapper",
+    "GridObservationMapper",
+    "GYMNASIUM_PRESETS",
 ]
 
 
@@ -202,6 +221,16 @@ def _register_adapters() -> None:
     # Register dialogue adapter (no third-party deps)
     try:
         environment_registry.register_adapter(DialogueAdapter())
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register gymnasium adapter if available
+    try:
+        adapter = GymnasiumAdapter()
+        adapter._get_gymnasium()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # gymnasium not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

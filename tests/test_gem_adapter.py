@@ -339,8 +339,8 @@ class TestGemEnvironment:
         assert correctness.value == 0.0
         assert correctness.reward_type == RewardType.STEP
 
-        # Check observation indicates too low
-        assert "too low" in result.next_state.observation.prompt.lower()
+        # Check observation indicates too low (in messages, not prompt)
+        assert "too low" in result.next_state.observation.messages[-1]["content"].lower()
 
     def test_multi_step_game(self, mock_gem_env):
         """Test playing through multiple steps."""
@@ -667,7 +667,7 @@ class TestStatelessGemEnvironment:
         state, info = env.reset(seed=42)
 
         assert isinstance(state.observation, Observation)
-        assert state.hidden.gem_state == ()
+        assert isinstance(state.hidden.gem_state, dict)
         assert state.metadata.is_terminal is False
 
     def test_step_works_without_state_methods(self, mock_stateless_env):
@@ -694,9 +694,9 @@ class TestStatelessGemEnvironment:
         )
         state, _ = env.reset()
 
-        # Step 1: too low
+        # Step 1: too low — feedback is in messages, not prompt
         result = env.step(state, Action(text="25"))
-        assert "too low" in result.next_state.observation.prompt.lower()
+        assert "too low" in result.next_state.observation.messages[-1]["content"].lower()
         state = result.next_state
 
         # Step 2: correct
@@ -704,13 +704,13 @@ class TestStatelessGemEnvironment:
         assert result.terminated is True
 
     def test_no_direct_branching_without_state_methods(self, mock_stateless_env):
-        """Without state methods, pure_step=False (no DirectStrategy)."""
+        """Stateless envs now use deepcopy fallback, so pure_step=True."""
         env = GemEnvironment(
             gem_env=mock_stateless_env,
             env_id="game:GuessTheNumber-v0",
             is_multi_turn=True,
         )
-        assert env.spec.pure_step is False
+        assert env.spec.pure_step is True
 
     def test_direct_branching_with_state_methods(self, mock_gem_env):
         """With state methods, pure_step=True (DirectStrategy)."""
@@ -721,18 +721,107 @@ class TestStatelessGemEnvironment:
         )
         assert env.spec.pure_step is True
 
-    def test_gem_state_empty_tuple_without_state_methods(self, mock_stateless_env):
-        """Hidden gem_state should be empty tuple when no state support."""
+    def test_gem_state_deepcopy_without_state_methods(self, mock_stateless_env):
+        """Hidden gem_state should be a dict (deepcopy) when no state support."""
         env = GemEnvironment(
             gem_env=mock_stateless_env,
             env_id="game:GuessTheNumber-v0",
             is_multi_turn=True,
         )
         state, _ = env.reset()
-        assert state.hidden.gem_state == ()
+        assert isinstance(state.hidden.gem_state, dict)
 
         result = env.step(state, Action(text="25"))
-        assert result.next_state.hidden.gem_state == ()
+        assert isinstance(result.next_state.hidden.gem_state, dict)
+
+    def test_state_restoration_deepcopy(self, mock_stateless_env):
+        """Step from same state twice on stateless env gives identical results."""
+        mock_stateless_env.target = 50
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+
+        result1 = env.step(state, Action(text="25"))
+        result2 = env.step(state, Action(text="25"))
+
+        assert (
+            result1.next_state.observation.messages
+            == result2.next_state.observation.messages
+        )
+        assert result1.rewards.total == result2.rewards.total
+
+    def test_interleaved_steps_no_corruption(self, mock_stateless_env):
+        """Step from same initial state with different actions — results are independent."""
+        mock_stateless_env.target = 50
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+
+        result_low = env.step(state, Action(text="25"))
+        result_high = env.step(state, Action(text="75"))
+
+        # Each result should reflect only its own action
+        assert "too low" in result_low.next_state.observation.messages[-1]["content"].lower()
+        assert "too high" in result_high.next_state.observation.messages[-1]["content"].lower()
+
+        # Both should be at episode_step 1
+        assert result_low.next_state.hidden.episode_step == 1
+        assert result_high.next_state.hidden.episode_step == 1
+
+    def test_message_history_accumulates(self, mock_stateless_env):
+        """Message history grows by 2 each turn; prompt stays as initial instructions."""
+        mock_stateless_env.target = 50
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+        initial_prompt = state.observation.prompt
+
+        # Turn 1
+        result = env.step(state, Action(text="25"))
+        state = result.next_state
+        assert len(state.observation.messages) == 2
+        assert state.observation.messages[0] == {"role": "assistant", "content": "25"}
+        assert "too low" in state.observation.messages[1]["content"].lower()
+        assert state.observation.prompt == initial_prompt
+
+        # Turn 2
+        result = env.step(state, Action(text="75"))
+        state = result.next_state
+        assert len(state.observation.messages) == 4
+        assert state.observation.messages[2] == {"role": "assistant", "content": "75"}
+        assert "too high" in state.observation.messages[3]["content"].lower()
+        assert state.observation.prompt == initial_prompt
+
+        # Turn 3: correct
+        result = env.step(state, Action(text="50"))
+        state = result.next_state
+        assert len(state.observation.messages) == 6
+        assert state.observation.prompt == initial_prompt
+
+    def test_message_history_on_correct_guess(self, mock_stateless_env):
+        """Messages accumulate even on terminal step."""
+        mock_stateless_env.target = 50
+        env = GemEnvironment(
+            gem_env=mock_stateless_env,
+            env_id="game:GuessTheNumber-v0",
+            is_multi_turn=True,
+        )
+        state, _ = env.reset()
+
+        result = env.step(state, Action(text="50"))
+        assert result.terminated is True
+        assert len(result.next_state.observation.messages) == 2
+        assert result.next_state.observation.messages[0] == {"role": "assistant", "content": "50"}
+        assert "correct" in result.next_state.observation.messages[1]["content"].lower()
 
     def test_action_replay_branching_without_state_methods(self):
         """ActionReplayStrategy works for stateless GEM envs."""

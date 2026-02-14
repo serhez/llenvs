@@ -246,9 +246,10 @@ class TestWebShopEnvironment:
         assert result.terminated is False
         assert result.next_state.metadata.is_terminal is False
 
-        # Check observation contains search results
-        assert "Search results" in result.next_state.observation.prompt
-        assert "Red Headphones" in result.next_state.observation.prompt
+        # Check observation in messages (step content goes into messages, not prompt)
+        last_msg = result.next_state.observation.messages[-1]["content"]
+        assert "Search results" in last_msg
+        assert "Red Headphones" in last_msg
 
         # Check step count
         assert result.next_state.hidden.episode_step == 1
@@ -270,9 +271,10 @@ class TestWebShopEnvironment:
         # Check not terminated
         assert result2.terminated is False
 
-        # Check observation shows product details
-        assert "Red Wireless Headphones" in result2.next_state.observation.prompt
-        assert "Buy Now" in result2.next_state.observation.prompt
+        # Check observation in messages shows product details
+        last_msg = result2.next_state.observation.messages[-1]["content"]
+        assert "Red Wireless Headphones" in last_msg
+        assert "Buy Now" in last_msg
 
     def test_step_purchase(self, mock_webshop_env):
         """Test purchase completes episode with reward."""
@@ -340,7 +342,7 @@ class TestWebShopEnvironment:
         action = Action(text="search[test]")
         result = env.step(state, action)
 
-        assert "[Step 1]" in result.next_state.observation.prompt
+        assert "[Step 1]" in result.next_state.observation.messages[-1]["content"]
 
     def test_action_format_hint(self, mock_webshop_env):
         """Test observation includes action format hint."""
@@ -349,6 +351,48 @@ class TestWebShopEnvironment:
 
         assert "search[" in state.observation.prompt.lower()
         assert "click[" in state.observation.prompt.lower()
+
+
+class TestWebShopMessageHistory:
+    """Tests for message history accumulation in WebShop."""
+
+    def test_message_history_accumulates(self, mock_webshop_env):
+        """Message history grows by 2 each turn; prompt stays as initial observation."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+        initial_prompt = state.observation.prompt
+        assert state.observation.messages == ()
+
+        # Turn 1: search
+        result = env.step(state, Action(text="search[headphones]"))
+        state = result.next_state
+        assert len(state.observation.messages) == 2
+        assert state.observation.messages[0] == {"role": "assistant", "content": "search[headphones]"}
+        assert "Search results" in state.observation.messages[1]["content"]
+        assert state.observation.prompt == initial_prompt
+
+        # Turn 2: click
+        result = env.step(state, Action(text="click[Product 1 - Red Headphones $45]"))
+        state = result.next_state
+        assert len(state.observation.messages) == 4
+        assert state.observation.messages[2] == {"role": "assistant", "content": "click[Product 1 - Red Headphones $45]"}
+        assert "Red Wireless Headphones" in state.observation.messages[3]["content"]
+        assert state.observation.prompt == initial_prompt
+
+    def test_message_history_on_terminal_step(self, mock_webshop_env):
+        """Messages accumulate even on terminal step (Buy Now)."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        # search → click → buy
+        result = env.step(state, Action(text="search[headphones]"))
+        result = env.step(result.next_state, Action(text="click[Product 1 - Red Headphones $45]"))
+        result = env.step(result.next_state, Action(text="click[Buy Now]"))
+
+        assert result.terminated is True
+        assert len(result.next_state.observation.messages) == 6
+        assert result.next_state.observation.messages[-2] == {"role": "assistant", "content": "click[Buy Now]"}
+        assert "Thank you" in result.next_state.observation.messages[-1]["content"]
 
 
 class TestWebShopAdapter:

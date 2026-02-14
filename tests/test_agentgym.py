@@ -305,7 +305,7 @@ class TestAgentGymEnvironment:
         env = self._make_env(client=client)
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="act"))
-        assert result.next_state.observation.prompt == "dict obs"
+        assert result.next_state.observation.messages[-1]["content"] == "dict obs"
 
     def test_step_coerces_non_string_state(self):
         client = _make_mock_client()
@@ -315,7 +315,7 @@ class TestAgentGymEnvironment:
         env = self._make_env(client=client)
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="act"))
-        assert result.next_state.observation.prompt == "42"
+        assert result.next_state.observation.messages[-1]["content"] == "42"
 
     # -- action_format --------------------------------------------------------
 
@@ -340,7 +340,7 @@ class TestAgentGymEnvironment:
         action = Action(text="go north")
         result = env.step(state, action)
 
-        assert result.next_state.observation.prompt == "You see a door."
+        assert result.next_state.observation.messages[-1]["content"] == "You see a door."
         assert result.next_state.hidden.episode_step == 1
         assert result.next_state.hidden.last_action == "go north"
         assert result.terminated is False
@@ -559,6 +559,48 @@ class TestAgentGymEnvironment:
         state, info = env.reset(options={"task_index": 0})
         assert state.hidden.available_actions == ()
         assert "available_actions" not in info
+
+    # -- message history accumulation -----------------------------------------
+
+    def test_message_history_accumulates(self):
+        """Message history grows by 2 each turn; prompt stays as initial observation."""
+        client = _make_mock_client(
+            initial_obs="You are in a room.",
+            step_obs="You moved north.",
+        )
+        env = self._make_env(client=client)
+        state, _ = env.reset(options={"task_index": 0})
+        initial_prompt = state.observation.prompt
+        assert state.observation.messages == ()
+
+        # Turn 1
+        result = env.step(state, Action(text="go north"))
+        state = result.next_state
+        assert len(state.observation.messages) == 2
+        assert state.observation.messages[0] == {"role": "assistant", "content": "go north"}
+        assert state.observation.messages[1] == {"role": "user", "content": "You moved north."}
+        assert state.observation.prompt == initial_prompt
+
+        # Turn 2
+        client.step.return_value = _StepOutput(state="A door appears.", reward=0.0, done=False)
+        result = env.step(state, Action(text="look"))
+        state = result.next_state
+        assert len(state.observation.messages) == 4
+        assert state.observation.messages[2] == {"role": "assistant", "content": "look"}
+        assert state.observation.messages[3] == {"role": "user", "content": "A door appears."}
+        assert state.observation.prompt == initial_prompt
+
+    def test_message_history_on_terminal_step(self):
+        """Messages accumulate even on terminal step."""
+        client = _make_mock_client(step_reward=1.0, step_done=True, step_obs="You won!")
+        env = self._make_env(client=client)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="submit"))
+        assert result.terminated is True
+        assert len(result.next_state.observation.messages) == 2
+        assert result.next_state.observation.messages[0] == {"role": "assistant", "content": "submit"}
+        assert result.next_state.observation.messages[1] == {"role": "user", "content": "You won!"}
 
 
 # ---------------------------------------------------------------------------

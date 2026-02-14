@@ -44,7 +44,8 @@ while not state.metadata.is_terminal:
     action = Action(text="50")
     result = env.step(state, action)
 
-    print(f"Response: {result.next_state.observation.prompt}")
+    # Step feedback is in messages; prompt stays as initial instructions
+    print(f"Response: {result.next_state.observation.messages[-1]['content']}")
     # "50 is too high." or "Correct!"
 
     state = result.next_state
@@ -244,25 +245,19 @@ Use whichever adapter fits your workflow. GEM provides a unified interface acros
 
 ## State Snapshotting and Branching
 
-GEM environments that implement `get_state()`/`set_state()` get full state snapshotting:
+All GEM environments have `pure_step=True` and support `DirectStrategy` branching:
 
-- **Pure function semantics**: `step(state, action)` always produces the same result for the same inputs
-- **DirectStrategy branching**: `pure_step=True` enables zero-cost tree search via `BranchManager`
+- **Native state envs** (with `get_state()`/`set_state()`): Use the native methods for efficient snapshotting
+- **Stateless envs** (without `get_state()`/`set_state()`): Use a transparent `deepcopy` fallback that captures and restores the underlying env's `__dict__`
 
-GEM environments that **lack** `get_state()`/`set_state()` (some game environments) still work and still support branching, but via fallback strategies:
-
-- **ProcessForkStrategy** (Unix): Forks the process to create independent copies — works for any environment
-- **ActionReplayStrategy**: Creates a fresh env and replays actions to reach the checkpoint state — requires `env_factory`
-
-`BranchManager.create(env)` auto-resolves the best available strategy:
+Both approaches guarantee **pure function semantics**: `step(state, action)` always produces the same result for the same inputs.
 
 ```python
 from llenvs import BranchManager
 
 env = adapter.get_environment("game:GuessTheNumber-v0")
 
-# Auto-resolves: DirectStrategy if get_state/set_state available,
-# otherwise ProcessForkStrategy (Unix) or ActionReplayStrategy
+# All GEM envs support DirectStrategy — no special configuration needed
 with BranchManager.create(env) as mgr:
     state, _ = env.reset(seed=42)
     # ... checkpoint and branch as usual
@@ -274,7 +269,7 @@ with BranchManager.create(env) as mgr:
 @dataclass(frozen=True)
 class GemHidden:
     env_id: str
-    gem_state: tuple[tuple[str, Any], ...]  # Frozen env state (empty if unsupported)
+    gem_state: Any  # Frozen tuple (native state) or dict (deepcopy fallback)
     task_index: int
     is_multi_turn: bool
     episode_step: int

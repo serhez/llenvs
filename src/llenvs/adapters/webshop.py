@@ -352,7 +352,11 @@ class WebShopEnvironment:
             available_actions=available,
         )
 
-        new_observation = Observation(prompt=obs_prompt)
+        new_messages = tuple(state.observation.messages) + (
+            {"role": "assistant", "content": action.text or ""},
+            {"role": "user", "content": obs_prompt},
+        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
