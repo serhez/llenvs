@@ -42,6 +42,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **AgentGym** | 15 multi-turn agent environments | ALFWorld, BabyAI, SciWorld, TextCraft |
 | **Verifiers** | Verifiers library environments | Rubric-scored tasks, tool-enabled envs |
 | **OpenEnv** | OpenEnv session-based environments | MCP tool servers, generic clients |
+| **LMRL-Gym** | Text-based RL environments for LMs | Wordle, Chess, Maze, Twenty Questions |
 
 ```python
 from llenvs.core.registry import environment_registry

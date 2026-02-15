@@ -85,6 +85,13 @@ from llenvs.adapters.jericho import (
     JerichoAdapter,
     JerichoReward,
 )
+from llenvs.adapters.lmrl import (
+    LMRLEnvironment,
+    LMRLHidden,
+    LMRLAdapter,
+    LMRLReward,
+    LMRL_PRESETS,
+)
 
 __all__ = [
     # ReasoningGym
@@ -157,6 +164,12 @@ __all__ = [
     "JerichoHidden",
     "JerichoAdapter",
     "JerichoReward",
+    # LMRL-Gym
+    "LMRLEnvironment",
+    "LMRLHidden",
+    "LMRLAdapter",
+    "LMRLReward",
+    "LMRL_PRESETS",
 ]
 
 
@@ -275,6 +288,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # jericho not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register LMRL-Gym adapter if available
+    try:
+        adapter = LMRLAdapter()
+        adapter._get_lmrl()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # LLM_RL not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
