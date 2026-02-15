@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardFunction
+from llenvs.core.reward import SignalBundle, RewardFunction
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.integrations.dataset_provider import DatasetProvider, TaskItem
 
@@ -62,12 +62,12 @@ class MockSingleTurnEnv:
         return state, {"task_index": idx}
 
     def step(self, state: State[_MockHidden], action: Action) -> StepResult[_MockHidden]:
-        return StepResult(next_state=state, rewards=RewardBundle.empty(), terminated=True)
+        return StepResult(next_state=state, rewards=SignalBundle.empty(), terminated=True)
 
     def compute_rewards(
         self, state: State[_MockHidden], action: Action, next_state: State[_MockHidden]
-    ) -> RewardBundle:
-        return RewardBundle.empty()
+    ) -> SignalBundle:
+        return SignalBundle.empty()
 
     def __len__(self) -> int:
         return self._num_tasks
@@ -110,12 +110,12 @@ class MockMultiTurnEnv:
         return state, {"task_index": idx}
 
     def step(self, state: State[dict], action: Action) -> StepResult[dict]:
-        return StepResult(next_state=state, rewards=RewardBundle.empty(), terminated=False)
+        return StepResult(next_state=state, rewards=SignalBundle.empty(), terminated=False)
 
     def compute_rewards(
         self, state: State[dict], action: Action, next_state: State[dict]
-    ) -> RewardBundle:
-        return RewardBundle.empty()
+    ) -> SignalBundle:
+        return SignalBundle.empty()
 
     def __len__(self) -> int:
         return self._num_tasks

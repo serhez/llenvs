@@ -8,7 +8,7 @@ Key capabilities:
 """
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
+from llenvs.core.reward import Signal, SignalBundle, RewardType, RewardFunction
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import (
@@ -21,6 +21,8 @@ from llenvs.core.extraction import (
 from llenvs.core.config import EvalConfig
 from llenvs.core.judge import JudgeReward
 from llenvs.core.branching import BranchManager
+from llenvs.adapters.iterative import IterativeEnvironment
+from llenvs.environments.coding import IterativeCodingEnvironment
 from llenvs.integrations.scoring import Scorer, ScoringResult
 from llenvs.integrations.dataset_provider import DatasetProvider, TaskItem
 
@@ -33,8 +35,8 @@ __all__ = [
     "Observation",
     "Action",
     # Rewards
-    "RewardSignal",
-    "RewardBundle",
+    "Signal",
+    "SignalBundle",
     "RewardType",
     "RewardFunction",
     # Trajectory
@@ -57,6 +59,9 @@ __all__ = [
     "JudgeReward",
     # Branching
     "BranchManager",
+    # Iterative
+    "IterativeEnvironment",
+    "IterativeCodingEnvironment",
     # Integrations
     "Scorer",
     "ScoringResult",

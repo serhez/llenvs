@@ -36,6 +36,7 @@ env = environment_registry.get(
 | `"correctness"` | question, response, ground_truth | Reference-based correctness scoring |
 | `"helpfulness"` | question, response | Reference-free helpfulness scoring |
 | `"safety"` | question, response | Reference-free safety scoring |
+| `"iterative_feedback"` | question, response, ground_truth | Actionable feedback for iterative refinement |
 
 All templates use the `[[score]]` output format (MT-Bench convention) on a 1-10 scale.
 
@@ -114,9 +115,9 @@ judge = JudgeReward(
         temperature=0.0,
         max_tokens=512,
     ),
-    name="judge",                     # Reward signal name
+    name="judge",                     # Signal name
     reward_type=RewardType.OUTCOME,   # OUTCOME, STEP, FORMAT, PROCESS
-    weight=1.0,                       # Signal weight in RewardBundle
+    weight=1.0,                       # Signal weight in SignalBundle
     normalize=True,                   # Normalize to [0,1]
     default_score=0.0,                # Fallback on extraction failure
     score_extractor=None,             # Custom parser (None = default)
@@ -174,9 +175,9 @@ environments:
 | `template` | str | `"correctness"` | Built-in name or literal template |
 | `system_prompt` | str \| None | None | Override template's system prompt |
 | `score_range` | [float, float] | [1, 10] | Scoring scale for normalization |
-| `name` | str | `"judge"` | Reward signal name |
+| `name` | str | `"judge"` | Signal name |
 | `reward_type` | str | `"outcome"` | outcome, step, format, process |
-| `weight` | float | 1.0 | Reward signal weight |
+| `weight` | float | 1.0 | Signal weight |
 | `normalize` | bool | true | Normalize to [0,1] |
 | `inference` | InferenceConfig \| None | None | Judge sampling params |
 
@@ -192,9 +193,21 @@ environments:
 
 This works across all adapters without adapter-specific code.
 
+## Feedback
+
+`JudgeReward` sets the `feedback` field on every signal it produces, containing the full judge LLM response text. This is used by `IterativeEnvironment` to show the judge's feedback to the agent on each refinement turn:
+
+```python
+signal = judge.compute(state, action, next_state)
+print(signal.reward)       # Normalized numeric score
+print(signal.feedback)    # Full judge response text (always set)
+```
+
+In iterative environments, `SignalBundle.feedback_texts()` collects all non-None feedback strings from signals to build the agent's next observation.
+
 ## Error Handling
 
-On any failure (backend error, unparseable score), `JudgeReward` logs a warning and returns a `RewardSignal` with `default_score` and error metadata:
+On any failure (backend error, unparseable score), `JudgeReward` logs a warning and returns a `Signal` with `default_score` and error metadata. The `feedback` field is set to the error message when available:
 
 ```python
 signal = judge.compute(state, action, next_state)

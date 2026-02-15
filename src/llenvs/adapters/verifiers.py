@@ -17,8 +17,8 @@ import uuid
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import (
-    RewardBundle,
-    RewardSignal,
+    SignalBundle,
+    Signal,
     RewardType,
     RewardFunction,
 )
@@ -210,7 +210,7 @@ class VerifiersRubricReward:
         state: State[Any],
         action: Action,
         next_state: State[Any],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute reward by calling rubric functions."""
         try:
             total = 0.0
@@ -229,21 +229,21 @@ class VerifiersRubricReward:
                 func_results[func_name] = score
                 total += score * weight
 
-            return RewardSignal(
-                value=total,
+            return Signal(
                 name=self.name,
                 reward_type=self.reward_type,
+                reward=total,
                 metadata={
-                    "func_scores": func_results,
+                    "rubric_results": func_results,
                     "env_id": self._env_id,
                 },
             )
         except Exception as e:
             logger.warning(f"Rubric evaluation failed for {self._env_id}: {e}")
-            return RewardSignal(
-                value=0.0,
+            return Signal(
                 name=self.name,
                 reward_type=self.reward_type,
+                reward=0.0,
                 metadata={"error": str(e)},
             )
 
@@ -421,12 +421,12 @@ class VerifiersSingleTurnEnvironment:
         state: State[VerifiersHidden],
         action: Action,
         next_state: State[VerifiersHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         signals = []
         for reward_fn in self.reward_functions:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # ── Tool executor ───────────────────────────────────────────────────
@@ -647,7 +647,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
             )
             rewards = self.compute_rewards(state, action, temp_state)
         else:
-            rewards = RewardBundle.empty()
+            rewards = SignalBundle.empty()
 
         next_hidden = VerifiersToolHidden(
             env_id=state.hidden.env_id,
@@ -688,12 +688,12 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
         state: State[VerifiersToolHidden],
         action: Action,
         next_state: State[VerifiersToolHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         signals = []
         for reward_fn in self.reward_functions:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # ── Adapter ─────────────────────────────────────────────────────────

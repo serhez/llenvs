@@ -14,7 +14,7 @@ import pytest
 from llenvs.container.client import ContainerEnvironment, ContainerEnvironmentError
 from llenvs.container.serialization import OpaqueHidden
 from llenvs.core.environment import EnvironmentSpec
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import ToolDefinition, ToolParameter, ToolParameterType
 
@@ -105,7 +105,7 @@ class MockHandler(BaseHTTPRequestHandler):
                 "rewards": {
                     "signals": [
                         {
-                            "value": 1.0 if correct else 0.0,
+                            "reward": 1.0 if correct else 0.0,
                             "name": "correct",
                             "reward_type": "OUTCOME",
                             "metadata": None,
@@ -123,7 +123,7 @@ class MockHandler(BaseHTTPRequestHandler):
             self._send(200, {
                 "signals": [
                     {
-                        "value": 1.0 if correct else 0.0,
+                        "reward": 1.0 if correct else 0.0,
                         "name": "correct",
                         "reward_type": "OUTCOME",
                         "metadata": None,
@@ -292,7 +292,7 @@ class TestComputeRewards:
         action = Action.from_text("4")
         result = client.step(state, action)
         rewards = client.compute_rewards(state, action, result.next_state)
-        assert isinstance(rewards, RewardBundle)
+        assert isinstance(rewards, SignalBundle)
         assert rewards.total == 1.0
 
 

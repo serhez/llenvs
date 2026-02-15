@@ -6,7 +6,7 @@ from typing import Any
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from llenvs.core.state import Observation, Action, State, StateMetadata
-from llenvs.core.reward import RewardType, RewardSignal, FormatReward
+from llenvs.core.reward import RewardType, Signal, FormatReward
 from llenvs.core.extraction import TagBasedExtractor
 from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameter, ToolParameterType
 
@@ -184,7 +184,7 @@ class TestVerifiersRubricReward:
         action = Action(text="The answer is 4")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.name == "verifiers_rubric"
         assert signal.reward_type == RewardType.OUTCOME
 
@@ -209,7 +209,7 @@ class TestVerifiersRubricReward:
         signal = reward.compute(state, action=Action(text="4"), next_state=state)
         # Weighted sum: 1.0*2.0 + 0.5*0.5 = 2.25, but we return the bundle's
         # total. Individual signals use weight field.
-        assert signal.value == pytest.approx(2.25)
+        assert signal.reward == pytest.approx(2.25)
 
     def test_compute_incorrect_answer(self):
         from llenvs.adapters.verifiers import VerifiersRubricReward, VerifiersHidden
@@ -229,7 +229,7 @@ class TestVerifiersRubricReward:
         )
 
         signal = reward.compute(state, Action(text="wrong"), state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_compute_exception_returns_zero(self):
         from llenvs.adapters.verifiers import VerifiersRubricReward, VerifiersHidden
@@ -250,7 +250,7 @@ class TestVerifiersRubricReward:
         )
 
         signal = reward.compute(state, Action(text="x"), state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
         assert signal.metadata is not None
         assert "error" in signal.metadata
 

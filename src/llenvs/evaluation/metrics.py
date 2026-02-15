@@ -359,7 +359,7 @@ def compute_format_compliance(
     for result in results:
         for transition in result.trajectory.transitions:
             format_reward = transition.rewards.by_name("format")
-            compliant = 1.0 if (format_reward and format_reward.value >= 1.0) else 0.0
+            compliant = 1.0 if (format_reward and format_reward.reward >= 1.0) else 0.0
             values.append(compliant)
 
     return Metric(

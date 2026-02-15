@@ -78,7 +78,7 @@ class Scorer:
         step_result = self._env.step(state, action)
 
         rewards = step_result.rewards
-        signals = {s.name: s.value for s in rewards.signals}
+        signals = {s.name: s.reward for s in rewards.signals}
         metadata = {
             s.name: s.metadata for s in rewards.signals if s.metadata is not None
         }

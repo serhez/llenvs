@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.integrations.scoring import Scorer, ScoringResult
 
@@ -40,16 +40,16 @@ class _MockRewardFn:
 
     def compute(
         self, state: State[_MockHidden], action: Any, next_state: State[_MockHidden]
-    ) -> RewardSignal:
+    ) -> Signal:
         text = action.text or ""
         expected = state.hidden.expected_answer
         # Simple "extraction": look for expected answer in text
         extracted = text if expected in text else None
         correct = extracted is not None
-        return RewardSignal(
-            value=1.0 if correct else 0.0,
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=1.0 if correct else 0.0,
             metadata={"extracted": extracted, "expected": expected},
         )
 
@@ -67,12 +67,12 @@ class _MockFormatRewardFn:
 
     def compute(
         self, state: State[_MockHidden], action: Any, next_state: State[_MockHidden]
-    ) -> RewardSignal:
+    ) -> Signal:
         formatted = (action.text or "").startswith("Answer:")
-        return RewardSignal(
-            value=1.0 if formatted else 0.0,
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=1.0 if formatted else 0.0,
         )
 
 
@@ -127,9 +127,9 @@ class MockSingleTurnEnv:
         state: State[_MockHidden],
         action: Action,
         next_state: State[_MockHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         signals = tuple(fn.compute(state, action, next_state) for fn in self._reward_fns)
-        return RewardBundle(signals=signals)
+        return SignalBundle(signals=signals)
 
     def __len__(self) -> int:
         return self._num_tasks
@@ -165,12 +165,12 @@ class MockMultiTurnEnv:
         return state, {}
 
     def step(self, state: State[Any], action: Action) -> StepResult[Any]:
-        return StepResult(next_state=state, rewards=RewardBundle.empty(), terminated=False)
+        return StepResult(next_state=state, rewards=SignalBundle.empty(), terminated=False)
 
     def compute_rewards(
         self, state: State[Any], action: Action, next_state: State[Any]
-    ) -> RewardBundle:
-        return RewardBundle.empty()
+    ) -> SignalBundle:
+        return SignalBundle.empty()
 
     def __len__(self) -> int:
         return 3

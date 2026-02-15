@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llenvs.core.state import Action, Observation, State
-from llenvs.core.reward import RewardType, RewardBundle, FormatReward
+from llenvs.core.reward import RewardType, SignalBundle, FormatReward
 from llenvs.core.extraction import RawGenerationExtractor, TagBasedExtractor
 
 
@@ -525,7 +525,7 @@ class TestGymnasiumReward:
                                    info={"gym_reward": 0.5}),
         )
         signal = reward_fn.compute(state, Action(text="1"), next_state)
-        assert signal.value == 0.5
+        assert signal.reward == 0.5
         assert signal.reward_type == RewardType.STEP
 
     def test_terminal_outcome_reward(self, import_adapter):
@@ -550,7 +550,7 @@ class TestGymnasiumReward:
                                    info={"gym_reward": 1.0}),
         )
         signal = reward_fn.compute(state, Action(text="2"), next_state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.reward_type == RewardType.OUTCOME
 
     def test_reward_name_and_type(self, import_adapter):
@@ -737,7 +737,7 @@ class TestGymnasiumEnvironment:
     def test_step_rewards(self, discrete_env):
         state, _ = discrete_env.reset()
         result = discrete_env.step(state, Action(text="1"))
-        assert isinstance(result.rewards, RewardBundle)
+        assert isinstance(result.rewards, SignalBundle)
         reward = result.rewards.by_name("gym_reward")
         assert reward is not None
 
@@ -902,7 +902,7 @@ class TestGymnasiumEnvironment:
         rewards = discrete_env.compute_rewards(
             state, Action(text="1"), result.next_state
         )
-        assert isinstance(rewards, RewardBundle)
+        assert isinstance(rewards, SignalBundle)
 
 
 # ===========================================================================
@@ -1073,7 +1073,7 @@ class TestFullEpisode:
         assert result.terminated is True
         reward = result.rewards.by_name("gym_reward")
         assert reward is not None
-        assert reward.value == 1.0
+        assert reward.reward == 1.0
 
     def test_complete_box_episode(self, import_adapter):
         """Play through a full episode with continuous env."""

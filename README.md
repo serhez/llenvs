@@ -25,7 +25,7 @@ print(result.rewards.total)  # 1.0
 - **`reset()` / `step()` / `compute_rewards()`** — the same interface whether you're evaluating on GSM8K, playing a GEM game, or navigating WebShop
 - **Stateless `step()`** — pass the state in, get a new state out. Branch, checkpoint, and explore in parallel without worrying about internal mutation
 - **Observation / hidden split** — models see `state.observation` (the prompt); ground truth lives in `state.hidden` (never leaked to the model)
-- **Multi-signal rewards** — each step produces a `RewardBundle` with named, typed signals (outcome, format, process, step) rather than a single scalar
+- **Multi-signal rewards** — each step produces a `SignalBundle` with named, typed signals carrying numeric rewards, textual feedback, or both
 
 ## Adapters
 

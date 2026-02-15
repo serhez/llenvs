@@ -12,7 +12,7 @@ from typing import Any, Generic, TypeVar
 import uuid
 
 from llenvs.core.state import Action, State
-from llenvs.core.reward import RewardBundle
+from llenvs.core.reward import SignalBundle
 
 HiddenT = TypeVar("HiddenT")
 
@@ -32,7 +32,7 @@ class Transition(Generic[HiddenT]):
     state: State[HiddenT]
     action: Any
     next_state: State[HiddenT]
-    rewards: RewardBundle
+    rewards: SignalBundle
     info: dict[str, Any] = field(default_factory=dict)
 
 

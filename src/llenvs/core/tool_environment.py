@@ -46,7 +46,7 @@ class BaseToolEnvironment(Generic[HiddenT]):
 
         These rewards are auto-attached to tool environments. With weight=0,
         they contribute nothing to the total reward but appear in the
-        RewardBundle for inspection.
+        SignalBundle for inspection.
         """
         from llenvs.core.tool_rewards import ToolEfficiencyReward, ToolValidityReward
 

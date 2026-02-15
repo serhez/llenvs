@@ -111,7 +111,7 @@ class TestAgentGymReward:
 
         signal = reward.compute(state, action, next_state)
         assert signal.reward_type == RewardType.STEP
-        assert signal.value == 0.5
+        assert signal.reward == 0.5
 
     def test_terminal_step_reward_type(self):
         reward = AgentGymReward()
@@ -123,7 +123,7 @@ class TestAgentGymReward:
 
         signal = reward.compute(state, action, next_state)
         assert signal.reward_type == RewardType.OUTCOME
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_missing_reward_defaults_to_zero(self):
         reward = AgentGymReward()
@@ -134,7 +134,7 @@ class TestAgentGymReward:
         next_state.metadata.info = {}
 
         signal = reward.compute(state, action, next_state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +393,7 @@ class TestAgentGymEnvironment:
         result = env.step(state, action)
 
         assert len(result.rewards.signals) == 1
-        assert result.rewards.signals[0].value == 0.75
+        assert result.rewards.signals[0].reward == 0.75
         assert result.rewards.signals[0].reward_type == RewardType.STEP
 
     def test_step_terminal_reward_type(self):
@@ -437,7 +437,7 @@ class TestAgentGymEnvironment:
 
         bundle = env.compute_rewards(state, action, next_state)
         assert len(bundle.signals) == 1
-        assert bundle.signals[0].value == 0.9
+        assert bundle.signals[0].reward == 0.9
 
     # -- Phase 2: reset return capture ----------------------------------------
 

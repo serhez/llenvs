@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import ToolCall, ToolResult, ToolResultStatus
 from llenvs.core.trajectory import Trajectory, Transition
@@ -70,7 +70,7 @@ def _make_transition(
         state=state,
         action=action,
         next_state=next_state,
-        rewards=RewardBundle.single(value=reward, name="correctness"),
+        rewards=SignalBundle.single(reward=reward, name="correctness"),
     )
 
 

@@ -122,10 +122,10 @@ for i in range(len(env)):
     action = Action(text=result.text)
     step_result = env.step(state, action)
 
-    if step_result.rewards.by_name("correctness").value == 1.0:
+    if step_result.rewards.by_name("correctness").reward == 1.0:
         correct += 1
 
-    print(f"Problem {i+1}: {'✓' if step_result.rewards.by_name('correctness').value == 1.0 else '✗'}")
+    print(f"Problem {i+1}: {'✓' if step_result.rewards.by_name('correctness').reward == 1.0 else '✗'}")
 
 print(f"\nAccuracy: {correct}/{len(env)} = {correct/len(env):.1%}")
 ```

@@ -127,7 +127,7 @@ def format_trajectory_result(traj_result: TrajectoryResult) -> dict[str, Any]:
         action_text = t.action.text if hasattr(t.action, "text") else str(t.action)
 
         # Get rewards
-        rewards = {s.name: s.value for s in t.rewards.signals}
+        rewards = {s.name: s.reward for s in t.rewards.signals}
 
         transitions_data.append({
             "step": t.state.metadata.step,

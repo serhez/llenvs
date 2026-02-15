@@ -17,6 +17,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[Inference Backends](guides/backends.md)** - Configure model backends and prompting
 - **[RL Training](guides/rl-training.md)** - Integrate with veRL, TRL, and OpenRLHF
 - **[Containers](guides/containers.md)** - Run environments in Docker or isolated subprocesses
+- **[Iterative Refinement](guides/iterative.md)** - Multi-turn refinement with code execution and judge feedback
 - **[Library Landscape](guides/landscape.md)** - Comparison with OpenEnv, verifiers, and similar libraries
 
 ## Environment Adapters
@@ -61,12 +62,14 @@ State(
 
 ### Multi-Signal Rewards
 
-Transitions produce `RewardBundle` with multiple named, weighted signals:
+Transitions produce a `SignalBundle` with multiple named, weighted `Signal` instances. Each signal can carry a numeric reward, textual feedback, or both:
 
 ```python
-RewardBundle(signals=(
-    RewardSignal(value=1.0, name="correctness", type=OUTCOME, weight=1.0),
-    RewardSignal(value=1.0, name="format", type=FORMAT, weight=0.5),
+SignalBundle(signals=(
+    Signal(name="correctness", reward_type=OUTCOME, reward=1.0, weight=1.0),
+    Signal(name="format", reward_type=FORMAT, reward=1.0, weight=0.5),
+    Signal(name="judge", reward_type=PROCESS, feedback="Consider edge cases..."),
 ))
-# bundle.total = 1.0*1.0 + 1.0*0.5 = 1.5
+# bundle.total = 1.0*1.0 + 1.0*0.5 = 1.5  (feedback-only signals don't contribute)
+# bundle.feedback_texts() = ("Consider edge cases...",)
 ```

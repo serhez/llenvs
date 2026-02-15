@@ -484,9 +484,9 @@ judge:
   template: correctness             # correctness, helpfulness, safety, or literal
   system_prompt: null               # Override template default
   score_range: [1, 10]              # For normalization to [0,1]
-  name: judge                       # Reward signal name
+  name: judge                       # Signal name
   reward_type: outcome              # outcome, step, format, process
-  weight: 1.0                       # Reward signal weight
+  weight: 1.0                       # Signal weight
   normalize: true                   # Normalize to [0,1]
   inference:                        # Judge sampling params
     temperature: 0.0
@@ -568,6 +568,44 @@ config = EnvironmentConfig(
 ```
 
 When `None` (default), `BranchManager.create()` auto-resolves the best strategy based on environment capabilities. See the **[Branching Guide](../guides/branching.md)** for details.
+
+## Iterative Configuration
+
+Wrap any single-turn environment in an iterative refinement loop. See the **[Iterative Refinement Guide](../guides/iterative.md)** for full details.
+
+```yaml
+environments:
+  - name: openai/openai_humaneval
+    adapter: huggingface
+    iterative:
+      max_turns: 5                           # Maximum refinement turns
+      include_history: true                  # Include previous attempts in feedback
+      summarize_history: false               # Use env LLM to summarize history
+      submit_keyword: SUBMIT                 # Keyword for early termination (null to disable)
+      submission_extractor: code_block       # Extractor name for parsing submissions
+      submission_extractor_config:
+        language: python
+      solved_threshold: 1.0                  # OUTCOME score threshold for solved
+      code_execution:                        # Optional code execution
+        timeout: 30.0                        # Execution timeout in seconds
+```
+
+```python
+from llenvs.core.config import EnvironmentConfig, IterativeConfig, CodeExecutionConfig
+
+config = EnvironmentConfig(
+    name="openai/openai_humaneval",
+    adapter="huggingface",
+    iterative=IterativeConfig(
+        max_turns=5,
+        submission_extractor="code_block",
+        submission_extractor_config={"language": "python"},
+        code_execution=CodeExecutionConfig(timeout=30.0),
+    ),
+)
+```
+
+When `iterative` is set, `EnvironmentFactory.create()` wraps the base environment in an `IterativeEnvironment`. The `submission_extractor` is resolved from the answer extractor registry, and `code_execution` creates a `CodeExecutionReward` with a `SubprocessCodeExecutor`.
 
 ## MCP Server Configuration
 

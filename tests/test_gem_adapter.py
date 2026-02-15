@@ -313,7 +313,7 @@ class TestGemEnvironment:
         # Check reward
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 1.0
+        assert correctness.reward == 1.0
         assert correctness.reward_type == RewardType.OUTCOME
 
     def test_step_incorrect_guess(self, mock_gem_env):
@@ -336,7 +336,7 @@ class TestGemEnvironment:
         # Check reward is step type for intermediate
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 0.0
+        assert correctness.reward == 0.0
         assert correctness.reward_type == RewardType.STEP
 
         # Check observation indicates too low (in messages, not prompt)
@@ -364,7 +364,7 @@ class TestGemEnvironment:
 
         # Should win
         assert result.terminated is True
-        assert result.rewards.by_name("correctness").value == 1.0
+        assert result.rewards.by_name("correctness").reward == 1.0
 
     def test_single_turn_terminates(self, mock_single_turn_env):
         """Test that single-turn env terminates after one step."""
@@ -379,7 +379,7 @@ class TestGemEnvironment:
         result = env.step(state, action)
 
         assert result.terminated is True
-        assert result.rewards.by_name("correctness").value == 1.0
+        assert result.rewards.by_name("correctness").reward == 1.0
 
     def test_format_reward_via_extra_rewards(self, mock_single_turn_env):
         """Test format reward when added via extra_rewards."""
@@ -398,7 +398,7 @@ class TestGemEnvironment:
 
         format_reward = result.rewards.by_name("format")
         assert format_reward is not None
-        assert format_reward.value == 1.0
+        assert format_reward.reward == 1.0
 
     def test_no_format_reward_by_default(self, mock_single_turn_env):
         """Test no format reward by default (native-only)."""
@@ -563,7 +563,7 @@ class TestGemEnvironmentSpec:
         assert spec.pure_step is True
 
 
-class TestRewardBundle:
+class TestSignalBundle:
     """Tests for reward bundle from GEM environments."""
 
     def test_total_reward_native_only(self, mock_single_turn_env):
@@ -682,7 +682,7 @@ class TestStatelessGemEnvironment:
 
         result = env.step(state, Action(text="50"))
         assert result.terminated is True
-        assert result.rewards.by_name("correctness").value == 1.0
+        assert result.rewards.by_name("correctness").reward == 1.0
 
     def test_multi_step_without_state_methods(self, mock_stateless_env):
         """Multi-step gameplay should work without state methods."""
@@ -856,4 +856,4 @@ class TestStatelessGemEnvironment:
             branch_env, branch_state = mgr.branch("after_guess1")
             result_branch = branch_env.step(branch_state, Action(text="50"))
             assert result_branch.terminated is True
-            assert result_branch.rewards.by_name("correctness").value == 1.0
+            assert result_branch.rewards.by_name("correctness").reward == 1.0

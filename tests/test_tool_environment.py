@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.environment import StepResult, EnvironmentSpec
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.tools import (
     ToolDefinition,
     ToolParameter,
@@ -43,8 +43,8 @@ class CorrectnessReward:
         state: State[Any],
         action: Any,
         next_state: State[Any],
-    ) -> RewardSignal:
-        return RewardSignal(value=1.0, name=self.name, reward_type=self.reward_type)
+    ) -> Signal:
+        return Signal(reward=1.0, name=self.name, reward_type=self.reward_type)
 
 
 @dataclass
@@ -165,7 +165,7 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
             metadata=next_metadata,
         )
 
-        rewards = RewardBundle.single(1.0 if terminated else 0.0, "correctness")
+        rewards = SignalBundle.single(1.0 if terminated else 0.0, "correctness")
 
         return StepResult(
             next_state=next_state,

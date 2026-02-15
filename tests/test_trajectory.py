@@ -2,7 +2,7 @@
 
 import pytest
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 
 
@@ -92,7 +92,7 @@ class TestTrajectory:
                 state=current,
                 action=Action(text=f"action_{i}"),
                 next_state=next_state,
-                rewards=RewardBundle.single(value=0.5),
+                rewards=SignalBundle.single(reward=0.5),
                 info={},
             )
             trajectory.add_transition(transition)
@@ -114,7 +114,7 @@ class TestTrajectory:
                 state=current,
                 action=Action(text="action"),
                 next_state=next_state,
-                rewards=RewardBundle.empty(),
+                rewards=SignalBundle.empty(),
                 info={},
             )
             trajectory.add_transition(transition)
@@ -144,7 +144,7 @@ class TestTrajectory:
                 state=current,
                 action=Action(text="action"),
                 next_state=next_state,
-                rewards=RewardBundle.single(value=r),
+                rewards=SignalBundle.single(reward=r),
                 info={},
             )
             trajectory.add_transition(transition)
@@ -163,7 +163,7 @@ class TestTrajectory:
                 state=sample_state,
                 action=Action(text="action"),
                 next_state=next_state,
-                rewards=RewardBundle.empty(),
+                rewards=SignalBundle.empty(),
                 info={},
             )
         )
@@ -176,7 +176,7 @@ class TestTrajectory:
                 state=next_state,
                 action=Action(text="final"),
                 next_state=terminal,
-                rewards=RewardBundle.empty(),
+                rewards=SignalBundle.empty(),
                 info={},
             )
         )
@@ -220,7 +220,7 @@ class TestTrajectory:
                     state=current,
                     action=Action(text=f"action_{i}"),
                     next_state=next_state,
-                    rewards=RewardBundle.single(value=1.0),
+                    rewards=SignalBundle.single(reward=1.0),
                     info={},
                 )
             )
@@ -234,7 +234,7 @@ class TestTrajectory:
                 state=trajectory.current_state,
                 action=Action(text="original_path"),
                 next_state=trajectory.current_state.with_metadata(step=4),
-                rewards=RewardBundle.single(value=0.5),
+                rewards=SignalBundle.single(reward=0.5),
                 info={},
             )
         )
@@ -264,7 +264,7 @@ class TestTrajectory:
                 state=sample_state,
                 action=Action(text="step1"),
                 next_state=next_state,
-                rewards=RewardBundle.single(value=1.0),
+                rewards=SignalBundle.single(reward=1.0),
                 info={},
             )
         )
@@ -279,7 +279,7 @@ class TestTrajectory:
                 state=trajectory.current_state,
                 action=Action(text="original_action"),
                 next_state=trajectory.current_state.with_metadata(step=2),
-                rewards=RewardBundle.single(value=0.0),
+                rewards=SignalBundle.single(reward=0.0),
                 info={},
             )
         )
@@ -289,7 +289,7 @@ class TestTrajectory:
                 state=branched.current_state,
                 action=Action(text="branched_action"),
                 next_state=branched.current_state.with_metadata(step=2),
-                rewards=RewardBundle.single(value=1.0),
+                rewards=SignalBundle.single(reward=1.0),
                 info={},
             )
         )

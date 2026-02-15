@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.core.reward import RewardSignal, RewardType
+from llenvs.core.reward import Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.inference.protocol import GenerationResult, SamplingParams, StopReason
 
@@ -258,11 +258,11 @@ class TestJudgeReward:
         action = Action.from_text("4")
         signal = reward.compute(state, action, state)
 
-        assert isinstance(signal, RewardSignal)
+        assert isinstance(signal, Signal)
         assert signal.name == "judge"
         assert signal.reward_type == RewardType.OUTCOME
         # 8 on 1-10 scale → (8-1)/(10-1) = 7/9 ≈ 0.778
-        assert signal.value == pytest.approx(7.0 / 9.0)
+        assert signal.reward == pytest.approx(7.0 / 9.0)
         assert signal.weight == 1.0
 
     def test_unparseable_returns_default(self):
@@ -275,7 +275,7 @@ class TestJudgeReward:
         action = Action.from_text("4")
         signal = reward.compute(state, action, state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
         assert signal.metadata is not None
         assert "error" in signal.metadata
 
@@ -290,7 +290,7 @@ class TestJudgeReward:
         action = Action.from_text("4")
         signal = reward.compute(state, action, state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
         assert signal.metadata is not None
         assert "error" in signal.metadata
         assert "API timeout" in signal.metadata["error"]
@@ -305,7 +305,7 @@ class TestJudgeReward:
         action = Action.from_text("4")
         signal = reward.compute(state, action, state)
 
-        assert signal.value == 8.0
+        assert signal.reward == 8.0
 
     def test_weight_propagation(self):
         from llenvs.core.judge import JudgeReward
@@ -356,7 +356,7 @@ class TestJudgeReward:
         signal = reward.compute(state, action, state)
 
         # 5 on 1-10 scale → (5-1)/(10-1) = 4/9
-        assert signal.value == pytest.approx(4.0 / 9.0)
+        assert signal.reward == pytest.approx(4.0 / 9.0)
 
     def test_custom_template_string(self):
         """Pass a literal template string instead of built-in name."""
@@ -374,7 +374,7 @@ class TestJudgeReward:
         signal = reward.compute(state, action, state)
 
         # 6 on 1-5 scale → (6-1)/(5-1) = 5/4 = 1.25, clamped to 1.0
-        assert signal.value == pytest.approx(1.0)
+        assert signal.reward == pytest.approx(1.0)
 
     def test_name_and_reward_type(self):
         from llenvs.core.judge import JudgeReward
@@ -468,7 +468,7 @@ class TestJudgeReward:
         action = Action.from_text("wrong")
         signal = reward.compute(state, action, state)
 
-        assert signal.value == pytest.approx(0.0)
+        assert signal.reward == pytest.approx(0.0)
 
     def test_score_at_range_maximum(self):
         """Score at upper bound normalizes to 1."""
@@ -481,7 +481,7 @@ class TestJudgeReward:
         action = Action.from_text("perfect")
         signal = reward.compute(state, action, state)
 
-        assert signal.value == pytest.approx(1.0)
+        assert signal.reward == pytest.approx(1.0)
 
 
 # ---------------------------------------------------------------------------

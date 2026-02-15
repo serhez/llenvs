@@ -127,7 +127,7 @@ class TestReasoningGymEnvironment:
         # Check rewards (native-only by default)
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 1.0
+        assert correctness.reward == 1.0
 
         # No format reward by default
         assert result.rewards.by_name("format") is None
@@ -146,7 +146,7 @@ class TestReasoningGymEnvironment:
 
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 0.0
+        assert correctness.reward == 0.0
 
     def test_step_no_answer_extracted(self, mock_dataset):
         """Test step when no answer can be extracted."""
@@ -157,7 +157,7 @@ class TestReasoningGymEnvironment:
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
-        assert correctness.value == 0.0
+        assert correctness.reward == 0.0
 
         assert result.info["extracted_answer"] is None
 
@@ -211,7 +211,7 @@ class TestCorrectnessRewardFunction:
         action = Action(text="<answer>4</answer>")
         signal = reward_fn.compute(state, action, state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.name == "correctness"
         assert signal.reward_type == RewardType.OUTCOME
         assert signal.metadata["extracted"] == "4"
@@ -227,7 +227,7 @@ class TestCorrectnessRewardFunction:
         action = Action(text="<answer>wrong</answer>")
         signal = reward_fn.compute(state, action, state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_no_extraction(self, mock_dataset):
         """Test reward when extraction fails."""
@@ -240,7 +240,7 @@ class TestCorrectnessRewardFunction:
         action = Action(text="No tags here")
         signal = reward_fn.compute(state, action, state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
         assert signal.metadata["extracted"] is None
 
 
@@ -265,7 +265,7 @@ class TestFormatReward:
         action = Action(text="<answer>anything</answer>")
         signal = reward_fn.compute(state, action, state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.name == "format"
         assert signal.reward_type == RewardType.FORMAT
 
@@ -287,7 +287,7 @@ class TestFormatReward:
         action = Action(text="No proper tags")
         signal = reward_fn.compute(state, action, state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
 
 class TestReasoningGymHidden:

@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle
+from llenvs.core.reward import SignalBundle
 from llenvs.core.state import (
     Action,
     Observation,
@@ -597,12 +597,12 @@ class MockSingleTurnEnv:
     def step(self, state, action):
         return StepResult(
             next_state=state.with_metadata(step=1, is_terminal=True),
-            rewards=RewardBundle.single(value=1.0, name="correctness"),
+            rewards=SignalBundle.single(reward=1.0, name="correctness"),
             terminated=True,
         )
 
     def compute_rewards(self, state, action, next_state):
-        return RewardBundle.single(value=1.0, name="correctness")
+        return SignalBundle.single(reward=1.0, name="correctness")
 
 
 class MockMultiTurnEnv:
@@ -640,14 +640,14 @@ class MockMultiTurnEnv:
         done = next_step >= target
         return StepResult(
             next_state=state.with_metadata(step=next_step, is_terminal=done),
-            rewards=RewardBundle.single(
-                value=1.0 if done else 0.0, name="correctness"
+            rewards=SignalBundle.single(
+                reward=1.0 if done else 0.0, name="correctness"
             ),
             terminated=done,
         )
 
     def compute_rewards(self, state, action, next_state):
-        return RewardBundle.empty()
+        return SignalBundle.empty()
 
 
 class BatchTrackingBackend(ModelBackend):
@@ -904,7 +904,7 @@ class MockSingleTurnToolEnv:
     def step(self, state, action):
         return StepResult(
             next_state=state.with_metadata(step=1, is_terminal=True),
-            rewards=RewardBundle.single(value=1.0, name="correctness"),
+            rewards=SignalBundle.single(reward=1.0, name="correctness"),
             terminated=True,
         )
 
@@ -991,12 +991,12 @@ class MockBaseEnvForSegmented:
     def step(self, state, action):
         return StepResult(
             next_state=state.with_metadata(step=1, is_terminal=True),
-            rewards=RewardBundle.single(value=1.0, name="correctness"),
+            rewards=SignalBundle.single(reward=1.0, name="correctness"),
             terminated=True,
         )
 
     def compute_rewards(self, state, action, next_state):
-        return RewardBundle.empty()
+        return SignalBundle.empty()
 
 
 class SegmentScriptedBackend(ModelBackend):

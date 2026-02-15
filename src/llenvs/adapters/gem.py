@@ -15,7 +15,7 @@ from llenvs.core.state import (
     Observation,
     Action,
 )
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
 from llenvs.core.tools import (
@@ -179,7 +179,7 @@ class GemCorrectnessReward:
     """Reward function wrapping GEM's native reward.
 
     GEM returns a single float reward per step. This wraps it in our
-    RewardSignal format with appropriate type based on terminal status.
+    Signal format with appropriate type based on terminal status.
     """
 
     _name: str = "correctness"
@@ -198,7 +198,7 @@ class GemCorrectnessReward:
         state: State[GemHidden],
         action: Action,
         next_state: State[GemHidden],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute reward from GEM's native reward."""
         gem_reward = next_state.metadata.info.get("gem_reward", 0.0)
 
@@ -209,10 +209,10 @@ class GemCorrectnessReward:
             else RewardType.STEP
         )
 
-        return RewardSignal(
-            value=float(gem_reward),
+        return Signal(
             name=self.name,
             reward_type=reward_type,
+            reward=float(gem_reward),
             metadata={"source": "gem"},
         )
 
@@ -450,7 +450,7 @@ class GemEnvironment:
         state: State[GemHidden],
         action: Action,
         next_state: State[GemHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition."""
         signals = []
 
@@ -458,7 +458,7 @@ class GemEnvironment:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
 
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 class GemAdapter:
@@ -1075,7 +1075,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         state: State[GemToolHidden],
         action: Action,
         next_state: State[GemToolHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition."""
         signals = []
 
@@ -1083,4 +1083,4 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
 
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))

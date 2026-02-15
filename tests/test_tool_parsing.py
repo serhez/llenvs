@@ -12,7 +12,7 @@ from llenvs.core.tool_parsing import (
 )
 from llenvs.core.state import Observation, State, StateMetadata, Action
 from llenvs.core.environment import EnvironmentSpec
-from llenvs.core.reward import RewardBundle, RewardType
+from llenvs.core.reward import SignalBundle, RewardType
 from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
@@ -265,7 +265,7 @@ class TestRunnerToolParsing:
 
         env.step.return_value = StepResult(
             next_state=terminal_state,
-            rewards=RewardBundle(signals=()),
+            rewards=SignalBundle(signals=()),
             terminated=True,
             info={},
         )

@@ -410,7 +410,7 @@ segmenter = CompositeSegmenter(segmenters=(
 Add custom per-step rewards:
 
 ```python
-from llenvs.core import RewardSignal, RewardType
+from llenvs.core import Signal, RewardType
 
 class PRMRewardFunction:
     """Process Reward Model for intermediate step quality."""
@@ -426,16 +426,16 @@ class PRMRewardFunction:
     def reward_type(self) -> RewardType:
         return RewardType.PROCESS
 
-    def compute(self, state, action, next_state) -> RewardSignal:
+    def compute(self, state, action, next_state) -> Signal:
         if not next_state.metadata.is_terminal:
             accumulated = state.hidden.accumulated_text + action.text
             score = self.prm.score(accumulated)
-            return RewardSignal(
-                value=score,
+            return Signal(
                 name=self.name,
-                reward_type=self.reward_type
+                reward_type=self.reward_type,
+                reward=score,
             )
-        return RewardSignal(value=0.0, name=self.name, reward_type=self.reward_type)
+        return Signal(name=self.name, reward_type=self.reward_type, reward=0.0)
 
 # Use with SegmentedEnvironment
 env = SegmentedEnvironment(

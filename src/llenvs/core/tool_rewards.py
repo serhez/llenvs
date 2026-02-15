@@ -7,7 +7,7 @@ of tool usage by models.
 from dataclasses import dataclass, field
 from typing import Any
 
-from llenvs.core.reward import RewardSignal, RewardType
+from llenvs.core.reward import Signal, RewardType
 from llenvs.core.state import State
 from llenvs.core.tools import ToolResultStatus
 
@@ -44,7 +44,7 @@ class ToolValidityReward:
         state: State[Any],
         action: Any,
         next_state: State[Any],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute validity reward for tool calls in action.
 
         Args:
@@ -53,15 +53,15 @@ class ToolValidityReward:
             next_state: State after action.
 
         Returns:
-            RewardSignal with value in [0, 1] based on tool validity.
+            Signal with reward in [0, 1] based on tool validity.
         """
         # Check if action has tool calls
         if not hasattr(action, "tool_calls") or not action.tool_calls:
             # No tool calls - neutral reward
-            return RewardSignal(
-                value=1.0,
+            return Signal(
                 name=self._name,
                 reward_type=self._reward_type,
+                reward=1.0,
                 metadata={"num_calls": 0, "num_valid": 0},
                 weight=self._weight,
             )
@@ -70,10 +70,10 @@ class ToolValidityReward:
         obs = next_state.observation
         if not hasattr(obs, "tool_results") or not obs.tool_results:
             # No results - assume all valid (shouldn't happen)
-            return RewardSignal(
-                value=1.0,
+            return Signal(
                 name=self._name,
                 reward_type=self._reward_type,
+                reward=1.0,
                 metadata={"num_calls": len(action.tool_calls), "num_valid": len(action.tool_calls)},
                 weight=self._weight,
             )
@@ -87,10 +87,10 @@ class ToolValidityReward:
         # Partial credit
         value = num_valid / num_calls if num_calls > 0 else 1.0
 
-        return RewardSignal(
-            value=value,
+        return Signal(
             name=self._name,
             reward_type=self._reward_type,
+            reward=value,
             metadata={
                 "num_calls": num_calls,
                 "num_valid": num_valid,
@@ -138,7 +138,7 @@ class ToolEfficiencyReward:
         state: State[Any],
         action: Any,
         next_state: State[Any],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute efficiency reward for tool usage.
 
         Args:
@@ -147,15 +147,15 @@ class ToolEfficiencyReward:
             next_state: State after action.
 
         Returns:
-            RewardSignal with value in [0, 1] based on efficiency.
+            Signal with reward in [0, 1] based on efficiency.
         """
         # Check if action has tool calls
         if not hasattr(action, "tool_calls") or not action.tool_calls:
             # No tool calls - perfect efficiency
-            return RewardSignal(
-                value=1.0,
+            return Signal(
                 name=self._name,
                 reward_type=self._reward_type,
+                reward=1.0,
                 metadata={"num_calls": 0, "excess": 0, "duplicates": 0},
                 weight=self._weight,
             )
@@ -183,10 +183,10 @@ class ToolEfficiencyReward:
         # Clamp to [0, 1]
         value = max(0.0, min(1.0, value))
 
-        return RewardSignal(
-            value=value,
+        return Signal(
             name=self._name,
             reward_type=self._reward_type,
+            reward=value,
             metadata={
                 "num_calls": num_calls,
                 "excess": excess,

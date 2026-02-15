@@ -86,7 +86,7 @@ print(f"Problem: {state.observation.prompt}")
 action = Action(text="Let me solve this step by step... <answer>42</answer>")
 result = env.step(state, action)
 
-print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
+print(f"Correct: {result.rewards.by_name('correctness').reward == 1.0}")
 ```
 
 ### Available Single-Turn Benchmarks

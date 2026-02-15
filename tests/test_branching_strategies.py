@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 
 
@@ -96,7 +96,7 @@ class PureFunctionEnv:
         )
         return StepResult(
             next_state=next_state,
-            rewards=RewardBundle.single(
+            rewards=SignalBundle.single(
                 1.0 if correct else 0.0, "correct", RewardType.OUTCOME
             ),
             terminated=True,
@@ -104,9 +104,9 @@ class PureFunctionEnv:
 
     def compute_rewards(
         self, state: State[MockHidden], action: Action, next_state: State[MockHidden]
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         correct = action.text == state.hidden.answer
-        return RewardBundle.single(
+        return SignalBundle.single(
             1.0 if correct else 0.0, "correct", RewardType.OUTCOME
         )
 
@@ -176,13 +176,13 @@ class MutableEnv:
         )
         return StepResult(
             next_state=next_state,
-            rewards=RewardBundle(signals=()),
+            rewards=SignalBundle(signals=()),
         )
 
     def compute_rewards(
         self, state: State[MockHidden], action: Action, next_state: State[MockHidden]
-    ) -> RewardBundle:
-        return RewardBundle(signals=())
+    ) -> SignalBundle:
+        return SignalBundle(signals=())
 
 
 class NoBranchNoSeedEnv:
@@ -225,13 +225,13 @@ class NoBranchNoSeedEnv:
     def step(self, state: State, action: Action) -> StepResult:
         return StepResult(
             next_state=state.with_metadata(step=state.metadata.step + 1),
-            rewards=RewardBundle(signals=()),
+            rewards=SignalBundle(signals=()),
         )
 
     def compute_rewards(
         self, state: State, action: Action, next_state: State
-    ) -> RewardBundle:
-        return RewardBundle(signals=())
+    ) -> SignalBundle:
+        return SignalBundle(signals=())
 
 
 # ---------------------------------------------------------------------------
@@ -842,13 +842,13 @@ class _MutableCounterEnv:
         )
         return StepResult(
             next_state=next_state,
-            rewards=RewardBundle(signals=()),
+            rewards=SignalBundle(signals=()),
         )
 
     def compute_rewards(
         self, state: State[_ForkMockHidden], action: Action, next_state: State[_ForkMockHidden]
-    ) -> RewardBundle:
-        return RewardBundle(signals=())
+    ) -> SignalBundle:
+        return SignalBundle(signals=())
 
 
 def _start_env_server(env, host="127.0.0.1", port=0):

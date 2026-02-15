@@ -15,8 +15,8 @@ from typing import Any, Callable
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.reward import (
-    RewardBundle,
-    RewardSignal,
+    SignalBundle,
+    Signal,
     RewardType,
     RewardFunction,
 )
@@ -162,14 +162,14 @@ class OpenEnvReward:
         state: State[Any],
         action: Action,
         next_state: State[Any],
-    ) -> RewardSignal:
+    ) -> Signal:
         reward_value = next_state.metadata.info.get("openenv_reward", 0.0) or 0.0
         is_terminal = next_state.metadata.is_terminal
 
-        return RewardSignal(
-            value=float(reward_value),
+        return Signal(
             name=self.name,
             reward_type=RewardType.OUTCOME if is_terminal else RewardType.STEP,
+            reward=float(reward_value),
         )
 
 
@@ -347,12 +347,12 @@ class OpenEnvEnvironment:
         state: State[OpenEnvHidden],
         action: Action,
         next_state: State[OpenEnvHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         signals = []
         for reward_fn in self.reward_functions:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # ── Tool environment ────────────────────────────────────────────────
@@ -584,12 +584,12 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
         state: State[OpenEnvHidden],
         action: Action,
         next_state: State[OpenEnvHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         signals = []
         for reward_fn in self.reward_functions:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # ── Adapter ─────────────────────────────────────────────────────────

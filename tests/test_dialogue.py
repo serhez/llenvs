@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import StepResult, EnvironmentSpec
 from llenvs.inference.protocol import (
     ChatMessage,
@@ -61,9 +61,9 @@ class DummyReward:
     def reward_type(self) -> RewardType:
         return self._reward_type
 
-    def compute(self, state: Any, action: Any, next_state: Any) -> RewardSignal:
-        return RewardSignal(
-            value=self._value, name=self._name, reward_type=self._reward_type
+    def compute(self, state: Any, action: Any, next_state: Any) -> Signal:
+        return Signal(
+            name=self._name, reward_type=self._reward_type, reward=self._value
         )
 
 
@@ -516,7 +516,7 @@ class TestDialogueRewards:
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action.from_text("A"))
         assert len(result.rewards.signals) == 1
-        assert result.rewards.signals[0].value == 0.7
+        assert result.rewards.signals[0].reward == 0.7
 
     def test_judge_reward_compatibility(self):
         """DialogueHidden.ground_truth is accessible for JudgeReward."""
@@ -988,7 +988,7 @@ class TestComputeRewards:
         state, _ = env.reset(options={"task_index": 0})
         bundle = env.compute_rewards(state, Action.from_text("A"), state)
         assert len(bundle.signals) == 1
-        assert bundle.signals[0].value == 0.9
+        assert bundle.signals[0].reward == 0.9
 
     def test_empty_rewards(self):
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment

@@ -15,7 +15,7 @@ from llenvs.container.config import ContainerConfig
 from llenvs.container.serialization import OpaqueHidden
 from llenvs.core.config import EnvironmentConfig, EnvironmentFactory
 from llenvs.core.environment import EnvironmentSpec
-from llenvs.core.reward import RewardBundle
+from llenvs.core.reward import SignalBundle
 from llenvs.core.state import Action
 
 
@@ -66,7 +66,7 @@ class TestContainerRoundTrip:
         action = Action.from_text("<answer>8</answer>")
         result = container_env.step(state, action)
         assert result.terminated or not result.terminated  # Valid StepResult
-        assert isinstance(result.rewards, RewardBundle)
+        assert isinstance(result.rewards, SignalBundle)
 
     def test_step_correct_answer(self, container_env):
         state, _ = container_env.reset(options={"task_index": 0})
@@ -85,7 +85,7 @@ class TestContainerRoundTrip:
         action = Action.from_text("<answer>42</answer>")
         result = container_env.step(state, action)
         rewards = container_env.compute_rewards(state, action, result.next_state)
-        assert isinstance(rewards, RewardBundle)
+        assert isinstance(rewards, SignalBundle)
 
     def test_reward_functions_empty(self, container_env):
         assert container_env.reward_functions == ()
@@ -105,7 +105,7 @@ class TestContainerRoundTrip:
             assert state.observation.prompt
             action = Action.from_text("<answer>0</answer>")
             result = container_env.step(state, action)
-            assert isinstance(result.rewards, RewardBundle)
+            assert isinstance(result.rewards, SignalBundle)
 
 
 class TestScorerIntegration:

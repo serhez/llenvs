@@ -251,7 +251,7 @@ class TestHuggingFaceEnvironment:
         # Check correctness reward (native-only default)
         correctness = result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 1.0
+        assert correctness.reward == 1.0
 
         # No format reward by default
         assert result.rewards.by_name("format") is None
@@ -269,7 +269,7 @@ class TestHuggingFaceEnvironment:
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
-        assert correctness.value == 0.0
+        assert correctness.reward == 0.0
 
     def test_step_no_answer_extracted(self, mock_hf_dataset):
         """Test step when no answer can be extracted."""
@@ -284,7 +284,7 @@ class TestHuggingFaceEnvironment:
         result = env.step(state, action)
 
         correctness = result.rewards.by_name("correctness")
-        assert correctness.value == 0.0
+        assert correctness.reward == 0.0
 
     def test_custom_extractor(self, mock_hf_dataset):
         """Test with custom extractor."""
@@ -318,7 +318,7 @@ class TestHuggingFaceEnvironment:
 
         result = env.step(state, Action(text="<answer>55</answer>"))
         correctness = result.rewards.by_name("correctness")
-        assert correctness.value == 1.0
+        assert correctness.reward == 1.0
 
 
 class TestHuggingFaceAdapter:

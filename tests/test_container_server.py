@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import ToolDefinition, ToolParameter, ToolParameterType
 from llenvs.container.server import EnvironmentServer
@@ -89,7 +89,7 @@ class MockEnvironment:
         self, state: State[MockHidden], action: Action
     ) -> StepResult[MockHidden]:
         correct = action.text == state.hidden.expected_answer
-        reward = RewardBundle.single(
+        reward = SignalBundle.single(
             1.0 if correct else 0.0, "correct", RewardType.OUTCOME
         )
         next_state = State(
@@ -113,9 +113,9 @@ class MockEnvironment:
         state: State[MockHidden],
         action: Action,
         next_state: State[MockHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         correct = action.text == state.hidden.expected_answer
-        return RewardBundle.single(
+        return SignalBundle.single(
             1.0 if correct else 0.0, "correct", RewardType.OUTCOME
         )
 
@@ -266,7 +266,7 @@ class TestStep:
         )
         assert step_data["terminated"] is True
         assert step_data["info"]["correct"] is True
-        assert step_data["rewards"]["signals"][0]["value"] == 1.0
+        assert step_data["rewards"]["signals"][0]["reward"] == 1.0
 
     def test_step_incorrect(self, server_url):
         _, reset_data = _request(server_url, "POST", "/reset", {})
@@ -279,7 +279,7 @@ class TestStep:
             {"state": state, "action": {"text": "wrong", "tool_calls": []}},
         )
         assert step_data["info"]["correct"] is False
-        assert step_data["rewards"]["signals"][0]["value"] == 0.0
+        assert step_data["rewards"]["signals"][0]["reward"] == 0.0
 
     def test_step_without_reset_fails(self, server_url):
         """If hidden_type was not captured yet, step uses a fallback or errors."""
@@ -324,7 +324,7 @@ class TestComputeRewards:
             },
         )
         assert status == 200
-        assert rewards_data["signals"][0]["value"] == 1.0
+        assert rewards_data["signals"][0]["reward"] == 1.0
 
 
 class TestErrors:

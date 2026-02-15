@@ -4,7 +4,7 @@ import json
 
 import pytest
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
+from llenvs.core.reward import Signal, SignalBundle, RewardType
 from llenvs.core.segmentation import (
     Segmenter,
     SentenceSegmenter,
@@ -581,7 +581,7 @@ class TestSegmentedEnvironment:
         final_result = results[-1]
         correctness = final_result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 1.0
+        assert correctness.reward == 1.0
 
     def test_replay_incorrect_answer(self, mock_dataset):
         """Test replay gives zero reward for wrong answer."""
@@ -598,7 +598,7 @@ class TestSegmentedEnvironment:
         final_result = results[-1]
         correctness = final_result.rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 0.0
+        assert correctness.reward == 0.0
 
     def test_replay_empty_response(self, mock_dataset):
         """Test replay handles empty response."""

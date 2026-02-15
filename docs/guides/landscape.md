@@ -130,17 +130,20 @@ For math and reasoning evaluation where parsing `\boxed{}`, `#### answers`, mult
 
 ### llenvs
 
-Multi-signal typed rewards. Each transition produces a `RewardBundle` with named, weighted `RewardSignal` instances:
+Multi-signal typed rewards. Each transition produces a `SignalBundle` with named, weighted `Signal` instances. Each signal can carry a numeric reward, textual feedback, or both:
 
 ```python
-RewardBundle(signals=(
-    RewardSignal(value=1.0, name="correctness", type=OUTCOME, weight=2.0),
-    RewardSignal(value=0.5, name="format", type=FORMAT, weight=0.5),
+SignalBundle(signals=(
+    Signal(name="correctness", reward_type=OUTCOME, reward=1.0, weight=2.0),
+    Signal(name="format", reward_type=FORMAT, reward=0.5, weight=0.5),
+    Signal(name="code_exec", reward_type=OUTCOME, reward=0.6, feedback="3/5 tests passed"),
 ))
-# bundle.total = 1.0*2.0 + 0.5*0.5 = 2.25
+# bundle.total = 1.0*2.0 + 0.5*0.5 + 0.6*1.0 = 2.85
+# bundle.feedback_texts() = ("3/5 tests passed",)
+# bundle.numeric_signals() returns the 3 signals with rewards
 ```
 
-Adapters provide only native rewards by default (wrapper fidelity). Additional rewards (`FormatReward`, `ToolValidityReward`, `ToolEfficiencyReward`) are opt-in via `extra_rewards`. Signals are queryable by name or type. The `weight` field (default 1.0) allows expressing relative importance.
+Adapters provide only native rewards by default (wrapper fidelity). Additional rewards (`FormatReward`, `ToolValidityReward`, `ToolEfficiencyReward`) are opt-in via `extra_rewards`. Signals are queryable by name or type. The `weight` field (default 1.0) allows expressing relative importance. Feedback-only signals (`reward=None`) participate in feedback collection but do not contribute to the numeric total — useful for delivering qualitative feedback in iterative refinement environments.
 
 ### OpenEnv
 

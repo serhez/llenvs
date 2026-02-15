@@ -9,7 +9,7 @@ from typing import Any
 import uuid
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
 
@@ -64,15 +64,15 @@ class CorrectnessRewardFunction:
         state: State[ReasoningGymHidden],
         action: Action,
         next_state: State[ReasoningGymHidden],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute correctness reward using reasoning-gym's scoring."""
         extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         if extracted is None:
-            return RewardSignal(
-                value=0.0,
+            return Signal(
                 name=self.name,
                 reward_type=self.reward_type,
+                reward=0.0,
                 metadata={"extracted": None, "extraction": extraction_meta},
             )
 
@@ -82,10 +82,10 @@ class CorrectnessRewardFunction:
             entry=state.hidden.entry,
         )
 
-        return RewardSignal(
-            value=float(score),
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=float(score),
             metadata={
                 "extracted": extracted,
                 "expected": state.hidden.expected_answer,
@@ -284,7 +284,7 @@ class ReasoningGymEnvironment:
         state: State[ReasoningGymHidden],
         action: Action,
         next_state: State[ReasoningGymHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition.
 
         Args:
@@ -293,7 +293,7 @@ class ReasoningGymEnvironment:
             next_state: State after action (unused for single-turn).
 
         Returns:
-            RewardBundle with correctness and optionally format signals.
+            SignalBundle with correctness and optionally format signals.
         """
         signals = []
 
@@ -301,7 +301,7 @@ class ReasoningGymEnvironment:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
 
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
     def __len__(self) -> int:
         """Number of tasks in the dataset."""

@@ -11,7 +11,7 @@ import dataclasses
 from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import (
     ToolCall,
@@ -201,32 +201,37 @@ def deserialize_tool_definition(data: dict[str, Any]) -> ToolDefinition:
 # Reward serialization
 # ---------------------------------------------------------------------------
 
-def serialize_reward_signal(sig: RewardSignal) -> dict[str, Any]:
-    return {
-        "value": sig.value,
+def serialize_reward_signal(sig: Signal) -> dict[str, Any]:
+    d: dict[str, Any] = {
         "name": sig.name,
         "reward_type": sig.reward_type.name,
-        "metadata": sig.metadata,
+        "reward": sig.reward,
         "weight": sig.weight,
     }
+    if sig.feedback is not None:
+        d["feedback"] = sig.feedback
+    if sig.metadata is not None:
+        d["metadata"] = sig.metadata
+    return d
 
 
-def deserialize_reward_signal(data: dict[str, Any]) -> RewardSignal:
-    return RewardSignal(
-        value=data["value"],
+def deserialize_reward_signal(data: dict[str, Any]) -> Signal:
+    return Signal(
         name=data["name"],
         reward_type=RewardType[data["reward_type"]],
+        reward=data.get("reward"),
+        feedback=data.get("feedback"),
         metadata=data.get("metadata"),
         weight=data.get("weight", 1.0),
     )
 
 
-def serialize_reward_bundle(bundle: RewardBundle) -> dict[str, Any]:
+def serialize_reward_bundle(bundle: SignalBundle) -> dict[str, Any]:
     return {"signals": [serialize_reward_signal(s) for s in bundle.signals]}
 
 
-def deserialize_reward_bundle(data: dict[str, Any]) -> RewardBundle:
-    return RewardBundle(
+def deserialize_reward_bundle(data: dict[str, Any]) -> SignalBundle:
+    return SignalBundle(
         signals=tuple(deserialize_reward_signal(s) for s in data["signals"])
     )
 

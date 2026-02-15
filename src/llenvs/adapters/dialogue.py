@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardFunction, RewardSignal
+from llenvs.core.reward import SignalBundle, RewardFunction, Signal
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.inference.protocol import ChatMessage, SamplingParams
 
@@ -303,7 +303,7 @@ class DialogueEnvironment:
         state: State[DialogueHidden],
         action: Action,
         next_state: State[DialogueHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition.
 
         Args:
@@ -312,12 +312,12 @@ class DialogueEnvironment:
             next_state: State after action.
 
         Returns:
-            RewardBundle with signals from extra_rewards only.
+            SignalBundle with signals from extra_rewards only.
         """
-        signals: list[RewardSignal] = []
+        signals: list[Signal] = []
         for reward_fn in self.reward_functions:
             signals.append(reward_fn.compute(state, action, next_state))
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # ---------------------------------------------------------------------------

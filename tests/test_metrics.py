@@ -3,7 +3,7 @@
 import pytest
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.trajectory import Trajectory, Transition
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.evaluation.runner import TrajectoryResult, BatchResult
 from llenvs.evaluation.metrics import (
     ContinuousStatistics,
@@ -53,17 +53,17 @@ def make_transition(
         state=state,
         action=Action(text="test response"),
         next_state=next_state,
-        rewards=RewardBundle(
+        rewards=SignalBundle(
             signals=(
-                RewardSignal(
-                    value=correctness_reward,
+                Signal(
                     name="correctness",
                     reward_type=RewardType.OUTCOME,
+                    reward=correctness_reward,
                 ),
-                RewardSignal(
-                    value=format_reward,
+                Signal(
                     name="format",
                     reward_type=RewardType.FORMAT,
+                    reward=format_reward,
                 ),
             )
         ),

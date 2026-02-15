@@ -23,7 +23,7 @@ from llenvs.container.serialization import (
     serialize_state,
 )
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle
+from llenvs.core.reward import SignalBundle
 from llenvs.core.state import Action, State
 
 
@@ -168,7 +168,7 @@ class ContainerEnvironment:
         state: State[OpaqueHidden],
         action: Action,
         next_state: State[OpaqueHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         body = {
             "state": serialize_state(state),
             "action": serialize_action(action),

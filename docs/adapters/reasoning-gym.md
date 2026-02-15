@@ -29,7 +29,7 @@ print(state.observation.prompt)
 
 action = Action(text="<answer>14</answer>")
 result = env.step(state, action)
-print(f"Correct: {result.rewards.by_name('correctness').value == 1.0}")
+print(f"Correct: {result.rewards.by_name('correctness').reward == 1.0}")
 ```
 
 ## Using the Adapter

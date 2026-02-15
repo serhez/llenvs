@@ -262,7 +262,7 @@ efficiency_reward = ToolEfficiencyReward(
 )
 ```
 
-Both reward classes accept a `_weight` parameter. With `_weight=0.0`, the signal appears in the `RewardBundle` for inspection but contributes nothing to the total. This is used for auto-monitoring (see below).
+Both reward classes accept a `_weight` parameter. With `_weight=0.0`, the signal appears in the `SignalBundle` for inspection but contributes nothing to the total. This is used for auto-monitoring (see below).
 
 ### Auto-Monitoring
 
@@ -270,7 +270,7 @@ All tool environments (GEM, verifiers, OpenEnv) auto-attach `ToolValidityReward`
 
 - Track tool call validity and efficiency on every step
 - Contribute nothing to the total reward (weight=0)
-- Are accessible via `reward_bundle.by_type(RewardType.STEP)` for inspection
+- Are accessible via `signal_bundle.by_type(RewardType.STEP)` for inspection
 
 No configuration is needed — monitoring is always on.
 

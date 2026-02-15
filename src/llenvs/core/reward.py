@@ -1,10 +1,12 @@
 """Multi-signal reward abstractions.
 
-Supports multiple reward signals per step, enabling:
+Supports multiple evaluation signals per step, enabling:
 - Outcome rewards (correctness at episode end)
 - Step rewards (per-turn feedback)
 - Format rewards (did model follow instructions)
 - Process rewards (intermediate reasoning quality)
+
+Signals can carry numeric rewards, textual feedback, or both.
 """
 
 from dataclasses import dataclass
@@ -26,64 +28,81 @@ class RewardType(Enum):
 
 
 @dataclass(frozen=True)
-class RewardSignal:
-    """A single reward signal.
+class Signal:
+    """A single evaluation signal.
+
+    Can carry a numeric reward, textual feedback, or both:
+    - Numeric-only: ``Signal(name="correctness", reward_type=OUTCOME, reward=1.0)``
+    - Feedback-only: ``Signal(name="judge", reward_type=PROCESS, feedback="Consider edge cases...")``
+    - Both: ``Signal(name="code_exec", reward_type=OUTCOME, reward=0.6, feedback="3/5 tests passed")``
 
     Attributes:
-        value: The numeric reward value.
-        name: Identifier for this reward (e.g., "correctness", "format").
-        reward_type: Category of reward.
-        metadata: Optional additional information about the reward.
+        name: Identifier for this signal (e.g., "correctness", "format").
+        reward_type: Category of signal.
+        reward: Optional numeric reward.
+        feedback: Optional textual feedback for the agent.
+        metadata: Optional additional information.
+        weight: Weight for aggregation (default 1.0).
     """
 
-    value: float
     name: str
     reward_type: RewardType
+    reward: float | None = None
+    feedback: str | None = None
     metadata: dict[str, Any] | None = None
     weight: float = 1.0
 
 
 @dataclass(frozen=True)
-class RewardBundle:
-    """Collection of reward signals for a single transition.
+class SignalBundle:
+    """Collection of evaluation signals for a single transition.
 
-    Enables multi-objective optimization and detailed reward analysis.
+    Enables multi-objective optimization, detailed reward analysis,
+    and textual feedback delivery.
 
     Attributes:
-        signals: Tuple of individual reward signals.
+        signals: Tuple of individual signals.
     """
 
-    signals: tuple[RewardSignal, ...]
+    signals: tuple[Signal, ...]
 
     @property
     def total(self) -> float:
-        """Weighted sum of all reward values."""
-        return sum(s.value * s.weight for s in self.signals)
+        """Weighted sum of all numeric rewards (skips feedback-only signals)."""
+        return sum(s.reward * s.weight for s in self.signals if s.reward is not None)
 
-    def by_name(self, name: str) -> RewardSignal | None:
-        """Get a reward signal by name."""
+    def by_name(self, name: str) -> Signal | None:
+        """Get a signal by name."""
         for signal in self.signals:
             if signal.name == name:
                 return signal
         return None
 
-    def by_type(self, reward_type: RewardType) -> tuple[RewardSignal, ...]:
-        """Get all reward signals of a given type."""
+    def by_type(self, reward_type: RewardType) -> tuple[Signal, ...]:
+        """Get all signals of a given type."""
         return tuple(s for s in self.signals if s.reward_type == reward_type)
+
+    def numeric_signals(self) -> tuple[Signal, ...]:
+        """Signals that carry numeric rewards."""
+        return tuple(s for s in self.signals if s.reward is not None)
+
+    def feedback_texts(self) -> tuple[str, ...]:
+        """Collect all non-None feedback strings."""
+        return tuple(s.feedback for s in self.signals if s.feedback is not None)
 
     @classmethod
     def single(
         cls,
-        value: float,
+        reward: float,
         name: str = "reward",
         reward_type: RewardType = RewardType.OUTCOME,
-    ) -> "RewardBundle":
-        """Create a bundle with a single reward signal."""
-        return cls(signals=(RewardSignal(value=value, name=name, reward_type=reward_type),))
+    ) -> "SignalBundle":
+        """Create a bundle with a single signal."""
+        return cls(signals=(Signal(name=name, reward_type=reward_type, reward=reward),))
 
     @classmethod
-    def empty(cls) -> "RewardBundle":
-        """Create an empty reward bundle."""
+    def empty(cls) -> "SignalBundle":
+        """Create an empty signal bundle."""
         return cls(signals=())
 
 
@@ -119,23 +138,23 @@ class FormatReward:
         state: State[Any],
         action: Any,
         next_state: State[Any],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute format reward (1.0 if answer extracted, 0.0 otherwise)."""
         extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
-        return RewardSignal(
-            value=1.0 if extracted is not None else 0.0,
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=1.0 if extracted is not None else 0.0,
             metadata={"extraction": extraction_meta},
         )
 
 
 class RewardFunction(Protocol[HiddenT]):
-    """Protocol for computing reward signals.
+    """Protocol for computing evaluation signals.
 
     Reward functions are composable - an environment can have multiple
-    reward functions that each contribute signals to the RewardBundle.
+    reward functions that each contribute signals to the SignalBundle.
     """
 
     @property
@@ -145,7 +164,7 @@ class RewardFunction(Protocol[HiddenT]):
 
     @property
     def reward_type(self) -> RewardType:
-        """Type of reward this function produces."""
+        """Type of signal this function produces."""
         ...
 
     def compute(
@@ -153,8 +172,8 @@ class RewardFunction(Protocol[HiddenT]):
         state: State[HiddenT],
         action: Any,
         next_state: State[HiddenT],
-    ) -> RewardSignal:
-        """Compute the reward signal for a transition.
+    ) -> Signal:
+        """Compute the signal for a transition.
 
         Args:
             state: State before action.
@@ -162,6 +181,6 @@ class RewardFunction(Protocol[HiddenT]):
             next_state: State after action.
 
         Returns:
-            A RewardSignal for this transition.
+            A Signal for this transition.
         """
         ...

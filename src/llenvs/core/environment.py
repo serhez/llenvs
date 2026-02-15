@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
 from llenvs.core.state import Action, Observation, State, StateMetadata
-from llenvs.core.reward import RewardBundle, RewardFunction
+from llenvs.core.reward import SignalBundle, RewardFunction
 
 HiddenT = TypeVar("HiddenT")
 
@@ -28,7 +28,7 @@ class StepResult(Generic[HiddenT]):
     """
 
     next_state: State[HiddenT]
-    rewards: RewardBundle
+    rewards: SignalBundle
     terminated: bool = False
     truncated: bool = False
     info: dict[str, Any] = field(default_factory=dict)
@@ -223,7 +223,7 @@ class Environment(Protocol[HiddenT]):
         state: State[HiddenT],
         action: Action,
         next_state: State[HiddenT],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition.
 
         Called internally by step(), but can also be called directly
@@ -235,6 +235,6 @@ class Environment(Protocol[HiddenT]):
             next_state: State after action.
 
         Returns:
-            RewardBundle containing all reward signals.
+            SignalBundle containing all reward signals.
         """
         ...

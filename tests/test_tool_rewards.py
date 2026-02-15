@@ -7,7 +7,7 @@ from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.tools import ToolCall, ToolResult, ToolResultStatus
 from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
 from llenvs.core.tool_environment import BaseToolEnvironment
-from llenvs.core.reward import RewardBundle, RewardType
+from llenvs.core.reward import SignalBundle, RewardType
 
 
 @pytest.fixture
@@ -58,7 +58,7 @@ class TestToolValidityReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.metadata["num_calls"] == 0
 
     def test_all_valid_calls(self, sample_state):
@@ -78,7 +78,7 @@ class TestToolValidityReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.metadata["num_calls"] == 2
         assert signal.metadata["num_valid"] == 2
 
@@ -101,7 +101,7 @@ class TestToolValidityReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == pytest.approx(2 / 3)
+        assert signal.reward == pytest.approx(2 / 3)
         assert signal.metadata["num_calls"] == 3
         assert signal.metadata["num_valid"] == 2
 
@@ -122,7 +122,7 @@ class TestToolValidityReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_custom_name(self):
         """Test custom reward name."""
@@ -147,7 +147,7 @@ class TestToolEfficiencyReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.metadata["num_calls"] == 0
 
     def test_under_max_calls(self, sample_state):
@@ -163,7 +163,7 @@ class TestToolEfficiencyReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.metadata["excess"] == 0
 
     def test_excess_calls_penalty(self, sample_state):
@@ -182,7 +182,7 @@ class TestToolEfficiencyReward:
         signal = reward.compute(sample_state, action, next_state)
 
         # 4 calls - 2 max = 2 excess, penalty = 2 * 0.2 = 0.4
-        assert signal.value == pytest.approx(0.6)
+        assert signal.reward == pytest.approx(0.6)
         assert signal.metadata["excess"] == 2
 
     def test_duplicate_calls_penalty(self, sample_state):
@@ -200,7 +200,7 @@ class TestToolEfficiencyReward:
         signal = reward.compute(sample_state, action, next_state)
 
         # 2 duplicates, penalty = 2 * 0.2 = 0.4
-        assert signal.value == pytest.approx(0.6)
+        assert signal.reward == pytest.approx(0.6)
         assert signal.metadata["duplicates"] == 2
 
     def test_different_args_not_duplicates(self, sample_state):
@@ -216,7 +216,7 @@ class TestToolEfficiencyReward:
 
         signal = reward.compute(sample_state, action, next_state)
 
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.metadata["duplicates"] == 0
 
     def test_combined_penalties(self, sample_state):
@@ -241,7 +241,7 @@ class TestToolEfficiencyReward:
         # 2 excess (4 - 2) * 0.1 = 0.2 penalty
         # 1 duplicate * 0.2 = 0.2 penalty
         # Total: 1.0 - 0.2 - 0.2 = 0.6
-        assert signal.value == pytest.approx(0.6)
+        assert signal.reward == pytest.approx(0.6)
 
     def test_reward_clamped_to_zero(self, sample_state):
         """Test that reward doesn't go below zero."""
@@ -260,7 +260,7 @@ class TestToolEfficiencyReward:
         signal = reward.compute(sample_state, action, next_state)
 
         # 9 excess * 0.5 = 4.5 penalty, clamped to 0
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_custom_parameters(self):
         """Test with custom parameters."""
@@ -292,7 +292,7 @@ class TestToolMonitoringRewards:
         assert efficiency._weight == 0.0
 
     def test_zero_weight_contributes_nothing_to_total(self, sample_state):
-        """Test that weight=0 signals don't affect RewardBundle.total."""
+        """Test that weight=0 signals don't affect SignalBundle.total."""
         validity = ToolValidityReward(_weight=0.0)
         efficiency = ToolEfficiencyReward(_weight=0.0)
 
@@ -310,7 +310,7 @@ class TestToolMonitoringRewards:
         assert v_signal.weight == 0.0
         assert e_signal.weight == 0.0
 
-        bundle = RewardBundle(signals=(v_signal, e_signal))
+        bundle = SignalBundle(signals=(v_signal, e_signal))
         assert bundle.total == 0.0
 
     def test_monitoring_signals_still_inspectable(self, sample_state):
@@ -326,11 +326,11 @@ class TestToolMonitoringRewards:
 
         signal = validity.compute(sample_state, action, next_state)
 
-        bundle = RewardBundle(signals=(signal,))
+        bundle = SignalBundle(signals=(signal,))
         step_signals = bundle.by_type(RewardType.STEP)
 
         assert len(step_signals) == 1
-        assert step_signals[0].value == 1.0
+        assert step_signals[0].reward == 1.0
         assert step_signals[0].weight == 0.0
         assert step_signals[0].metadata["num_valid"] == 1
 

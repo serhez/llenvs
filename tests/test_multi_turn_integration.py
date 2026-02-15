@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.integrations.verl import LLEnvsAgentLoop
 from llenvs.integrations.trl import make_trl_rollout_fn
@@ -50,9 +50,9 @@ class _MockRewardFn:
     def reward_type(self) -> RewardType:
         return RewardType.OUTCOME
 
-    def compute(self, state, action, next_state) -> RewardSignal:
+    def compute(self, state, action, next_state) -> Signal:
         done = next_state.metadata.is_terminal
-        return RewardSignal(value=1.0 if done else 0.0, name=self.name, reward_type=self.reward_type)
+        return Signal(reward=1.0 if done else 0.0, name=self.name, reward_type=self.reward_type)
 
 
 class MockMultiTurnEnv:
@@ -114,7 +114,7 @@ class MockMultiTurnEnv:
 
     def compute_rewards(self, state, action, next_state):
         signals = tuple(fn.compute(state, action, next_state) for fn in self.reward_functions)
-        return RewardBundle(signals=signals)
+        return SignalBundle(signals=signals)
 
     def __len__(self):
         return len(self._steps)

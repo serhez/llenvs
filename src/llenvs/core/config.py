@@ -63,6 +63,7 @@ class EnvironmentConfig:
     judge: JudgeConfig | list[JudgeConfig] | None = None
     env_llm: EnvironmentLLMConfig | None = None
     branching_strategy: str | None = None
+    iterative: IterativeConfig | None = None
 
 
 @dataclass
@@ -120,6 +121,45 @@ class EnvironmentLLMConfig:
     model: ModelConfig
     system_prompt: str = ""
     inference: InferenceConfig | None = None
+
+
+@dataclass
+class CodeExecutionConfig:
+    """Configuration for code execution in iterative environments.
+
+    Attributes:
+        timeout: Maximum execution time per test run in seconds.
+    """
+
+    timeout: float = 30.0
+
+
+@dataclass
+class IterativeConfig:
+    """Configuration for iterative refinement wrapping.
+
+    When set on an ``EnvironmentConfig``, ``EnvironmentFactory.create()``
+    wraps the base environment in an ``IterativeEnvironment``.
+
+    Attributes:
+        max_turns: Maximum refinement turns.
+        include_history: Whether to include previous attempts in feedback.
+        summarize_history: Whether to use env LLM to summarize history.
+        submit_keyword: Keyword for early termination. None to disable.
+        submission_extractor: Extractor name for parsing submissions.
+        submission_extractor_config: Config for the submission extractor.
+        solved_threshold: OUTCOME score threshold to consider task solved.
+        code_execution: Optional code execution configuration.
+    """
+
+    max_turns: int = 3
+    include_history: bool = True
+    summarize_history: bool = False
+    submit_keyword: str | None = "SUBMIT"
+    submission_extractor: str | None = None
+    submission_extractor_config: dict[str, Any] = field(default_factory=dict)
+    solved_threshold: float = 1.0
+    code_execution: CodeExecutionConfig | None = None
 
 
 @dataclass
@@ -349,6 +389,29 @@ class EvalConfig:
                     inference=env_llm_inference,
                 )
 
+            # Parse iterative config
+            iterative_data = env_data.get("iterative")
+            iterative = None
+            if iterative_data is not None:
+                code_exec_data = iterative_data.get("code_execution")
+                code_exec = None
+                if code_exec_data is not None:
+                    code_exec = CodeExecutionConfig(
+                        timeout=code_exec_data.get("timeout", 30.0),
+                    )
+                iterative = IterativeConfig(
+                    max_turns=iterative_data.get("max_turns", 3),
+                    include_history=iterative_data.get("include_history", True),
+                    summarize_history=iterative_data.get("summarize_history", False),
+                    submit_keyword=iterative_data.get("submit_keyword", "SUBMIT"),
+                    submission_extractor=iterative_data.get("submission_extractor"),
+                    submission_extractor_config=iterative_data.get(
+                        "submission_extractor_config", {}
+                    ),
+                    solved_threshold=iterative_data.get("solved_threshold", 1.0),
+                    code_execution=code_exec,
+                )
+
             environments.append(
                 EnvironmentConfig(
                     name=env_data["name"],
@@ -368,6 +431,7 @@ class EvalConfig:
                     judge=env_judge,
                     env_llm=env_llm,
                     branching_strategy=env_data.get("branching_strategy"),
+                    iterative=iterative,
                 )
             )
 
@@ -468,6 +532,28 @@ class EvalConfig:
                 d["env_llm"] = env_llm_d
             if env.branching_strategy is not None:
                 d["branching_strategy"] = env.branching_strategy
+            if env.iterative is not None:
+                iter_d: dict[str, Any] = {
+                    "max_turns": env.iterative.max_turns,
+                }
+                if not env.iterative.include_history:
+                    iter_d["include_history"] = False
+                if env.iterative.summarize_history:
+                    iter_d["summarize_history"] = True
+                if env.iterative.submit_keyword != "SUBMIT":
+                    iter_d["submit_keyword"] = env.iterative.submit_keyword
+                if env.iterative.submission_extractor is not None:
+                    iter_d["submission_extractor"] = env.iterative.submission_extractor
+                if env.iterative.submission_extractor_config:
+                    iter_d["submission_extractor_config"] = env.iterative.submission_extractor_config
+                if env.iterative.solved_threshold != 1.0:
+                    iter_d["solved_threshold"] = env.iterative.solved_threshold
+                if env.iterative.code_execution is not None:
+                    ce: dict[str, Any] = {}
+                    if env.iterative.code_execution.timeout != 30.0:
+                        ce["timeout"] = env.iterative.code_execution.timeout
+                    iter_d["code_execution"] = ce
+                d["iterative"] = iter_d
             env_dicts.append(d)
 
         result: dict[str, Any] = {
@@ -582,13 +668,72 @@ class EnvironmentFactory:
                 env_kwargs["system_prompt"] = config.env_llm.system_prompt
 
         # Use the environment registry to get the environment
-        return environment_registry.get(
+        env = environment_registry.get(
             name=config.name,
             adapter=config.adapter,
             size=config.size,
             seed=config.seed,
             answer_extractor=answer_extractor,
             **env_kwargs,
+        )
+
+        # Wrap with iterative refinement if configured
+        if config.iterative is not None:
+            env = EnvironmentFactory._wrap_iterative(config, env)
+
+        return env
+
+    @staticmethod
+    def _wrap_iterative(config: EnvironmentConfig, env: Any) -> Any:
+        """Wrap an environment with iterative refinement.
+
+        Args:
+            config: Environment configuration with iterative settings.
+            env: Base environment to wrap.
+
+        Returns:
+            IterativeEnvironment wrapping the base environment.
+        """
+        from llenvs.adapters.iterative import IterativeEnvironment
+        from llenvs.core.reward import RewardFunction
+
+        assert config.iterative is not None
+        ic = config.iterative
+
+        # Build submission extractor
+        submission_extractor = None
+        if ic.submission_extractor is not None:
+            from llenvs.core.registry import answer_extractor_registry
+
+            submission_extractor = answer_extractor_registry.create(
+                ic.submission_extractor, **ic.submission_extractor_config
+            )
+
+        # Build extra rewards
+        extra_rewards: list[RewardFunction] = []
+
+        # Code execution reward
+        if ic.code_execution is not None:
+            from llenvs.core.code_execution import (
+                CodeExecutionReward,
+                SubprocessCodeExecutor,
+            )
+
+            executor = SubprocessCodeExecutor()
+            extra_rewards.append(
+                CodeExecutionReward(
+                    executor=executor,
+                )
+            )
+
+        return IterativeEnvironment(
+            inner=env,
+            max_turns=ic.max_turns,
+            include_history=ic.include_history,
+            submit_keyword=ic.submit_keyword,
+            solved_threshold=ic.solved_threshold,
+            submission_extractor=submission_extractor,
+            extra_rewards=tuple(extra_rewards),
         )
 
 

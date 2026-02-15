@@ -4,7 +4,7 @@ import pytest
 from typing import Any
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardSignal, RewardBundle, RewardType
+from llenvs.core.reward import Signal, SignalBundle, RewardType
 from llenvs.core.trajectory import Trajectory, Transition
 
 
@@ -58,25 +58,25 @@ def sample_action() -> Action:
 
 
 @pytest.fixture
-def sample_reward_signal() -> RewardSignal:
+def sample_reward_signal() -> Signal:
     """Create sample reward signal."""
-    return RewardSignal(
-        value=1.0,
+    return Signal(
         name="correctness",
         reward_type=RewardType.OUTCOME,
+        reward=1.0,
         metadata={"extracted": "4", "expected": "4"},
     )
 
 
 @pytest.fixture
-def sample_reward_bundle(sample_reward_signal: RewardSignal) -> RewardBundle:
+def sample_reward_bundle(sample_reward_signal: Signal) -> SignalBundle:
     """Create sample reward bundle."""
-    format_signal = RewardSignal(
-        value=1.0,
+    format_signal = Signal(
         name="format",
         reward_type=RewardType.FORMAT,
+        reward=1.0,
     )
-    return RewardBundle(signals=(sample_reward_signal, format_signal))
+    return SignalBundle(signals=(sample_reward_signal, format_signal))
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ def sample_transition(
     sample_state: State,
     sample_action: Action,
     terminal_state: State,
-    sample_reward_bundle: RewardBundle,
+    sample_reward_bundle: SignalBundle,
 ) -> Transition:
     """Create sample transition."""
     return Transition(

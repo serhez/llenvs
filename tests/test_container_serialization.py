@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import (
     ToolCall,
@@ -238,22 +238,22 @@ class TestToolDefinitionSerialization:
 
 
 # ---------------------------------------------------------------------------
-# RewardSignal round-trip
+# Signal round-trip
 # ---------------------------------------------------------------------------
 
 
-class TestRewardSignalSerialization:
+class TestSignalSerialization:
     def test_round_trip(self):
-        sig = RewardSignal(value=1.0, name="correct", reward_type=RewardType.OUTCOME)
+        sig = Signal(name="correct", reward_type=RewardType.OUTCOME, reward=1.0)
         data = serialize_reward_signal(sig)
         result = deserialize_reward_signal(data)
         assert result == sig
 
     def test_with_metadata(self):
-        sig = RewardSignal(
-            value=0.5,
+        sig = Signal(
             name="format",
             reward_type=RewardType.FORMAT,
+            reward=0.5,
             metadata={"extraction": {"found": True}},
         )
         data = serialize_reward_signal(sig)
@@ -261,8 +261,8 @@ class TestRewardSignalSerialization:
         assert result == sig
 
     def test_with_weight(self):
-        sig = RewardSignal(
-            value=0.8, name="rubric", reward_type=RewardType.PROCESS, weight=2.0
+        sig = Signal(
+            name="rubric", reward_type=RewardType.PROCESS, reward=0.8, weight=2.0
         )
         data = serialize_reward_signal(sig)
         result = deserialize_reward_signal(data)
@@ -270,23 +270,23 @@ class TestRewardSignalSerialization:
 
     def test_all_types(self):
         for rtype in RewardType:
-            sig = RewardSignal(value=0.0, name="x", reward_type=rtype)
+            sig = Signal(name="x", reward_type=rtype, reward=0.0)
             data = serialize_reward_signal(sig)
             result = deserialize_reward_signal(data)
             assert result.reward_type == rtype
 
 
 # ---------------------------------------------------------------------------
-# RewardBundle round-trip
+# SignalBundle round-trip
 # ---------------------------------------------------------------------------
 
 
-class TestRewardBundleSerialization:
+class TestSignalBundleSerialization:
     def test_round_trip(self):
-        bundle = RewardBundle(
+        bundle = SignalBundle(
             signals=(
-                RewardSignal(value=1.0, name="correct", reward_type=RewardType.OUTCOME),
-                RewardSignal(value=0.5, name="format", reward_type=RewardType.FORMAT),
+                Signal(name="correct", reward_type=RewardType.OUTCOME, reward=1.0),
+                Signal(name="format", reward_type=RewardType.FORMAT, reward=0.5),
             )
         )
         data = serialize_reward_bundle(bundle)
@@ -294,16 +294,16 @@ class TestRewardBundleSerialization:
         assert result == bundle
 
     def test_empty(self):
-        bundle = RewardBundle.empty()
+        bundle = SignalBundle.empty()
         data = serialize_reward_bundle(bundle)
         result = deserialize_reward_bundle(data)
         assert result.signals == ()
 
     def test_total_preserved(self):
-        bundle = RewardBundle(
+        bundle = SignalBundle(
             signals=(
-                RewardSignal(value=1.0, name="a", reward_type=RewardType.OUTCOME, weight=2.0),
-                RewardSignal(value=0.5, name="b", reward_type=RewardType.FORMAT),
+                Signal(name="a", reward_type=RewardType.OUTCOME, reward=1.0, weight=2.0),
+                Signal(name="b", reward_type=RewardType.FORMAT, reward=0.5),
             )
         )
         data = serialize_reward_bundle(bundle)
@@ -498,7 +498,7 @@ class TestStepResultSerialization:
                 hidden=MockHidden(expected_answer="42"),
                 metadata=StateMetadata(step=1, episode_id="ep-1", is_terminal=True),
             ),
-            rewards=RewardBundle.single(1.0, "correct", RewardType.OUTCOME),
+            rewards=SignalBundle.single(1.0, "correct", RewardType.OUTCOME),
             terminated=True,
             truncated=False,
             info={"turns": 1},
@@ -519,7 +519,7 @@ class TestStepResultSerialization:
                 hidden=MockHidden(expected_answer="?"),
                 metadata=StateMetadata(step=0, episode_id="e"),
             ),
-            rewards=RewardBundle.empty(),
+            rewards=SignalBundle.empty(),
         )
         data = serialize_step_result(step_result)
         result = deserialize_step_result(data)
@@ -616,13 +616,13 @@ class TestFullJsonRoundTrip:
                 hidden=MockHidden(expected_answer="42"),
                 metadata=StateMetadata(step=1, episode_id="ep-1"),
             ),
-            rewards=RewardBundle(
+            rewards=SignalBundle(
                 signals=(
-                    RewardSignal(value=1.0, name="correct", reward_type=RewardType.OUTCOME),
-                    RewardSignal(
-                        value=0.5,
+                    Signal(name="correct", reward_type=RewardType.OUTCOME, reward=1.0),
+                    Signal(
                         name="format",
                         reward_type=RewardType.FORMAT,
+                        reward=0.5,
                         weight=0.5,
                     ),
                 )
@@ -645,7 +645,7 @@ class TestFullJsonRoundTrip:
 
 class TestEdgeCases:
     def test_none_metadata_in_reward(self):
-        sig = RewardSignal(value=0.0, name="x", reward_type=RewardType.STEP, metadata=None)
+        sig = Signal(name="x", reward_type=RewardType.STEP, reward=0.0, metadata=None)
         data = serialize_reward_signal(sig)
         result = deserialize_reward_signal(data)
         assert result.metadata is None

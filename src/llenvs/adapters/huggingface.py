@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from llenvs.inference.prompts import PromptTemplate
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import (
     AnswerExtractor,
@@ -176,16 +176,16 @@ class HuggingFaceCorrectnessReward:
         state: State[HuggingFaceHidden],
         action: Action,
         next_state: State[HuggingFaceHidden],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute correctness reward."""
         # Extract answer from model response
         extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         if extracted is None:
-            return RewardSignal(
-                value=0.0,
+            return Signal(
                 name=self.name,
                 reward_type=self.reward_type,
+                reward=0.0,
                 metadata={"extracted": None, "extraction": extraction_meta},
             )
 
@@ -195,10 +195,10 @@ class HuggingFaceCorrectnessReward:
         # Score
         score = self._scoring_fn(extracted, expected)
 
-        return RewardSignal(
-            value=float(score),
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=float(score),
             metadata={
                 "extracted": extracted,
                 "expected": expected,
@@ -482,7 +482,7 @@ class HuggingFaceEnvironment:
         state: State[HuggingFaceHidden],
         action: Action,
         next_state: State[HuggingFaceHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition."""
         signals = []
 
@@ -490,7 +490,7 @@ class HuggingFaceEnvironment:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
 
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
     def __len__(self) -> int:
         """Number of examples in the dataset."""

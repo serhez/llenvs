@@ -12,7 +12,7 @@ from typing import Any
 import uuid
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
 
 
@@ -61,14 +61,14 @@ class WebShopReward:
         state: State[WebShopHidden],
         action: Action,
         next_state: State[WebShopHidden],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute reward from WebShop's native reward."""
         webshop_reward = next_state.metadata.info.get("webshop_reward", 0.0)
 
-        return RewardSignal(
-            value=float(webshop_reward),
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=float(webshop_reward),
             metadata={"source": "webshop"},
         )
 
@@ -396,7 +396,7 @@ class WebShopEnvironment:
         state: State[WebShopHidden],
         action: Action,
         next_state: State[WebShopHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition."""
         signals = []
 
@@ -404,7 +404,7 @@ class WebShopEnvironment:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
 
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 class WebShopAdapter:

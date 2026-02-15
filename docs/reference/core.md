@@ -92,7 +92,7 @@ class Environment(Protocol[HiddenT]):
         state: State[HiddenT],
         action: Action,
         next_state: State[HiddenT],
-    ) -> RewardBundle: ...
+    ) -> SignalBundle: ...
 ```
 
 **Location**: `llenvs/core/environment.py`
@@ -110,7 +110,7 @@ class Environment(Protocol[HiddenT]):
 @dataclass(frozen=True)
 class StepResult(Generic[HiddenT]):
     next_state: State[HiddenT]
-    rewards: RewardBundle
+    rewards: SignalBundle
     terminated: bool  # Episode ended naturally
     truncated: bool   # Episode cut off (max steps, etc.)
     info: dict[str, Any]
@@ -149,9 +149,11 @@ Capability flags allow integrations to check compatibility at init time. For exa
 
 `ContainerEnvironment` (`llenvs/container/client.py`) implements the `Environment[OpaqueHidden]` protocol as a proxy to a remote server. Hidden state is deserialized as `OpaqueHidden`, which supports attribute access (e.g., `state.hidden.expected_answer`) but is immutable. `reward_functions` returns `()` because reward computation happens server-side. See the **[Containers Guide](../guides/containers.md)**.
 
-## Rewards
+## Signals and Rewards
 
 **Location**: `llenvs/core/reward.py`
+
+Evaluation signals can carry numeric rewards (for RL training and scoring), textual feedback (for iterative refinement), or both. Feedback-only signals participate in `feedback_texts()` but do not contribute to the numeric `total`.
 
 ### RewardType
 
@@ -163,41 +165,50 @@ class RewardType(Enum):
     PROCESS = auto()   # Intermediate reasoning quality
 ```
 
-### RewardSignal
+### Signal
 
 ```python
 @dataclass(frozen=True)
-class RewardSignal:
-    value: float
-    name: str           # e.g., "correctness", "format"
+class Signal:
+    name: str                                # e.g., "correctness", "format"
     reward_type: RewardType
+    reward: float | None = None               # Numeric reward (None for feedback-only)
+    feedback: str | None = None              # Textual feedback for the agent
     metadata: dict[str, Any] | None = None
-    weight: float = 1.0  # Importance weight for total computation
+    weight: float = 1.0                      # Importance weight for total computation
 ```
 
-### RewardBundle
+A `Signal` can carry a numeric reward, textual feedback, or both. Feedback-only signals (where `reward` is `None`) do not contribute to the total.
+
+### SignalBundle
 
 ```python
 @dataclass(frozen=True)
-class RewardBundle:
-    signals: tuple[RewardSignal, ...]
+class SignalBundle:
+    signals: tuple[Signal, ...]
 
     @property
     def total(self) -> float:
-        """Weighted sum of all signal values (value * weight)."""
+        """Weighted sum of all numeric rewards (skips feedback-only signals)."""
 
-    def by_name(self, name: str) -> RewardSignal | None:
+    def by_name(self, name: str) -> Signal | None:
         """Get signal by name."""
 
-    def by_type(self, reward_type: RewardType) -> tuple[RewardSignal, ...]:
+    def by_type(self, reward_type: RewardType) -> tuple[Signal, ...]:
         """Get all signals of a given type."""
 
+    def numeric_signals(self) -> tuple[Signal, ...]:
+        """Signals that carry numeric rewards."""
+
+    def feedback_texts(self) -> tuple[str, ...]:
+        """Collect all non-None feedback strings."""
+
     @classmethod
-    def single(cls, value: float, name: str = "reward", ...) -> RewardBundle:
+    def single(cls, reward: float, name: str = "reward", ...) -> SignalBundle:
         """Create bundle with single signal."""
 
     @classmethod
-    def empty(cls) -> RewardBundle:
+    def empty(cls) -> SignalBundle:
         """Create empty bundle."""
 ```
 
@@ -216,14 +227,14 @@ class RewardFunction(Protocol[HiddenT]):
         state: State[HiddenT],
         action: Action,
         next_state: State[HiddenT],
-    ) -> RewardSignal: ...
+    ) -> Signal: ...
 ```
 
 ### JudgeReward
 
 **Location**: `llenvs/core/judge.py`
 
-LLM-as-a-judge reward function. Calls a judge LLM to score model responses.
+LLM-as-a-judge reward function. Calls a judge LLM to score model responses. Returns a `Signal` with both a numeric `reward` (normalized score) and a `feedback` string (the judge's full response text).
 
 ```python
 @dataclass
@@ -241,10 +252,11 @@ class JudgeReward:
         score_extractor: ScoreExtractor | None = None,
     ) -> None: ...
 
-    def compute(self, state, action, next_state) -> RewardSignal: ...
+    def compute(self, state, action, next_state) -> Signal: ...
+    # Returns Signal(name=..., reward_type=..., reward=score, feedback=judge_text)
 ```
 
-Built-in templates: `"correctness"`, `"helpfulness"`, `"safety"` (available via `JUDGE_TEMPLATES` dict). See the **[Judge guide](../guides/judge.md)** for details.
+Built-in templates: `"correctness"`, `"helpfulness"`, `"safety"`, `"iterative_feedback"` (available via `JUDGE_TEMPLATES` dict). The `"iterative_feedback"` template produces actionable refinement feedback. See the **[Judge guide](../guides/judge.md)** for details.
 
 ## Trajectory
 
@@ -288,7 +300,7 @@ class Transition(Generic[HiddenT]):
     state: State[HiddenT]
     action: Action
     next_state: State[HiddenT]
-    rewards: RewardBundle
+    rewards: SignalBundle
     info: dict[str, Any]
 ```
 

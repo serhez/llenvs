@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from dataclasses import dataclass
 
 from llenvs.core.state import Observation, Action, State, StateMetadata
-from llenvs.core.reward import RewardType, RewardSignal
+from llenvs.core.reward import RewardType, Signal
 from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameterType
 
 
@@ -216,7 +216,7 @@ class TestOpenEnvReward:
         )
 
         signal = reward_fn.compute(state, Action(text="x"), next_state)
-        assert signal.value == 0.75
+        assert signal.reward == 0.75
         assert signal.reward_type == RewardType.OUTCOME
 
     def test_compute_no_reward(self):
@@ -234,7 +234,7 @@ class TestOpenEnvReward:
         )
 
         signal = reward_fn.compute(state, Action(text="x"), state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_step_reward_type(self):
         """Non-terminal steps use STEP type."""
@@ -386,7 +386,7 @@ class TestOpenEnvEnvironment:
         assert result.terminated is True
         reward = result.rewards.by_name("openenv_native")
         assert reward is not None
-        assert reward.value == 1.0
+        assert reward.reward == 1.0
 
     def test_step_done(self):
         client = MockSyncClient(

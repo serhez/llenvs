@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.integrations.openrlhf import make_openrlhf_reward_fn
 
@@ -33,9 +33,9 @@ class _MockRewardFn:
     def reward_type(self) -> RewardType:
         return RewardType.OUTCOME
 
-    def compute(self, state: State[_MockHidden], action: Any, next_state: State[_MockHidden]) -> RewardSignal:
+    def compute(self, state: State[_MockHidden], action: Any, next_state: State[_MockHidden]) -> Signal:
         correct = (action.text or "") == state.hidden.expected_answer
-        return RewardSignal(value=1.0 if correct else 0.0, name=self.name, reward_type=self.reward_type)
+        return Signal(reward=1.0 if correct else 0.0, name=self.name, reward_type=self.reward_type)
 
 
 class MockEnv:
@@ -79,7 +79,7 @@ class MockEnv:
 
     def compute_rewards(self, state, action, next_state):
         signals = tuple(fn.compute(state, action, next_state) for fn in self.reward_functions)
-        return RewardBundle(signals=signals)
+        return SignalBundle(signals=signals)
 
     def __len__(self):
         return self._num_tasks

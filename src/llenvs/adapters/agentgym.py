@@ -20,7 +20,7 @@ from typing import Any
 import uuid
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
 
 
@@ -99,15 +99,15 @@ class AgentGymReward:
         state: State[AgentGymHidden],
         action: Action,
         next_state: State[AgentGymHidden],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute reward from AgentGym's native reward."""
         native_reward = next_state.metadata.info.get("agentgym_reward", 0.0)
         rtype = RewardType.OUTCOME if next_state.metadata.is_terminal else RewardType.STEP
 
-        return RewardSignal(
-            value=float(native_reward),
+        return Signal(
             name=self.name,
             reward_type=rtype,
+            reward=float(native_reward),
             metadata={"source": "agentgym"},
         )
 
@@ -363,12 +363,12 @@ class AgentGymEnvironment:
         state: State[AgentGymHidden],
         action: Action,
         next_state: State[AgentGymHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         signals = []
         for reward_fn in self.reward_functions:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # ---------------------------------------------------------------------------

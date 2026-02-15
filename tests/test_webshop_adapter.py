@@ -301,7 +301,7 @@ class TestWebShopEnvironment:
         assert result3.info["webshop_reward"] == 0.8
         reward_signal = result3.rewards.by_name("purchase_match")
         assert reward_signal is not None
-        assert reward_signal.value == 0.8
+        assert reward_signal.reward == 0.8
 
     def test_truncation(self, mock_webshop_env):
         """Test episode truncates at max_steps."""

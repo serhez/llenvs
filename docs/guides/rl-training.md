@@ -49,8 +49,8 @@ results = scorer.score_batch(
 ```python
 @dataclass(frozen=True)
 class ScoringResult:
-    total: float                    # Sum of all reward signals
-    signals: dict[str, float]      # name -> value
+    total: float                    # Weighted sum of numeric signal rewards
+    signals: dict[str, float]      # name -> reward (only numeric signals)
     extracted_answer: str | None   # What the extractor found
     metadata: dict[str, Any]       # Per-signal metadata
 ```

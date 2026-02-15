@@ -19,7 +19,7 @@ import uuid
 import numpy as np
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
 from llenvs.core.extraction import AnswerExtractor, RawGenerationExtractor
 
@@ -524,7 +524,7 @@ class GymnasiumReward:
         state: State[GymnasiumHidden],
         action: Action,
         next_state: State[GymnasiumHidden],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute reward from gymnasium's native reward."""
         gym_reward = next_state.metadata.info.get("gym_reward", 0.0)
 
@@ -534,10 +534,10 @@ class GymnasiumReward:
             else RewardType.STEP
         )
 
-        return RewardSignal(
-            value=float(gym_reward),
+        return Signal(
             name=self.name,
             reward_type=reward_type,
+            reward=float(gym_reward),
             metadata={"source": "gymnasium"},
         )
 
@@ -957,13 +957,13 @@ class GymnasiumEnvironment:
         state: State[GymnasiumHidden],
         action: Action,
         next_state: State[GymnasiumHidden],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition."""
         signals = []
         for reward_fn in self.reward_functions:
             signal = reward_fn.compute(state, action, next_state)
             signals.append(signal)
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
 
 # =============================================================================

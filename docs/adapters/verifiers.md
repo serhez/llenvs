@@ -83,7 +83,7 @@ verifiers rubrics contain weighted async reward functions. The adapter:
 
 1. Calls each rubric function with appropriate keyword arguments (`completion`, `answer`, `prompt`, etc.)
 2. Applies the rubric's weights to each score
-3. Returns the weighted sum as a single `OUTCOME`-type `RewardSignal` named `"verifiers_rubric"`
+3. Returns the weighted sum as a single `OUTCOME`-type `Signal` named `"verifiers_rubric"`
 
 ```python
 # Rubric with two functions at different weights
@@ -91,7 +91,7 @@ rubric = vf.Rubric(
     funcs=[exact_match, format_check],
     weights=[2.0, 0.5],
 )
-# -> RewardSignal(value=2.0*1.0 + 0.5*0.8, name="verifiers_rubric", type=OUTCOME)
+# -> Signal(name="verifiers_rubric", reward_type=OUTCOME, reward=2.0*1.0 + 0.5*0.8)
 ```
 
 ### Tool Conversion

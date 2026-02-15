@@ -410,12 +410,20 @@ from llenvs.core import RewardType
 
 for result in batch_result.trajectory_results:
     for transition in result.trajectory.transitions:
-        # Get rewards by type
-        outcome_rewards = transition.rewards.by_type(RewardType.OUTCOME)
-        format_rewards = transition.rewards.by_type(RewardType.FORMAT)
+        # Get signals by type
+        outcome_signals = transition.rewards.by_type(RewardType.OUTCOME)
+        format_signals = transition.rewards.by_type(RewardType.FORMAT)
 
-        # Get specific reward
+        # Get specific signal
         correctness = transition.rewards.by_name("correctness")
         if correctness:
-            print(f"Correctness: {correctness.value}")
+            print(f"Correctness: {correctness.reward}")
+
+        # Get only signals with numeric rewards (skips feedback-only)
+        numeric = transition.rewards.numeric_signals()
+
+        # Collect textual feedback from all signals
+        feedback = transition.rewards.feedback_texts()
+        if feedback:
+            print(f"Feedback: {feedback}")
 ```

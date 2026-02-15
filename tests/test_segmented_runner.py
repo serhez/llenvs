@@ -10,7 +10,7 @@ import pytest
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.environment import StepResult
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType
+from llenvs.core.reward import SignalBundle, Signal, RewardType
 from llenvs.core.segmentation import (
     SentenceSegmenter,
     LineSegmenter,
@@ -128,9 +128,9 @@ def _make_base_env(
                     info={"answer_correct": is_correct},
                 ),
             ),
-            rewards=RewardBundle(
+            rewards=SignalBundle(
                 signals=(
-                    RewardSignal(value=reward, name="correctness", reward_type=RewardType.OUTCOME),
+                    Signal(reward=reward, name="correctness", reward_type=RewardType.OUTCOME),
                 )
             ),
             terminated=True,
@@ -517,7 +517,7 @@ class TestSegmentedTrajectoryRunner:
         last_rewards = result.trajectory.transitions[-1].rewards
         correctness = last_rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value == 1.0
+        assert correctness.reward == 1.0
 
     def test_max_steps_limit(self):
         """Runner stops after max_steps, still finalizes."""
@@ -941,7 +941,7 @@ class TestCompleteEarlyExit:
         last_rewards = result.trajectory.transitions[-1].rewards
         correctness = last_rewards.by_name("correctness")
         assert correctness is not None
-        assert correctness.value >= 1.0
+        assert correctness.reward >= 1.0
 
     def test_complete_preserves_prior_transitions(self):
         """Transitions from before COMPLETE are kept in the final trajectory."""

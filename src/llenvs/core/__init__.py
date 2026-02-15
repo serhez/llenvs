@@ -21,7 +21,7 @@ from llenvs.core.mcp_executor import MCPToolExecutor, MCPServerConfig, MCPConnec
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tool_rewards import ToolValidityReward, ToolEfficiencyReward
 from llenvs.core.tool_parsing import ToolCallParser, ParsedToolResponse, HermesToolCallParser
-from llenvs.core.reward import RewardSignal, RewardBundle, RewardType, RewardFunction
+from llenvs.core.reward import Signal, SignalBundle, RewardType, RewardFunction
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.extraction import (
@@ -53,6 +53,8 @@ from llenvs.core.config import (
     InferenceConfig,
     JudgeConfig,
     EnvironmentLLMConfig,
+    IterativeConfig,
+    CodeExecutionConfig,
     EnvironmentFactory,
     BackendFactory,
 )
@@ -118,8 +120,8 @@ __all__ = [
     "ParsedToolResponse",
     "HermesToolCallParser",
     # Rewards
-    "RewardSignal",
-    "RewardBundle",
+    "Signal",
+    "SignalBundle",
     "RewardType",
     "RewardFunction",
     # Trajectory
@@ -157,6 +159,8 @@ __all__ = [
     "InferenceConfig",
     "JudgeConfig",
     "EnvironmentLLMConfig",
+    "IterativeConfig",
+    "CodeExecutionConfig",
     "EnvironmentFactory",
     "BackendFactory",
     # Judge

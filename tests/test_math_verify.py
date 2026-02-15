@@ -72,7 +72,7 @@ class TestMathVerifyExtractionFailure:
 
         signal = reward.compute(state, action, state)
 
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
         assert signal.name == "math_correctness"
         assert signal.metadata["extracted"] is None
 
@@ -88,7 +88,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>42</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_integer_float_equivalence(self):
         """42 and 42.0 should be equivalent."""
@@ -97,7 +97,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>42.0</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_fraction_decimal_equivalence(self):
         """1/2 and 0.5 should be equivalent."""
@@ -106,7 +106,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>0.5</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_fraction_equivalence(self):
         """2/4 and 1/2 should be equivalent."""
@@ -115,7 +115,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>2/4</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_negative_number(self):
         """-3 and -3.0 should be equivalent."""
@@ -124,7 +124,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>-3.0</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_wrong_answer(self):
         """Clearly different answers should score 0."""
@@ -133,7 +133,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>7</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_latex_equivalence(self):
         """LaTeX fractions should be parsed correctly."""
@@ -142,7 +142,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>\\frac{1}{2}</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_percentage_as_decimal(self):
         """50/100 and 1/2 should be equivalent."""
@@ -153,7 +153,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>50/100</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_whitespace_insensitive(self):
         """Extra whitespace shouldn't matter."""
@@ -162,7 +162,7 @@ class TestMathVerifyEquivalence:
         action = Action(text="<answer>  42  </answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
 
 class TestMathVerifyFallback:
@@ -175,7 +175,7 @@ class TestMathVerifyFallback:
         action = Action(text="<answer>hello</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_fallback_case_and_whitespace(self):
         """Fallback should normalize case and whitespace."""
@@ -184,7 +184,7 @@ class TestMathVerifyFallback:
         action = Action(text="<answer>  Hello World  </answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
 
     def test_fallback_mismatch(self):
         """Fallback should return 0 on string mismatch."""
@@ -193,7 +193,7 @@ class TestMathVerifyFallback:
         action = Action(text="<answer>dog</answer>")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0
 
     def test_metadata_includes_method(self):
         """Metadata should indicate which comparison method was used."""
@@ -218,7 +218,7 @@ class TestMathVerifyWithRealExtractor:
         action = Action(text="The answer is <answer>42</answer>.")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 1.0
+        assert signal.reward == 1.0
         assert signal.metadata["extracted"] == "42"
 
     def test_with_tag_extractor_no_tag(self):
@@ -231,4 +231,4 @@ class TestMathVerifyWithRealExtractor:
         action = Action(text="The answer is 42, no tags here.")
 
         signal = reward.compute(state, action, state)
-        assert signal.value == 0.0
+        assert signal.reward == 0.0

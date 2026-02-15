@@ -202,6 +202,34 @@ The proxy forwards `reset()`, `step()`, and `compute_rewards()` over HTTP to a s
 
 See **[Containers Guide](containers.md)** for full details.
 
+## Iterative Refinement
+
+Any single-turn environment can be wrapped into a multi-turn iterative refinement loop. The agent submits solutions, receives feedback from evaluation signals, and refines:
+
+```python
+from llenvs.core.config import EnvironmentConfig, EnvironmentFactory
+from llenvs.core.config import IterativeConfig
+
+config = EnvironmentConfig(
+    name="leg_counting",
+    adapter="reasoning_gym",
+    size=50,
+    iterative=IterativeConfig(max_turns=5),
+)
+env = EnvironmentFactory.create(config)
+# env is now an IterativeEnvironment wrapping leg_counting
+```
+
+Or use the ready-made coding environments:
+
+```python
+from llenvs.environments import IterativeCodingEnvironment
+
+env = IterativeCodingEnvironment.from_humaneval(max_turns=5)
+```
+
+See **[Iterative Refinement Guide](iterative.md)** for full details.
+
 ## Next Steps
 
 - **[ReasoningGym Adapter](../adapters/reasoning-gym.md)**

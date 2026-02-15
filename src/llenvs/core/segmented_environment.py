@@ -9,7 +9,7 @@ from typing import Any, Generic, TypeVar
 import copy
 
 from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import RewardBundle, RewardSignal, RewardType, RewardFunction
+from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
 from llenvs.core.segmentation import Segmenter
 
@@ -374,7 +374,7 @@ class SegmentedEnvironment(Generic[HiddenT]):
         state: State[SegmentedHidden[HiddenT]],
         action: Action,
         next_state: State[SegmentedHidden[HiddenT]],
-    ) -> RewardBundle:
+    ) -> SignalBundle:
         """Compute rewards for a transition.
 
         For intermediate steps, returns an empty reward bundle by default.
@@ -387,13 +387,13 @@ class SegmentedEnvironment(Generic[HiddenT]):
             next_state: State after action.
 
         Returns:
-            RewardBundle containing reward signals.
+            SignalBundle containing reward signals.
         """
         # For intermediate steps with no custom reward functions, return empty
         if not next_state.metadata.is_terminal:
             if self._reward_functions == self._env.reward_functions:
                 # Using base env's reward functions, which only work at episode end
-                return RewardBundle.empty()
+                return SignalBundle.empty()
 
         # Compute rewards from all reward functions
         signals = []
@@ -413,7 +413,7 @@ class SegmentedEnvironment(Generic[HiddenT]):
             signal = reward_fn.compute(base_state, action, base_next_state)
             signals.append(signal)
 
-        return RewardBundle(signals=tuple(signals))
+        return SignalBundle(signals=tuple(signals))
 
     def __len__(self) -> int:
         """Number of tasks in the underlying environment."""

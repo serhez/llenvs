@@ -748,3 +748,260 @@ class TestInferenceConfigExtra:
         config = EvalConfig.from_dict(original)
         result = config.to_dict()
         assert result["inference"]["extra"] == {"thinking_budget": 512}
+
+
+class TestIterativeConfig:
+    """Tests for IterativeConfig in EnvironmentConfig."""
+
+    def test_iterative_default_none(self):
+        """Test that iterative defaults to None."""
+        config = EnvironmentConfig(name="test")
+        assert config.iterative is None
+
+    def test_iterative_config_defaults(self):
+        """Test IterativeConfig default values."""
+        from llenvs.core.config import IterativeConfig
+
+        ic = IterativeConfig()
+        assert ic.max_turns == 3
+        assert ic.include_history is True
+        assert ic.summarize_history is False
+        assert ic.submit_keyword == "SUBMIT"
+        assert ic.submission_extractor is None
+        assert ic.submission_extractor_config == {}
+        assert ic.solved_threshold == 1.0
+        assert ic.code_execution is None
+
+    def test_code_execution_config_defaults(self):
+        """Test CodeExecutionConfig default values."""
+        from llenvs.core.config import CodeExecutionConfig
+
+        ce = CodeExecutionConfig()
+        assert ce.timeout == 30.0
+
+    def test_from_dict_with_iterative(self):
+        """Test from_dict parses iterative config."""
+        data = {
+            "environments": [
+                {
+                    "name": "humaneval",
+                    "adapter": "huggingface",
+                    "iterative": {
+                        "max_turns": 5,
+                        "submit_keyword": "DONE",
+                        "solved_threshold": 0.9,
+                        "submission_extractor": "code_block",
+                        "submission_extractor_config": {"language": "python"},
+                        "code_execution": {"timeout": 60.0},
+                    },
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert env.iterative is not None
+        assert env.iterative.max_turns == 5
+        assert env.iterative.submit_keyword == "DONE"
+        assert env.iterative.solved_threshold == 0.9
+        assert env.iterative.submission_extractor == "code_block"
+        assert env.iterative.submission_extractor_config == {"language": "python"}
+        assert env.iterative.code_execution is not None
+        assert env.iterative.code_execution.timeout == 60.0
+
+    def test_from_dict_iterative_defaults(self):
+        """Test from_dict uses IterativeConfig defaults for missing fields."""
+        data = {
+            "environments": [
+                {
+                    "name": "test",
+                    "iterative": {"max_turns": 5},
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert env.iterative is not None
+        assert env.iterative.max_turns == 5
+        assert env.iterative.include_history is True
+        assert env.iterative.submit_keyword == "SUBMIT"
+        assert env.iterative.code_execution is None
+
+    def test_from_dict_without_iterative(self):
+        """Test from_dict defaults iterative to None."""
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        assert config.environments[0].iterative is None
+
+    def test_to_dict_with_iterative(self):
+        """Test to_dict serializes iterative config."""
+        from llenvs.core.config import IterativeConfig, CodeExecutionConfig
+
+        config = EvalConfig(
+            environments=[
+                EnvironmentConfig(
+                    name="test",
+                    iterative=IterativeConfig(
+                        max_turns=5,
+                        submit_keyword="DONE",
+                        solved_threshold=0.8,
+                        code_execution=CodeExecutionConfig(timeout=60.0),
+                    ),
+                )
+            ],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        env_data = data["environments"][0]
+        assert "iterative" in env_data
+        assert env_data["iterative"]["max_turns"] == 5
+        assert env_data["iterative"]["submit_keyword"] == "DONE"
+        assert env_data["iterative"]["solved_threshold"] == 0.8
+        assert "code_execution" in env_data["iterative"]
+
+    def test_to_dict_without_iterative(self):
+        """Test to_dict omits iterative when None."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        assert "iterative" not in data["environments"][0]
+
+    def test_to_dict_iterative_defaults_omitted(self):
+        """Test to_dict omits default-valued iterative fields."""
+        from llenvs.core.config import IterativeConfig
+
+        config = EvalConfig(
+            environments=[
+                EnvironmentConfig(
+                    name="test",
+                    iterative=IterativeConfig(max_turns=5),
+                )
+            ],
+            model=ModelConfig(model="test-model"),
+        )
+        data = config.to_dict()
+        iter_d = data["environments"][0]["iterative"]
+        assert iter_d["max_turns"] == 5
+        # Default values should be omitted
+        assert "include_history" not in iter_d
+        assert "summarize_history" not in iter_d
+        assert "submit_keyword" not in iter_d  # SUBMIT is default
+        assert "submission_extractor" not in iter_d
+        assert "solved_threshold" not in iter_d
+
+    def test_roundtrip_with_iterative(self):
+        """Test roundtrip preserves iterative config."""
+        original = {
+            "environments": [
+                {
+                    "name": "humaneval",
+                    "iterative": {
+                        "max_turns": 5,
+                        "include_history": False,
+                        "submit_keyword": "DONE",
+                        "solved_threshold": 0.8,
+                        "submission_extractor": "code_block",
+                        "submission_extractor_config": {"language": "python"},
+                        "code_execution": {"timeout": 60.0},
+                    },
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+        iter_d = result["environments"][0]["iterative"]
+        assert iter_d["max_turns"] == 5
+        assert iter_d["include_history"] is False
+        assert iter_d["submit_keyword"] == "DONE"
+        assert iter_d["solved_threshold"] == 0.8
+        assert iter_d["submission_extractor"] == "code_block"
+        assert iter_d["submission_extractor_config"] == {"language": "python"}
+        assert iter_d["code_execution"]["timeout"] == 60.0
+
+    def test_factory_wraps_with_iterative(self):
+        """Test EnvironmentFactory.create() wraps with IterativeEnvironment."""
+        from llenvs.core.config import EnvironmentFactory, IterativeConfig
+
+        config = EnvironmentConfig(
+            name="leg_counting",
+            adapter="reasoning_gym",
+            size=5,
+            iterative=IterativeConfig(max_turns=4),
+        )
+        env = EnvironmentFactory.create(config)
+
+        from llenvs.adapters.iterative import IterativeEnvironment
+
+        assert isinstance(env, IterativeEnvironment)
+        assert env.spec.is_multi_turn
+        assert env.spec.max_steps == 4
+
+    def test_factory_wraps_with_code_execution(self):
+        """Test factory creates CodeExecutionReward when code_execution set."""
+        from llenvs.core.config import (
+            EnvironmentFactory,
+            IterativeConfig,
+            CodeExecutionConfig,
+        )
+
+        config = EnvironmentConfig(
+            name="leg_counting",
+            adapter="reasoning_gym",
+            size=5,
+            iterative=IterativeConfig(
+                max_turns=3,
+                code_execution=CodeExecutionConfig(timeout=10.0),
+            ),
+        )
+        env = EnvironmentFactory.create(config)
+
+        from llenvs.adapters.iterative import IterativeEnvironment
+
+        assert isinstance(env, IterativeEnvironment)
+        # Should have code execution reward in extra rewards
+        reward_names = {rf.name for rf in env._extra_rewards}
+        assert "code_execution" in reward_names
+
+    def test_factory_wraps_with_submission_extractor(self):
+        """Test factory resolves submission extractor from config."""
+        from llenvs.core.config import EnvironmentFactory, IterativeConfig
+
+        config = EnvironmentConfig(
+            name="leg_counting",
+            adapter="reasoning_gym",
+            size=5,
+            iterative=IterativeConfig(
+                max_turns=3,
+                submission_extractor="code_block",
+                submission_extractor_config={"language": "python"},
+            ),
+        )
+        env = EnvironmentFactory.create(config)
+
+        from llenvs.adapters.iterative import IterativeEnvironment
+        from llenvs.core.extraction import CodeBlockExtractor
+
+        assert isinstance(env, IterativeEnvironment)
+        assert isinstance(env._submission_extractor, CodeBlockExtractor)
+
+    def test_factory_no_iterative_wrapping_by_default(self):
+        """Test factory does NOT wrap when iterative is None."""
+        from llenvs.core.config import EnvironmentFactory
+
+        config = EnvironmentConfig(
+            name="leg_counting",
+            adapter="reasoning_gym",
+            size=5,
+        )
+        env = EnvironmentFactory.create(config)
+
+        from llenvs.adapters.iterative import IterativeEnvironment
+
+        assert not isinstance(env, IterativeEnvironment)

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llenvs.core.extraction import AnswerExtractor
-from llenvs.core.reward import RewardSignal, RewardType
+from llenvs.core.reward import Signal, RewardType
 from llenvs.core.state import State, Action, Observation
 
 try:
@@ -87,7 +87,7 @@ class MathVerifyRewardFunction:
         state: State[Any],
         action: Action,
         next_state: State[Any],
-    ) -> RewardSignal:
+    ) -> Signal:
         """Compute math-correctness reward.
 
         Flow:
@@ -98,10 +98,10 @@ class MathVerifyRewardFunction:
         extracted, extraction_meta = self._answer_extractor.extract(action.text)
 
         if extracted is None:
-            return RewardSignal(
-                value=0.0,
+            return Signal(
                 name=self.name,
                 reward_type=self.reward_type,
+                reward=0.0,
                 metadata={"extracted": None, "extraction": extraction_meta},
             )
 
@@ -112,10 +112,10 @@ class MathVerifyRewardFunction:
 
         if result is not None:
             # math-verify successfully parsed and compared
-            return RewardSignal(
-                value=1.0 if result else 0.0,
+            return Signal(
                 name=self.name,
                 reward_type=self.reward_type,
+                reward=1.0 if result else 0.0,
                 metadata={
                     "extracted": extracted,
                     "expected": expected,
@@ -126,10 +126,10 @@ class MathVerifyRewardFunction:
 
         # Fallback: normalized string comparison
         is_match = _normalize(extracted) == _normalize(expected)
-        return RewardSignal(
-            value=1.0 if is_match else 0.0,
+        return Signal(
             name=self.name,
             reward_type=self.reward_type,
+            reward=1.0 if is_match else 0.0,
             metadata={
                 "extracted": extracted,
                 "expected": expected,
