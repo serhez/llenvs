@@ -1,0 +1,204 @@
+# AlfWorld
+
+The AlfWorld adapter wraps [AlfWorld](https://github.com/alfworld/alfworld) household environments for text-based LLM agents. Agents navigate rooms and manipulate objects to complete everyday tasks like "put a clean mug on the desk".
+
+## Installation
+
+```bash
+pip install alfworld
+# or
+pip install llenvs[alfworld]
+```
+
+Follow AlfWorld's setup instructions to download game data:
+
+```bash
+export ALFWORLD_DATA=<path_to_data>
+alfworld-download
+```
+
+## Quick Start
+
+```python
+from llenvs.adapters import AlfWorldAdapter
+from llenvs.core import Action
+
+adapter = AlfWorldAdapter()
+env = adapter.get_environment("alfworld:eval_out_of_distribution")
+
+state, info = env.reset(options={"task_index": 0})
+print(info["objective"])  # e.g., "put a clean mug on desk 1"
+print(state.observation.prompt)
+
+result = env.step(state, Action(text="go to shelf 1"))
+print(result.next_state.observation.messages[-1]["content"])
+```
+
+## Task Types
+
+AlfWorld has 6 task types, each requiring a different sequence of interactions:
+
+| ID | Task Type | Description |
+|----|-----------|-------------|
+| 1 | `pick_and_place_simple` | Pick up an object and place it somewhere |
+| 2 | `look_at_obj_in_light` | Examine an object under a light source |
+| 3 | `pick_clean_then_place_in_recep` | Clean an object then place it |
+| 4 | `pick_heat_then_place_in_recep` | Heat an object then place it |
+| 5 | `pick_cool_then_place_in_recep` | Cool an object then place it |
+| 6 | `pick_two_obj_and_place` | Pick up two objects and place them |
+
+Filter to specific task types:
+
+```python
+# Only pick-and-place tasks
+env = adapter.get_environment(task_types=[1])
+
+# Pick-and-place + cleaning tasks
+env = adapter.get_environment(task_types=[1, 3])
+```
+
+## Action Format
+
+Actions are free-form text commands understood by the TextWorld backend:
+
+| Action | Description |
+|--------|-------------|
+| `go to {recep}` | Navigate to a receptacle |
+| `take {obj} from {recep}` | Pick up an object |
+| `put {obj} in/on {recep}` | Place an object |
+| `open {recep}` / `close {recep}` | Open or close a container |
+| `use {obj}` | Use an object (e.g., a lamp) |
+| `clean {obj} with {recep}` | Clean an object |
+| `heat {obj} with {recep}` | Heat an object |
+| `cool {obj} with {recep}` | Cool an object |
+| `examine {obj/recep}` | Look at something |
+| `inventory` | Check held items |
+| `look` | Look around the room |
+
+## Admissible Commands
+
+AlfWorld provides a list of valid commands at each step. By default, these are included in the observation text and always stored in the hidden state:
+
+```python
+# Included in observation (default)
+env = adapter.get_environment(include_admissible_commands=True)
+
+# Hidden from observation, but still in hidden state
+env = adapter.get_environment(include_admissible_commands=False)
+state, _ = env.reset(options={"task_index": 0})
+print(state.hidden.admissible_commands)  # always available
+```
+
+## Adapter Configuration
+
+### Splits
+
+Three data splits are available, specified via the environment name:
+
+```python
+env = adapter.get_environment("alfworld:train")
+env = adapter.get_environment("alfworld:eval_in_distribution")
+env = adapter.get_environment("alfworld:eval_out_of_distribution")  # default
+```
+
+### Config
+
+Config resolution priority: `config_path` > `config` dict > AlfWorld default.
+
+```python
+# Use AlfWorld's default config
+env = adapter.get_environment()
+
+# Custom config dict
+env = adapter.get_environment(config={"env": {"train_eval": "train"}})
+
+# Config from YAML file
+env = adapter.get_environment(config_path="/path/to/config.yaml")
+```
+
+### Parameters
+
+```python
+env = adapter.get_environment(
+    name="alfworld:eval_out_of_distribution",
+    max_steps=50,                          # default: 50
+    include_admissible_commands=True,       # default: True
+    include_objective_in_obs=True,          # default: True
+    task_types=[1, 2, 3],                  # filter task types (None = all)
+    prompts={                              # override prompt templates
+        "objective_prefix": "Goal: {objective}",
+        "admissible_commands_prefix": "Valid actions:",
+    },
+)
+```
+
+## Rewards
+
+AlfWorld provides binary sparse rewards:
+
+| Reward | Type | Value |
+|--------|------|-------|
+| `task_completion` | `OUTCOME` | `1.0` if task completed, `0.0` otherwise |
+
+```python
+result = env.step(state, Action(text="put mug 1 in/on desk 1"))
+signal = result.rewards.by_name("task_completion")
+print(signal.reward)  # 1.0 if won
+```
+
+Add extra reward signals:
+
+```python
+from llenvs.core.reward import FormatReward
+
+env = AlfWorldEnvironment(
+    game_files=game_files,
+    config=config,
+    extra_rewards=(my_custom_reward,),
+)
+```
+
+## Hidden State
+
+```python
+@dataclass(frozen=True)
+class AlfWorldHidden:
+    task_index: int                        # index into game_files
+    task_type: str                         # e.g., "pick_and_place_simple"
+    objective: str                         # extracted task objective
+    game_file: str                         # path to current game file
+    episode_step: int                      # current step count
+    last_action: str | None                # last action taken
+    admissible_commands: tuple[str, ...]   # valid commands at this step
+```
+
+## Using with TrajectoryRunner
+
+```python
+from llenvs.adapters import AlfWorldAdapter
+from llenvs.inference.backends import OpenAIBackend
+from llenvs.evaluation import TrajectoryRunner
+from llenvs.inference import SamplingParams
+
+adapter = AlfWorldAdapter()
+env = adapter.get_environment(
+    "alfworld:eval_out_of_distribution",
+    max_steps=50,
+)
+
+backend = OpenAIBackend(model="gpt-4o")
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=SamplingParams(temperature=0.0),
+)
+
+result = runner.run_trajectory(task_index=0)
+print(f"Won: {result.trajectory.final_state.metadata.info['won']}")
+```
+
+## Limitations
+
+- Non-pure (`pure_step=False`) — cannot branch with `DirectStrategy`; use `ActionReplay` or `ProcessFork` strategies
+- No seed support — AlfWorld games are deterministic per game file
+- Requires AlfWorld data download (`alfworld-download`) before use

@@ -37,6 +37,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **HuggingFace** | Any HF dataset with Q/A columns | AIME 2024, GSM8K, MATH |
 | **GEM** | Multi-turn games and benchmarks | GuessTheNumber, Wordle, Mastermind |
 | **WebShop** | E-commerce product search | Navigate, search, purchase |
+| **AlfWorld** | Text-based household tasks | pick & place, clean, heat, cool, examine |
 | **AgentGym** | 15 multi-turn agent environments | ALFWorld, BabyAI, SciWorld, TextCraft |
 | **Verifiers** | Verifiers library environments | Rubric-scored tasks, tool-enabled envs |
 | **OpenEnv** | OpenEnv session-based environments | MCP tool servers, generic clients |
@@ -48,7 +49,7 @@ from llenvs.core.registry import environment_registry
 env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100)
 env = environment_registry.get(name="HuggingFaceH4/aime_2024", adapter="huggingface")
 env = environment_registry.get(name="game:GuessTheNumber-v0", adapter="gem")
-env = environment_registry.get(name="alfworld", adapter="agentgym")
+env = environment_registry.get(name="alfworld:eval_out_of_distribution", adapter="alfworld")
 ```
 
 ## Inference Backends
@@ -194,6 +195,7 @@ Built-in segmenters: `SentenceSegmenter`, `LineSegmenter`, `NumberedStepSegmente
 ```bash
 pip install llenvs[openai,reasoning-gym]   # API + reasoning tasks
 pip install llenvs[vllm,huggingface]       # Local inference + HF datasets
+pip install llenvs[alfworld]               # AlfWorld household tasks
 pip install llenvs[agentgym]               # AgentGym environments
 pip install llenvs[verifiers]              # Verifiers environments
 pip install llenvs[openenv]                # OpenEnv environments

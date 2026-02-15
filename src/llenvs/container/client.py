@@ -61,14 +61,10 @@ class ContainerEnvironment:
 
     def _get_conn(self) -> http.client.HTTPConnection:
         if self._conn is None:
-            self._conn = http.client.HTTPConnection(
-                self._host, self._port, timeout=self._timeout
-            )
+            self._conn = http.client.HTTPConnection(self._host, self._port, timeout=self._timeout)
         return self._conn
 
-    def _request(
-        self, method: str, path: str, body: dict | list | None = None
-    ) -> Any:
+    def _request(self, method: str, path: str, body: dict | list | None = None) -> Any:
         """Send an HTTP request and return parsed JSON response.
 
         Reconnects once on connection errors.

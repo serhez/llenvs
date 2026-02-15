@@ -72,6 +72,13 @@ from llenvs.adapters.gymnasium import (
     GridObservationMapper,
     GYMNASIUM_PRESETS,
 )
+from llenvs.adapters.alfworld import (
+    AlfWorldEnvironment,
+    AlfWorldHidden,
+    AlfWorldAdapter,
+    AlfWorldReward,
+    ALFWORLD_TASK_TYPES,
+)
 
 __all__ = [
     # ReasoningGym
@@ -133,6 +140,12 @@ __all__ = [
     "AutoActionMapper",
     "GridObservationMapper",
     "GYMNASIUM_PRESETS",
+    # AlfWorld
+    "AlfWorldEnvironment",
+    "AlfWorldHidden",
+    "AlfWorldAdapter",
+    "AlfWorldReward",
+    "ALFWORLD_TASK_TYPES",
 ]
 
 
@@ -231,6 +244,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # gymnasium not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register AlfWorld adapter if available
+    try:
+        adapter = AlfWorldAdapter()
+        adapter._get_alfworld()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # alfworld not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

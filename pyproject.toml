@@ -30,12 +30,13 @@ agentgym = ["agentenv>=0.0.1"]
 verifiers = ["verifiers>=0.1"]
 openenv = ["openenv-core>=0.1"]
 gymnasium = ["gymnasium>=0.26"]
+alfworld = ["alfworld>=0.3"]
 math-verify = ["math-verify[antlr4-13-2]>=0.7"]
 wandb = ["wandb>=0.16"]
 rl = ["datasets>=2.14"]
 trl = ["trl>=0.7", "datasets>=2.14"]
 all = [
-  "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,gymnasium,vllm,openai,anthropic,transformers,math-verify,rl,wandb]",
+  "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,gymnasium,alfworld,vllm,openai,anthropic,transformers,math-verify,rl,wandb]",
 ]
 dev = [
   "pytest>=7.0",
