@@ -91,10 +91,10 @@ class TestHermesToolCallParserParse:
         """Test parsing a single tool call."""
         parser = HermesToolCallParser()
         text = (
-            'I will check the weather.\n'
-            '<tool_call>\n'
+            "I will check the weather.\n"
+            "<tool_call>\n"
             '{"name": "get_weather", "arguments": {"city": "Paris"}}\n'
-            '</tool_call>'
+            "</tool_call>"
         )
 
         result = parser.parse(text, sample_tools)
@@ -108,12 +108,12 @@ class TestHermesToolCallParserParse:
         """Test parsing multiple tool calls."""
         parser = HermesToolCallParser()
         text = (
-            '<tool_call>\n'
+            "<tool_call>\n"
             '{"name": "get_weather", "arguments": {"city": "Paris"}}\n'
-            '</tool_call>\n'
-            '<tool_call>\n'
+            "</tool_call>\n"
+            "<tool_call>\n"
             '{"name": "calculate", "arguments": {"expression": "2+2"}}\n'
-            '</tool_call>'
+            "</tool_call>"
         )
 
         result = parser.parse(text, sample_tools)
@@ -126,11 +126,11 @@ class TestHermesToolCallParserParse:
         """Test that remaining text is preserved when mixed with tool calls."""
         parser = HermesToolCallParser()
         text = (
-            'Let me help you.\n'
-            '<tool_call>\n'
+            "Let me help you.\n"
+            "<tool_call>\n"
             '{"name": "get_weather", "arguments": {"city": "London"}}\n'
-            '</tool_call>\n'
-            'I called the weather tool.'
+            "</tool_call>\n"
+            "I called the weather tool."
         )
 
         result = parser.parse(text, sample_tools)
@@ -153,11 +153,7 @@ class TestHermesToolCallParserParse:
     def test_only_tool_calls_no_text(self, sample_tools):
         """Test that text is None when output is only tool calls."""
         parser = HermesToolCallParser()
-        text = (
-            '<tool_call>\n'
-            '{"name": "get_weather", "arguments": {"city": "NYC"}}\n'
-            '</tool_call>'
-        )
+        text = '<tool_call>\n{"name": "get_weather", "arguments": {"city": "NYC"}}\n</tool_call>'
 
         result = parser.parse(text, sample_tools)
 
@@ -168,12 +164,12 @@ class TestHermesToolCallParserParse:
         """Test that invalid JSON in tool_call blocks is skipped."""
         parser = HermesToolCallParser()
         text = (
-            '<tool_call>\n'
-            'not valid json\n'
-            '</tool_call>\n'
-            '<tool_call>\n'
+            "<tool_call>\n"
+            "not valid json\n"
+            "</tool_call>\n"
+            "<tool_call>\n"
             '{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n'
-            '</tool_call>'
+            "</tool_call>"
         )
 
         with caplog.at_level(logging.WARNING):
@@ -185,11 +181,7 @@ class TestHermesToolCallParserParse:
     def test_unknown_tool_name_still_parsed(self, sample_tools):
         """Test that unknown tool names are still parsed (validation is env's job)."""
         parser = HermesToolCallParser()
-        text = (
-            '<tool_call>\n'
-            '{"name": "unknown_tool", "arguments": {"x": 1}}\n'
-            '</tool_call>'
-        )
+        text = '<tool_call>\n{"name": "unknown_tool", "arguments": {"x": 1}}\n</tool_call>'
 
         result = parser.parse(text, sample_tools)
 
@@ -258,9 +250,7 @@ class TestRunnerToolParsing:
         # Make step return a terminal state
         terminal_metadata = StateMetadata(step=1, episode_id="test", is_terminal=True)
         terminal_obs = Observation(prompt="Test prompt", messages=())
-        terminal_state = State(
-            observation=terminal_obs, hidden=None, metadata=terminal_metadata
-        )
+        terminal_state = State(observation=terminal_obs, hidden=None, metadata=terminal_metadata)
         from llenvs.core.environment import StepResult
 
         env.step.return_value = StepResult(

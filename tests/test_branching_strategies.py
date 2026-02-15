@@ -73,15 +73,11 @@ class PureFunctionEnv:
         state = State(
             observation=Observation(prompt=task["prompt"]),
             hidden=MockHidden(answer=task["answer"], task_index=task_index),
-            metadata=StateMetadata(
-                step=0, episode_id=f"ep-{task_index}-{seed or 0}"
-            ),
+            metadata=StateMetadata(step=0, episode_id=f"ep-{task_index}-{seed or 0}"),
         )
         return state, {"task_index": task_index}
 
-    def step(
-        self, state: State[MockHidden], action: Action
-    ) -> StepResult[MockHidden]:
+    def step(self, state: State[MockHidden], action: Action) -> StepResult[MockHidden]:
         correct = action.text == state.hidden.answer
         next_state = State(
             observation=Observation(
@@ -96,9 +92,7 @@ class PureFunctionEnv:
         )
         return StepResult(
             next_state=next_state,
-            rewards=SignalBundle.single(
-                1.0 if correct else 0.0, "correct", RewardType.OUTCOME
-            ),
+            rewards=SignalBundle.single(1.0 if correct else 0.0, "correct", RewardType.OUTCOME),
             terminated=True,
         )
 
@@ -106,9 +100,7 @@ class PureFunctionEnv:
         self, state: State[MockHidden], action: Action, next_state: State[MockHidden]
     ) -> SignalBundle:
         correct = action.text == state.hidden.answer
-        return SignalBundle.single(
-            1.0 if correct else 0.0, "correct", RewardType.OUTCOME
-        )
+        return SignalBundle.single(1.0 if correct else 0.0, "correct", RewardType.OUTCOME)
 
 
 class MutableEnv:
@@ -154,20 +146,14 @@ class MutableEnv:
         state = State(
             observation=Observation(prompt=f"Task {task_index}, counter=0"),
             hidden=MockHidden(answer="done", task_index=task_index),
-            metadata=StateMetadata(
-                step=0, episode_id=f"ep-{task_index}-{seed or 0}"
-            ),
+            metadata=StateMetadata(step=0, episode_id=f"ep-{task_index}-{seed or 0}"),
         )
         return state, {"task_index": task_index}
 
-    def step(
-        self, state: State[MockHidden], action: Action
-    ) -> StepResult[MockHidden]:
+    def step(self, state: State[MockHidden], action: Action) -> StepResult[MockHidden]:
         self._counter += 1
         next_state = State(
-            observation=Observation(
-                prompt=f"Step {self._counter}, action={action.text}"
-            ),
+            observation=Observation(prompt=f"Step {self._counter}, action={action.text}"),
             hidden=state.hidden,
             metadata=StateMetadata(
                 step=state.metadata.step + 1,
@@ -228,9 +214,7 @@ class NoBranchNoSeedEnv:
             rewards=SignalBundle(signals=()),
         )
 
-    def compute_rewards(
-        self, state: State, action: Action, next_state: State
-    ) -> SignalBundle:
+    def compute_rewards(self, state: State, action: Action, next_state: State) -> SignalBundle:
         return SignalBundle(signals=())
 
 
@@ -449,6 +433,7 @@ class TestResolveStrategy:
         env = MutableEnv()
         strategy = resolve_strategy(env)
         from llenvs.core.branching import ProcessForkStrategy
+
         assert isinstance(strategy, ProcessForkStrategy)
 
     def test_resolves_action_replay_when_explicitly_requested(self):
@@ -463,9 +448,7 @@ class TestResolveStrategy:
 
         env = PureFunctionEnv()
         # Even though direct is best, user requests action_replay
-        strategy = resolve_strategy(
-            env, preference="action_replay", env_factory=PureFunctionEnv
-        )
+        strategy = resolve_strategy(env, preference="action_replay", env_factory=PureFunctionEnv)
         assert isinstance(strategy, ActionReplayStrategy)
 
     def test_preference_direct(self):
@@ -593,7 +576,8 @@ class TestBranchManager:
             result = env.step(state0, Action.from_text("2"))
             state1 = result.next_state
             mgr.checkpoint(
-                "step1", state1,
+                "step1",
+                state1,
                 actions=(Action.from_text("2"),),
                 reset_options={},
             )
@@ -701,7 +685,8 @@ class TestBranchManager:
 
             # Overwrite with state at step 1
             mgr.checkpoint(
-                "x", state1,
+                "x",
+                state1,
                 actions=(Action.from_text("2"),),
                 reset_options={},
             )
@@ -826,14 +811,10 @@ class _MutableCounterEnv:
         )
         return state, {"task_index": task_index}
 
-    def step(
-        self, state: State[_ForkMockHidden], action: Action
-    ) -> StepResult[_ForkMockHidden]:
+    def step(self, state: State[_ForkMockHidden], action: Action) -> StepResult[_ForkMockHidden]:
         self._counter += 1
         next_state = State(
-            observation=Observation(
-                prompt=f"counter={self._counter}, action={action.text}"
-            ),
+            observation=Observation(prompt=f"counter={self._counter}, action={action.text}"),
             hidden=state.hidden,
             metadata=StateMetadata(
                 step=state.metadata.step + 1,
@@ -956,7 +937,9 @@ class TestServerForkEndpoint:
             _, reset_data = _http_request(url, "POST", "/reset", {})
             state = reset_data["state"]
             _, step_data = _http_request(
-                url, "POST", "/step",
+                url,
+                "POST",
+                "/step",
                 {"state": state, "action": {"text": "action-0", "tool_calls": []}},
             )
             state_after_step = step_data["next_state"]
@@ -970,8 +953,13 @@ class TestServerForkEndpoint:
                 # Step on the child — its internal counter should be at 1
                 # (inherited from parent), so next step increments to 2
                 _, child_step = _http_request(
-                    child_url, "POST", "/step",
-                    {"state": state_after_step, "action": {"text": "child-action", "tool_calls": []}},
+                    child_url,
+                    "POST",
+                    "/step",
+                    {
+                        "state": state_after_step,
+                        "action": {"text": "child-action", "tool_calls": []},
+                    },
                 )
                 # Child counter was at 1, now 2
                 assert "counter=2" in child_step["next_state"]["observation"]["prompt"]
@@ -1002,12 +990,16 @@ class TestServerForkEndpoint:
 
             # Step on fork1
             _, r1 = _http_request(
-                url1, "POST", "/step",
+                url1,
+                "POST",
+                "/step",
                 {"state": state, "action": {"text": "A", "tool_calls": []}},
             )
             # Step on fork2
             _, r2 = _http_request(
-                url2, "POST", "/step",
+                url2,
+                "POST",
+                "/step",
                 {"state": state, "action": {"text": "B", "tool_calls": []}},
             )
 
@@ -1101,6 +1093,7 @@ class TestProcessForkStrategy:
 
             # Branch env should be a ContainerEnvironment (proxy)
             from llenvs.container.client import ContainerEnvironment
+
             assert isinstance(branch.environment, ContainerEnvironment)
 
             # Step on the branch

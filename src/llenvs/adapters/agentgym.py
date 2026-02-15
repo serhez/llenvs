@@ -173,11 +173,7 @@ class AgentGymEnvironment:
         raw = getattr(self._client, "info", None)
         if not isinstance(raw, dict):
             return {}
-        return {
-            f"client_{k}": v
-            for k, v in raw.items()
-            if k != "observation"
-        }
+        return {f"client_{k}": v for k, v in raw.items() if k != "observation"}
 
     def _extract_available_actions(self) -> tuple[str, ...]:
         """Extract available actions from client info if present."""
@@ -227,9 +223,7 @@ class AgentGymEnvironment:
         task_index = options.get("task_index", 0)
 
         if task_index < 0 or task_index >= self._data_len:
-            raise ValueError(
-                f"task_index {task_index} out of bounds [0, {self._data_len})"
-            )
+            raise ValueError(f"task_index {task_index} out of bounds [0, {self._data_len})")
 
         # Reset and capture return value
         reset_result = self._client.reset(task_index)
@@ -515,11 +509,11 @@ class AgentGymAdapter:
         """Import and return the agentenv module."""
         try:
             import agentenv
+
             return agentenv
         except ImportError as e:
             raise ImportError(
-                "agentenv is required for AgentGymAdapter. "
-                "Install with: pip install agentenv"
+                "agentenv is required for AgentGymAdapter. Install with: pip install agentenv"
             ) from e
 
     def _resolve_client_class(self, env_name: str) -> type:
@@ -541,11 +535,13 @@ class AgentGymAdapter:
         class_name, _ = ENV_REGISTRY[env_name]
 
         from agentenv.envs import __dict__ as envs_dict
+
         if class_name in envs_dict:
             return envs_dict[class_name]
 
         # Fallback: try getattr
         import agentenv.envs as envs_module
+
         return getattr(envs_module, class_name)
 
     def list_environments(self) -> list[str]:

@@ -132,9 +132,7 @@ class MockMultiTurnEnv:
         done = next_step >= target
         return StepResult(
             next_state=state.with_metadata(step=next_step, is_terminal=done),
-            rewards=SignalBundle.single(
-                reward=1.0 if done else 0.0, name="correctness"
-            ),
+            rewards=SignalBundle.single(reward=1.0 if done else 0.0, name="correctness"),
             terminated=done,
         )
 
@@ -296,8 +294,12 @@ class TestConsoleTarget:
     def test_trajectory_end_logs_info(self, caplog):
         target = _ConsoleTarget()
         event = _TrajectoryEndEvent(
-            task_index=3, success=True, total_reward=0.85,
-            num_steps=5, completed_count=7, total_count=10,
+            task_index=3,
+            success=True,
+            total_reward=0.85,
+            num_steps=5,
+            completed_count=7,
+            total_count=10,
         )
         with caplog.at_level(logging.INFO, logger="llenvs.evaluation"):
             target.on_trajectory_end(event)
@@ -308,8 +310,12 @@ class TestConsoleTarget:
     def test_trajectory_end_fail(self, caplog):
         target = _ConsoleTarget()
         event = _TrajectoryEndEvent(
-            task_index=1, success=False, total_reward=0.0,
-            num_steps=2, completed_count=1, total_count=5,
+            task_index=1,
+            success=False,
+            total_reward=0.0,
+            num_steps=2,
+            completed_count=1,
+            total_count=5,
         )
         with caplog.at_level(logging.INFO, logger="llenvs.evaluation"):
             target.on_trajectory_end(event)
@@ -326,9 +332,13 @@ class TestConsoleTarget:
     def test_step_logs_debug(self, caplog):
         target = _ConsoleTarget()
         event = _StepEvent(
-            task_index=0, step_num=1, reward_total=0.5,
-            prompt_tokens=10, completion_tokens=5,
-            has_tool_calls=False, num_tool_calls=0,
+            task_index=0,
+            step_num=1,
+            reward_total=0.5,
+            prompt_tokens=10,
+            completion_tokens=5,
+            has_tool_calls=False,
+            num_tool_calls=0,
         )
         with caplog.at_level(logging.DEBUG, logger="llenvs.evaluation"):
             target.on_step(event)
@@ -359,10 +369,16 @@ class TestFileTarget:
     def test_writes_valid_jsonl(self, tmp_path):
         target = _FileTarget(str(tmp_path / "logs"), "env1")
         target.on_batch_start(_BatchStartEvent(num_tasks=5, environment_name="env1", max_steps=10))
-        target.on_trajectory_end(_TrajectoryEndEvent(
-            task_index=0, success=True, total_reward=1.0,
-            num_steps=1, completed_count=1, total_count=5,
-        ))
+        target.on_trajectory_end(
+            _TrajectoryEndEvent(
+                task_index=0,
+                success=True,
+                total_reward=1.0,
+                num_steps=1,
+                completed_count=1,
+                total_count=5,
+            )
+        )
         target.close()
 
         # Find the JSONL file
@@ -379,11 +395,17 @@ class TestFileTarget:
     def test_event_types_in_json(self, tmp_path):
         target = _FileTarget(str(tmp_path / "logs"), "env1")
         target.on_batch_start(_BatchStartEvent(num_tasks=5, environment_name="env1", max_steps=10))
-        target.on_step(_StepEvent(
-            task_index=0, step_num=1, reward_total=0.5,
-            prompt_tokens=10, completion_tokens=5,
-            has_tool_calls=False, num_tool_calls=0,
-        ))
+        target.on_step(
+            _StepEvent(
+                task_index=0,
+                step_num=1,
+                reward_total=0.5,
+                prompt_tokens=10,
+                completion_tokens=5,
+                has_tool_calls=False,
+                num_tool_calls=0,
+            )
+        )
         target.on_error(_ErrorEvent(task_index=1, phase="step", error="oops"))
         target.on_batch_end(_BatchEndEvent(success_rate=0.8, mean_reward=0.7, num_tasks=5))
         target.close()
@@ -406,11 +428,17 @@ class TestFileTarget:
     def test_multiple_events_multiple_lines(self, tmp_path):
         target = _FileTarget(str(tmp_path / "logs"), "env1")
         for i in range(5):
-            target.on_step(_StepEvent(
-                task_index=0, step_num=i, reward_total=float(i),
-                prompt_tokens=10, completion_tokens=5,
-                has_tool_calls=False, num_tool_calls=0,
-            ))
+            target.on_step(
+                _StepEvent(
+                    task_index=0,
+                    step_num=i,
+                    reward_total=float(i),
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                    has_tool_calls=False,
+                    num_tool_calls=0,
+                )
+            )
         target.close()
 
         files = list((tmp_path / "logs" / "env1").glob("*.jsonl"))
@@ -421,7 +449,9 @@ class TestFileTarget:
         # Change cwd so .logs goes in tmp
         monkeypatch.chdir(tmp_path)
         target = _FileTarget(".logs", "test_env")
-        target.on_batch_start(_BatchStartEvent(num_tasks=1, environment_name="test_env", max_steps=10))
+        target.on_batch_start(
+            _BatchStartEvent(num_tasks=1, environment_name="test_env", max_steps=10)
+        )
         target.close()
         assert (tmp_path / ".logs" / "test_env").is_dir()
 
@@ -648,10 +678,12 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        results = run_multi_evaluation([
-            MultiEvalEntry(runner=runner1, task_indices=[0, 1]),
-            MultiEvalEntry(runner=runner2, task_indices=[0, 1]),
-        ])
+        results = run_multi_evaluation(
+            [
+                MultiEvalEntry(runner=runner1, task_indices=[0, 1]),
+                MultiEvalEntry(runner=runner2, task_indices=[0, 1]),
+            ]
+        )
 
         assert len(results) == 2
         # Each env should have its own log directory

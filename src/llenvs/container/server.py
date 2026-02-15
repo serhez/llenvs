@@ -121,10 +121,12 @@ class EnvironmentHandler(BaseHTTPRequestHandler):
         if cls.hidden_type is None:
             cls.hidden_type = type(state.hidden)
 
-        self._send_json({
-            "state": serialize_state(state),
-            "info": info,
-        })
+        self._send_json(
+            {
+                "state": serialize_state(state),
+                "info": info,
+            }
+        )
 
     def _handle_step(self, body: dict[str, Any]) -> None:
         cls = type(self)
@@ -198,6 +200,7 @@ class EnvironmentHandler(BaseHTTPRequestHandler):
             while time.monotonic() < deadline:
                 try:
                     import http.client
+
                     conn = http.client.HTTPConnection("127.0.0.1", child_port, timeout=1)
                     conn.request("GET", "/health")
                     resp = conn.getresponse()
@@ -214,9 +217,7 @@ class EnvironmentHandler(BaseHTTPRequestHandler):
                     os.waitpid(pid, 0)
                 except ChildProcessError:
                     pass
-                raise RuntimeError(
-                    f"Forked child on port {child_port} did not become healthy"
-                )
+                raise RuntimeError(f"Forked child on port {child_port} did not become healthy")
 
             self._send_json({"url": child_url, "pid": pid})
 

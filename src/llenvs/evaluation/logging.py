@@ -124,34 +124,45 @@ class _ConsoleTarget:
     def on_batch_start(self, event: _BatchStartEvent) -> None:
         logger.info(
             "Starting evaluation: %s, %d tasks, max %d steps",
-            event.environment_name, event.num_tasks, event.max_steps,
+            event.environment_name,
+            event.num_tasks,
+            event.max_steps,
         )
 
     def on_batch_end(self, event: _BatchEndEvent) -> None:
         logger.info(
             "Evaluation complete: success_rate=%.2f%%, mean_reward=%.3f",
-            event.success_rate * 100, event.mean_reward,
+            event.success_rate * 100,
+            event.mean_reward,
         )
 
     def on_trajectory_end(self, event: _TrajectoryEndEvent) -> None:
         status = "OK" if event.success else "FAIL"
         logger.info(
             "[%d/%d] Task %d: %s reward=%.3f steps=%d",
-            event.completed_count, event.total_count,
-            event.task_index, status, event.total_reward, event.num_steps,
+            event.completed_count,
+            event.total_count,
+            event.task_index,
+            status,
+            event.total_reward,
+            event.num_steps,
         )
 
     def on_step(self, event: _StepEvent) -> None:
         logger.debug(
             "Task %d step %d: reward=%.3f tokens=%d",
-            event.task_index, event.step_num, event.reward_total,
+            event.task_index,
+            event.step_num,
+            event.reward_total,
             event.prompt_tokens + event.completion_tokens,
         )
 
     def on_error(self, event: _ErrorEvent) -> None:
         logger.warning(
             "Task %d error in %s: %s",
-            event.task_index, event.phase, event.error,
+            event.task_index,
+            event.phase,
+            event.error,
         )
 
     def close(self) -> None:
@@ -211,8 +222,7 @@ class _WandbTarget:
             import wandb
         except ImportError:
             raise ImportError(
-                "wandb is required for W&B logging. "
-                "Install it with: pip install 'llenvs[wandb]'"
+                "wandb is required for W&B logging. Install it with: pip install 'llenvs[wandb]'"
             )
 
         if config.wandb_run is not None:
@@ -229,44 +239,56 @@ class _WandbTarget:
         self._wandb = wandb
 
     def on_batch_start(self, event: _BatchStartEvent) -> None:
-        self._run.config.update({
-            "environment": event.environment_name,
-            "num_tasks": event.num_tasks,
-            "max_steps": event.max_steps,
-        })
+        self._run.config.update(
+            {
+                "environment": event.environment_name,
+                "num_tasks": event.num_tasks,
+                "max_steps": event.max_steps,
+            }
+        )
 
     def on_batch_end(self, event: _BatchEndEvent) -> None:
-        self._run.log({
-            "batch/success_rate": event.success_rate,
-            "batch/mean_reward": event.mean_reward,
-        })
-        self._run.summary.update({
-            "success_rate": event.success_rate,
-            "mean_reward": event.mean_reward,
-            "num_tasks": event.num_tasks,
-        })
+        self._run.log(
+            {
+                "batch/success_rate": event.success_rate,
+                "batch/mean_reward": event.mean_reward,
+            }
+        )
+        self._run.summary.update(
+            {
+                "success_rate": event.success_rate,
+                "mean_reward": event.mean_reward,
+                "num_tasks": event.num_tasks,
+            }
+        )
 
     def on_trajectory_end(self, event: _TrajectoryEndEvent) -> None:
-        self._run.log({
-            "trajectory/success": int(event.success),
-            "trajectory/reward": event.total_reward,
-            "trajectory/completed": event.completed_count,
-        })
+        self._run.log(
+            {
+                "trajectory/success": int(event.success),
+                "trajectory/reward": event.total_reward,
+                "trajectory/completed": event.completed_count,
+            }
+        )
 
     def on_step(self, event: _StepEvent) -> None:
-        self._run.log({
-            "step/reward": event.reward_total,
-            "step/tokens": event.prompt_tokens + event.completion_tokens,
-            "step/prompt_tokens": event.prompt_tokens,
-            "step/completion_tokens": event.completion_tokens,
-            "step/num_tool_calls": event.num_tool_calls,
-        })
+        self._run.log(
+            {
+                "step/reward": event.reward_total,
+                "step/tokens": event.prompt_tokens + event.completion_tokens,
+                "step/prompt_tokens": event.prompt_tokens,
+                "step/completion_tokens": event.completion_tokens,
+                "step/num_tool_calls": event.num_tool_calls,
+            }
+        )
 
     def on_error(self, event: _ErrorEvent) -> None:
-        self._run.log({
-            "error/task_index": event.task_index,
-            "error/phase": event.phase,
-        })
+        self._run.log(
+            {
+                "error/task_index": event.task_index,
+                "error/phase": event.phase,
+            }
+        )
 
     def close(self) -> None:
         if self._owns_run:

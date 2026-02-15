@@ -233,9 +233,7 @@ class TestMCPToolExecutorIntegration:
         mock_process = MagicMock()
         mock_process.stdin = MagicMock()
         mock_process.stdout = MagicMock()
-        mock_process.stdout.readline.return_value = (
-            json.dumps(error_response).encode() + b"\n"
-        )
+        mock_process.stdout.readline.return_value = json.dumps(error_response).encode() + b"\n"
 
         executor._process = mock_process
         executor._connected = True

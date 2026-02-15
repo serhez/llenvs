@@ -365,9 +365,7 @@ class EvalConfig:
                 env_llm_model_data = env_llm_data.get("model", {})
                 env_llm_model = ModelConfig(
                     backend=env_llm_model_data.get("backend", "vllm"),
-                    model=env_llm_model_data.get(
-                        "model", env_llm_model_data.get("path", "")
-                    ),
+                    model=env_llm_model_data.get("model", env_llm_model_data.get("path", "")),
                     max_concurrency=env_llm_model_data.get("max_concurrency", 64),
                     params=env_llm_model_data.get("params", {}),
                 )
@@ -379,9 +377,7 @@ class EvalConfig:
                         max_tokens=env_llm_inference_data.get("max_tokens", 512),
                         top_p=env_llm_inference_data.get("top_p", 1.0),
                         top_k=env_llm_inference_data.get("top_k", 0),
-                        stop_sequences=env_llm_inference_data.get(
-                            "stop_sequences", []
-                        ),
+                        stop_sequences=env_llm_inference_data.get("stop_sequences", []),
                     )
                 env_llm = EnvironmentLLMConfig(
                     model=env_llm_model,
@@ -545,7 +541,9 @@ class EvalConfig:
                 if env.iterative.submission_extractor is not None:
                     iter_d["submission_extractor"] = env.iterative.submission_extractor
                 if env.iterative.submission_extractor_config:
-                    iter_d["submission_extractor_config"] = env.iterative.submission_extractor_config
+                    iter_d["submission_extractor_config"] = (
+                        env.iterative.submission_extractor_config
+                    )
                 if env.iterative.solved_threshold != 1.0:
                     iter_d["solved_threshold"] = env.iterative.solved_threshold
                 if env.iterative.code_execution is not None:

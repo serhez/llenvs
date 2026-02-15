@@ -30,7 +30,12 @@ from llenvs.evaluation.continuation import (
     TokenContinuationStrategy,
     BoundaryContinuationStrategy,
 )
-from llenvs.evaluation.runner import COMPLETE, ForceAction, SegmentedTrajectoryRunner, TrajectoryResult
+from llenvs.evaluation.runner import (
+    COMPLETE,
+    ForceAction,
+    SegmentedTrajectoryRunner,
+    TrajectoryResult,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -129,9 +134,7 @@ def _make_base_env(
                 ),
             ),
             rewards=SignalBundle(
-                signals=(
-                    Signal(reward=reward, name="correctness", reward_type=RewardType.OUTCOME),
-                )
+                signals=(Signal(reward=reward, name="correctness", reward_type=RewardType.OUTCOME),)
             ),
             terminated=True,
         )
@@ -242,7 +245,9 @@ class TestBoundaryContinuationStrategy:
         backend = MockBackend(["First sentence. Second sentence."])
         segmenter = SentenceSegmenter()
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter, chunk_max_tokens=256,
+            backend=backend,
+            segmenter=segmenter,
+            chunk_max_tokens=256,
         )
 
         segment, buffer, gen_result = strategy.generate_segment(
@@ -259,7 +264,9 @@ class TestBoundaryContinuationStrategy:
         backend = MockBackend(["A. B. C."])
         segmenter = SentenceSegmenter()
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter, chunk_max_tokens=256,
+            backend=backend,
+            segmenter=segmenter,
+            chunk_max_tokens=256,
         )
 
         segment, buffer, _ = strategy.generate_segment(
@@ -276,7 +283,9 @@ class TestBoundaryContinuationStrategy:
         backend = MockBackend(["should not be called"])
         segmenter = SentenceSegmenter()
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter, chunk_max_tokens=256,
+            backend=backend,
+            segmenter=segmenter,
+            chunk_max_tokens=256,
         )
 
         segment, buffer, gen_result = strategy.generate_segment(
@@ -300,7 +309,9 @@ class TestBoundaryContinuationStrategy:
         )
         segmenter = SentenceSegmenter()
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter, chunk_max_tokens=256,
+            backend=backend,
+            segmenter=segmenter,
+            chunk_max_tokens=256,
         )
 
         segment, buffer, gen_result = strategy.generate_segment(
@@ -321,7 +332,9 @@ class TestBoundaryContinuationStrategy:
         )
         segmenter = SentenceSegmenter()
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter, chunk_max_tokens=256,
+            backend=backend,
+            segmenter=segmenter,
+            chunk_max_tokens=256,
         )
 
         segment, buffer, _ = strategy.generate_segment(
@@ -338,7 +351,9 @@ class TestBoundaryContinuationStrategy:
         """Generation is done on EOS with empty buffer."""
         backend = MockBackend([])
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=SentenceSegmenter(), chunk_max_tokens=256,
+            backend=backend,
+            segmenter=SentenceSegmenter(),
+            chunk_max_tokens=256,
         )
 
         gen_done = GenerationResult(finish_reason=StopReason.END_OF_TEXT)
@@ -351,7 +366,9 @@ class TestBoundaryContinuationStrategy:
         """Generation isn't done if buffer still has text."""
         backend = MockBackend([])
         strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=SentenceSegmenter(), chunk_max_tokens=256,
+            backend=backend,
+            segmenter=SentenceSegmenter(),
+            chunk_max_tokens=256,
         )
 
         gen_eos = GenerationResult(finish_reason=StopReason.END_OF_TEXT)
@@ -488,8 +505,7 @@ class TestSegmentedTrajectoryRunner:
         # Each segment transition's action should contain text
         # (the last transition may be a finalize with empty text)
         segment_transitions = [
-            t for t in result.trajectory.transitions
-            if t.info.get("finalize") is not True
+            t for t in result.trajectory.transitions if t.info.get("finalize") is not True
         ]
         assert len(segment_transitions) >= 3
         for t in segment_transitions:
@@ -1112,9 +1128,7 @@ class TestPrefixReplay:
 
         # More specifically: no callback step should correspond to prefix transitions
         # Prefix transitions have info["replayed"]=True
-        replayed_count = sum(
-            1 for t in result.trajectory.transitions if t.info.get("replayed")
-        )
+        replayed_count = sum(1 for t in result.trajectory.transitions if t.info.get("replayed"))
         assert replayed_count == 2
         # Callback should only be called for non-replayed, non-terminal steps
         assert len(callback_steps) <= len(result.trajectory.transitions) - replayed_count
@@ -1232,8 +1246,7 @@ class TestPrefixReplay:
 
         # Extract prefix pairs from the first 2 non-finalize transitions
         non_finalize = [
-            t for t in first_result.trajectory.transitions
-            if not t.info.get("finalize")
+            t for t in first_result.trajectory.transitions if not t.info.get("finalize")
         ]
         prefix_pairs = [(t.state, t.action) for t in non_finalize[:2]]
 
@@ -1328,13 +1341,19 @@ class TestPrefixReplay:
         env = SegmentedEnvironment(base_env, segmenter)
 
         runner1 = SegmentedTrajectoryRunner(
-            environment=env, backend=backend1, sampling_params=SamplingParams(),
+            environment=env,
+            backend=backend1,
+            sampling_params=SamplingParams(),
         )
         runner2 = SegmentedTrajectoryRunner(
-            environment=env, backend=backend2, sampling_params=SamplingParams(),
+            environment=env,
+            backend=backend2,
+            sampling_params=SamplingParams(),
         )
         runner3 = SegmentedTrajectoryRunner(
-            environment=env, backend=backend3, sampling_params=SamplingParams(),
+            environment=env,
+            backend=backend3,
+            sampling_params=SamplingParams(),
         )
 
         result_none = runner1.run_trajectory(task_index=0)
@@ -1376,7 +1395,8 @@ class TestPrefixReplay:
         assert len(replayed) == 2
         # Generation steps (non-replayed, non-finalize) should be at most 3
         gen_transitions = [
-            t for t in result.trajectory.transitions
+            t
+            for t in result.trajectory.transitions
             if not t.info.get("replayed") and not t.info.get("finalize")
         ]
         assert len(gen_transitions) <= 3

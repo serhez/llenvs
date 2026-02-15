@@ -43,7 +43,7 @@ def make_openrlhf_reward_fn(
         completions = []
         for query, prompt in zip(queries, prompts):
             if query.startswith(prompt):
-                completions.append(query[len(prompt):])
+                completions.append(query[len(prompt) :])
             else:
                 completions.append(query)
 

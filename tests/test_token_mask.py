@@ -137,7 +137,9 @@ class TestTrajectoryMaskerSingleTurn:
         terminal = _make_state(prompt="Q?", step=1, is_terminal=True)
 
         traj = Trajectory.create(initial)
-        traj.add_transition(_make_transition(initial, action_text=action_text, next_state=terminal, reward=1.0))
+        traj.add_transition(
+            _make_transition(initial, action_text=action_text, next_state=terminal, reward=1.0)
+        )
 
         result = masker.mask_trajectory(traj)
 

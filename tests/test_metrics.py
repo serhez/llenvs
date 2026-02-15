@@ -135,7 +135,7 @@ class TestContinuousStatistics:
         stats = compute_continuous_statistics(values)
 
         # std_error = std_dev / sqrt(n) = 10 / sqrt(3)
-        expected_std_error = 10.0 / (3 ** 0.5)
+        expected_std_error = 10.0 / (3**0.5)
         assert stats.std_error == pytest.approx(expected_std_error)
 
     def test_compute_quantiles(self):
@@ -321,7 +321,7 @@ class TestMetric:
         metric = Metric(name="accuracy", statistics=stats)
 
         assert metric.name == "accuracy"
-        assert metric.statistics.mean == pytest.approx(2/3)
+        assert metric.statistics.mean == pytest.approx(2 / 3)
         assert isinstance(metric.statistics, BinaryStatistics)
         assert metric.statistics.count == 2
 
@@ -379,7 +379,7 @@ class TestMetricsBundle:
         result = bundle.to_dict()
 
         assert "accuracy" in result
-        assert result["accuracy"]["mean"] == pytest.approx(2/3)
+        assert result["accuracy"]["mean"] == pytest.approx(2 / 3)
         assert result["accuracy"]["n"] == 3
         assert result["accuracy"]["count"] == 2
         assert "std_dev" not in result["accuracy"]
@@ -714,15 +714,11 @@ class TestAggregateContinuousMetrics:
         """Test aggregating two continuous metrics with equal weights."""
         m1 = Metric(
             "reward",
-            ContinuousStatistics(
-                n=10, mean=5.0, std_dev=2.0, min=1.0, max=9.0, std_error=0.632
-            ),
+            ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, min=1.0, max=9.0, std_error=0.632),
         )
         m2 = Metric(
             "reward",
-            ContinuousStatistics(
-                n=10, mean=7.0, std_dev=2.0, min=3.0, max=11.0, std_error=0.632
-            ),
+            ContinuousStatistics(n=10, mean=7.0, std_dev=2.0, min=3.0, max=11.0, std_error=0.632),
         )
         result = aggregate_continuous_metrics([m1, m2])
 
@@ -734,12 +730,8 @@ class TestAggregateContinuousMetrics:
 
     def test_weighted_mean(self):
         """Test that weighted mean is computed correctly for unequal n."""
-        m1 = Metric(
-            "reward", ContinuousStatistics(n=10, mean=10.0, std_dev=1.0, std_error=0.316)
-        )
-        m2 = Metric(
-            "reward", ContinuousStatistics(n=30, mean=20.0, std_dev=1.0, std_error=0.183)
-        )
+        m1 = Metric("reward", ContinuousStatistics(n=10, mean=10.0, std_dev=1.0, std_error=0.316))
+        m2 = Metric("reward", ContinuousStatistics(n=30, mean=20.0, std_dev=1.0, std_error=0.183))
         result = aggregate_continuous_metrics([m1, m2])
 
         # Weighted mean: (10*10 + 30*20) / 40 = 700/40 = 17.5
@@ -799,15 +791,9 @@ class TestAggregateContinuousMetrics:
 
     def test_min_max_aggregation(self):
         """Test min/max are properly aggregated."""
-        m1 = Metric(
-            "reward", ContinuousStatistics(n=5, mean=5.0, min=2.0, max=8.0)
-        )
-        m2 = Metric(
-            "reward", ContinuousStatistics(n=5, mean=15.0, min=10.0, max=20.0)
-        )
-        m3 = Metric(
-            "reward", ContinuousStatistics(n=5, mean=0.0, min=-5.0, max=5.0)
-        )
+        m1 = Metric("reward", ContinuousStatistics(n=5, mean=5.0, min=2.0, max=8.0))
+        m2 = Metric("reward", ContinuousStatistics(n=5, mean=15.0, min=10.0, max=20.0))
+        m3 = Metric("reward", ContinuousStatistics(n=5, mean=0.0, min=-5.0, max=5.0))
         result = aggregate_continuous_metrics([m1, m2, m3])
 
         assert result.statistics.min == -5.0
@@ -817,15 +803,11 @@ class TestAggregateContinuousMetrics:
         """Test that median, q25, q75 are None (cannot reconstruct)."""
         m1 = Metric(
             "reward",
-            ContinuousStatistics(
-                n=10, mean=5.0, std_dev=2.0, median=5.0, q25=4.0, q75=6.0
-            ),
+            ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, median=5.0, q25=4.0, q75=6.0),
         )
         m2 = Metric(
             "reward",
-            ContinuousStatistics(
-                n=10, mean=7.0, std_dev=2.0, median=7.0, q25=6.0, q75=8.0
-            ),
+            ContinuousStatistics(n=10, mean=7.0, std_dev=2.0, median=7.0, q25=6.0, q75=8.0),
         )
         result = aggregate_continuous_metrics([m1, m2])
 
@@ -836,12 +818,8 @@ class TestAggregateContinuousMetrics:
     def test_pooled_variance_identical_groups(self):
         """Test variance pooling with identical groups."""
         # Two groups with same mean and std_dev
-        m1 = Metric(
-            "reward", ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, std_error=0.632)
-        )
-        m2 = Metric(
-            "reward", ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, std_error=0.632)
-        )
+        m1 = Metric("reward", ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, std_error=0.632))
+        m2 = Metric("reward", ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, std_error=0.632))
         result = aggregate_continuous_metrics([m1, m2])
 
         # SS_within = (10-1)*4 + (10-1)*4 = 72
@@ -866,12 +844,8 @@ class TestAggregateContinuousMetrics:
 
     def test_confidence_interval_computed(self):
         """Test that CI is computed for aggregated metrics."""
-        m1 = Metric(
-            "reward", ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, std_error=0.632)
-        )
-        m2 = Metric(
-            "reward", ContinuousStatistics(n=10, mean=7.0, std_dev=2.0, std_error=0.632)
-        )
+        m1 = Metric("reward", ContinuousStatistics(n=10, mean=5.0, std_dev=2.0, std_error=0.632))
+        m2 = Metric("reward", ContinuousStatistics(n=10, mean=7.0, std_dev=2.0, std_error=0.632))
         result = aggregate_continuous_metrics([m1, m2])
 
         assert result.statistics.ci_lower is not None

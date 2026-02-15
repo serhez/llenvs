@@ -191,9 +191,7 @@ class ReasoningGymEnvironment:
 
         task_index = options["task_index"]
         if task_index < 0 or task_index >= len(self._dataset):
-            raise ValueError(
-                f"task_index {task_index} out of bounds [0, {len(self._dataset)})"
-            )
+            raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._dataset)})")
 
         # Get the dataset entry
         entry = self._dataset[task_index]
@@ -329,6 +327,7 @@ class ReasoningGymAdapter:
         """Import and return the reasoning_gym module."""
         try:
             import reasoning_gym
+
             return reasoning_gym
         except ImportError as e:
             raise ImportError(

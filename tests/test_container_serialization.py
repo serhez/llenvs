@@ -129,6 +129,7 @@ class TestToolCallSerialization:
 
     def test_json_compatible(self):
         import json
+
         tc = ToolCall(id="tc3", name="run", arguments={"x": [1, 2]})
         data = serialize_tool_call(tc)
         json_str = json.dumps(data)
@@ -261,9 +262,7 @@ class TestSignalSerialization:
         assert result == sig
 
     def test_with_weight(self):
-        sig = Signal(
-            name="rubric", reward_type=RewardType.PROCESS, reward=0.8, weight=2.0
-        )
+        sig = Signal(name="rubric", reward_type=RewardType.PROCESS, reward=0.8, weight=2.0)
         data = serialize_reward_signal(sig)
         result = deserialize_reward_signal(data)
         assert result.weight == 2.0
@@ -577,6 +576,7 @@ class TestEnvironmentSpecSerialization:
 class TestFullJsonRoundTrip:
     def test_state_through_json(self):
         import json
+
         state = State(
             observation=Observation(
                 prompt="Solve: 2+2",
@@ -610,6 +610,7 @@ class TestFullJsonRoundTrip:
 
     def test_step_result_through_json(self):
         import json
+
         sr = StepResult(
             next_state=State(
                 observation=Observation(prompt="done"),
@@ -651,9 +652,7 @@ class TestEdgeCases:
         assert result.metadata is None
 
     def test_none_error_in_tool_result(self):
-        tr = ToolResult(
-            call_id="c", tool_name="t", status=ToolResultStatus.SUCCESS, output="ok"
-        )
+        tr = ToolResult(call_id="c", tool_name="t", status=ToolResultStatus.SUCCESS, output="ok")
         data = serialize_tool_result(tr)
         result = deserialize_tool_result(data)
         assert result.error is None

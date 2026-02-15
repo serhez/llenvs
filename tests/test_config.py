@@ -602,7 +602,10 @@ class TestExtractorsChainConfig:
         config = EvalConfig.from_dict(original)
         result = config.to_dict()
 
-        assert result["environments"][0]["answer_extractors"] == original["environments"][0]["answer_extractors"]
+        assert (
+            result["environments"][0]["answer_extractors"]
+            == original["environments"][0]["answer_extractors"]
+        )
 
 
 class TestPromptsConfig:

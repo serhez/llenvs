@@ -415,8 +415,7 @@ class AnthropicBackend(ModelBackend):
             from anthropic import Anthropic, AsyncAnthropic
         except ImportError as e:
             raise ImportError(
-                "anthropic is required for AnthropicBackend. "
-                "Install with: pip install anthropic"
+                "anthropic is required for AnthropicBackend. Install with: pip install anthropic"
             ) from e
 
         self._model = model
@@ -664,26 +663,32 @@ class AnthropicBackend(ModelBackend):
                 system_content = msg.content
             elif msg.role == "tool":
                 # Anthropic uses tool_result blocks
-                chat_messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg.tool_call_id,
-                        "content": msg.content,
-                    }],
-                })
+                chat_messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": msg.content,
+                            }
+                        ],
+                    }
+                )
             elif msg.role == "assistant" and msg.tool_calls:
                 # Assistant message with tool calls
                 content: list[dict[str, Any]] = []
                 if msg.content:
                     content.append({"type": "text", "text": msg.content})
                 for tc in msg.tool_calls:
-                    content.append({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.arguments,
-                    })
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }
+                    )
                 chat_messages.append({"role": "assistant", "content": content})
             else:
                 chat_messages.append(msg.to_dict())
@@ -790,8 +795,7 @@ class OpenRouterBackend(ModelBackend):
             from openai import AsyncOpenAI, OpenAI
         except ImportError as e:
             raise ImportError(
-                "openai is required for OpenRouterBackend. "
-                "Install with: pip install openai"
+                "openai is required for OpenRouterBackend. Install with: pip install openai"
             ) from e
 
         import os

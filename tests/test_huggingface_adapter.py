@@ -70,21 +70,22 @@ def mock_hf_dataset() -> MockHFDataset:
 @pytest.fixture
 def mock_aime_dataset() -> MockHFDataset:
     """Create mock AIME-style dataset with direct numeric answers."""
-    return MockHFDataset([
-        {
-            "problem": "Find the sum of 1 + 2 + 3 + ... + 10.",
-            "answer": "55",
-            "problem_idx": 1,
-            "problem_type": ["Algebra"],
-        },
-        {
-            "problem": "How many factors does 12 have?",
-            "answer": "6",
-            "problem_idx": 2,
-            "problem_type": ["Number Theory"],
-        },
-    ])
-
+    return MockHFDataset(
+        [
+            {
+                "problem": "Find the sum of 1 + 2 + 3 + ... + 10.",
+                "answer": "55",
+                "problem_idx": 1,
+                "problem_type": ["Algebra"],
+            },
+            {
+                "problem": "How many factors does 12 have?",
+                "answer": "6",
+                "problem_idx": 2,
+                "problem_type": ["Number Theory"],
+            },
+        ]
+    )
 
 
 class TestNormalization:
@@ -392,6 +393,7 @@ class TestEnvironmentRegistryIntegration:
         def mock_get_datasets():
             class MockDatasets:
                 pass
+
             return MockDatasets()
 
         adapter = HuggingFaceAdapter()
@@ -407,6 +409,7 @@ class TestEnvironmentRegistryIntegration:
         def mock_get_datasets():
             class MockDatasets:
                 pass
+
             return MockDatasets()
 
         adapter = HuggingFaceAdapter()

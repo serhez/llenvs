@@ -525,7 +525,9 @@ class TestResolvePromptConfig:
         env_cfg = EnvironmentConfig(name="test")
 
         sys_prompt, _, _ = resolve_prompt_config(
-            eval_cfg, env_cfg, is_multi_turn=False,
+            eval_cfg,
+            env_cfg,
+            is_multi_turn=False,
         )
         assert sys_prompt is not None
         assert sys_prompt == SYSTEM_PROMPT_REGISTRY["general_reasoning"].content
@@ -541,7 +543,9 @@ class TestResolvePromptConfig:
         env_cfg = EnvironmentConfig(name="test")
 
         sys_prompt, _, _ = resolve_prompt_config(
-            eval_cfg, env_cfg, is_multi_turn=True,
+            eval_cfg,
+            env_cfg,
+            is_multi_turn=True,
         )
         assert sys_prompt is None
 
@@ -551,8 +555,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return "Adapter default prompt."
+
             def get_prompt_template(self, name):
                 return None
 
@@ -573,8 +579,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return "Adapter default."
+
             def get_prompt_template(self, name):
                 return None
 
@@ -596,8 +604,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return "Adapter default."
+
             def get_prompt_template(self, name):
                 return None
 
@@ -618,8 +628,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return "Adapter default."
+
             def get_prompt_template(self, name):
                 return None
 
@@ -630,8 +642,11 @@ class TestResolvePromptConfig:
         env_cfg = EnvironmentConfig(name="test")
 
         sys_prompt, _, _ = resolve_prompt_config(
-            eval_cfg, env_cfg,
-            adapter=MockAdapter(), env_name="test", is_multi_turn=False,
+            eval_cfg,
+            env_cfg,
+            adapter=MockAdapter(),
+            env_name="test",
+            is_multi_turn=False,
         )
         # Adapter default wins over library fallback
         assert sys_prompt == "Adapter default."
@@ -642,8 +657,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return None
+
             def get_prompt_template(self, name):
                 return None
 
@@ -654,8 +671,11 @@ class TestResolvePromptConfig:
         env_cfg = EnvironmentConfig(name="test")
 
         sys_prompt, _, _ = resolve_prompt_config(
-            eval_cfg, env_cfg,
-            adapter=MockAdapter(), env_name="test", is_multi_turn=False,
+            eval_cfg,
+            env_cfg,
+            adapter=MockAdapter(),
+            env_name="test",
+            is_multi_turn=False,
         )
         # Falls to library fallback
         assert sys_prompt == SYSTEM_PROMPT_REGISTRY["general_reasoning"].content
@@ -666,8 +686,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return None
+
             def get_prompt_template(self, name):
                 return PromptTemplate(template="Adapter: {question}", name="adapter_tpl")
 
@@ -689,8 +711,10 @@ class TestResolvePromptConfig:
 
         class MockAdapter:
             name = "mock"
+
             def get_default_system_prompt(self, name):
                 return None
+
             def get_prompt_template(self, name):
                 return PromptTemplate(template="Adapter: {question}", name="adapter_tpl")
 
@@ -706,4 +730,3 @@ class TestResolvePromptConfig:
         )
         assert template is not None
         assert template.name == "math"
-

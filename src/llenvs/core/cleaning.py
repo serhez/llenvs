@@ -12,9 +12,7 @@ from collections.abc import Callable
 # Pre-cleaners (raw response -> cleaned response)
 # ---------------------------------------------------------------------------
 
-_SPECIAL_TOKEN_PATTERN = re.compile(
-    r"<\|endoftext\|>|<\|im_end\|>|<\|im_start\|>|<pad>|</s>|<s>"
-)
+_SPECIAL_TOKEN_PATTERN = re.compile(r"<\|endoftext\|>|<\|im_end\|>|<\|im_start\|>|<pad>|</s>|<s>")
 
 
 def strip_special_tokens(text: str) -> str:
@@ -68,9 +66,7 @@ def strip_trailing_punctuation(text: str) -> str:
 def strip_surrounding_quotes(text: str) -> str:
     """Remove matched surrounding quotes from extracted answers."""
     if len(text) >= 2:
-        if (text[0] == '"' and text[-1] == '"') or (
-            text[0] == "'" and text[-1] == "'"
-        ):
+        if (text[0] == '"' and text[-1] == '"') or (text[0] == "'" and text[-1] == "'"):
             return text[1:-1]
     return text
 
@@ -144,8 +140,7 @@ def resolve_cleaners(
     for name in names:
         if name not in registry:
             raise KeyError(
-                f"Unknown {kind}-cleaner: {name!r}. "
-                f"Available: {sorted(registry.keys())}"
+                f"Unknown {kind}-cleaner: {name!r}. Available: {sorted(registry.keys())}"
             )
         result.append(registry[name])
     return result

@@ -16,6 +16,7 @@ from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameterType
 @dataclass
 class MockStepResult:
     """Mock openenv StepResult."""
+
     observation: dict[str, Any]
     reward: float | None = None
     done: bool = False
@@ -124,7 +125,9 @@ class TestOpenEnvHidden:
         from llenvs.adapters.openenv import OpenEnvHidden
 
         hidden = OpenEnvHidden(
-            env_name="test", episode_step=0, last_action=None,
+            env_name="test",
+            episode_step=0,
+            last_action=None,
             session_info=(),
         )
         with pytest.raises(AttributeError):
@@ -139,18 +142,22 @@ class TestCoerceObservation:
 
     def test_text_key(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         assert _coerce_observation({"text": "hello"}) == "hello"
 
     def test_content_key(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         assert _coerce_observation({"content": "world"}) == "world"
 
     def test_observation_key(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         assert _coerce_observation({"observation": "obs"}) == "obs"
 
     def test_message_key(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         assert _coerce_observation({"message": "msg"}) == "msg"
 
     def test_fallback_to_json(self):
@@ -164,15 +171,18 @@ class TestCoerceObservation:
 
     def test_empty_dict(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         result = _coerce_observation({})
         assert result == "{}"
 
     def test_string_observation(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         assert _coerce_observation("already a string") == "already a string"
 
     def test_priority_text_over_content(self):
         from llenvs.adapters.openenv import _coerce_observation
+
         assert _coerce_observation({"text": "a", "content": "b"}) == "a"
 
 
@@ -194,14 +204,18 @@ class TestOpenEnvReward:
 
         reward_fn = OpenEnvReward()
         hidden = OpenEnvHidden(
-            env_name="test", episode_step=1, last_action="act",
+            env_name="test",
+            episode_step=1,
+            last_action="act",
             session_info=(),
         )
         state = State(
             observation=Observation(prompt="test"),
             hidden=hidden,
             metadata=StateMetadata(
-                step=0, episode_id="test", is_terminal=False,
+                step=0,
+                episode_id="test",
+                is_terminal=False,
                 info={"openenv_reward": 0.75},
             ),
         )
@@ -210,7 +224,9 @@ class TestOpenEnvReward:
             observation=Observation(prompt="test"),
             hidden=hidden,
             metadata=StateMetadata(
-                step=1, episode_id="test", is_terminal=True,
+                step=1,
+                episode_id="test",
+                is_terminal=True,
                 info={"openenv_reward": 0.75},
             ),
         )
@@ -224,7 +240,9 @@ class TestOpenEnvReward:
 
         reward_fn = OpenEnvReward()
         hidden = OpenEnvHidden(
-            env_name="test", episode_step=0, last_action=None,
+            env_name="test",
+            episode_step=0,
+            last_action=None,
             session_info=(),
         )
         state = State(
@@ -242,14 +260,18 @@ class TestOpenEnvReward:
 
         reward_fn = OpenEnvReward()
         hidden = OpenEnvHidden(
-            env_name="test", episode_step=0, last_action=None,
+            env_name="test",
+            episode_step=0,
+            last_action=None,
             session_info=(),
         )
         state = State(
             observation=Observation(prompt="test"),
             hidden=hidden,
             metadata=StateMetadata(
-                step=0, episode_id="test", is_terminal=False,
+                step=0,
+                episode_id="test",
+                is_terminal=False,
                 info={"openenv_reward": 0.5},
             ),
         )
@@ -257,7 +279,9 @@ class TestOpenEnvReward:
             observation=Observation(prompt="test"),
             hidden=hidden,
             metadata=StateMetadata(
-                step=1, episode_id="test", is_terminal=False,
+                step=1,
+                episode_id="test",
+                is_terminal=False,
                 info={"openenv_reward": 0.5},
             ),
         )
@@ -454,13 +478,17 @@ class TestOpenEnvToolEnvironment:
         if client is None:
             tools = [
                 _make_mock_tool("search", "Search tool"),
-                _make_mock_tool("calculate", "Calculator", {
-                    "type": "object",
-                    "properties": {
-                        "expression": {"type": "string", "description": "Math expr"},
+                _make_mock_tool(
+                    "calculate",
+                    "Calculator",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "expression": {"type": "string", "description": "Math expr"},
+                        },
+                        "required": ["expression"],
                     },
-                    "required": ["expression"],
-                }),
+                ),
             ]
             client = MockMCPToolSyncClient(tools=tools)
 
@@ -550,11 +578,13 @@ class TestOpenEnvAdapter:
 
     def test_adapter_name(self):
         from llenvs.adapters.openenv import OpenEnvAdapter
+
         adapter = OpenEnvAdapter()
         assert adapter.name == "openenv"
 
     def test_get_openenv_import_error(self):
         from llenvs.adapters.openenv import OpenEnvAdapter
+
         adapter = OpenEnvAdapter()
         with pytest.raises(ImportError, match="openenv"):
             adapter._get_openenv()
@@ -591,7 +621,9 @@ class TestOpenEnvAdapter:
         monkeypatch.setattr(adapter, "_get_openenv", lambda: mock_openenv)
 
         env = adapter.get_environment(
-            "tool-env", base_url="http://localhost:8000", use_tools=True,
+            "tool-env",
+            base_url="http://localhost:8000",
+            use_tools=True,
         )
         assert isinstance(env, OpenEnvToolEnvironment)
 
@@ -607,16 +639,19 @@ class TestOpenEnvAdapter:
 
     def test_get_native_answer_extractor(self):
         from llenvs.adapters.openenv import OpenEnvAdapter
+
         adapter = OpenEnvAdapter()
         assert adapter.get_native_answer_extractor("test") is None
 
     def test_get_prompt_template(self):
         from llenvs.adapters.openenv import OpenEnvAdapter
+
         adapter = OpenEnvAdapter()
         assert adapter.get_prompt_template("test") is None
 
     def test_get_environment_info(self):
         from llenvs.adapters.openenv import OpenEnvAdapter
+
         adapter = OpenEnvAdapter()
         info = adapter.get_environment_info("test")
         assert info["name"] == "test"
@@ -624,6 +659,7 @@ class TestOpenEnvAdapter:
 
     def test_list_environments(self):
         from llenvs.adapters.openenv import OpenEnvAdapter
+
         adapter = OpenEnvAdapter()
         envs = adapter.list_environments()
         assert isinstance(envs, list)

@@ -27,7 +27,6 @@ def create_container_environment(config: "EnvironmentConfig") -> "ContainerEnvir
         ValueError: If ``config.container`` is ``None`` or runtime is unknown.
     """
     from llenvs.container.client import ContainerEnvironment as _ContainerEnvironment
-    from llenvs.container.config import ContainerConfig
     from llenvs.container.runtime import DockerRuntime, ProcessRuntime
 
     container_config = config.container

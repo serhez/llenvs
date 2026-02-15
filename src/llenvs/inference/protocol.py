@@ -322,8 +322,7 @@ class ModelBackend(ABC):
             List of GenerationResults, one per conversation, in the same order.
         """
         return [
-            self.generate_with_tools(msgs, tools, params, tool_choice)
-            for msgs in messages_batch
+            self.generate_with_tools(msgs, tools, params, tool_choice) for msgs in messages_batch
         ]
 
     def generate_with_logprobs(
@@ -385,9 +384,7 @@ class ModelBackend(ABC):
             NotImplementedError: If backend doesn't support prefix continuation.
         """
         if not self.capabilities.supports_prefix_continuation:
-            raise NotImplementedError(
-                "This backend does not support prefix continuation"
-            )
+            raise NotImplementedError("This backend does not support prefix continuation")
         raise NotImplementedError("Subclass must implement continue_from_prefix")
 
     def generate_with_tools(
@@ -416,7 +413,5 @@ class ModelBackend(ABC):
             NotImplementedError: If backend doesn't support function calling.
         """
         if not self.capabilities.supports_function_calling:
-            raise NotImplementedError(
-                "This backend does not support function calling"
-            )
+            raise NotImplementedError("This backend does not support function calling")
         raise NotImplementedError("Subclass must implement generate_with_tools")

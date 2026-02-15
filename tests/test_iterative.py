@@ -312,9 +312,7 @@ class MockInnerEnv:
     def spec(self):
         from llenvs.core.environment import EnvironmentSpec
 
-        return EnvironmentSpec(
-            name="mock_inner", adapter="mock", pure_step=True
-        )
+        return EnvironmentSpec(name="mock_inner", adapter="mock", pure_step=True)
 
     @property
     def reward_functions(self):
@@ -346,10 +344,7 @@ class MockInnerEnv:
         )
 
     def compute_rewards(self, state, action, next_state):
-        signals = tuple(
-            rf.compute(state, action, next_state)
-            for rf in self.reward_functions
-        )
+        signals = tuple(rf.compute(state, action, next_state) for rf in self.reward_functions)
         return SignalBundle(signals=signals)
 
 
@@ -436,8 +431,6 @@ class TestSubmissionExtraction:
             extra_rewards=(DummyReward(),),
         )
         state, _ = env.reset(options={"task_index": 0})
-        result = env.step(
-            state, Action(text="thinking... <answer>42</answer>")
-        )
+        result = env.step(state, Action(text="thinking... <answer>42</answer>"))
 
         assert result.next_state.hidden.submissions[-1] == "42"

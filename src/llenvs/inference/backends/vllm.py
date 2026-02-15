@@ -180,9 +180,7 @@ class VLLMBackend(ModelBackend):
                 # Build top logprobs dict
                 top_logprobs = None
                 if hasattr(logprob_obj, "top_logprobs") and logprob_obj.top_logprobs:
-                    top_logprobs = {
-                        tok: lp.logprob for tok, lp in logprob_obj.top_logprobs.items()
-                    }
+                    top_logprobs = {tok: lp.logprob for tok, lp in logprob_obj.top_logprobs.items()}
 
                 logprobs.append(
                     TokenLogprob(

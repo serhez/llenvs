@@ -41,7 +41,9 @@ class MockGemEnv:
         """Reset the mock environment."""
         self._guesses = 0
         self._terminated = False
-        self._last_obs = f"I'm thinking of a number between 1 and 100. You have {self.max_guesses} guesses."
+        self._last_obs = (
+            f"I'm thinking of a number between 1 and 100. You have {self.max_guesses} guesses."
+        )
         return self._last_obs, {"target": self.target}
 
     def step(self, action: str) -> tuple[str, float, bool, bool, dict[str, Any]]:
@@ -502,6 +504,7 @@ class TestEnvironmentRegistryIntegration:
         def mock_get_gem():
             class MockGem:
                 ENV_REGISTRY = {"game:Test-v0": {}}
+
             return MockGem()
 
         adapter = GemAdapter()
@@ -517,6 +520,7 @@ class TestEnvironmentRegistryIntegration:
         def mock_get_gem():
             class MockGem:
                 ENV_REGISTRY = {}
+
             return MockGem()
 
         adapter = GemAdapter()
@@ -747,10 +751,7 @@ class TestStatelessGemEnvironment:
         result1 = env.step(state, Action(text="25"))
         result2 = env.step(state, Action(text="25"))
 
-        assert (
-            result1.next_state.observation.messages
-            == result2.next_state.observation.messages
-        )
+        assert result1.next_state.observation.messages == result2.next_state.observation.messages
         assert result1.rewards.total == result2.rewards.total
 
     def test_interleaved_steps_no_corruption(self, mock_stateless_env):
@@ -835,9 +836,7 @@ class TestStatelessGemEnvironment:
             )
 
         env = env_factory()
-        with BranchManager.create(
-            env, strategy="action_replay", env_factory=env_factory
-        ) as mgr:
+        with BranchManager.create(env, strategy="action_replay", env_factory=env_factory) as mgr:
             state, _ = env.reset(seed=42)
             actions = []
 
@@ -848,9 +847,7 @@ class TestStatelessGemEnvironment:
             actions.append(a1)
 
             # Checkpoint after first guess
-            mgr.checkpoint(
-                "after_guess1", state, tuple(actions), {"seed": 42}
-            )
+            mgr.checkpoint("after_guess1", state, tuple(actions), {"seed": 42})
 
             # Branch and try a different second guess
             branch_env, branch_state = mgr.branch("after_guess1")

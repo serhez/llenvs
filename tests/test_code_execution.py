@@ -115,7 +115,10 @@ class TestSubprocessCodeExecutor:
         test_code = "slow()"
         result = executor.execute(code, test_code, timeout=1.0)
         assert result.compilation_error is not None
-        assert "timeout" in result.compilation_error.lower() or "timed out" in result.compilation_error.lower()
+        assert (
+            "timeout" in result.compilation_error.lower()
+            or "timed out" in result.compilation_error.lower()
+        )
 
     def test_multiline_test(self):
         executor = SubprocessCodeExecutor()

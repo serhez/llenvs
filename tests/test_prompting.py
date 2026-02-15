@@ -94,9 +94,7 @@ class TestFewShotInjector:
 
     def test_inject_examples_no_system(self, user_message):
         """Test examples injected before first user message when no system."""
-        injector = FewShotInjector(
-            examples=[("Q", "A")]
-        )
+        injector = FewShotInjector(examples=[("Q", "A")])
         result = injector.transform(user_message)
 
         assert result[0].role == "user"
@@ -210,10 +208,7 @@ class TestMessageTrimmer:
 
     def test_keeps_most_recent(self):
         """Test that most recent messages are kept."""
-        messages = [
-            ChatMessage(role="user", content=f"msg_{i}")
-            for i in range(10)
-        ]
+        messages = [ChatMessage(role="user", content=f"msg_{i}") for i in range(10)]
         trimmer = MessageTrimmer(max_messages=3)
         result = trimmer.transform(messages)
 
@@ -268,10 +263,7 @@ class TestPromptPipeline:
 
     def test_compose_with_rshift(self, user_message):
         """Test composing transformers with >> operator."""
-        pipeline = (
-            SystemPromptInjector("System.")
-            >> AnswerFormatInjector("xml_answer")
-        )
+        pipeline = SystemPromptInjector("System.") >> AnswerFormatInjector("xml_answer")
         result = pipeline.transform(user_message)
 
         assert result[0].role == "system"
@@ -393,9 +385,8 @@ class TestPromptTemplateTransformer:
         from llenvs.inference.prompts import PromptTemplate
 
         template = PromptTemplate(template="Problem: {question}")
-        pipeline = (
-            SystemPromptInjector("You are helpful.")
-            >> PromptTemplateTransformer(template=template)
+        pipeline = SystemPromptInjector("You are helpful.") >> PromptTemplateTransformer(
+            template=template
         )
         result = pipeline.transform(user_message)
 

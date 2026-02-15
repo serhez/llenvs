@@ -113,12 +113,14 @@ class DatasetProvider:
         from datasets import Dataset
 
         items = self.get_items(indices)
-        return Dataset.from_dict({
-            "task_index": [item.task_index for item in items],
-            "prompt": [item.prompt for item in items],
-            "ground_truth": [item.ground_truth for item in items],
-            "messages": [list(item.messages) for item in items],
-        })
+        return Dataset.from_dict(
+            {
+                "task_index": [item.task_index for item in items],
+                "prompt": [item.prompt for item in items],
+                "ground_truth": [item.ground_truth for item in items],
+                "messages": [list(item.messages) for item in items],
+            }
+        )
 
     @classmethod
     def from_config(cls, config: Any) -> DatasetProvider:

@@ -100,9 +100,32 @@ class MockHandler(BaseHTTPRequestHandler):
             correct = action_text == "4"
             next_state = _make_state_dict(prompt="Done", step=1)
             next_state["metadata"]["is_terminal"] = True
-            self._send(200, {
-                "next_state": next_state,
-                "rewards": {
+            self._send(
+                200,
+                {
+                    "next_state": next_state,
+                    "rewards": {
+                        "signals": [
+                            {
+                                "reward": 1.0 if correct else 0.0,
+                                "name": "correct",
+                                "reward_type": "OUTCOME",
+                                "metadata": None,
+                                "weight": 1.0,
+                            }
+                        ]
+                    },
+                    "terminated": True,
+                    "truncated": False,
+                    "info": {"correct": correct},
+                },
+            )
+        elif self.path == "/compute_rewards":
+            action_text = body.get("action", {}).get("text", "")
+            correct = action_text == "4"
+            self._send(
+                200,
+                {
                     "signals": [
                         {
                             "reward": 1.0 if correct else 0.0,
@@ -113,32 +136,18 @@ class MockHandler(BaseHTTPRequestHandler):
                         }
                     ]
                 },
-                "terminated": True,
-                "truncated": False,
-                "info": {"correct": correct},
-            })
-        elif self.path == "/compute_rewards":
-            action_text = body.get("action", {}).get("text", "")
-            correct = action_text == "4"
-            self._send(200, {
-                "signals": [
-                    {
-                        "reward": 1.0 if correct else 0.0,
-                        "name": "correct",
-                        "reward_type": "OUTCOME",
-                        "metadata": None,
-                        "weight": 1.0,
-                    }
-                ]
-            })
+            )
         elif self.path == "/error":
-            self._send(500, {
-                "error": {
-                    "type": "ValueError",
-                    "message": "Something went wrong",
-                    "traceback": "Traceback ...",
-                }
-            })
+            self._send(
+                500,
+                {
+                    "error": {
+                        "type": "ValueError",
+                        "message": "Something went wrong",
+                        "traceback": "Traceback ...",
+                    }
+                },
+            )
         else:
             self._send(404, {"error": {"type": "NotFound", "message": "Unknown path"}})
 
@@ -161,6 +170,7 @@ def mock_server():
 
     # Wait for server readiness
     import http.client
+
     for _ in range(50):
         try:
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)

@@ -64,10 +64,7 @@ class MockFrotzEnv:
             return obs, 5, False, {}
 
         elif action == "go north":
-            obs = (
-                "North of House\n"
-                "You are facing the north side of a white house."
-            )
+            obs = "North of House\nYou are facing the north side of a white house."
             self._score = self._score  # no score change
             return obs, 0, False, {}
 
@@ -737,9 +734,7 @@ class TestJerichoAdapter:
             mock_jericho = MagicMock()
             mock_get.return_value = mock_jericho
 
-            env = adapter.get_environment(
-                game_files=["/custom/path/mygame.z5"]
-            )
+            env = adapter.get_environment(game_files=["/custom/path/mygame.z5"])
 
             assert isinstance(env, JerichoEnvironment)
             assert len(env) == 1

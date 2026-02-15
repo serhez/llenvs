@@ -326,10 +326,7 @@ class AlfWorldEnvironment:
         task_index = options.get("task_index", 0)
 
         if task_index < 0 or task_index >= len(self._game_files):
-            raise IndexError(
-                f"task_index {task_index} out of range "
-                f"[0, {len(self._game_files)})"
-            )
+            raise IndexError(f"task_index {task_index} out of range [0, {len(self._game_files)})")
 
         game_file = self._game_files[task_index]
 
@@ -345,9 +342,7 @@ class AlfWorldEnvironment:
         admissible_commands = tuple(init_info.get("admissible_commands", ()))
 
         # Build observation
-        obs_prompt = self._build_observation_prompt(
-            raw_obs, objective, admissible_commands
-        )
+        obs_prompt = self._build_observation_prompt(raw_obs, objective, admissible_commands)
 
         hidden = AlfWorldHidden(
             task_index=task_index,
@@ -441,9 +436,7 @@ class AlfWorldEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_prompt},
         )
-        new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -597,9 +590,7 @@ class AlfWorldAdapter:
 
         valid_splits = {"train", "eval_in_distribution", "eval_out_of_distribution"}
         if split not in valid_splits:
-            raise ValueError(
-                f"Invalid split: {split!r}. Must be one of: {valid_splits}"
-            )
+            raise ValueError(f"Invalid split: {split!r}. Must be one of: {valid_splits}")
 
         # Resolve config
         if config_path is not None:
@@ -627,13 +618,10 @@ class AlfWorldAdapter:
             invalid = set(task_types) - valid_type_ids
             if invalid:
                 raise ValueError(
-                    f"Invalid task type IDs: {invalid}. "
-                    f"Valid IDs: {sorted(valid_type_ids)}"
+                    f"Invalid task type IDs: {invalid}. Valid IDs: {sorted(valid_type_ids)}"
                 )
             type_names = {ALFWORLD_TASK_TYPES[tid] for tid in task_types}
-            game_files = tuple(
-                gf for gf in game_files if _extract_task_type(gf) in type_names
-            )
+            game_files = tuple(gf for gf in game_files if _extract_task_type(gf) in type_names)
 
         return AlfWorldEnvironment(
             game_files=game_files,

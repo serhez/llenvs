@@ -46,11 +46,15 @@ class MockAlfWorldGymEnv:
         )
         infos = {
             "won": [False],
-            "admissible_commands": [["go to desk 1", "go to shelf 1", "go to drawer 1", "inventory", "look"]],
+            "admissible_commands": [
+                ["go to desk 1", "go to shelf 1", "go to drawer 1", "inventory", "look"]
+            ],
         }
         return [obs], infos
 
-    def step(self, actions: list[str]) -> tuple[list[str], list[float], list[bool], dict[str, list]]:
+    def step(
+        self, actions: list[str]
+    ) -> tuple[list[str], list[float], list[bool], dict[str, list]]:
         self._step_count += 1
         action = actions[0]
 
@@ -61,7 +65,13 @@ class MockAlfWorldGymEnv:
 
         elif action == "go to shelf 1":
             obs = "You arrive at shelf 1. On the shelf 1, you see a mug 1."
-            admissible = ["take mug 1 from shelf 1", "examine shelf 1", "go to desk 1", "inventory", "look"]
+            admissible = [
+                "take mug 1 from shelf 1",
+                "examine shelf 1",
+                "go to desk 1",
+                "inventory",
+                "look",
+            ]
             return [obs], [0.0], [False], {"won": [False], "admissible_commands": [admissible]}
 
         elif action == "take mug 1 from shelf 1":
@@ -169,22 +179,40 @@ class TestExtractTaskType:
     """Tests for _extract_task_type."""
 
     def test_pick_and_place(self):
-        assert _extract_task_type("/data/pick_and_place_simple-Mug-001/game.tw") == "pick_and_place_simple"
+        assert (
+            _extract_task_type("/data/pick_and_place_simple-Mug-001/game.tw")
+            == "pick_and_place_simple"
+        )
 
     def test_look_at_obj(self):
-        assert _extract_task_type("/data/look_at_obj_in_light-Candle/game.tw") == "look_at_obj_in_light"
+        assert (
+            _extract_task_type("/data/look_at_obj_in_light-Candle/game.tw")
+            == "look_at_obj_in_light"
+        )
 
     def test_pick_clean(self):
-        assert _extract_task_type("/data/pick_clean_then_place_in_recep-Cup/game.tw") == "pick_clean_then_place_in_recep"
+        assert (
+            _extract_task_type("/data/pick_clean_then_place_in_recep-Cup/game.tw")
+            == "pick_clean_then_place_in_recep"
+        )
 
     def test_pick_heat(self):
-        assert _extract_task_type("/data/pick_heat_then_place_in_recep-Egg/game.tw") == "pick_heat_then_place_in_recep"
+        assert (
+            _extract_task_type("/data/pick_heat_then_place_in_recep-Egg/game.tw")
+            == "pick_heat_then_place_in_recep"
+        )
 
     def test_pick_cool(self):
-        assert _extract_task_type("/data/pick_cool_then_place_in_recep-Apple/game.tw") == "pick_cool_then_place_in_recep"
+        assert (
+            _extract_task_type("/data/pick_cool_then_place_in_recep-Apple/game.tw")
+            == "pick_cool_then_place_in_recep"
+        )
 
     def test_pick_two(self):
-        assert _extract_task_type("/data/pick_two_obj_and_place-Pen/game.tw") == "pick_two_obj_and_place"
+        assert (
+            _extract_task_type("/data/pick_two_obj_and_place-Pen/game.tw")
+            == "pick_two_obj_and_place"
+        )
 
     def test_unknown(self):
         assert _extract_task_type("/data/some_other_task/game.tw") == "unknown"
@@ -562,7 +590,10 @@ class TestAlfWorldMessageHistory:
 
         assert result.terminated is True
         assert len(result.next_state.observation.messages) == 2
-        assert result.next_state.observation.messages[0] == {"role": "assistant", "content": "put mug 1 in/on desk 1"}
+        assert result.next_state.observation.messages[0] == {
+            "role": "assistant",
+            "content": "put mug 1 in/on desk 1",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -610,7 +641,10 @@ class TestAlfWorldPrompts:
         prompts = env.prompts
 
         assert prompts["objective_prefix"] == "Task: {objective}"
-        assert prompts["admissible_commands_prefix"] == DEFAULT_ALFWORLD_PROMPTS["admissible_commands_prefix"]
+        assert (
+            prompts["admissible_commands_prefix"]
+            == DEFAULT_ALFWORLD_PROMPTS["admissible_commands_prefix"]
+        )
 
 
 # ---------------------------------------------------------------------------

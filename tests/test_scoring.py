@@ -116,9 +116,7 @@ class MockSingleTurnEnv:
         next_state = State(
             observation=state.observation,
             hidden=state.hidden,
-            metadata=StateMetadata(
-                step=1, episode_id=state.metadata.episode_id, is_terminal=True
-            ),
+            metadata=StateMetadata(step=1, episode_id=state.metadata.episode_id, is_terminal=True),
         )
         return StepResult(next_state=next_state, rewards=rewards, terminated=True)
 

@@ -49,6 +49,7 @@ from llenvs.inference.protocol import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_result(text: str) -> GenerationResult:
     """Create a simple GenerationResult."""
     return GenerationResult(
@@ -640,9 +641,7 @@ class MockMultiTurnEnv:
         done = next_step >= target
         return StepResult(
             next_state=state.with_metadata(step=next_step, is_terminal=done),
-            rewards=SignalBundle.single(
-                reward=1.0 if done else 0.0, name="correctness"
-            ),
+            rewards=SignalBundle.single(reward=1.0 if done else 0.0, name="correctness"),
             terminated=done,
         )
 
@@ -1024,10 +1023,7 @@ class SegmentScriptedBackend(ModelBackend):
         return "scripted-segment"
 
     def generate(self, prompts: list[str], params: SamplingParams) -> list[GenerationResult]:
-        return [
-            GenerationResult(text="x", finish_reason=StopReason.END_OF_TEXT)
-            for _ in prompts
-        ]
+        return [GenerationResult(text="x", finish_reason=StopReason.END_OF_TEXT) for _ in prompts]
 
     def generate_chat(
         self, messages: list[ChatMessage], params: SamplingParams
@@ -1107,9 +1103,7 @@ class TestBoundaryContinuationStrategyBatch:
         """When all buffers already have boundaries, no backend call is made."""
         backend = BatchTrackingBackend()
         segmenter = LineSegmenter()
-        strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter
-        )
+        strategy = BoundaryContinuationStrategy(backend=backend, segmenter=segmenter)
         contexts = [
             SegmentContext(
                 messages=[ChatMessage(role="user", content="q1")],
@@ -1139,9 +1133,7 @@ class TestBoundaryContinuationStrategyBatch:
         backend.add_round([("generated\nmore", StopReason.MAX_TOKENS)])
 
         segmenter = LineSegmenter()
-        strategy = BoundaryContinuationStrategy(
-            backend=backend, segmenter=segmenter
-        )
+        strategy = BoundaryContinuationStrategy(backend=backend, segmenter=segmenter)
         contexts = [
             SegmentContext(
                 messages=[ChatMessage(role="user", content="q1")],
@@ -1183,11 +1175,13 @@ class TestSegmentedTrajectoryRunnerBatch:
         """Should use generate_chat_batch instead of generate_chat."""
         env = self._make_env(num_tasks=3)
         backend = SegmentScriptedBackend()
-        backend.add_round([
-            ("answer_0", StopReason.END_OF_TEXT),
-            ("answer_1", StopReason.END_OF_TEXT),
-            ("answer_2", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("answer_0", StopReason.END_OF_TEXT),
+                ("answer_1", StopReason.END_OF_TEXT),
+                ("answer_2", StopReason.END_OF_TEXT),
+            ]
+        )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2])
@@ -1201,20 +1195,26 @@ class TestSegmentedTrajectoryRunnerBatch:
         env = self._make_env(num_tasks=3)
         backend = SegmentScriptedBackend()
         # Round 0: task 1 finishes (EOS), tasks 0 and 2 continue
-        backend.add_round([
-            ("s0", StopReason.MAX_TOKENS),
-            ("s1", StopReason.END_OF_TEXT),
-            ("s2", StopReason.MAX_TOKENS),
-        ])
+        backend.add_round(
+            [
+                ("s0", StopReason.MAX_TOKENS),
+                ("s1", StopReason.END_OF_TEXT),
+                ("s2", StopReason.MAX_TOKENS),
+            ]
+        )
         # Round 1: task 0 finishes, task 2 continues
-        backend.add_round([
-            ("s0b", StopReason.END_OF_TEXT),
-            ("s2b", StopReason.MAX_TOKENS),
-        ])
+        backend.add_round(
+            [
+                ("s0b", StopReason.END_OF_TEXT),
+                ("s2b", StopReason.MAX_TOKENS),
+            ]
+        )
         # Round 2: task 2 finishes
-        backend.add_round([
-            ("s2c", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("s2c", StopReason.END_OF_TEXT),
+            ]
+        )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2])
@@ -1227,18 +1227,24 @@ class TestSegmentedTrajectoryRunnerBatch:
         env = self._make_env(num_tasks=3)
         backend = SegmentScriptedBackend()
         # Task 1 finishes first, task 0 second, task 2 last
-        backend.add_round([
-            ("s", StopReason.MAX_TOKENS),
-            ("s", StopReason.END_OF_TEXT),
-            ("s", StopReason.MAX_TOKENS),
-        ])
-        backend.add_round([
-            ("s", StopReason.END_OF_TEXT),
-            ("s", StopReason.MAX_TOKENS),
-        ])
-        backend.add_round([
-            ("s", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("s", StopReason.MAX_TOKENS),
+                ("s", StopReason.END_OF_TEXT),
+                ("s", StopReason.MAX_TOKENS),
+            ]
+        )
+        backend.add_round(
+            [
+                ("s", StopReason.END_OF_TEXT),
+                ("s", StopReason.MAX_TOKENS),
+            ]
+        )
+        backend.add_round(
+            [
+                ("s", StopReason.END_OF_TEXT),
+            ]
+        )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2])
@@ -1287,10 +1293,12 @@ class TestSegmentedTrajectoryRunnerBatch:
         segmenter = TokenSegmenter(tokenizer=_SimpleTokenizer(), token_size=64)
         env = SegmentedEnvironment(base, segmenter)
         backend = SegmentScriptedBackend()
-        backend.add_round([
-            ("a0", StopReason.END_OF_TEXT),
-            ("a2", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("a0", StopReason.END_OF_TEXT),
+                ("a2", StopReason.END_OF_TEXT),
+            ]
+        )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2])
@@ -1303,13 +1311,17 @@ class TestSegmentedTrajectoryRunnerBatch:
         """Progress callback reports increasing completion."""
         env = self._make_env(num_tasks=2)
         backend = SegmentScriptedBackend()
-        backend.add_round([
-            ("s", StopReason.END_OF_TEXT),
-            ("s", StopReason.MAX_TOKENS),
-        ])
-        backend.add_round([
-            ("s", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("s", StopReason.END_OF_TEXT),
+                ("s", StopReason.MAX_TOKENS),
+            ]
+        )
+        backend.add_round(
+            [
+                ("s", StopReason.END_OF_TEXT),
+            ]
+        )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
         reports: list[tuple[int, int]] = []
@@ -1469,15 +1481,19 @@ class TestBatchSizeChunking:
 
         backend = SegmentScriptedBackend()
         # Chunk 1: tasks 0, 1
-        backend.add_round([
-            ("a0", StopReason.END_OF_TEXT),
-            ("a1", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("a0", StopReason.END_OF_TEXT),
+                ("a1", StopReason.END_OF_TEXT),
+            ]
+        )
         # Chunk 2: tasks 2, 3
-        backend.add_round([
-            ("a2", StopReason.END_OF_TEXT),
-            ("a3", StopReason.END_OF_TEXT),
-        ])
+        backend.add_round(
+            [
+                ("a2", StopReason.END_OF_TEXT),
+                ("a3", StopReason.END_OF_TEXT),
+            ]
+        )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
         result = runner.run_batch([0, 1, 2, 3], batch_size=2)
@@ -1539,11 +1555,13 @@ class TestMultiEvaluation:
         backend = BatchTrackingBackend()
 
         runner_a = TrajectoryRunner(
-            environment=env, backend=backend,
+            environment=env,
+            backend=backend,
             sampling_params=SamplingParams(temperature=0.0),
         )
         runner_b = TrajectoryRunner(
-            environment=env, backend=backend,
+            environment=env,
+            backend=backend,
             sampling_params=SamplingParams(temperature=1.0),
         )
 

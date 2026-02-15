@@ -88,9 +88,7 @@ MULTI_TURN_ENVS = {
 }
 
 # Multi-turn environment prefixes for pattern matching
-MULTI_TURN_PREFIXES = (
-    "game:",
-)
+MULTI_TURN_PREFIXES = ("game:",)
 
 
 def _is_multi_turn_env(env_id: str) -> bool:
@@ -203,11 +201,7 @@ class GemCorrectnessReward:
         gem_reward = next_state.metadata.info.get("gem_reward", 0.0)
 
         # Use STEP type for intermediate rewards, OUTCOME for final
-        reward_type = (
-            self.reward_type
-            if next_state.metadata.is_terminal
-            else RewardType.STEP
-        )
+        reward_type = self.reward_type if next_state.metadata.is_terminal else RewardType.STEP
 
         return Signal(
             name=self.name,
@@ -262,9 +256,7 @@ class GemEnvironment:
         self._is_multi_turn = is_multi_turn
         self._answer_extractor = answer_extractor or TagBasedExtractor()
         self._max_steps = max_steps
-        self._supports_state = hasattr(gem_env, "get_state") and hasattr(
-            gem_env, "set_state"
-        )
+        self._supports_state = hasattr(gem_env, "get_state") and hasattr(gem_env, "set_state")
 
         self._native_rewards: tuple[RewardFunction, ...] = (GemCorrectnessReward(),)
         self._extra_rewards = extra_rewards
@@ -405,9 +397,7 @@ class GemEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": str(obs)},
         )
-        new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -491,8 +481,7 @@ class GemAdapter:
             return gem
         except ImportError as e:
             raise ImportError(
-                "GEM is required for GemAdapter. "
-                "Install with: pip install gem-llm"
+                "GEM is required for GemAdapter. Install with: pip install gem-llm"
             ) from e
 
     def list_environments(self) -> list[str]:
@@ -667,9 +656,7 @@ class GemToolExecutor:
             ToolResult with execution outcome.
         """
         if call.name not in self._gem_tools:
-            return ToolResult.from_error(
-                call.id, call.name, f"Unknown tool: {call.name}"
-            )
+            return ToolResult.from_error(call.id, call.name, f"Unknown tool: {call.name}")
 
         # Convert to GEM's XML format
         gem_tool = self._gem_tools[call.name]
@@ -768,9 +755,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
         self._env_id = env_id
         self._max_steps = max_steps or 10
         self._tool_types = tool_types
-        self._supports_state = hasattr(gem_env, "get_state") and hasattr(
-            gem_env, "set_state"
-        )
+        self._supports_state = hasattr(gem_env, "get_state") and hasattr(gem_env, "set_state")
 
         # Initialize GEM tools
         self._gem_tools = self._create_gem_tools(tool_types, **tool_kwargs)
@@ -796,13 +781,10 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             return gem
         except ImportError as e:
             raise ImportError(
-                "GEM is required for GemToolEnvironment. "
-                "Install with: pip install gem-llm"
+                "GEM is required for GemToolEnvironment. Install with: pip install gem-llm"
             ) from e
 
-    def _create_gem_tools(
-        self, tool_types: tuple[str, ...], **kwargs: Any
-    ) -> dict[str, Any]:
+    def _create_gem_tools(self, tool_types: tuple[str, ...], **kwargs: Any) -> dict[str, Any]:
         """Create GEM tool instances.
 
         Args:
@@ -828,9 +810,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
 
         return tools
 
-    def _create_tool_definitions(
-        self, tool_types: tuple[str, ...]
-    ) -> tuple[ToolDefinition, ...]:
+    def _create_tool_definitions(self, tool_types: tuple[str, ...]) -> tuple[ToolDefinition, ...]:
         """Create ToolDefinitions for the enabled tools.
 
         Args:
@@ -981,9 +961,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             for call in action.tool_calls:
                 if call.name == "submit_answer":
                     answer = call.arguments.get("answer", "")
-                    gem_obs, gem_reward, terminated, _, info = self._gem_env.step(
-                        answer
-                    )
+                    gem_obs, gem_reward, terminated, _, info = self._gem_env.step(answer)
                     break
 
             # For non-terminal tools, observation is the tool result

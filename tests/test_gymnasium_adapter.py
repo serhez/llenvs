@@ -15,8 +15,10 @@ from llenvs.core.extraction import RawGenerationExtractor, TagBasedExtractor
 # Mock gymnasium spaces
 # ---------------------------------------------------------------------------
 
+
 class MockDiscrete:
     """Mock gymnasium.spaces.Discrete."""
+
     def __init__(self, n: int, start: int = 0):
         self.n = n
         self.start = start
@@ -29,6 +31,7 @@ class MockDiscrete:
 
 class MockBox:
     """Mock gymnasium.spaces.Box."""
+
     def __init__(self, low, high, shape=None, dtype=np.float32):
         self.low = np.array(low) if not isinstance(low, np.ndarray) else low
         self.high = np.array(high) if not isinstance(high, np.ndarray) else high
@@ -46,6 +49,7 @@ class MockBox:
 
 class MockMultiDiscrete:
     """Mock gymnasium.spaces.MultiDiscrete."""
+
     def __init__(self, nvec):
         self.nvec = np.array(nvec)
         self.shape = self.nvec.shape
@@ -54,6 +58,7 @@ class MockMultiDiscrete:
 
 class MockMultiBinary:
     """Mock gymnasium.spaces.MultiBinary."""
+
     def __init__(self, n):
         self.n = n
         self.shape = (n,)
@@ -62,12 +67,14 @@ class MockMultiBinary:
 
 class MockText:
     """Mock gymnasium.spaces.Text."""
+
     def __init__(self, max_length=100):
         self.max_length = max_length
 
 
 class MockDict:
     """Mock gymnasium.spaces.Dict."""
+
     def __init__(self, spaces: dict):
         self.spaces = spaces
 
@@ -77,6 +84,7 @@ class MockDict:
 
 class MockTuple:
     """Mock gymnasium.spaces.Tuple."""
+
     def __init__(self, spaces: tuple):
         self.spaces = spaces
 
@@ -85,9 +93,11 @@ class MockTuple:
 # Mock gymnasium environments
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class MockSpec:
     """Mock gymnasium env spec."""
+
     id: str = "MockEnv-v0"
     max_episode_steps: int | None = None
 
@@ -122,7 +132,11 @@ class MockGymEnv:
 
     def step(self, action):
         self._step_count += 1
-        self._current_obs = min(action, self.observation_space.n - 1) if isinstance(self.observation_space, MockDiscrete) else action
+        self._current_obs = (
+            min(action, self.observation_space.n - 1)
+            if isinstance(self.observation_space, MockDiscrete)
+            else action
+        )
         terminated = self._step_count >= self._terminal_step
         reward = self._terminal_reward if terminated else self._reward_per_step
         return self._current_obs, reward, terminated, False, {"step": self._step_count}
@@ -191,6 +205,7 @@ class MockGridEnv:
 # We need to patch gymnasium.spaces for isinstance checks in the adapter
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def mock_gymnasium_spaces(monkeypatch):
     """Patch gymnasium.spaces so isinstance checks work with our mocks."""
@@ -233,11 +248,13 @@ def mock_gymnasium_spaces(monkeypatch):
 # Now import the adapter (after mock is set up)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def import_adapter(mock_gymnasium_spaces):
     """Import adapter module after gymnasium is mocked."""
     import importlib
     import llenvs.adapters.gymnasium as mod
+
     importlib.reload(mod)
     return mod
 
@@ -246,8 +263,8 @@ def import_adapter(mock_gymnasium_spaces):
 # AutoObservationMapper tests
 # ===========================================================================
 
-class TestAutoObservationMapper:
 
+class TestAutoObservationMapper:
     def test_discrete_without_labels(self, import_adapter):
         space = MockDiscrete(5)
         mapper = import_adapter.AutoObservationMapper(space)
@@ -273,9 +290,7 @@ class TestAutoObservationMapper:
 
     def test_box_1d_with_labels(self, import_adapter):
         space = MockBox(-1.0, 1.0, shape=(2,))
-        mapper = import_adapter.AutoObservationMapper(
-            space, labels={0: "position", 1: "velocity"}
-        )
+        mapper = import_adapter.AutoObservationMapper(space, labels={0: "position", 1: "velocity"})
         obs = np.array([1.5, -0.3])
         result = mapper.map(obs, {})
         assert "position" in result.lower() or "Position" in result
@@ -327,10 +342,12 @@ class TestAutoObservationMapper:
         assert result == "hello world"
 
     def test_dict_space(self, import_adapter):
-        space = MockDict({
-            "pos": MockDiscrete(10),
-            "vel": MockBox(-1.0, 1.0, shape=(2,)),
-        })
+        space = MockDict(
+            {
+                "pos": MockDiscrete(10),
+                "vel": MockBox(-1.0, 1.0, shape=(2,)),
+            }
+        )
         mapper = import_adapter.AutoObservationMapper(space)
         obs = {"pos": 3, "vel": np.array([0.5, -0.5])}
         result = mapper.map(obs, {})
@@ -356,8 +373,8 @@ class TestAutoObservationMapper:
 # AutoActionMapper tests
 # ===========================================================================
 
-class TestAutoActionMapper:
 
+class TestAutoActionMapper:
     def test_discrete_by_number(self, import_adapter):
         space = MockDiscrete(3)
         mapper = import_adapter.AutoActionMapper(space)
@@ -453,17 +470,19 @@ class TestAutoActionMapper:
 # GridObservationMapper tests
 # ===========================================================================
 
-class TestGridObservationMapper:
 
+class TestGridObservationMapper:
     def test_basic_grid(self, import_adapter):
         value_map = {0.0: ".", 0.6: "R", 1.0: "#"}
         mapper = import_adapter.GridObservationMapper(value_map)
 
-        grid = np.array([
-            [0.6, 0.0, 0.0],
-            [0.0, 0.0, 1.0],
-            [0.0, 0.0, 0.0],
-        ])
+        grid = np.array(
+            [
+                [0.6, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+            ]
+        )
         result = mapper.map(grid, {})
         assert "R" in result
         assert "#" in result
@@ -501,8 +520,8 @@ class TestGridObservationMapper:
 # GymnasiumReward tests
 # ===========================================================================
 
-class TestGymnasiumReward:
 
+class TestGymnasiumReward:
     def test_intermediate_step_reward(self, import_adapter):
         reward_fn = import_adapter.GymnasiumReward()
         from llenvs.core.state import StateMetadata
@@ -510,19 +529,28 @@ class TestGymnasiumReward:
         state = State(
             observation=Observation(prompt="test"),
             hidden=import_adapter.GymnasiumHidden(
-                task_index=0, seed=None, episode_step=0,
-                last_action=None, raw_observation=0, gym_reward=0.0,
+                task_index=0,
+                seed=None,
+                episode_step=0,
+                last_action=None,
+                raw_observation=0,
+                gym_reward=0.0,
             ),
             metadata=StateMetadata(step=0, episode_id="ep1"),
         )
         next_state = State(
             observation=Observation(prompt="test"),
             hidden=import_adapter.GymnasiumHidden(
-                task_index=0, seed=None, episode_step=1,
-                last_action="1", raw_observation=1, gym_reward=0.5,
+                task_index=0,
+                seed=None,
+                episode_step=1,
+                last_action="1",
+                raw_observation=1,
+                gym_reward=0.5,
             ),
-            metadata=StateMetadata(step=1, episode_id="ep1", is_terminal=False,
-                                   info={"gym_reward": 0.5}),
+            metadata=StateMetadata(
+                step=1, episode_id="ep1", is_terminal=False, info={"gym_reward": 0.5}
+            ),
         )
         signal = reward_fn.compute(state, Action(text="1"), next_state)
         assert signal.reward == 0.5
@@ -535,19 +563,28 @@ class TestGymnasiumReward:
         state = State(
             observation=Observation(prompt="test"),
             hidden=import_adapter.GymnasiumHidden(
-                task_index=0, seed=None, episode_step=2,
-                last_action="1", raw_observation=1, gym_reward=0.5,
+                task_index=0,
+                seed=None,
+                episode_step=2,
+                last_action="1",
+                raw_observation=1,
+                gym_reward=0.5,
             ),
             metadata=StateMetadata(step=2, episode_id="ep1"),
         )
         next_state = State(
             observation=Observation(prompt="test"),
             hidden=import_adapter.GymnasiumHidden(
-                task_index=0, seed=None, episode_step=3,
-                last_action="2", raw_observation=2, gym_reward=1.5,
+                task_index=0,
+                seed=None,
+                episode_step=3,
+                last_action="2",
+                raw_observation=2,
+                gym_reward=1.5,
             ),
-            metadata=StateMetadata(step=3, episode_id="ep1", is_terminal=True,
-                                   info={"gym_reward": 1.0}),
+            metadata=StateMetadata(
+                step=3, episode_id="ep1", is_terminal=True, info={"gym_reward": 1.0}
+            ),
         )
         signal = reward_fn.compute(state, Action(text="2"), next_state)
         assert signal.reward == 1.0
@@ -563,8 +600,8 @@ class TestGymnasiumReward:
 # GymnasiumEnvironment tests
 # ===========================================================================
 
-class TestGymnasiumEnvironment:
 
+class TestGymnasiumEnvironment:
     @pytest.fixture
     def discrete_env(self, import_adapter):
         gym_env = MockGymEnv(
@@ -770,9 +807,7 @@ class TestGymnasiumEnvironment:
 
     def test_len_with_seeds(self, import_adapter):
         gym_env = MockGymEnv()
-        env = import_adapter.GymnasiumEnvironment(
-            gym_env=gym_env, seeds=[1, 2, 3, 4, 5]
-        )
+        env = import_adapter.GymnasiumEnvironment(gym_env=gym_env, seeds=[1, 2, 3, 4, 5])
         assert len(env) == 5
 
     def test_len_raises_without_seeds_or_num_tasks(self, import_adapter):
@@ -783,17 +818,13 @@ class TestGymnasiumEnvironment:
 
     def test_seed_from_seeds_list(self, import_adapter):
         gym_env = MockGymEnv()
-        env = import_adapter.GymnasiumEnvironment(
-            gym_env=gym_env, seeds=[10, 20, 30]
-        )
+        env = import_adapter.GymnasiumEnvironment(gym_env=gym_env, seeds=[10, 20, 30])
         state, _ = env.reset(options={"task_index": 1})
         assert state.hidden.seed == 20
 
     def test_seed_explicit_overrides_seeds_list(self, import_adapter):
         gym_env = MockGymEnv()
-        env = import_adapter.GymnasiumEnvironment(
-            gym_env=gym_env, seeds=[10, 20, 30]
-        )
+        env = import_adapter.GymnasiumEnvironment(gym_env=gym_env, seeds=[10, 20, 30])
         state, _ = env.reset(seed=99, options={"task_index": 1})
         assert state.hidden.seed == 99
 
@@ -810,16 +841,12 @@ class TestGymnasiumEnvironment:
 
     def test_spec_max_steps(self, import_adapter):
         gym_env = MockGymEnv(max_episode_steps=200)
-        env = import_adapter.GymnasiumEnvironment(
-            gym_env=gym_env, num_tasks=1
-        )
+        env = import_adapter.GymnasiumEnvironment(gym_env=gym_env, num_tasks=1)
         assert env.spec.max_steps == 200
 
     def test_spec_explicit_max_steps_overrides(self, import_adapter):
         gym_env = MockGymEnv(max_episode_steps=200)
-        env = import_adapter.GymnasiumEnvironment(
-            gym_env=gym_env, max_steps=50, num_tasks=1
-        )
+        env = import_adapter.GymnasiumEnvironment(gym_env=gym_env, max_steps=50, num_tasks=1)
         assert env.spec.max_steps == 50
 
     # --- Reward functions ---
@@ -899,9 +926,7 @@ class TestGymnasiumEnvironment:
     def test_compute_rewards(self, discrete_env):
         state, _ = discrete_env.reset()
         result = discrete_env.step(state, Action(text="1"))
-        rewards = discrete_env.compute_rewards(
-            state, Action(text="1"), result.next_state
-        )
+        rewards = discrete_env.compute_rewards(state, Action(text="1"), result.next_state)
         assert isinstance(rewards, SignalBundle)
 
 
@@ -909,8 +934,8 @@ class TestGymnasiumEnvironment:
 # GymnasiumAdapter tests
 # ===========================================================================
 
-class TestGymnasiumAdapter:
 
+class TestGymnasiumAdapter:
     @pytest.fixture
     def adapter(self, import_adapter):
         return import_adapter.GymnasiumAdapter()
@@ -926,9 +951,7 @@ class TestGymnasiumAdapter:
 
     def test_get_environment_with_gym_env(self, adapter, import_adapter):
         gym_env = MockGymEnv()
-        env = adapter.get_environment(
-            "test-env", gym_env=gym_env, num_tasks=5
-        )
+        env = adapter.get_environment("test-env", gym_env=gym_env, num_tasks=5)
         assert isinstance(env, import_adapter.GymnasiumEnvironment)
 
     def test_get_environment_preset_merging(self, adapter, import_adapter):
@@ -952,6 +975,7 @@ class TestGymnasiumAdapter:
         # With mocked gymnasium, make() will be MagicMock
         # which is fine — it returns a MagicMock that has attributes
         import sys
+
         mock_gymnasium = sys.modules["gymnasium"]
         mock_env = MockGymEnv()
         mock_gymnasium.make = MagicMock(return_value=mock_env)
@@ -975,6 +999,7 @@ class TestGymnasiumAdapter:
     def test_render_mode_auto_ansi(self, adapter):
         """use_ansi_render=True should set render_mode='ansi'."""
         import sys
+
         mock_gymnasium = sys.modules["gymnasium"]
         mock_env = MockGymEnv()
         mock_gymnasium.make = MagicMock(return_value=mock_env)
@@ -998,8 +1023,8 @@ class TestGymnasiumAdapter:
 # Preset tests
 # ===========================================================================
 
-class TestPresets:
 
+class TestPresets:
     def test_presets_exist(self, import_adapter):
         assert isinstance(import_adapter.GYMNASIUM_PRESETS, dict)
         assert len(import_adapter.GYMNASIUM_PRESETS) > 0
@@ -1019,20 +1044,27 @@ class TestPresets:
 # GymnasiumHidden tests
 # ===========================================================================
 
-class TestGymnasiumHidden:
 
+class TestGymnasiumHidden:
     def test_frozen(self, import_adapter):
         hidden = import_adapter.GymnasiumHidden(
-            task_index=0, seed=42, episode_step=0,
-            last_action=None, raw_observation=0, gym_reward=0.0,
+            task_index=0,
+            seed=42,
+            episode_step=0,
+            last_action=None,
+            raw_observation=0,
+            gym_reward=0.0,
         )
         with pytest.raises(AttributeError):
             hidden.task_index = 1
 
     def test_fields(self, import_adapter):
         hidden = import_adapter.GymnasiumHidden(
-            task_index=5, seed=123, episode_step=3,
-            last_action="right", raw_observation=np.array([1.0, 2.0]),
+            task_index=5,
+            seed=123,
+            episode_step=3,
+            last_action="right",
+            raw_observation=np.array([1.0, 2.0]),
             gym_reward=1.5,
         )
         assert hidden.task_index == 5
@@ -1046,8 +1078,8 @@ class TestGymnasiumHidden:
 # Integration: full episode
 # ===========================================================================
 
-class TestFullEpisode:
 
+class TestFullEpisode:
     def test_complete_discrete_episode(self, import_adapter):
         """Play through a full episode with discrete env."""
         gym_env = MockGymEnv(

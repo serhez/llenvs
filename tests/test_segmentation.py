@@ -223,9 +223,7 @@ class TestCompositeSegmenter:
 
     def test_combine_sentence_and_line(self):
         """Test combining sentence and line segmenters."""
-        segmenter = CompositeSegmenter(
-            segmenters=(LineSegmenter(), SentenceSegmenter())
-        )
+        segmenter = CompositeSegmenter(segmenters=(LineSegmenter(), SentenceSegmenter()))
         text = "Line one. Line one continued.\nLine two. Line two end."
 
         segments = segmenter.segment(text)
@@ -234,9 +232,7 @@ class TestCompositeSegmenter:
 
     def test_find_boundary_earliest(self):
         """Test find_boundary returns earliest boundary."""
-        segmenter = CompositeSegmenter(
-            segmenters=(LineSegmenter(), SentenceSegmenter())
-        )
+        segmenter = CompositeSegmenter(segmenters=(LineSegmenter(), SentenceSegmenter()))
         text = "Short.\nLonger sentence here."
 
         boundary = segmenter.find_boundary(text)
@@ -270,7 +266,7 @@ class _CharTokenizer:
 
     def decode(self, tokens: list[int]) -> str:
         # Decode prefix: use stored text sliced to token length
-        return self._text[:len(tokens)]
+        return self._text[: len(tokens)]
 
 
 class TestTokenSegmenter:
@@ -788,9 +784,7 @@ class TestLLMSegmenter:
     def test_basic_segmentation(self):
         """Mock backend returns valid JSON segments, verify correct mapping."""
         original = "First, I add the numbers. Then I get the result."
-        llm_response = json.dumps(
-            ["First, I add the numbers.", "Then I get the result."]
-        )
+        llm_response = json.dumps(["First, I add the numbers.", "Then I get the result."])
         backend = _MockLLMBackend(response=llm_response)
         segmenter = LLMSegmenter(backend=backend)
 
@@ -897,9 +891,7 @@ class TestLLMSegmenter:
         original = "Text."
         llm_response = json.dumps(["Text."])
         backend = _MockLLMBackend(response=llm_response)
-        segmenter = LLMSegmenter(
-            backend=backend, system_prompt="Custom system prompt"
-        )
+        segmenter = LLMSegmenter(backend=backend, system_prompt="Custom system prompt")
 
         segmenter.segment(original)
 
@@ -939,9 +931,7 @@ class TestLLMSegmenter:
     def test_segments_reconstruct_original(self):
         """''.join(segments) == original for well-formed inputs."""
         original = "First sentence. Second sentence. Third sentence."
-        llm_response = json.dumps(
-            ["First sentence.", "Second sentence.", "Third sentence."]
-        )
+        llm_response = json.dumps(["First sentence.", "Second sentence.", "Third sentence."])
         backend = _MockLLMBackend(response=llm_response)
         segmenter = LLMSegmenter(backend=backend)
 

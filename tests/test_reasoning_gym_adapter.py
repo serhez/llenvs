@@ -330,6 +330,7 @@ class TestReasoningGymAdapter:
 
     def test_list_environments_returns_list(self, monkeypatch):
         """Test list_environments returns a list."""
+
         # Mock reasoning_gym to avoid import errors in tests
         class MockReasoningGym:
             @staticmethod
@@ -345,6 +346,7 @@ class TestReasoningGymAdapter:
 
     def test_list_environments_fallback(self, monkeypatch):
         """Test fallback when reasoning_gym doesn't have list_datasets."""
+
         class MockReasoningGym:
             pass  # No list_datasets method
 
@@ -390,6 +392,7 @@ class TestEnvironmentRegistry:
                 @staticmethod
                 def list_datasets():
                     return ["test"]
+
             return MockRG()
 
         adapter = ReasoningGymAdapter()
@@ -407,6 +410,7 @@ class TestEnvironmentRegistry:
                 @staticmethod
                 def list_datasets():
                     return ["test"]
+
             return MockRG()
 
         adapter1 = ReasoningGymAdapter()
@@ -427,6 +431,7 @@ class TestEnvironmentRegistry:
                 @staticmethod
                 def list_datasets():
                     return ["test"]
+
             return MockRG()
 
         adapter = ReasoningGymAdapter()
@@ -452,6 +457,7 @@ class TestEnvironmentRegistry:
                 @staticmethod
                 def list_datasets():
                     return ["test"]
+
             return MockRG()
 
         adapter = ReasoningGymAdapter()

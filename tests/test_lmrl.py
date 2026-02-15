@@ -64,9 +64,7 @@ class MockTextEnv:
         )
         return (initial_obs,)
 
-    def step(
-        self, text_history: tuple
-    ) -> tuple[tuple, float, bool]:
+    def step(self, text_history: tuple) -> tuple[tuple, float, bool]:
         assert text_history[-1].is_action
         guess_text = text_history[-1].text.strip()
         self._guesses += 1
@@ -421,25 +419,19 @@ class TestLMRLEnvironment:
         assert mock_text_env._target == 6
         assert info["seed"] == 5
 
-    def test_reset_task_index_with_explicit_seed(
-        self, mock_text_env: MockTextEnv
-    ):
+    def test_reset_task_index_with_explicit_seed(self, mock_text_env: MockTextEnv):
         """Explicit seed overrides task_index-derived seed."""
         env = _make_env(text_env=mock_text_env, num_tasks=10)
         env.reset(seed=3, options={"task_index": 5})
         # Explicit seed=3 takes priority → target = (3 % 10) + 1 = 4
         assert mock_text_env._target == 4
 
-    def test_reset_task_index_out_of_range(
-        self, mock_text_env: MockTextEnv
-    ):
+    def test_reset_task_index_out_of_range(self, mock_text_env: MockTextEnv):
         env = _make_env(text_env=mock_text_env, num_tasks=10)
         with pytest.raises(IndexError, match="out of range"):
             env.reset(options={"task_index": 15})
 
-    def test_reset_negative_task_index(
-        self, mock_text_env: MockTextEnv
-    ):
+    def test_reset_negative_task_index(self, mock_text_env: MockTextEnv):
         env = _make_env(text_env=mock_text_env, num_tasks=10)
         with pytest.raises(IndexError, match="out of range"):
             env.reset(options={"task_index": -1})
@@ -528,9 +520,7 @@ class TestLMRLEnvironment:
         assert result.terminated is False
         assert result.next_state.metadata.is_terminal is True
 
-    def test_terminated_at_max_steps_not_truncated(
-        self, mock_text_env: MockTextEnv
-    ):
+    def test_terminated_at_max_steps_not_truncated(self, mock_text_env: MockTextEnv):
         """If the game ends at the last possible step, terminated=True."""
         env = _make_env(text_env=mock_text_env, max_steps=1)
         state, _ = env.reset()  # target = 7
@@ -539,9 +529,7 @@ class TestLMRLEnvironment:
         assert result.terminated is True
         assert result.truncated is False
 
-    def test_state_continuity_rejects_stale_state(
-        self, env: LMRLEnvironment
-    ):
+    def test_state_continuity_rejects_stale_state(self, env: LMRLEnvironment):
         state, _ = env.reset()
         env.step(state, Action(text="3"))
 
@@ -683,9 +671,7 @@ class TestLMRLFullEpisode:
         # Correct guess
         result = env.step(result.next_state, Action(text="7"))
         assert result.terminated is True
-        assert result.next_state.hidden.cumulative_reward == pytest.approx(
-            -0.1 + -0.1 + 1.0
-        )
+        assert result.next_state.hidden.cumulative_reward == pytest.approx(-0.1 + -0.1 + 1.0)
 
     def test_full_episode_all_wrong(self, mock_text_env: MockTextEnv):
         env = _make_env(text_env=mock_text_env, max_steps=3)
@@ -720,9 +706,7 @@ class TestLMRLFullEpisode:
             state = result.next_state
             assert len(state.observation.messages) == (i + 1) * 2
 
-    def test_text_history_tracks_full_conversation(
-        self, env: LMRLEnvironment
-    ):
+    def test_text_history_tracks_full_conversation(self, env: LMRLEnvironment):
         state, _ = env.reset()  # target = 7
 
         result = env.step(state, Action(text="3"))
@@ -801,7 +785,15 @@ class TestCreateTextEnv:
 
     def test_chess_requires_lmrl(self):
         """Chess factory raises ImportError when LMRL-Gym is not installed."""
-        with patch.dict("sys.modules", {"llm_rl_scripts": None, "llm_rl_scripts.chess": None, "llm_rl_scripts.chess.env": None, "llm_rl_scripts.chess.env.env": None}):
+        with patch.dict(
+            "sys.modules",
+            {
+                "llm_rl_scripts": None,
+                "llm_rl_scripts.chess": None,
+                "llm_rl_scripts.chess.env": None,
+                "llm_rl_scripts.chess.env.env": None,
+            },
+        ):
             with pytest.raises(ImportError):
                 _create_text_env("chess")
 
@@ -922,8 +914,6 @@ class TestLMRLRegistration:
         """Adapter is silently skipped when LLM_RL is not installed."""
         adapter = LMRLAdapter()
 
-        with patch.object(
-            adapter, "_get_lmrl", side_effect=ImportError("no LLM_RL")
-        ):
+        with patch.object(adapter, "_get_lmrl", side_effect=ImportError("no LLM_RL")):
             with pytest.raises(ImportError):
                 adapter._get_lmrl()

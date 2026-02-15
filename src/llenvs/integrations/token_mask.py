@@ -90,23 +90,27 @@ class TrajectoryMasker:
             # Model tokens: action text
             if action.text is not None:
                 model_ids = tuple(self._tokenizer.encode(action.text))
-                spans.append(TokenSpan(
-                    text=action.text,
-                    token_ids=model_ids,
-                    source="model",
-                    step_index=step_idx,
-                ))
+                spans.append(
+                    TokenSpan(
+                        text=action.text,
+                        token_ids=model_ids,
+                        source="model",
+                        step_index=step_idx,
+                    )
+                )
 
             # Model tokens: serialized tool calls
             if action.has_tool_calls:
                 tc_text = self._serialize_tool_calls(action.tool_calls)
                 tc_ids = tuple(self._tokenizer.encode(tc_text))
-                spans.append(TokenSpan(
-                    text=tc_text,
-                    token_ids=tc_ids,
-                    source="model",
-                    step_index=step_idx,
-                ))
+                spans.append(
+                    TokenSpan(
+                        text=tc_text,
+                        token_ids=tc_ids,
+                        source="model",
+                        step_index=step_idx,
+                    )
+                )
 
             # Environment tokens: only if not the last transition
             is_last = step_idx == len(transitions) - 1
@@ -114,12 +118,14 @@ class TrajectoryMasker:
                 env_text = self._get_environment_text(transition)
                 if env_text:
                     env_ids = tuple(self._tokenizer.encode(env_text))
-                    spans.append(TokenSpan(
-                        text=env_text,
-                        token_ids=env_ids,
-                        source="environment",
-                        step_index=step_idx,
-                    ))
+                    spans.append(
+                        TokenSpan(
+                            text=env_text,
+                            token_ids=env_ids,
+                            source="environment",
+                            step_index=step_idx,
+                        )
+                    )
 
         # Concatenate all spans
         response_ids: list[int] = []
@@ -137,9 +143,7 @@ class TrajectoryMasker:
             rewards=tuple(rewards),
         )
 
-    def mask_batch(
-        self, trajectories: list[Trajectory[Any]]
-    ) -> list[MaskedTrajectory]:
+    def mask_batch(self, trajectories: list[Trajectory[Any]]) -> list[MaskedTrajectory]:
         """Convert multiple trajectories into masked token sequences.
 
         Args:
@@ -154,11 +158,15 @@ class TrajectoryMasker:
         """Serialize tool calls to a text representation."""
         parts = []
         for tc in tool_calls:
-            parts.append(json.dumps({
-                "id": tc.id,
-                "name": tc.name,
-                "arguments": tc.arguments,
-            }))
+            parts.append(
+                json.dumps(
+                    {
+                        "id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    }
+                )
+            )
         return "\n".join(parts)
 
     def _get_environment_text(self, transition: Any) -> str:

@@ -367,7 +367,10 @@ class TestWebShopMessageHistory:
         result = env.step(state, Action(text="search[headphones]"))
         state = result.next_state
         assert len(state.observation.messages) == 2
-        assert state.observation.messages[0] == {"role": "assistant", "content": "search[headphones]"}
+        assert state.observation.messages[0] == {
+            "role": "assistant",
+            "content": "search[headphones]",
+        }
         assert "Search results" in state.observation.messages[1]["content"]
         assert state.observation.prompt == initial_prompt
 
@@ -375,7 +378,10 @@ class TestWebShopMessageHistory:
         result = env.step(state, Action(text="click[Product 1 - Red Headphones $45]"))
         state = result.next_state
         assert len(state.observation.messages) == 4
-        assert state.observation.messages[2] == {"role": "assistant", "content": "click[Product 1 - Red Headphones $45]"}
+        assert state.observation.messages[2] == {
+            "role": "assistant",
+            "content": "click[Product 1 - Red Headphones $45]",
+        }
         assert "Red Wireless Headphones" in state.observation.messages[3]["content"]
         assert state.observation.prompt == initial_prompt
 
@@ -391,7 +397,10 @@ class TestWebShopMessageHistory:
 
         assert result.terminated is True
         assert len(result.next_state.observation.messages) == 6
-        assert result.next_state.observation.messages[-2] == {"role": "assistant", "content": "click[Buy Now]"}
+        assert result.next_state.observation.messages[-2] == {
+            "role": "assistant",
+            "content": "click[Buy Now]",
+        }
         assert "Thank you" in result.next_state.observation.messages[-1]["content"]
 
 

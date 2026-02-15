@@ -231,7 +231,9 @@ class TestJudgePromptTemplate:
 class TestJudgeReward:
     """Tests for JudgeReward.compute()."""
 
-    def _make_backend(self, text="Rating: The response is good. [[8]]", prompt_tokens=10, completion_tokens=50):
+    def _make_backend(
+        self, text="Rating: The response is good. [[8]]", prompt_tokens=10, completion_tokens=50
+    ):
         backend = MagicMock()
         backend.generate_chat.return_value = GenerationResult(
             text=text,
@@ -322,7 +324,9 @@ class TestJudgeReward:
     def test_metadata_contents(self):
         from llenvs.core.judge import JudgeReward
 
-        backend = self._make_backend(text="Excellent! [[9]]", prompt_tokens=15, completion_tokens=40)
+        backend = self._make_backend(
+            text="Excellent! [[9]]", prompt_tokens=15, completion_tokens=40
+        )
         reward = JudgeReward(backend=backend, template="correctness")
 
         state = self._make_state()

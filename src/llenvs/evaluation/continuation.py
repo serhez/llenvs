@@ -177,8 +177,7 @@ class TokenContinuationStrategy:
         )
 
         messages_batch = [
-            _build_continuation_messages(ctx.messages, ctx.accumulated_text)
-            for ctx in contexts
+            _build_continuation_messages(ctx.messages, ctx.accumulated_text) for ctx in contexts
         ]
         gen_results = self.backend.generate_chat_batch(messages_batch, params)
 
@@ -348,7 +347,10 @@ class BoundaryContinuationStrategy:
                         working_buffers[idx][boundary:],
                         gen_result,
                     )
-                elif gen_result.finish_reason in (StopReason.END_OF_TEXT, StopReason.STOP_SEQUENCE) or not new_text:
+                elif (
+                    gen_result.finish_reason in (StopReason.END_OF_TEXT, StopReason.STOP_SEQUENCE)
+                    or not new_text
+                ):
                     results[idx] = (working_buffers[idx], "", gen_result)
                 else:
                     still_active.append(idx)

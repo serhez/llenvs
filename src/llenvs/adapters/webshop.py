@@ -202,9 +202,7 @@ class WebShopEnvironment:
 
         return tuple(actions)
 
-    def _build_observation_prompt(
-        self, raw_obs: str, instruction: str, step: int
-    ) -> str:
+    def _build_observation_prompt(self, raw_obs: str, instruction: str, step: int) -> str:
         """Build the full observation prompt for the model.
 
         Args:
@@ -336,9 +334,7 @@ class WebShopEnvironment:
 
         # Build next observation
         next_step = state.hidden.episode_step + 1
-        obs_prompt = self._build_observation_prompt(
-            raw_obs, state.hidden.instruction, next_step
-        )
+        obs_prompt = self._build_observation_prompt(raw_obs, state.hidden.instruction, next_step)
 
         # Check truncation
         truncated = next_step >= self._max_steps and not done
@@ -497,8 +493,7 @@ class WebShopAdapter:
         valid_modes = {"text", "text_rich", "html", "url"}
         if observation_mode not in valid_modes:
             raise ValueError(
-                f"Invalid observation_mode: {observation_mode}. "
-                f"Must be one of: {valid_modes}"
+                f"Invalid observation_mode: {observation_mode}. Must be one of: {valid_modes}"
             )
 
         # Create WebShop gym environment

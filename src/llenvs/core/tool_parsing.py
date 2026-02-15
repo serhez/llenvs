@@ -44,16 +44,12 @@ class ToolCallParser(Protocol):
         """Format tool definitions as text for inclusion in the prompt."""
         ...
 
-    def parse(
-        self, text: str, available_tools: tuple[ToolDefinition, ...]
-    ) -> ParsedToolResponse:
+    def parse(self, text: str, available_tools: tuple[ToolDefinition, ...]) -> ParsedToolResponse:
         """Parse tool calls from model text output."""
         ...
 
 
-_TOOL_CALL_PATTERN = re.compile(
-    r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL
-)
+_TOOL_CALL_PATTERN = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 
 
 class HermesToolCallParser:
@@ -80,15 +76,13 @@ class HermesToolCallParser:
             "You have access to the following tools:\n"
             f"<tools>\n{tools_json}\n</tools>\n\n"
             "To call a tool, respond with a <tool_call> block containing "
-            "a JSON object with \"name\" and \"arguments\" keys:\n"
+            'a JSON object with "name" and "arguments" keys:\n'
             "<tool_call>\n"
             '{"name": "tool_name", "arguments": {"arg1": "value1"}}\n'
             "</tool_call>"
         )
 
-    def parse(
-        self, text: str, available_tools: tuple[ToolDefinition, ...]
-    ) -> ParsedToolResponse:
+    def parse(self, text: str, available_tools: tuple[ToolDefinition, ...]) -> ParsedToolResponse:
         """Parse Hermes-style tool calls from text."""
         tool_calls: list[ToolCall] = []
         remaining = _TOOL_CALL_PATTERN.sub("", text).strip()
@@ -105,15 +99,11 @@ class HermesToolCallParser:
             arguments = data.get("arguments", {})
 
             if not isinstance(arguments, dict):
-                logger.warning(
-                    "tool_call arguments is not a dict: %s", type(arguments)
-                )
+                logger.warning("tool_call arguments is not a dict: %s", type(arguments))
                 arguments = {}
 
             call_id = f"tc_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                ToolCall(id=call_id, name=name, arguments=arguments)
-            )
+            tool_calls.append(ToolCall(id=call_id, name=name, arguments=arguments))
 
         return ParsedToolResponse(
             text=remaining or None,

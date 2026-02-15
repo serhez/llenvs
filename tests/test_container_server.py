@@ -34,10 +34,7 @@ class MockEnvironment:
 
     def __init__(self, size: int = 5) -> None:
         self._size = size
-        self._tasks = [
-            {"prompt": f"Question {i}", "answer": str(i * 10)}
-            for i in range(size)
-        ]
+        self._tasks = [{"prompt": f"Question {i}", "answer": str(i * 10)} for i in range(size)]
 
     @property
     def spec(self) -> EnvironmentSpec:
@@ -85,13 +82,9 @@ class MockEnvironment:
         )
         return state, {"task_index": task_index}
 
-    def step(
-        self, state: State[MockHidden], action: Action
-    ) -> StepResult[MockHidden]:
+    def step(self, state: State[MockHidden], action: Action) -> StepResult[MockHidden]:
         correct = action.text == state.hidden.expected_answer
-        reward = SignalBundle.single(
-            1.0 if correct else 0.0, "correct", RewardType.OUTCOME
-        )
+        reward = SignalBundle.single(1.0 if correct else 0.0, "correct", RewardType.OUTCOME)
         next_state = State(
             observation=Observation(prompt="Done"),
             hidden=state.hidden,
@@ -115,9 +108,7 @@ class MockEnvironment:
         next_state: State[MockHidden],
     ) -> SignalBundle:
         correct = action.text == state.hidden.expected_answer
-        return SignalBundle.single(
-            1.0 if correct else 0.0, "correct", RewardType.OUTCOME
-        )
+        return SignalBundle.single(1.0 if correct else 0.0, "correct", RewardType.OUTCOME)
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +127,11 @@ def server_url():
 
     handler_class = type(
         "BoundHandler",
-        (__import__("llenvs.container.server", fromlist=["EnvironmentHandler"]).EnvironmentHandler,),
+        (
+            __import__(
+                "llenvs.container.server", fromlist=["EnvironmentHandler"]
+            ).EnvironmentHandler,
+        ),
         {"environment": env, "hidden_type": None},
     )
     http_server = HTTPServer(("127.0.0.1", 0), handler_class)
@@ -237,9 +232,7 @@ class TestReset:
         assert state["hidden"]["expected_answer"] == "0"
 
     def test_reset_with_task_index(self, server_url):
-        status, data = _request(
-            server_url, "POST", "/reset", {"options": {"task_index": 2}}
-        )
+        status, data = _request(server_url, "POST", "/reset", {"options": {"task_index": 2}})
         assert status == 200
         assert data["state"]["observation"]["prompt"] == "Question 2"
         assert data["state"]["hidden"]["expected_answer"] == "20"
@@ -345,9 +338,7 @@ class TestHiddenTypeCapture:
         _request(server_url, "POST", "/reset", {})
 
         # Second reset still works
-        status, data = _request(
-            server_url, "POST", "/reset", {"options": {"task_index": 1}}
-        )
+        status, data = _request(server_url, "POST", "/reset", {"options": {"task_index": 1}})
         assert status == 200
         assert data["state"]["hidden"]["expected_answer"] == "10"
 
@@ -356,9 +347,7 @@ class TestMultipleEpisodes:
     def test_sequential_episodes(self, server_url):
         """Multiple reset/step cycles work correctly."""
         for i in range(3):
-            _, reset_data = _request(
-                server_url, "POST", "/reset", {"options": {"task_index": i}}
-            )
+            _, reset_data = _request(server_url, "POST", "/reset", {"options": {"task_index": i}})
             state = reset_data["state"]
             expected = str(i * 10)
 

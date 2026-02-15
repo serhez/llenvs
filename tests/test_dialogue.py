@@ -37,10 +37,7 @@ def _mock_backend(response_text: str = "No.") -> MagicMock:
 def _mock_backend_sequence(responses: list[str]) -> MagicMock:
     """Create a mock ModelBackend that returns responses in sequence."""
     backend = MagicMock()
-    results = [
-        GenerationResult(text=r, finish_reason=StopReason.END_OF_TEXT)
-        for r in responses
-    ]
+    results = [GenerationResult(text=r, finish_reason=StopReason.END_OF_TEXT) for r in responses]
     backend.generate_chat.side_effect = results
     return backend
 
@@ -62,9 +59,7 @@ class DummyReward:
         return self._reward_type
 
     def compute(self, state: Any, action: Any, next_state: Any) -> Signal:
-        return Signal(
-            name=self._name, reward_type=self._reward_type, reward=self._value
-        )
+        return Signal(name=self._name, reward_type=self._reward_type, reward=self._value)
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +195,7 @@ class TestDialogueEnvironmentReset:
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend()
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
 
         with pytest.raises(ValueError):
             env.reset(options={"task_index": 1})
@@ -214,9 +207,7 @@ class TestDialogueEnvironmentReset:
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend()
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
         state, _ = env.reset()
         assert state.hidden.task_index == 0
 
@@ -484,9 +475,7 @@ class TestDialogueRewards:
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend()
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
         assert env.reward_functions == ()
 
     def test_extra_rewards_included(self):
@@ -564,18 +553,14 @@ class TestDialogueSpec:
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend()
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
         assert env.prompts == {}
 
     def test_available_tools_empty(self):
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend()
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
         assert env.available_tools == ()
 
 
@@ -621,9 +606,7 @@ class TestTaskCreation:
 
         backend = _mock_backend()
         adapter = DialogueAdapter()
-        env = adapter.get_environment(
-            "twenty_questions", env_llm=backend, words=["cat", "dog"]
-        )
+        env = adapter.get_environment("twenty_questions", env_llm=backend, words=["cat", "dog"])
         assert len(env) == 2
 
     def test_from_questions(self):
@@ -658,9 +641,7 @@ class TestTaskCreation:
 
         backend = _mock_backend()
         adapter = DialogueAdapter()
-        env = adapter.get_environment(
-            "twenty_questions", env_llm=backend, words=["cat"]
-        )
+        env = adapter.get_environment("twenty_questions", env_llm=backend, words=["cat"])
         state, _ = env.reset(options={"task_index": 0})
         # Context should mention the secret word
         assert "cat" in state.hidden.task.context
@@ -752,9 +733,7 @@ class TestEnvironmentLLMConfig:
     def test_creation(self):
         from llenvs.core.config import EnvironmentLLMConfig, ModelConfig
 
-        config = EnvironmentLLMConfig(
-            model=ModelConfig(backend="openai", model="gpt-4o-mini")
-        )
+        config = EnvironmentLLMConfig(model=ModelConfig(backend="openai", model="gpt-4o-mini"))
         assert config.model.backend == "openai"
         assert config.system_prompt == ""
         assert config.inference is None
@@ -808,9 +787,7 @@ class TestEnvironmentLLMConfig:
         from llenvs.core.config import EvalConfig
 
         data = {
-            "environments": [
-                {"name": "sudoku", "adapter": "reasoning_gym"}
-            ],
+            "environments": [{"name": "sudoku", "adapter": "reasoning_gym"}],
             "model": {"backend": "openai", "model": "gpt-4o"},
         }
         config = EvalConfig.from_dict(data)
@@ -918,9 +895,7 @@ class TestFullEpisode:
 
         backend = _mock_backend_sequence(["No.", "No.", "Correct! The word was cat."])
         adapter = DialogueAdapter()
-        env = adapter.get_environment(
-            "twenty_questions", env_llm=backend, words=["cat"]
-        )
+        env = adapter.get_environment("twenty_questions", env_llm=backend, words=["cat"])
 
         state, info = env.reset(options={"task_index": 0})
         assert state.hidden.task.ground_truth == "cat"
@@ -945,10 +920,12 @@ class TestFullEpisode:
         """Simulate a 2-turn teacher session."""
         from llenvs.adapters.dialogue import DialogueAdapter
 
-        backend = _mock_backend_sequence([
-            "Good attempt, but the answer should be x^3/3 + C. Try again.",
-            "That's correct! x^3/3 + C is right.",
-        ])
+        backend = _mock_backend_sequence(
+            [
+                "Good attempt, but the answer should be x^3/3 + C. Try again.",
+                "That's correct! x^3/3 + C is right.",
+            ]
+        )
         adapter = DialogueAdapter()
         env = adapter.get_environment(
             "teacher",
@@ -994,9 +971,7 @@ class TestComputeRewards:
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend("Response")
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
 
         state, _ = env.reset(options={"task_index": 0})
         bundle = env.compute_rewards(state, Action.from_text("A"), state)
@@ -1014,9 +989,7 @@ class TestSamplingParams:
         from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
 
         backend = _mock_backend("OK")
-        env = DialogueEnvironment(
-            backend=backend, tasks=(DialogueTask(prompt="Q"),)
-        )
+        env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
 
         state, _ = env.reset(options={"task_index": 0})
         env.step(state, Action.from_text("A"))

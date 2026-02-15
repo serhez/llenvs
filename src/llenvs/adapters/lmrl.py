@@ -236,9 +236,7 @@ class LMRLEnvironment:
         obs_parts = [t.text for t in text_history if not t.is_action]
         return "".join(obs_parts).strip() if obs_parts else ""
 
-    def _extract_last_observation(
-        self, text_history: tuple, prev_len: int
-    ) -> str:
+    def _extract_last_observation(self, text_history: tuple, prev_len: int) -> str:
         """Extract the latest observation added after stepping.
 
         Only looks at texts appended after the previous history length.
@@ -268,10 +266,7 @@ class LMRLEnvironment:
 
         if task_index is not None and self._num_tasks is not None:
             if task_index < 0 or task_index >= self._num_tasks:
-                raise IndexError(
-                    f"task_index {task_index} out of range "
-                    f"[0, {self._num_tasks})"
-                )
+                raise IndexError(f"task_index {task_index} out of range [0, {self._num_tasks})")
             # Use task_index as seed if no explicit seed provided
             if seed is None:
                 seed = task_index
@@ -358,9 +353,7 @@ class LMRLEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_text},
         )
-        new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,

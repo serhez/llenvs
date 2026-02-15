@@ -192,9 +192,7 @@ class DialogueEnvironment:
         task_index = options.get("task_index", 0)
 
         if task_index < 0 or task_index >= len(self._tasks):
-            raise ValueError(
-                f"task_index {task_index} out of bounds [0, {len(self._tasks)})"
-            )
+            raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._tasks)})")
 
         task = self._tasks[task_index]
         observation = Observation(prompt=task.prompt, messages=())
@@ -254,9 +252,7 @@ class DialogueEnvironment:
         # 4. Check termination
         step_count = state.hidden.step_count + 1
         terminated = (
-            self._is_terminal(env_response, action_text, step_count)
-            if self._is_terminal
-            else False
+            self._is_terminal(env_response, action_text, step_count) if self._is_terminal else False
         )
         truncated = step_count >= self._max_steps
 
@@ -265,9 +261,7 @@ class DialogueEnvironment:
             {"role": "assistant", "content": action_text},
             {"role": "user", "content": env_response},
         )
-        next_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        next_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         # 6. Build next hidden and state
         next_hidden = DialogueHidden(
@@ -428,9 +422,7 @@ class DialogueAdapter:
                     )
                 )
         else:
-            raise ValueError(
-                "Must provide one of: tasks, words, or questions"
-            )
+            raise ValueError("Must provide one of: tasks, words, or questions")
 
         return DialogueEnvironment(
             backend=env_llm,

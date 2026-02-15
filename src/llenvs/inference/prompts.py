@@ -163,8 +163,12 @@ def _register_system_prompt(name: str, *fragment_names: str) -> SystemPrompt:
     return sp
 
 
-_register_system_prompt("general_reasoning", "general_assistant", "think_step_by_step", "xml_answer")
-_register_system_prompt("math_reasoning", "math_expert", "show_your_work", "verify_your_answer", "xml_answer")
+_register_system_prompt(
+    "general_reasoning", "general_assistant", "think_step_by_step", "xml_answer"
+)
+_register_system_prompt(
+    "math_reasoning", "math_expert", "show_your_work", "verify_your_answer", "xml_answer"
+)
 _register_system_prompt("math_boxed", "math_expert", "show_your_work", "boxed_answer")
 _register_system_prompt("math_gsm8k", "general_assistant", "show_your_work", "gsm8k_answer")
 _register_system_prompt("coding_problem", "coding_expert", "think_step_by_step", "xml_answer")

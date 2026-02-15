@@ -22,9 +22,11 @@ from llenvs.core.state import Action, Observation
 # Mock helpers
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class _StepOutput:
     """Mimics agentenv StepOutput."""
+
     state: Any
     reward: float
     done: bool
@@ -58,12 +60,25 @@ def _make_mock_client(
 # ENV_REGISTRY
 # ---------------------------------------------------------------------------
 
+
 class TestEnvRegistry:
     def test_all_environments_present(self):
         expected = {
-            "webshop", "alfworld", "babyai", "maze", "wordle",
-            "sciworld", "sqlgym", "textcraft", "webarena",
-            "searchqa", "movie", "weather", "academia", "todo", "sheet",
+            "webshop",
+            "alfworld",
+            "babyai",
+            "maze",
+            "wordle",
+            "sciworld",
+            "sqlgym",
+            "textcraft",
+            "webarena",
+            "searchqa",
+            "movie",
+            "weather",
+            "academia",
+            "todo",
+            "sheet",
         }
         assert set(ENV_REGISTRY.keys()) == expected
 
@@ -77,6 +92,7 @@ class TestEnvRegistry:
 # AgentGymHidden
 # ---------------------------------------------------------------------------
 
+
 class TestAgentGymHidden:
     def test_frozen(self):
         hidden = AgentGymHidden(task_index=0, env_name="maze", episode_step=1, last_action=None)
@@ -84,7 +100,9 @@ class TestAgentGymHidden:
             hidden.task_index = 5  # type: ignore[misc]
 
     def test_fields(self):
-        hidden = AgentGymHidden(task_index=3, env_name="wordle", episode_step=2, last_action="go north")
+        hidden = AgentGymHidden(
+            task_index=3, env_name="wordle", episode_step=2, last_action="go north"
+        )
         assert hidden.task_index == 3
         assert hidden.env_name == "wordle"
         assert hidden.episode_step == 2
@@ -94,6 +112,7 @@ class TestAgentGymHidden:
 # ---------------------------------------------------------------------------
 # AgentGymReward
 # ---------------------------------------------------------------------------
+
 
 class TestAgentGymReward:
     def test_name(self):
@@ -141,6 +160,7 @@ class TestAgentGymReward:
 # AgentGymEnvironment
 # ---------------------------------------------------------------------------
 
+
 class TestAgentGymEnvironment:
     def _make_env(self, client=None, max_steps=20, **kwargs):
         if client is None:
@@ -173,7 +193,9 @@ class TestAgentGymEnvironment:
     def test_spec_metadata_action_format(self):
         client = _make_mock_client()
         env = AgentGymEnvironment(
-            client=client, env_name="maze", action_format="function_calling",
+            client=client,
+            env_name="maze",
+            action_format="function_calling",
         )
         assert env.spec.metadata["action_format"] == "function_calling"
 
@@ -300,7 +322,9 @@ class TestAgentGymEnvironment:
     def test_step_coerces_dict_state(self):
         client = _make_mock_client()
         client.step.return_value = _StepOutput(
-            state={"observation": "dict obs"}, reward=0.0, done=False,
+            state={"observation": "dict obs"},
+            reward=0.0,
+            done=False,
         )
         env = self._make_env(client=client)
         state, _ = env.reset(options={"task_index": 0})
@@ -310,7 +334,9 @@ class TestAgentGymEnvironment:
     def test_step_coerces_non_string_state(self):
         client = _make_mock_client()
         client.step.return_value = _StepOutput(
-            state=42, reward=0.0, done=False,
+            state=42,
+            reward=0.0,
+            done=False,
         )
         env = self._make_env(client=client)
         state, _ = env.reset(options={"task_index": 0})
@@ -326,7 +352,9 @@ class TestAgentGymEnvironment:
     def test_action_format_custom(self):
         client = _make_mock_client()
         env = AgentGymEnvironment(
-            client=client, env_name="maze", action_format="code_as_action",
+            client=client,
+            env_name="maze",
+            action_format="code_as_action",
         )
         assert env.spec.metadata["action_format"] == "code_as_action"
 
@@ -530,7 +558,10 @@ class TestAgentGymEnvironment:
 
     def test_hidden_available_actions_default(self):
         hidden = AgentGymHidden(
-            task_index=0, env_name="maze", episode_step=0, last_action=None,
+            task_index=0,
+            env_name="maze",
+            episode_step=0,
+            last_action=None,
         )
         assert hidden.available_actions == ()
 
@@ -599,13 +630,17 @@ class TestAgentGymEnvironment:
         result = env.step(state, Action(text="submit"))
         assert result.terminated is True
         assert len(result.next_state.observation.messages) == 2
-        assert result.next_state.observation.messages[0] == {"role": "assistant", "content": "submit"}
+        assert result.next_state.observation.messages[0] == {
+            "role": "assistant",
+            "content": "submit",
+        }
         assert result.next_state.observation.messages[1] == {"role": "user", "content": "You won!"}
 
 
 # ---------------------------------------------------------------------------
 # AgentGymAdapter - conversation prompts
 # ---------------------------------------------------------------------------
+
 
 class TestAgentGymAdapter:
     def test_name(self):
@@ -648,8 +683,10 @@ class TestAgentGymAdapter:
         mock_client_class.return_value = mock_client_instance
 
         adapter = AgentGymAdapter()
-        with patch.object(adapter, "_get_agentenv"), \
-             patch.object(adapter, "_resolve_client_class", return_value=mock_client_class):
+        with (
+            patch.object(adapter, "_get_agentenv"),
+            patch.object(adapter, "_resolve_client_class", return_value=mock_client_class),
+        ):
             env = adapter.get_environment("maze", max_steps=10)
 
         assert isinstance(env, AgentGymEnvironment)
@@ -666,8 +703,10 @@ class TestAgentGymAdapter:
         mock_client_class.return_value = mock_client_instance
 
         adapter = AgentGymAdapter()
-        with patch.object(adapter, "_get_agentenv"), \
-             patch.object(adapter, "_resolve_client_class", return_value=mock_client_class):
+        with (
+            patch.object(adapter, "_get_agentenv"),
+            patch.object(adapter, "_resolve_client_class", return_value=mock_client_class),
+        ):
             env = adapter.get_environment("maze", action_format="function_calling")
 
         assert env.spec.metadata["action_format"] == "function_calling"
@@ -688,8 +727,10 @@ class TestAgentGymAdapter:
         mock_client_class.return_value = mock_client_instance
 
         adapter = AgentGymAdapter()
-        with patch.object(adapter, "_get_agentenv"), \
-             patch.object(adapter, "_resolve_client_class", return_value=mock_client_class):
+        with (
+            patch.object(adapter, "_get_agentenv"),
+            patch.object(adapter, "_resolve_client_class", return_value=mock_client_class),
+        ):
             env = adapter.get_environment("maze", action_format="react")
 
         assert env.prompts["system_prompt"] == "You are an agent. Use ReAct format."
@@ -707,8 +748,10 @@ class TestAgentGymAdapter:
         mock_client_class.return_value = mock_client_instance
 
         adapter = AgentGymAdapter()
-        with patch.object(adapter, "_get_agentenv"), \
-             patch.object(adapter, "_resolve_client_class", return_value=mock_client_class):
+        with (
+            patch.object(adapter, "_get_agentenv"),
+            patch.object(adapter, "_resolve_client_class", return_value=mock_client_class),
+        ):
             env = adapter.get_environment(
                 "maze",
                 prompts={"system_prompt": "My custom prompt"},
@@ -728,8 +771,10 @@ class TestAgentGymAdapter:
         mock_client_class.return_value = mock_client_instance
 
         adapter = AgentGymAdapter()
-        with patch.object(adapter, "_get_agentenv"), \
-             patch.object(adapter, "_resolve_client_class", return_value=mock_client_class):
+        with (
+            patch.object(adapter, "_get_agentenv"),
+            patch.object(adapter, "_resolve_client_class", return_value=mock_client_class),
+        ):
             env = adapter.get_environment("maze")
 
         assert env.prompts == {}
@@ -747,8 +792,10 @@ class TestAgentGymAdapter:
         mock_client_class.return_value = mock_client_instance
 
         adapter = AgentGymAdapter()
-        with patch.object(adapter, "_get_agentenv"), \
-             patch.object(adapter, "_resolve_client_class", return_value=mock_client_class):
+        with (
+            patch.object(adapter, "_get_agentenv"),
+            patch.object(adapter, "_resolve_client_class", return_value=mock_client_class),
+        ):
             env = adapter.get_environment("maze", action_format="function_calling")
 
         # Falls back to first available format
@@ -764,6 +811,7 @@ class TestAgentGymAdapter:
 # ---------------------------------------------------------------------------
 # _ServerManager
 # ---------------------------------------------------------------------------
+
 
 class TestServerManager:
     def test_returns_existing_url_if_env_server_base_provided(self):

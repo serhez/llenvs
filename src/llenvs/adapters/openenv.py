@@ -20,7 +20,12 @@ from llenvs.core.reward import (
     RewardType,
     RewardFunction,
 )
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec, _StateContinuityTracker
+from llenvs.core.environment import (
+    Environment,
+    StepResult,
+    EnvironmentSpec,
+    _StateContinuityTracker,
+)
 from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.tools import (
     ToolCall,
@@ -275,11 +280,7 @@ class OpenEnvEnvironment:
 
         next_step = state.hidden.episode_step + 1
         terminated = step_result.done
-        truncated = (
-            not terminated
-            and self._max_steps is not None
-            and next_step >= self._max_steps
-        )
+        truncated = not terminated and self._max_steps is not None and next_step >= self._max_steps
 
         obs_text = _coerce_observation(step_result.observation)
 
@@ -296,10 +297,11 @@ class OpenEnvEnvironment:
         # Get session info
         try:
             server_state = self._client.state()
-            session_info = tuple(
-                (k, v) for k, v in server_state.items()
-                if isinstance(k, str)
-            ) if isinstance(server_state, dict) else ()
+            session_info = (
+                tuple((k, v) for k, v in server_state.items() if isinstance(k, str))
+                if isinstance(server_state, dict)
+                else ()
+            )
         except Exception:
             session_info = ()
 
@@ -521,16 +523,14 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
             done = step_result.done
 
         terminated = done
-        truncated = (
-            not terminated
-            and self._max_steps is not None
-            and next_step >= self._max_steps
-        )
+        truncated = not terminated and self._max_steps is not None and next_step >= self._max_steps
 
         # Build next observation
         if tool_results or action.tool_calls:
             next_observation = self._build_next_observation(
-                state.observation, action, tool_results,
+                state.observation,
+                action,
+                tool_results,
             )
         else:
             messages = list(state.observation.messages)
@@ -609,6 +609,7 @@ class OpenEnvAdapter:
     def _get_openenv(self) -> Any:
         try:
             import openenv
+
             return openenv
         except ImportError as e:
             raise ImportError(

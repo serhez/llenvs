@@ -55,9 +55,7 @@ class TestMathVerifyRewardFunctionProperties:
         assert reward.reward_type == RewardType.OUTCOME
 
     def test_custom_name(self):
-        reward = MathVerifyRewardFunction(
-            answer_extractor=_make_extractor("x"), name="custom_math"
-        )
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("x"), name="custom_math")
         assert reward.name == "custom_math"
 
 
@@ -146,9 +144,7 @@ class TestMathVerifyEquivalence:
 
     def test_percentage_as_decimal(self):
         """50/100 and 1/2 should be equivalent."""
-        reward = MathVerifyRewardFunction(
-            answer_extractor=_make_extractor("50/100")
-        )
+        reward = MathVerifyRewardFunction(answer_extractor=_make_extractor("50/100"))
         state = _make_state("1/2")
         action = Action(text="<answer>50/100</answer>")
 

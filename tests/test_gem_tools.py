@@ -228,9 +228,7 @@ class TestGemToolExecutor:
 
     def test_execute_batch(self, mock_python_tool, mock_search_tool):
         """Test batch execution of multiple tool calls."""
-        executor = GemToolExecutor(
-            {"python": mock_python_tool, "search": mock_search_tool}
-        )
+        executor = GemToolExecutor({"python": mock_python_tool, "search": mock_search_tool})
 
         calls = (
             ToolCall(id="1", name="python", arguments={"code": "print(3*3)"}),
@@ -543,9 +541,7 @@ class TestGemToolEnvironment:
 
         # Take max_steps without submitting answer
         for _ in range(2):
-            call = ToolCall(
-                id="1", name="python", arguments={"code": "print('thinking...')"}
-            )
+            call = ToolCall(id="1", name="python", arguments={"code": "print('thinking...')"})
             action = Action(tool_calls=(call,))
             result = env.step(state, action)
             state = result.next_state
@@ -593,10 +589,7 @@ class TestGemToolEnvironment:
         result2 = env.step(state, action)
 
         # Results should match
-        assert (
-            result1.info["tool_results"][0].output
-            == result2.info["tool_results"][0].output
-        )
+        assert result1.info["tool_results"][0].output == result2.info["tool_results"][0].output
 
 
 class TestGemToolEnvironmentWithSearchTool:
@@ -637,9 +630,7 @@ class TestGemToolEnvironmentWithSearchTool:
 
         state, _ = env.reset()
 
-        call = ToolCall(
-            id="1", name="search", arguments={"query": "capital of France"}
-        )
+        call = ToolCall(id="1", name="search", arguments={"query": "capital of France"})
         action = Action(tool_calls=(call,))
         result = env.step(state, action)
 

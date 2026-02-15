@@ -129,13 +129,15 @@ def format_trajectory_result(traj_result: TrajectoryResult) -> dict[str, Any]:
         # Get rewards
         rewards = {s.name: s.reward for s in t.rewards.signals}
 
-        transitions_data.append({
-            "step": t.state.metadata.step,
-            "action": action_text[:1000],  # Truncate long responses
-            "rewards": rewards,
-            "total_reward": t.rewards.total,
-            "info": t.info,
-        })
+        transitions_data.append(
+            {
+                "step": t.state.metadata.step,
+                "action": action_text[:1000],  # Truncate long responses
+                "rewards": rewards,
+                "total_reward": t.rewards.total,
+                "info": t.info,
+            }
+        )
 
     # Get observation from initial state
     observation = trajectory.initial_state.observation
@@ -249,5 +251,7 @@ def print_summary(result: EvaluationResult) -> None:
         print("".join(parts))
 
     print()
-    print(f"Summary: {result.summary['num_successful']}/{result.summary['num_trajectories']} successful")
+    print(
+        f"Summary: {result.summary['num_successful']}/{result.summary['num_trajectories']} successful"
+    )
     print(f"{'=' * 60}\n")

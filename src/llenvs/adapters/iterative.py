@@ -84,9 +84,7 @@ class IterativeHidden:
 # History summarizer
 # ---------------------------------------------------------------------------
 
-HistorySummarizer = Callable[
-    [tuple[str, ...], tuple[tuple[str, ...], ...]], str
-]
+HistorySummarizer = Callable[[tuple[str, ...], tuple[tuple[str, ...], ...]], str]
 """Callable that summarizes submission/feedback history into a string."""
 
 
@@ -97,9 +95,7 @@ def _default_history_formatter(
 ) -> str:
     """Format history entries using the entry template."""
     parts: list[str] = []
-    for i, (submission, feedbacks) in enumerate(
-        zip(submissions, feedback_history)
-    ):
+    for i, (submission, feedbacks) in enumerate(zip(submissions, feedback_history)):
         feedback_text = "\n".join(feedbacks) if feedbacks else "(no feedback)"
         entry = entry_template.format(
             turn=i + 1,
@@ -128,9 +124,7 @@ _DEFAULT_PROMPTS: dict[str, str] = {
         "Revise your solution or write SUBMIT to finalize."
     ),
     "history_entry": (
-        "### Turn {turn}\n"
-        "**Submission:**\n{submission}\n\n"
-        "**Feedback:**\n{feedback}"
+        "### Turn {turn}\n**Submission:**\n{submission}\n\n**Feedback:**\n{feedback}"
     ),
 }
 
@@ -222,9 +216,7 @@ class IterativeEnvironment:
         task_index = options.get("task_index", 0)
 
         if self._inner is not None:
-            inner_state, inner_info = self._inner.reset(
-                seed=seed, options=options
-            )
+            inner_state, inner_info = self._inner.reset(seed=seed, options=options)
             task_prompt = inner_state.observation.prompt
             inner_hidden = inner_state.hidden
             # Store initial state for pure_step re-evaluation
@@ -235,9 +227,7 @@ class IterativeEnvironment:
         else:
             assert self._tasks is not None
             if task_index < 0 or task_index >= len(self._tasks):
-                raise ValueError(
-                    f"task_index {task_index} out of bounds [0, {len(self._tasks)})"
-                )
+                raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._tasks)})")
             task = self._tasks[task_index]
             task_prompt = task.prompt
             inner_hidden = task
@@ -283,11 +273,8 @@ class IterativeEnvironment:
         action_text = action.text or ""
 
         # 1. Check for early submit
-        early_submit = (
-            self._submit_keyword is not None
-            and action_text.lstrip().upper().startswith(
-                self._submit_keyword.upper()
-            )
+        early_submit = self._submit_keyword is not None and action_text.lstrip().upper().startswith(
+            self._submit_keyword.upper()
         )
 
         # 2. Extract submission
@@ -357,9 +344,7 @@ class IterativeEnvironment:
             obs_text = "Episode complete."
             messages: tuple[dict[str, Any], ...] = ()
         else:
-            obs_text = self._build_feedback_observation(
-                new_hidden, feedback_texts
-            )
+            obs_text = self._build_feedback_observation(new_hidden, feedback_texts)
             # Build messages for chat runners
             messages = self._build_messages(state, action_text, obs_text)
 
@@ -411,7 +396,9 @@ class IterativeEnvironment:
         feedback_texts: tuple[str, ...],
     ) -> str:
         """Build the observation text with feedback and optional history."""
-        feedback_str = "\n".join(feedback_texts) if feedback_texts else "No specific feedback available."
+        feedback_str = (
+            "\n".join(feedback_texts) if feedback_texts else "No specific feedback available."
+        )
 
         # Build history section
         history_section = ""

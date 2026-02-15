@@ -330,9 +330,7 @@ class TestFromCallable:
     def test_all_basic_types(self):
         """Test all basic type mappings."""
 
-        def typed(
-            s: str, i: int, f: float, b: bool, l: list, d: dict
-        ) -> str:
+        def typed(s: str, i: int, f: float, b: bool, l: list, d: dict) -> str:
             """All types."""
             return ""
 

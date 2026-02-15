@@ -380,9 +380,7 @@ class TestBoxedExtractor:
     def test_multiple_boxed_takes_last(self):
         r"""Test multiple \boxed{}, takes last."""
         extractor = BoxedExtractor()
-        answer, meta = extractor.extract(
-            r"First \boxed{wrong}, then \boxed{correct}"
-        )
+        answer, meta = extractor.extract(r"First \boxed{wrong}, then \boxed{correct}")
         assert answer == "correct"
         assert meta["num_matches"] == 2
 
@@ -597,9 +595,7 @@ class TestPatternAnswerExtractor:
     def test_multiple_patterns_takes_last(self):
         """Test multiple matches, takes last."""
         extractor = PatternAnswerExtractor()
-        answer, _ = extractor.extract(
-            "The answer is 10. But actually the answer is 42"
-        )
+        answer, _ = extractor.extract("The answer is 10. But actually the answer is 42")
         assert answer == "42"
 
     def test_no_match_returns_none(self):
@@ -623,9 +619,7 @@ class TestCleanedExtractorInExtraction:
         """Test stripping <|endoftext|> before inner extraction."""
         inner = TagBasedExtractor()
         extractor = CleanedExtractor(inner=inner, pre_cleaners=[strip_special_tokens])
-        answer, _ = extractor.extract(
-            "<answer>42</answer><|endoftext|><|endoftext|>"
-        )
+        answer, _ = extractor.extract("<answer>42</answer><|endoftext|><|endoftext|>")
         assert answer == "42"
 
     def test_strips_pad_tokens(self):
@@ -653,9 +647,7 @@ class TestCleanedExtractorInExtraction:
         """Test multiple token types stripped at once."""
         inner = TagBasedExtractor()
         extractor = CleanedExtractor(inner=inner, pre_cleaners=[strip_special_tokens])
-        answer, _ = extractor.extract(
-            "<|endoftext|><pad><answer>42</answer></s><|im_end|>"
-        )
+        answer, _ = extractor.extract("<|endoftext|><pad><answer>42</answer></s><|im_end|>")
         assert answer == "42"
 
     def test_no_special_tokens_works_fine(self):
@@ -722,12 +714,8 @@ class TestExtractionRobustness:
 
     def test_padding_tokens_with_tag(self):
         """Response with padding tokens interspersed."""
-        extractor = CleanedExtractor(
-            inner=TagBasedExtractor(), pre_cleaners=[strip_special_tokens]
-        )
-        answer, _ = extractor.extract(
-            "<answer>42</answer><|endoftext|><|endoftext|>"
-        )
+        extractor = CleanedExtractor(inner=TagBasedExtractor(), pre_cleaners=[strip_special_tokens])
+        answer, _ = extractor.extract("<answer>42</answer><|endoftext|><|endoftext|>")
         assert answer == "42"
 
     def test_empty_response(self):
@@ -786,9 +774,7 @@ class TestCompositeExtractorChains:
                 RawGenerationExtractor(),
             ]
         )
-        answer, meta = chain.extract(
-            "<answer>42</answer> the answer is 99. 100"
-        )
+        answer, meta = chain.extract("<answer>42</answer> the answer is 99. 100")
         assert answer == "42"
         assert meta["extractor_type"] == "TagBasedExtractor"
 

@@ -97,7 +97,8 @@ class MockMultiTurnEnv:
         next_state = State(
             observation=Observation(
                 prompt=f"Step {next_step} feedback",
-                messages=state.observation.messages + (
+                messages=state.observation.messages
+                + (
                     {"role": "assistant", "content": action.text or ""},
                     {"role": "user", "content": f"Step {next_step} feedback"},
                 ),

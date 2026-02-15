@@ -32,11 +32,9 @@ class ContainerRuntime(Protocol):
         """Stop the environment server and clean up."""
         ...
 
-    def is_running(self) -> bool:
-        ...
+    def is_running(self) -> bool: ...
 
-    def logs(self) -> str:
-        ...
+    def logs(self) -> str: ...
 
 
 def _find_free_port() -> int:
@@ -106,27 +104,33 @@ class DockerRuntime:
         self._host_port = self._port or _find_free_port()
 
         cmd = [
-            self._docker, "run", "-d", "--rm",
-            "-p", f"{self._host_port}:8080",
+            self._docker,
+            "run",
+            "-d",
+            "--rm",
+            "-p",
+            f"{self._host_port}:8080",
         ]
         for key, value in self._env_vars.items():
             cmd.extend(["-e", f"{key}={value}"])
         for host_path, container_path in self._volumes.items():
             cmd.extend(["-v", f"{host_path}:{container_path}"])
-        cmd.extend([
-            self._image,
-            "python", "-m", "llenvs.container",
-            "--config", self._config_json,
-            "--port", "8080",
-        ])
-
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30
+        cmd.extend(
+            [
+                self._image,
+                "python",
+                "-m",
+                "llenvs.container",
+                "--config",
+                self._config_json,
+                "--port",
+                "8080",
+            ]
         )
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Docker run failed (exit {result.returncode}): {result.stderr}"
-            )
+            raise RuntimeError(f"Docker run failed (exit {result.returncode}): {result.stderr}")
         self._container_id = result.stdout.strip()
         logger.info("Started container %s on port %d", self._container_id[:12], self._host_port)
 
@@ -144,7 +148,9 @@ class DockerRuntime:
         try:
             subprocess.run(
                 [self._docker, "stop", cid],
-                capture_output=True, text=True, timeout=15,
+                capture_output=True,
+                text=True,
+                timeout=15,
             )
         except Exception as e:
             logger.warning("Failed to stop container %s: %s", cid[:12], e)
@@ -155,7 +161,9 @@ class DockerRuntime:
         try:
             result = subprocess.run(
                 [self._docker, "inspect", "-f", "{{.State.Running}}", self._container_id],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             return result.stdout.strip() == "true"
         except Exception:
@@ -167,7 +175,9 @@ class DockerRuntime:
         try:
             result = subprocess.run(
                 [self._docker, "logs", self._container_id],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             return result.stdout + result.stderr
         except Exception as e:
@@ -205,9 +215,13 @@ class ProcessRuntime:
         self._host_port = self._port or _find_free_port()
 
         cmd = [
-            self._python, "-m", "llenvs.container",
-            "--config", self._config_json,
-            "--port", str(self._host_port),
+            self._python,
+            "-m",
+            "llenvs.container",
+            "--config",
+            self._config_json,
+            "--port",
+            str(self._host_port),
         ]
         self._process = subprocess.Popen(
             cmd,
@@ -228,8 +242,7 @@ class ProcessRuntime:
                 stderr_output = stderr_bytes.decode("utf-8", errors="replace")
             self.stop()
             raise TimeoutError(
-                f"Process server did not start within {self._timeout}s. "
-                f"Stderr: {stderr_output}"
+                f"Process server did not start within {self._timeout}s. Stderr: {stderr_output}"
             )
         return f"http://127.0.0.1:{self._host_port}"
 
@@ -258,5 +271,7 @@ class ProcessRuntime:
         # Can't read from pipes without blocking if process is still running
         if self._process.poll() is not None:
             stdout, stderr = self._process.communicate(timeout=2)
-            return stdout.decode("utf-8", errors="replace") + stderr.decode("utf-8", errors="replace")
+            return stdout.decode("utf-8", errors="replace") + stderr.decode(
+                "utf-8", errors="replace"
+            )
         return "(process still running — logs not available)"

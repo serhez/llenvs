@@ -78,8 +78,15 @@ def _make_rubric(funcs=None, weights=None, parser=None):
     return rubric
 
 
-def _make_verifiers_env(env_type="SingleTurnEnv", dataset=None, rubric=None,
-                        system_prompt=None, tools=None, oai_tools=None, tool_map=None):
+def _make_verifiers_env(
+    env_type="SingleTurnEnv",
+    dataset=None,
+    rubric=None,
+    system_prompt=None,
+    tools=None,
+    oai_tools=None,
+    tool_map=None,
+):
     """Create a mock verifiers environment."""
     env = MagicMock()
     env.__class__.__name__ = env_type
@@ -197,7 +204,9 @@ class TestVerifiersRubricReward:
         reward = VerifiersRubricReward(rubric=rubric, env_id="test")
 
         hidden = VerifiersHidden(
-            env_id="test", task_index=0, expected_answer="4",
+            env_id="test",
+            task_index=0,
+            expected_answer="4",
             dataset_item=(("answer", "4"), ("prompt", [])),
         )
         state = State(
@@ -219,7 +228,9 @@ class TestVerifiersRubricReward:
         reward = VerifiersRubricReward(rubric=rubric, env_id="test")
 
         hidden = VerifiersHidden(
-            env_id="test", task_index=0, expected_answer="4",
+            env_id="test",
+            task_index=0,
+            expected_answer="4",
             dataset_item=(("answer", "4"), ("prompt", [])),
         )
         state = State(
@@ -240,7 +251,9 @@ class TestVerifiersRubricReward:
         reward = VerifiersRubricReward(rubric=rubric, env_id="test")
 
         hidden = VerifiersHidden(
-            env_id="test", task_index=0, expected_answer="4",
+            env_id="test",
+            task_index=0,
+            expected_answer="4",
             dataset_item=(("answer", "4"), ("prompt", [])),
         )
         state = State(
@@ -455,6 +468,7 @@ def _make_oai_tools():
 
 def _make_tool_funcs():
     """Create mock tool callables."""
+
     async def search(query: str) -> str:
         return f"Results for: {query}"
 
@@ -485,8 +499,12 @@ class TestVerifiersToolHidden:
         from llenvs.adapters.verifiers import VerifiersToolHidden
 
         hidden = VerifiersToolHidden(
-            env_id="test", task_index=0, expected_answer=None,
-            dataset_item=(), episode_step=0, last_action=None,
+            env_id="test",
+            task_index=0,
+            expected_answer=None,
+            dataset_item=(),
+            episode_step=0,
+            last_action=None,
         )
         with pytest.raises(AttributeError):
             hidden.episode_step = 1  # type: ignore
@@ -539,11 +557,14 @@ class TestVerifiersToolEnvironment:
 
         tool_map = kwargs.pop("tool_map", _make_tool_funcs())
         oai_tools = kwargs.pop("oai_tools", _make_oai_tools())
-        vf_env = kwargs.pop("vf_env", _make_verifiers_env(
-            env_type="ToolEnv",
-            oai_tools=oai_tools,
-            tool_map=tool_map,
-        ))
+        vf_env = kwargs.pop(
+            "vf_env",
+            _make_verifiers_env(
+                env_type="ToolEnv",
+                oai_tools=oai_tools,
+                tool_map=tool_map,
+            ),
+        )
         return VerifiersToolEnvironment(vf_env=vf_env, **kwargs)
 
     def test_creation(self):
@@ -623,6 +644,7 @@ class TestVerifiersToolEnvironment:
         vf_env = _make_verifiers_env(env_type="ToolEnv")
         vf_env.max_turns = 2
         from llenvs.adapters.verifiers import VerifiersToolEnvironment
+
         env = VerifiersToolEnvironment(vf_env=vf_env)
 
         state, _ = env.reset(options={"task_index": 0})
@@ -658,11 +680,13 @@ class TestVerifiersAdapter:
 
     def test_adapter_name(self):
         from llenvs.adapters.verifiers import VerifiersAdapter
+
         adapter = VerifiersAdapter()
         assert adapter.name == "verifiers"
 
     def test_get_verifiers_import_error(self):
         from llenvs.adapters.verifiers import VerifiersAdapter
+
         adapter = VerifiersAdapter()
         with pytest.raises(ImportError, match="verifiers"):
             adapter._get_verifiers()
@@ -745,23 +769,24 @@ class TestVerifiersAdapter:
         monkeypatch.setattr(adapter, "_get_verifiers", lambda: mock_vf)
 
         adapter.get_environment("gsm8k", system_prompt="Custom prompt")
-        mock_vf.load_environment.assert_called_once_with(
-            "gsm8k", system_prompt="Custom prompt"
-        )
+        mock_vf.load_environment.assert_called_once_with("gsm8k", system_prompt="Custom prompt")
 
     def test_get_native_answer_extractor(self):
         from llenvs.adapters.verifiers import VerifiersAdapter
+
         adapter = VerifiersAdapter()
         # No native answer extractor
         assert adapter.get_native_answer_extractor("gsm8k") is None
 
     def test_get_prompt_template(self):
         from llenvs.adapters.verifiers import VerifiersAdapter
+
         adapter = VerifiersAdapter()
         assert adapter.get_prompt_template("gsm8k") is None
 
     def test_get_environment_info(self):
         from llenvs.adapters.verifiers import VerifiersAdapter
+
         adapter = VerifiersAdapter()
         info = adapter.get_environment_info("gsm8k")
         assert info["name"] == "gsm8k"
@@ -790,21 +815,23 @@ class TestOaiSchemaConversion:
     def test_optional_parameters(self):
         from llenvs.adapters.verifiers import _oai_tools_to_definitions
 
-        oai_tools = [{
-            "type": "function",
-            "function": {
-                "name": "test",
-                "description": "Test tool",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "required_param": {"type": "string"},
-                        "optional_param": {"type": "integer"},
+        oai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "test",
+                    "description": "Test tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "required_param": {"type": "string"},
+                            "optional_param": {"type": "integer"},
+                        },
+                        "required": ["required_param"],
                     },
-                    "required": ["required_param"],
                 },
-            },
-        }]
+            }
+        ]
         defs = _oai_tools_to_definitions(oai_tools)
         params = {p.name: p for p in defs[0].parameters}
         assert params["required_param"].required is True
@@ -813,25 +840,27 @@ class TestOaiSchemaConversion:
     def test_type_mapping(self):
         from llenvs.adapters.verifiers import _oai_tools_to_definitions
 
-        oai_tools = [{
-            "type": "function",
-            "function": {
-                "name": "test",
-                "description": "Test",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "s": {"type": "string"},
-                        "i": {"type": "integer"},
-                        "n": {"type": "number"},
-                        "b": {"type": "boolean"},
-                        "a": {"type": "array"},
-                        "o": {"type": "object"},
+        oai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "test",
+                    "description": "Test",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "s": {"type": "string"},
+                            "i": {"type": "integer"},
+                            "n": {"type": "number"},
+                            "b": {"type": "boolean"},
+                            "a": {"type": "array"},
+                            "o": {"type": "object"},
+                        },
+                        "required": [],
                     },
-                    "required": [],
                 },
-            },
-        }]
+            }
+        ]
         defs = _oai_tools_to_definitions(oai_tools)
         params = {p.name: p for p in defs[0].parameters}
         assert params["s"].type == ToolParameterType.STRING
@@ -843,19 +872,22 @@ class TestOaiSchemaConversion:
 
     def test_empty_tools(self):
         from llenvs.adapters.verifiers import _oai_tools_to_definitions
+
         assert _oai_tools_to_definitions([]) == ()
 
     def test_no_parameters(self):
         from llenvs.adapters.verifiers import _oai_tools_to_definitions
 
-        oai_tools = [{
-            "type": "function",
-            "function": {
-                "name": "ping",
-                "description": "Ping",
-                "parameters": {"type": "object", "properties": {}},
-            },
-        }]
+        oai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "description": "Ping",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
         defs = _oai_tools_to_definitions(oai_tools)
         assert len(defs) == 1
         assert len(defs[0].parameters) == 0

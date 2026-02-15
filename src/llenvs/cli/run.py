@@ -108,9 +108,7 @@ def run_command(args: argparse.Namespace) -> int:
 
     # Filter environments if specified
     if args.environment:
-        config.environments = [
-            env for env in config.environments if env.name == args.environment
-        ]
+        config.environments = [env for env in config.environments if env.name == args.environment]
         if not config.environments:
             print(f"Error: Environment '{args.environment}' not found in config")
             return 1

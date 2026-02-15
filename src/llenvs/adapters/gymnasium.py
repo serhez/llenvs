@@ -172,9 +172,7 @@ class AutoObservationMapper:
         if isinstance(self._space, spaces.Discrete):
             n = self._space.n
             if self._labels:
-                vals = ", ".join(
-                    f"{k}: {v}" for k, v in sorted(self._labels.items())
-                )
+                vals = ", ".join(f"{k}: {v}" for k, v in sorted(self._labels.items()))
                 return f"Discrete state (one of {n} values): {vals}"
             return f"Discrete state with {n} possible values (0 to {n - 1})."
 
@@ -182,9 +180,7 @@ class AutoObservationMapper:
             shape = self._space.shape
             ndim = shape[0] if len(shape) == 1 else int(np.prod(shape))
             if self._labels:
-                dims = ", ".join(
-                    self._labels.get(i, f"dim_{i}") for i in range(min(ndim, 20))
-                )
+                dims = ", ".join(self._labels.get(i, f"dim_{i}") for i in range(min(ndim, 20)))
                 return f"Continuous vector ({ndim} dims): {dims}"
             return f"Continuous vector with {ndim} dimensions."
 
@@ -285,16 +281,13 @@ class AutoActionMapper:
             return self._name_to_index[lower]
 
         if self._action_names:
-            valid = ", ".join(
-                f"{i}: {n}" for i, n in sorted(self._action_names.items())
-            )
+            valid = ", ".join(f"{i}: {n}" for i, n in sorted(self._action_names.items()))
             raise ValueError(
                 f"Invalid action '{text}'. Expected a number "
                 f"(0-{self._space.n - 1}) or one of: {valid}"
             )
         raise ValueError(
-            f"Invalid action '{text}'. Expected a number in "
-            f"range [0, {self._space.n - 1}]."
+            f"Invalid action '{text}'. Expected a number in range [0, {self._space.n - 1}]."
         )
 
     def _parse_values(self, text: str) -> list[str]:
@@ -308,9 +301,7 @@ class AutoActionMapper:
         expected = int(np.prod(self._space.shape))
         parts = self._parse_values(text)
         if len(parts) != expected:
-            raise ValueError(
-                f"Expected {expected} values for Box action, got {len(parts)}."
-            )
+            raise ValueError(f"Expected {expected} values for Box action, got {len(parts)}.")
         try:
             values = np.array([float(v) for v in parts], dtype=self._space.dtype)
         except (ValueError, TypeError) as e:
@@ -332,8 +323,7 @@ class AutoActionMapper:
         parts = self._parse_values(text)
         if len(parts) != expected:
             raise ValueError(
-                f"Expected {expected} values for MultiDiscrete action, "
-                f"got {len(parts)}."
+                f"Expected {expected} values for MultiDiscrete action, got {len(parts)}."
             )
         try:
             values = np.array([int(v) for v in parts], dtype=self._space.dtype)
@@ -343,18 +333,14 @@ class AutoActionMapper:
         # Validate ranges
         for i, (val, nv) in enumerate(zip(values, self._space.nvec)):
             if val < 0 or val >= nv:
-                raise ValueError(
-                    f"Action value {val} at index {i} out of range [0, {nv - 1}]."
-                )
+                raise ValueError(f"Action value {val} at index {i} out of range [0, {nv - 1}].")
         return values
 
     def _map_multi_binary(self, text: str) -> np.ndarray:
         expected = self._space.n
         parts = self._parse_values(text)
         if len(parts) != expected:
-            raise ValueError(
-                f"Expected {expected} binary values, got {len(parts)}."
-            )
+            raise ValueError(f"Expected {expected} binary values, got {len(parts)}.")
         try:
             values = np.array([int(v) for v in parts], dtype=self._space.dtype)
         except (ValueError, TypeError) as e:
@@ -362,9 +348,7 @@ class AutoActionMapper:
 
         for val in values:
             if val not in (0, 1):
-                raise ValueError(
-                    f"MultiBinary values must be 0 or 1, got {val}."
-                )
+                raise ValueError(f"MultiBinary values must be 0 or 1, got {val}.")
         return values
 
     def describe(self) -> str:
@@ -376,12 +360,9 @@ class AutoActionMapper:
         if isinstance(self._space, spaces.Discrete):
             if self._action_names:
                 entries = "\n".join(
-                    f"  {i}: {name}"
-                    for i, name in sorted(self._action_names.items())
+                    f"  {i}: {name}" for i, name in sorted(self._action_names.items())
                 )
-                return (
-                    f"Choose one action by name or number:\n{entries}"
-                )
+                return f"Choose one action by name or number:\n{entries}"
             return (
                 f"Enter an integer action in range "
                 f"[{self._space.start}, {self._space.start + self._space.n - 1}]."
@@ -396,7 +377,7 @@ class AutoActionMapper:
             )
 
         if isinstance(self._space, spaces.MultiDiscrete):
-            ranges = ", ".join(f"[0,{n-1}]" for n in self._space.nvec)
+            ranges = ", ".join(f"[0,{n - 1}]" for n in self._space.nvec)
             return f"Enter {len(self._space.nvec)} integers. Ranges: {ranges}."
 
         if isinstance(self._space, spaces.MultiBinary):
@@ -464,9 +445,7 @@ class GridObservationMapper:
         return result
 
     def describe(self) -> str:
-        legend = ", ".join(
-            f"{char} = {val}" for val, char in sorted(self._value_map.items())
-        )
+        legend = ", ".join(f"{char} = {val}" for val, char in sorted(self._value_map.items()))
         return f"ASCII grid map. Characters: {legend}"
 
 
@@ -528,11 +507,7 @@ class GymnasiumReward:
         """Compute reward from gymnasium's native reward."""
         gym_reward = next_state.metadata.info.get("gym_reward", 0.0)
 
-        reward_type = (
-            self.reward_type
-            if next_state.metadata.is_terminal
-            else RewardType.STEP
-        )
+        reward_type = self.reward_type if next_state.metadata.is_terminal else RewardType.STEP
 
         return Signal(
             name=self.name,
@@ -601,9 +576,7 @@ class GymnasiumEnvironment:
         prompts: dict[str, str] | None = None,
     ) -> None:
         self._gym_env = gym_env
-        self._env_id = env_id or getattr(
-            getattr(gym_env, "spec", None), "id", "gymnasium"
-        )
+        self._env_id = env_id or getattr(getattr(gym_env, "spec", None), "id", "gymnasium")
         self._use_ansi_render = use_ansi_render
         self._seeds = seeds
         self._num_tasks = num_tasks
@@ -680,9 +653,7 @@ class GymnasiumEnvironment:
     def reward_functions(self) -> tuple[RewardFunction[GymnasiumHidden], ...]:
         return self._native_rewards + self._extra_rewards
 
-    def _resolve_seed(
-        self, seed: int | None, task_index: int
-    ) -> int | None:
+    def _resolve_seed(self, seed: int | None, task_index: int) -> int | None:
         """Resolve the seed for this episode."""
         if seed is not None:
             return seed
@@ -739,9 +710,7 @@ class GymnasiumEnvironment:
         meta_step = state.metadata.step + 1
 
         # Check truncation
-        truncated = (
-            self._max_steps is not None and next_step >= self._max_steps
-        )
+        truncated = self._max_steps is not None and next_step >= self._max_steps
 
         new_hidden = GymnasiumHidden(
             task_index=state.hidden.task_index,
@@ -756,9 +725,7 @@ class GymnasiumEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": f"[Step {next_step}] Error: {error_msg}"},
         )
-        new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=meta_step,
@@ -866,9 +833,7 @@ class GymnasiumEnvironment:
         self._state_tracker.validate(state, "GymnasiumEnvironment")
 
         # Step 1: Extract action text
-        extracted, extraction_meta = self._answer_extractor.extract(
-            action.text or ""
-        )
+        extracted, extraction_meta = self._answer_extractor.extract(action.text or "")
         if extracted is None:
             result = self._build_error_step(
                 state, action, "Could not extract action from response."
@@ -885,17 +850,13 @@ class GymnasiumEnvironment:
             return result
 
         # Step the gymnasium environment
-        raw_obs, reward, terminated, truncated_gym, info = self._gym_env.step(
-            gym_action
-        )
+        raw_obs, reward, terminated, truncated_gym, info = self._gym_env.step(gym_action)
 
         next_step = state.hidden.episode_step + 1
         cumulative_reward = state.hidden.gym_reward + reward
 
         # Check our own truncation
-        truncated = truncated_gym or (
-            self._max_steps is not None and next_step >= self._max_steps
-        )
+        truncated = truncated_gym or (self._max_steps is not None and next_step >= self._max_steps)
 
         # Render observation
         obs_text = self._render_observation(raw_obs, info)
@@ -913,9 +874,7 @@ class GymnasiumEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": f"[Step {next_step}]\n{obs_text}"},
         )
-        new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         is_terminal = terminated or truncated
         new_metadata = StateMetadata(
@@ -1038,8 +997,7 @@ class GymnasiumAdapter:
             return gymnasium
         except ImportError as e:
             raise ImportError(
-                "gymnasium is required for GymnasiumAdapter. "
-                "Install with: pip install gymnasium"
+                "gymnasium is required for GymnasiumAdapter. Install with: pip install gymnasium"
             ) from e
 
     def list_environments(self) -> list[str]:

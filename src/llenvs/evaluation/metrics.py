@@ -421,7 +421,9 @@ def _percentile(sorted_values: list[float], p: float) -> float:
     upper_idx = min(lower_idx + 1, n - 1)
     fraction = idx - lower_idx
 
-    return sorted_values[lower_idx] + fraction * (sorted_values[upper_idx] - sorted_values[lower_idx])
+    return sorted_values[lower_idx] + fraction * (
+        sorted_values[upper_idx] - sorted_values[lower_idx]
+    )
 
 
 def _comb(n: int, k: int) -> float:
@@ -469,9 +471,7 @@ def aggregate_continuous_metrics(
 
     for m in metrics:
         if not isinstance(m.statistics, ContinuousStatistics):
-            raise TypeError(
-                f"Expected ContinuousStatistics, got {type(m.statistics).__name__}"
-            )
+            raise TypeError(f"Expected ContinuousStatistics, got {type(m.statistics).__name__}")
 
     stats_list = [m.statistics for m in metrics]
     result_name = name if name is not None else metrics[0].name
@@ -503,9 +503,7 @@ def aggregate_continuous_metrics(
 
         if can_pool:
             ss_within = sum(
-                (s.n - 1) * s.std_dev**2
-                for s in stats_list
-                if s.n > 1 and s.std_dev is not None
+                (s.n - 1) * s.std_dev**2 for s in stats_list if s.n > 1 and s.std_dev is not None
             )
             ss_between = sum(s.n * (s.mean - mean_total) ** 2 for s in stats_list)
             var_pooled = (ss_within + ss_between) / (n_total - 1)
@@ -565,9 +563,7 @@ def aggregate_binary_metrics(
 
     for m in metrics:
         if not isinstance(m.statistics, BinaryStatistics):
-            raise TypeError(
-                f"Expected BinaryStatistics, got {type(m.statistics).__name__}"
-            )
+            raise TypeError(f"Expected BinaryStatistics, got {type(m.statistics).__name__}")
 
     stats_list = [m.statistics for m in metrics]
     result_name = name if name is not None else metrics[0].name
@@ -576,16 +572,12 @@ def aggregate_binary_metrics(
     count_total = sum(s.count for s in stats_list)
 
     if n_total == 0:
-        return Metric(
-            name=result_name, statistics=BinaryStatistics(n=0, mean=0.0, count=0)
-        )
+        return Metric(name=result_name, statistics=BinaryStatistics(n=0, mean=0.0, count=0))
 
     mean_total = count_total / n_total
 
     # Standard error
-    std_error = (
-        math.sqrt(mean_total * (1 - mean_total) / n_total) if n_total > 1 else None
-    )
+    std_error = math.sqrt(mean_total * (1 - mean_total) / n_total) if n_total > 1 else None
 
     # Wilson score CI
     z = _z_score(confidence_level)

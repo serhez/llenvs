@@ -56,6 +56,7 @@ class OpaqueHidden:
 # Hidden state helpers
 # ---------------------------------------------------------------------------
 
+
 def _serialize_hidden(hidden: Any) -> dict[str, Any]:
     """Serialize hidden state to a JSON-compatible dict."""
     if isinstance(hidden, OpaqueHidden):
@@ -118,6 +119,7 @@ def reconstruct_hidden(hidden_dict: dict[str, Any], hidden_type: type) -> Any:
 # ToolResult / ToolCall serialization
 # ---------------------------------------------------------------------------
 
+
 def serialize_tool_call(tc: ToolCall) -> dict[str, Any]:
     return {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
 
@@ -153,6 +155,7 @@ def deserialize_tool_result(data: dict[str, Any]) -> ToolResult:
 # ---------------------------------------------------------------------------
 # ToolDefinition / ToolParameter serialization
 # ---------------------------------------------------------------------------
+
 
 def serialize_tool_parameter(tp: ToolParameter) -> dict[str, Any]:
     result: dict[str, Any] = {
@@ -190,9 +193,7 @@ def deserialize_tool_definition(data: dict[str, Any]) -> ToolDefinition:
     return ToolDefinition(
         name=data["name"],
         description=data["description"],
-        parameters=tuple(
-            deserialize_tool_parameter(p) for p in data.get("parameters", [])
-        ),
+        parameters=tuple(deserialize_tool_parameter(p) for p in data.get("parameters", [])),
         is_terminal=data.get("is_terminal", False),
     )
 
@@ -200,6 +201,7 @@ def deserialize_tool_definition(data: dict[str, Any]) -> ToolDefinition:
 # ---------------------------------------------------------------------------
 # Reward serialization
 # ---------------------------------------------------------------------------
+
 
 def serialize_reward_signal(sig: Signal) -> dict[str, Any]:
     d: dict[str, Any] = {
@@ -231,14 +233,13 @@ def serialize_reward_bundle(bundle: SignalBundle) -> dict[str, Any]:
 
 
 def deserialize_reward_bundle(data: dict[str, Any]) -> SignalBundle:
-    return SignalBundle(
-        signals=tuple(deserialize_reward_signal(s) for s in data["signals"])
-    )
+    return SignalBundle(signals=tuple(deserialize_reward_signal(s) for s in data["signals"]))
 
 
 # ---------------------------------------------------------------------------
 # Observation serialization
 # ---------------------------------------------------------------------------
+
 
 def serialize_observation(obs: Observation) -> dict[str, Any]:
     return {
@@ -253,9 +254,7 @@ def deserialize_observation(data: dict[str, Any]) -> Observation:
     return Observation(
         prompt=data["prompt"],
         messages=tuple(data.get("messages", ())),
-        tool_results=tuple(
-            deserialize_tool_result(tr) for tr in data.get("tool_results", ())
-        ),
+        tool_results=tuple(deserialize_tool_result(tr) for tr in data.get("tool_results", ())),
         available_tools=tuple(
             deserialize_tool_definition(td) for td in data.get("available_tools", ())
         ),
@@ -265,6 +264,7 @@ def deserialize_observation(data: dict[str, Any]) -> Observation:
 # ---------------------------------------------------------------------------
 # StateMetadata serialization
 # ---------------------------------------------------------------------------
+
 
 def serialize_state_metadata(meta: StateMetadata) -> dict[str, Any]:
     return {
@@ -288,6 +288,7 @@ def deserialize_state_metadata(data: dict[str, Any]) -> StateMetadata:
 # State serialization
 # ---------------------------------------------------------------------------
 
+
 def serialize_state(state: State) -> dict[str, Any]:
     return {
         "observation": serialize_observation(state.observation),
@@ -305,9 +306,7 @@ def deserialize_state(data: dict[str, Any]) -> State[OpaqueHidden]:
     )
 
 
-def deserialize_state_typed(
-    data: dict[str, Any], hidden_type: type
-) -> State:
+def deserialize_state_typed(data: dict[str, Any], hidden_type: type) -> State:
     """Deserialize state on the server side with a concrete hidden type."""
     return State(
         observation=deserialize_observation(data["observation"]),
@@ -320,6 +319,7 @@ def deserialize_state_typed(
 # Action serialization
 # ---------------------------------------------------------------------------
 
+
 def serialize_action(action: Action) -> dict[str, Any]:
     return {
         "text": action.text,
@@ -330,15 +330,14 @@ def serialize_action(action: Action) -> dict[str, Any]:
 def deserialize_action(data: dict[str, Any]) -> Action:
     return Action(
         text=data.get("text"),
-        tool_calls=tuple(
-            deserialize_tool_call(tc) for tc in data.get("tool_calls", ())
-        ),
+        tool_calls=tuple(deserialize_tool_call(tc) for tc in data.get("tool_calls", ())),
     )
 
 
 # ---------------------------------------------------------------------------
 # StepResult serialization
 # ---------------------------------------------------------------------------
+
 
 def serialize_step_result(result: StepResult) -> dict[str, Any]:
     return {
@@ -363,6 +362,7 @@ def deserialize_step_result(data: dict[str, Any]) -> StepResult[OpaqueHidden]:
 # ---------------------------------------------------------------------------
 # EnvironmentSpec serialization
 # ---------------------------------------------------------------------------
+
 
 def serialize_env_spec(spec: EnvironmentSpec) -> dict[str, Any]:
     return {

@@ -43,7 +43,7 @@ def normalize_numeric(value: str) -> str | None:
     """
     try:
         # Try to parse as float
-        num = float(value.replace(',', ''))
+        num = float(value.replace(",", ""))
         # If it's an integer, return as int string
         if num == int(num):
             return str(int(num))
@@ -97,8 +97,8 @@ def score_numeric_tolerance(predicted: str, expected: str, rtol: float = 1e-5) -
         1.0 if within tolerance, 0.0 otherwise.
     """
     try:
-        pred_val = float(predicted.replace(',', ''))
-        exp_val = float(expected.replace(',', ''))
+        pred_val = float(predicted.replace(",", ""))
+        exp_val = float(expected.replace(",", ""))
 
         if exp_val == 0:
             return 1.0 if abs(pred_val) < rtol else 0.0
@@ -135,6 +135,7 @@ class HuggingFaceHidden:
         dataset_name: Full HuggingFace dataset name.
         split: Dataset split this came from.
     """
+
     entry: dict[str, Any]
     expected_answer: str
     task_index: int
@@ -271,8 +272,7 @@ class HuggingFaceEnvironment:
         if isinstance(scoring, str):
             if scoring not in SCORING_FUNCTIONS:
                 raise ValueError(
-                    f"Unknown scoring: {scoring}. "
-                    f"Available: {list(SCORING_FUNCTIONS.keys())}"
+                    f"Unknown scoring: {scoring}. Available: {list(SCORING_FUNCTIONS.keys())}"
                 )
             self._scoring_fn = SCORING_FUNCTIONS[scoring]
         else:
@@ -357,9 +357,7 @@ class HuggingFaceEnvironment:
 
         task_index = options["task_index"]
         if task_index < 0 or task_index >= len(self._dataset):
-            raise ValueError(
-                f"task_index {task_index} out of bounds [0, {len(self._dataset)})"
-            )
+            raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._dataset)})")
 
         # Get the dataset entry
         entry = self._dataset[task_index]
@@ -533,6 +531,7 @@ class HuggingFaceAdapter:
         """Import and return the datasets module."""
         try:
             import datasets
+
             return datasets
         except ImportError as e:
             raise ImportError(
@@ -725,6 +724,7 @@ class HuggingFaceAdapter:
         """
         try:
             from huggingface_hub import dataset_info
+
             info = dataset_info(name)
             return {
                 "name": name,

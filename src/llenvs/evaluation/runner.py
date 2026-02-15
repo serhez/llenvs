@@ -367,9 +367,7 @@ class TrajectoryRunner:
 
         if tools and self.backend.capabilities.supports_function_calling:
             # Native function calling (API backends)
-            result = self.backend.generate_with_tools(
-                messages, tools, self.sampling_params
-            )
+            result = self.backend.generate_with_tools(messages, tools, self.sampling_params)
         elif tools and self.tool_call_parser:
             # Text-based tool calling (vLLM/HF with parser)
             result = self._generate_with_text_tools(messages, tuple(tools))
@@ -456,7 +454,10 @@ class TrajectoryRunner:
 
         try:
             return self._run_trajectory_impl(
-                task_index, trajectory_id, max_steps, eval_logger,
+                task_index,
+                trajectory_id,
+                max_steps,
+                eval_logger,
             )
         finally:
             if eval_logger:
@@ -514,15 +515,19 @@ class TrajectoryRunner:
             step_count += 1
 
             if eval_logger:
-                eval_logger.on_step(_StepEvent(
-                    task_index=task_index,
-                    step_num=step_count,
-                    reward_total=step_result.rewards.total,
-                    prompt_tokens=gen_result.prompt_tokens,
-                    completion_tokens=gen_result.completion_tokens,
-                    has_tool_calls=gen_result.has_tool_calls,
-                    num_tool_calls=len(gen_result.tool_calls) if gen_result.has_tool_calls else 0,
-                ))
+                eval_logger.on_step(
+                    _StepEvent(
+                        task_index=task_index,
+                        step_num=step_count,
+                        reward_total=step_result.rewards.total,
+                        prompt_tokens=gen_result.prompt_tokens,
+                        completion_tokens=gen_result.completion_tokens,
+                        has_tool_calls=gen_result.has_tool_calls,
+                        num_tool_calls=len(gen_result.tool_calls)
+                        if gen_result.has_tool_calls
+                        else 0,
+                    )
+                )
 
             if step_result.done:
                 break
@@ -536,14 +541,16 @@ class TrajectoryRunner:
                 success = outcome_rewards[-1].reward >= 1.0
 
         if eval_logger:
-            eval_logger.on_trajectory_end(_TrajectoryEndEvent(
-                task_index=task_index,
-                success=success,
-                total_reward=trajectory.total_reward,
-                num_steps=len(trajectory),
-                completed_count=1,
-                total_count=1,
-            ))
+            eval_logger.on_trajectory_end(
+                _TrajectoryEndEvent(
+                    task_index=task_index,
+                    success=success,
+                    total_reward=trajectory.total_reward,
+                    num_steps=len(trajectory),
+                    completed_count=1,
+                    total_count=1,
+                )
+            )
 
         return TrajectoryResult(
             trajectory=trajectory,
@@ -584,7 +591,10 @@ class TrajectoryRunner:
 
         try:
             return self._run_batch_impl(
-                task_indices, batch_size, progress_callback, eval_logger,
+                task_indices,
+                batch_size,
+                progress_callback,
+                eval_logger,
             )
         finally:
             if eval_logger:
@@ -603,11 +613,13 @@ class TrajectoryRunner:
         max_steps = self.environment.spec.max_steps or 100
 
         if eval_logger:
-            eval_logger.on_batch_start(_BatchStartEvent(
-                num_tasks=len(task_indices),
-                environment_name=self.environment.spec.name,
-                max_steps=max_steps,
-            ))
+            eval_logger.on_batch_start(
+                _BatchStartEvent(
+                    num_tasks=len(task_indices),
+                    environment_name=self.environment.spec.name,
+                    max_steps=max_steps,
+                )
+            )
 
         if batch_size is not None and len(task_indices) > batch_size:
             result = _run_in_chunks(
@@ -620,11 +632,13 @@ class TrajectoryRunner:
             result = self._run_batch_inner(task_indices, progress_callback, eval_logger)
 
         if eval_logger:
-            eval_logger.on_batch_end(_BatchEndEvent(
-                success_rate=result.success_rate,
-                mean_reward=result.mean_reward,
-                num_tasks=len(task_indices),
-            ))
+            eval_logger.on_batch_end(
+                _BatchEndEvent(
+                    success_rate=result.success_rate,
+                    mean_reward=result.mean_reward,
+                    num_tasks=len(task_indices),
+                )
+            )
 
         return result
 
@@ -645,9 +659,7 @@ class TrajectoryRunner:
         active: list[_ActiveTrajectory] = []
         for pos, task_index in enumerate(task_indices):
             try:
-                state, reset_info = self.environment.reset(
-                    options={"task_index": task_index}
-                )
+                state, reset_info = self.environment.reset(options={"task_index": task_index})
                 trajectory: Trajectory[Any] = Trajectory.create(state)
                 active.append(
                     _ActiveTrajectory(
@@ -661,9 +673,13 @@ class TrajectoryRunner:
             except Exception as e:
                 logger.error(f"Error resetting task {task_index}: {e}")
                 if eval_logger:
-                    eval_logger.on_error(_ErrorEvent(
-                        task_index=task_index, phase="reset", error=str(e),
-                    ))
+                    eval_logger.on_error(
+                        _ErrorEvent(
+                            task_index=task_index,
+                            phase="reset",
+                            error=str(e),
+                        )
+                    )
                 result_slots[pos] = TrajectoryResult(
                     trajectory=Trajectory(
                         episode_id=f"error_{task_index}",
@@ -703,17 +719,12 @@ class TrajectoryRunner:
                 assert self.tool_call_parser is not None
                 tools_text = self.tool_call_parser.format_tools(tuple(tools))
                 modified_batch = [
-                    self._inject_tools_in_messages(msgs, tools_text)
-                    for msgs in messages_batch
+                    self._inject_tools_in_messages(msgs, tools_text) for msgs in messages_batch
                 ]
-                raw_results = self.backend.generate_chat_batch(
-                    modified_batch, self.sampling_params
-                )
+                raw_results = self.backend.generate_chat_batch(modified_batch, self.sampling_params)
                 gen_results = []
                 for raw in raw_results:
-                    parsed = self.tool_call_parser.parse(
-                        raw.text or "", tuple(tools)
-                    )
+                    parsed = self.tool_call_parser.parse(raw.text or "", tuple(tools))
                     gen_results.append(
                         GenerationResult(
                             text=parsed.text,
@@ -735,9 +746,7 @@ class TrajectoryRunner:
                         type(self.backend).__name__,
                     )
                     self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
-                gen_results = self.backend.generate_chat_batch(
-                    messages_batch, self.sampling_params
-                )
+                gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
 
             for t, gen_result in zip(remaining, gen_results):
                 try:
@@ -768,38 +777,48 @@ class TrajectoryRunner:
                     t.step_count += 1
 
                     if eval_logger:
-                        eval_logger.on_step(_StepEvent(
-                            task_index=t.task_index,
-                            step_num=t.step_count,
-                            reward_total=step_result.rewards.total,
-                            prompt_tokens=gen_result.prompt_tokens,
-                            completion_tokens=gen_result.completion_tokens,
-                            has_tool_calls=gen_result.has_tool_calls,
-                            num_tool_calls=len(gen_result.tool_calls) if gen_result.has_tool_calls else 0,
-                        ))
+                        eval_logger.on_step(
+                            _StepEvent(
+                                task_index=t.task_index,
+                                step_num=t.step_count,
+                                reward_total=step_result.rewards.total,
+                                prompt_tokens=gen_result.prompt_tokens,
+                                completion_tokens=gen_result.completion_tokens,
+                                has_tool_calls=gen_result.has_tool_calls,
+                                num_tool_calls=len(gen_result.tool_calls)
+                                if gen_result.has_tool_calls
+                                else 0,
+                            )
+                        )
 
                     if step_result.done or t.step_count >= max_steps:
                         t.done = True
                         completed_count += 1
                         if eval_logger:
                             result = _finalize_trajectory(t)
-                            eval_logger.on_trajectory_end(_TrajectoryEndEvent(
-                                task_index=t.task_index,
-                                success=result.success,
-                                total_reward=result.total_reward,
-                                num_steps=len(t.trajectory),
-                                completed_count=completed_count,
-                                total_count=total,
-                            ))
+                            eval_logger.on_trajectory_end(
+                                _TrajectoryEndEvent(
+                                    task_index=t.task_index,
+                                    success=result.success,
+                                    total_reward=result.total_reward,
+                                    num_steps=len(t.trajectory),
+                                    completed_count=completed_count,
+                                    total_count=total,
+                                )
+                            )
                 except Exception as e:
                     logger.error(f"Error stepping task {t.task_index}: {e}")
                     t.done = True
                     t.error = str(e)
                     completed_count += 1
                     if eval_logger:
-                        eval_logger.on_error(_ErrorEvent(
-                            task_index=t.task_index, phase="step", error=str(e),
-                        ))
+                        eval_logger.on_error(
+                            _ErrorEvent(
+                                task_index=t.task_index,
+                                phase="step",
+                                error=str(e),
+                            )
+                        )
 
             if progress_callback:
                 done_count = reset_errors + sum(1 for t in active if t.done)
@@ -946,13 +965,18 @@ def run_multi_evaluation(
     for i, entry in enumerate(entries):
         if entry.runner.log is not None:
             entry_loggers[i] = _EvalLogger(
-                entry.runner.log, entry.runner.environment.spec.name,
+                entry.runner.log,
+                entry.runner.environment.spec.name,
             )
 
     try:
         return _run_multi_eval_impl(
-            entries, backend, sampling_params, batch_size,
-            progress_callback, entry_loggers,
+            entries,
+            backend,
+            sampling_params,
+            batch_size,
+            progress_callback,
+            entry_loggers,
         )
     finally:
         for el in entry_loggers.values():
@@ -977,11 +1001,13 @@ def _run_multi_eval_impl(
     # Emit batch_start for each entry
     for i, entry in enumerate(entries):
         if i in entry_loggers:
-            entry_loggers[i].on_batch_start(_BatchStartEvent(
-                num_tasks=len(entry.task_indices),
-                environment_name=entry.runner.environment.spec.name,
-                max_steps=max_steps_per_entry[i],
-            ))
+            entry_loggers[i].on_batch_start(
+                _BatchStartEvent(
+                    num_tasks=len(entry.task_indices),
+                    environment_name=entry.runner.environment.spec.name,
+                    max_steps=max_steps_per_entry[i],
+                )
+            )
 
     # Reset all tasks across all entries
     all_trajectories: list[_MultiActiveTrajectory] = []
@@ -1012,9 +1038,13 @@ def _run_multi_eval_impl(
             except Exception as e:
                 logger.error(f"Error resetting task {task_index} in entry {entry_idx}: {e}")
                 if entry_idx in entry_loggers:
-                    entry_loggers[entry_idx].on_error(_ErrorEvent(
-                        task_index=task_index, phase="reset", error=str(e),
-                    ))
+                    entry_loggers[entry_idx].on_error(
+                        _ErrorEvent(
+                            task_index=task_index,
+                            phase="reset",
+                            error=str(e),
+                        )
+                    )
                 reset_error_results[entry_idx].append(
                     TrajectoryResult(
                         trajectory=Trajectory(
@@ -1034,19 +1064,24 @@ def _run_multi_eval_impl(
     if batch_size is not None and len(all_trajectories) > batch_size:
         # Chunk trajectories and process each chunk
         for start in range(0, len(all_trajectories), batch_size):
-            chunk = all_trajectories[start:start + batch_size]
+            chunk = all_trajectories[start : start + batch_size]
             _run_multi_lockstep(
-                chunk, backend, sampling_params, max_steps_per_entry,
+                chunk,
+                backend,
+                sampling_params,
+                max_steps_per_entry,
                 progress_callback=progress_callback,
                 total_for_progress=total,
-                progress_offset=sum(
-                    1 for t in all_trajectories[:start] if t.inner.done
-                ) + sum(len(v) for v in reset_error_results.values()),
+                progress_offset=sum(1 for t in all_trajectories[:start] if t.inner.done)
+                + sum(len(v) for v in reset_error_results.values()),
             )
     else:
         reset_errors_total = sum(len(v) for v in reset_error_results.values())
         _run_multi_lockstep(
-            all_trajectories, backend, sampling_params, max_steps_per_entry,
+            all_trajectories,
+            backend,
+            sampling_params,
+            max_steps_per_entry,
             progress_callback=progress_callback,
             total_for_progress=total,
             progress_offset=reset_errors_total,
@@ -1067,11 +1102,13 @@ def _run_multi_eval_impl(
     for i in range(len(entries)):
         batch_result = _aggregate_results(per_entry_results[i])
         if i in entry_loggers:
-            entry_loggers[i].on_batch_end(_BatchEndEvent(
-                success_rate=batch_result.success_rate,
-                mean_reward=batch_result.mean_reward,
-                num_tasks=len(per_entry_results[i]),
-            ))
+            entry_loggers[i].on_batch_end(
+                _BatchEndEvent(
+                    success_rate=batch_result.success_rate,
+                    mean_reward=batch_result.mean_reward,
+                    num_tasks=len(per_entry_results[i]),
+                )
+            )
         results.append(batch_result)
 
     return results
@@ -1131,7 +1168,9 @@ def run_evaluation(
     )
 
     return runner.run_batch(
-        task_indices, batch_size=batch_size, progress_callback=progress_callback,
+        task_indices,
+        batch_size=batch_size,
+        progress_callback=progress_callback,
     )
 
 
@@ -1479,7 +1518,11 @@ class SegmentedTrajectoryRunner:
         # One-shot completion for early exit
         if complete_early and not terminal:
             state, terminal = self._complete_remainder(
-                env, trajectory, state, messages, accumulated,
+                env,
+                trajectory,
+                state,
+                messages,
+                accumulated,
             )
 
         # Finalize to get correctness rewards
@@ -1626,9 +1669,7 @@ class SegmentedTrajectoryRunner:
                     )
                     for t in need_gen
                 ]
-                seg_results = strategy.generate_segment_batch(
-                    contexts, self.sampling_params
-                )
+                seg_results = strategy.generate_segment_batch(contexts, self.sampling_params)
                 for t, seg_result in zip(need_gen, seg_results):
                     gen_map[id(t)] = seg_result
 
@@ -1695,12 +1736,8 @@ class SegmentedTrajectoryRunner:
                         elif isinstance(feedback, ForceAction):
                             t.forced_segment = feedback.text
                         elif feedback is not None:
-                            t.messages.append(
-                                ChatMessage(role="assistant", content=t.accumulated)
-                            )
-                            t.messages.append(
-                                ChatMessage(role="user", content=feedback)
-                            )
+                            t.messages.append(ChatMessage(role="assistant", content=t.accumulated))
+                            t.messages.append(ChatMessage(role="user", content=feedback))
                             t.accumulated = ""
                             t.buffer = ""
 
@@ -1717,9 +1754,7 @@ class SegmentedTrajectoryRunner:
                     t.error = str(e)
 
             if progress_callback:
-                done_count = reset_errors + sum(
-                    1 for t in active if t.done or t.generation_done
-                )
+                done_count = reset_errors + sum(1 for t in active if t.done or t.generation_done)
                 progress_callback(done_count, total)
 
         # Phase 3: Buffer drain
@@ -1755,7 +1790,11 @@ class SegmentedTrajectoryRunner:
             if t.complete_early and not t.done:
                 try:
                     state, terminal = self._complete_remainder(
-                        env, t.trajectory, t.state, t.messages, t.accumulated,
+                        env,
+                        t.trajectory,
+                        t.state,
+                        t.messages,
+                        t.accumulated,
                     )
                     t.state = state
                     if terminal:

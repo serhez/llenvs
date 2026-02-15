@@ -327,9 +327,7 @@ class NumericExtractor:
 
     def __post_init__(self) -> None:
         # Match numbers with optional commas for thousands, optional decimal
-        self._pattern = re.compile(
-            r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?"
-        )
+        self._pattern = re.compile(r"-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?")
 
     def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
         """Extract the last number from text."""
@@ -358,9 +356,7 @@ class LastLineExtractor:
 
     def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
         """Return the last non-empty line."""
-        lines = [
-            line.strip() for line in response.strip().split("\n") if line.strip()
-        ]
+        lines = [line.strip() for line in response.strip().split("\n") if line.strip()]
 
         if not lines:
             return None, {"found": False, "format": "last_line"}

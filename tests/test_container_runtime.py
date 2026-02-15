@@ -89,8 +89,10 @@ class TestDockerRuntime:
             docker_command="docker",
         )
 
-        with patch("llenvs.container.runtime.subprocess.run") as mock_run, \
-             patch("llenvs.container.runtime._wait_for_health"):
+        with (
+            patch("llenvs.container.runtime.subprocess.run") as mock_run,
+            patch("llenvs.container.runtime._wait_for_health"),
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="abc123\n", stderr="")
             url = rt.start()
 
@@ -113,25 +115,25 @@ class TestDockerRuntime:
             image="test:latest",
             config_json='{"name":"test"}',
         )
-        with patch("llenvs.container.runtime.subprocess.run") as mock_run, \
-             patch("llenvs.container.runtime._wait_for_health"), \
-             patch("llenvs.container.runtime._find_free_port", return_value=12345):
+        with (
+            patch("llenvs.container.runtime.subprocess.run") as mock_run,
+            patch("llenvs.container.runtime._wait_for_health"),
+            patch("llenvs.container.runtime._find_free_port", return_value=12345),
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="container123\n", stderr="")
             url = rt.start()
 
         assert "12345" in url
 
     def test_start_failure(self):
-        rt = DockerRuntime(image="bad:latest", config_json='{}')
+        rt = DockerRuntime(image="bad:latest", config_json="{}")
         with patch("llenvs.container.runtime.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1, stdout="", stderr="image not found"
-            )
+            mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="image not found")
             with pytest.raises(RuntimeError, match="Docker run failed"):
                 rt.start()
 
     def test_stop(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         rt._container_id = "abc123"
         with patch("llenvs.container.runtime.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
@@ -140,29 +142,29 @@ class TestDockerRuntime:
         mock_run.assert_called_once()
 
     def test_stop_idempotent(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         rt.stop()  # No container_id, should not raise
 
     def test_is_running_true(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         rt._container_id = "abc123"
         with patch("llenvs.container.runtime.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="true\n", stderr="")
             assert rt.is_running() is True
 
     def test_is_running_false(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         rt._container_id = "abc123"
         with patch("llenvs.container.runtime.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="false\n", stderr="")
             assert rt.is_running() is False
 
     def test_is_running_no_container(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         assert rt.is_running() is False
 
     def test_logs(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         rt._container_id = "abc123"
         with patch("llenvs.container.runtime.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
@@ -172,7 +174,7 @@ class TestDockerRuntime:
         assert "server started" in logs
 
     def test_logs_no_container(self):
-        rt = DockerRuntime(image="test:latest", config_json='{}')
+        rt = DockerRuntime(image="test:latest", config_json="{}")
         assert rt.logs() == ""
 
 
@@ -193,8 +195,12 @@ class TestProcessRuntime:
         mock_proc.pid = 12345
         mock_proc.poll.return_value = None
 
-        with patch("llenvs.container.runtime.subprocess.Popen", return_value=mock_proc) as mock_popen, \
-             patch("llenvs.container.runtime._wait_for_health"):
+        with (
+            patch(
+                "llenvs.container.runtime.subprocess.Popen", return_value=mock_proc
+            ) as mock_popen,
+            patch("llenvs.container.runtime._wait_for_health"),
+        ):
             url = rt.start()
 
         assert url == "http://127.0.0.1:8888"
@@ -214,15 +220,17 @@ class TestProcessRuntime:
         mock_proc.pid = 99
         mock_proc.poll.return_value = None
 
-        with patch("llenvs.container.runtime.subprocess.Popen", return_value=mock_proc), \
-             patch("llenvs.container.runtime._wait_for_health"), \
-             patch("llenvs.container.runtime._find_free_port", return_value=54321):
+        with (
+            patch("llenvs.container.runtime.subprocess.Popen", return_value=mock_proc),
+            patch("llenvs.container.runtime._wait_for_health"),
+            patch("llenvs.container.runtime._find_free_port", return_value=54321),
+        ):
             url = rt.start()
 
         assert "54321" in url
 
     def test_stop(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         mock_proc = MagicMock()
         mock_proc.wait.return_value = 0
         rt._process = mock_proc
@@ -232,7 +240,7 @@ class TestProcessRuntime:
         assert rt._process is None
 
     def test_stop_kills_on_timeout(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         mock_proc = MagicMock()
         mock_proc.terminate.return_value = None
         mock_proc.wait.side_effect = [subprocess.TimeoutExpired("cmd", 5), None]
@@ -242,29 +250,29 @@ class TestProcessRuntime:
         mock_proc.kill.assert_called_once()
 
     def test_stop_idempotent(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         rt.stop()  # No process, should not raise
 
     def test_is_running_true(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None  # Still running
         rt._process = mock_proc
         assert rt.is_running() is True
 
     def test_is_running_false_exited(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 0  # Exited
         rt._process = mock_proc
         assert rt.is_running() is False
 
     def test_is_running_no_process(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         assert rt.is_running() is False
 
     def test_logs_after_exit(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         mock_proc = MagicMock()
         mock_proc.poll.return_value = 0
         mock_proc.communicate.return_value = (b"output\n", b"error\n")
@@ -274,7 +282,7 @@ class TestProcessRuntime:
         assert "error" in logs
 
     def test_logs_while_running(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         rt._process = mock_proc
@@ -282,18 +290,20 @@ class TestProcessRuntime:
         assert "still running" in logs
 
     def test_logs_no_process(self):
-        rt = ProcessRuntime(config_json='{}')
+        rt = ProcessRuntime(config_json="{}")
         assert rt.logs() == ""
 
     def test_start_timeout_collects_stderr(self):
-        rt = ProcessRuntime(config_json='{}', port=1, timeout=0.3)
+        rt = ProcessRuntime(config_json="{}", port=1, timeout=0.3)
 
         mock_proc = MagicMock()
         mock_proc.pid = 1
         mock_proc.poll.return_value = 1  # Already exited
         mock_proc.communicate.return_value = (b"", b"import error\n")
 
-        with patch("llenvs.container.runtime.subprocess.Popen", return_value=mock_proc), \
-             patch("llenvs.container.runtime._wait_for_health", side_effect=TimeoutError("timeout")):
+        with (
+            patch("llenvs.container.runtime.subprocess.Popen", return_value=mock_proc),
+            patch("llenvs.container.runtime._wait_for_health", side_effect=TimeoutError("timeout")),
+        ):
             with pytest.raises(TimeoutError, match="import error"):
                 rt.start()

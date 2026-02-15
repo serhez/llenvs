@@ -56,11 +56,7 @@ class CodeExecutionResult:
     @property
     def all_passed(self) -> bool:
         """Whether every test passed with no errors."""
-        return (
-            self.compilation_error is None
-            and self.total > 0
-            and self.passed == self.total
-        )
+        return self.compilation_error is None and self.total > 0 and self.passed == self.total
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +104,7 @@ print(json.dumps({{"results": results}}))
 class SubprocessCodeExecutor:
     """Execute code + tests in a subprocess with timeout."""
 
-    def execute(
-        self, code: str, test_code: str, *, timeout: float = 30.0
-    ) -> CodeExecutionResult:
+    def execute(self, code: str, test_code: str, *, timeout: float = 30.0) -> CodeExecutionResult:
         """Run *code* then *test_code* in a fresh Python subprocess.
 
         Each assertion line in *test_code* is run independently so partial
@@ -176,11 +170,7 @@ class SubprocessCodeExecutor:
 
         results = data.get("results", [])
         passed = sum(1 for r in results if r.get("passed"))
-        errors = tuple(
-            (r["name"], r.get("error", ""))
-            for r in results
-            if not r.get("passed")
-        )
+        errors = tuple((r["name"], r.get("error", "")) for r in results if not r.get("passed"))
 
         return CodeExecutionResult(
             passed=passed,
@@ -202,9 +192,7 @@ def _split_tests(test_code: str) -> list[str]:
 
     # If it looks like individual assert statements, split them
     if all(
-        line.strip().startswith("assert ") or not line.strip()
-        for line in lines
-        if line.strip()
+        line.strip().startswith("assert ") or not line.strip() for line in lines if line.strip()
     ):
         return [line.strip() for line in lines if line.strip()]
 

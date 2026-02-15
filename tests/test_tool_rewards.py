@@ -23,9 +23,7 @@ def sample_state() -> State[Any]:
     return State(observation=obs, hidden=None, metadata=metadata)
 
 
-def make_next_state(
-    state: State, tool_results: tuple[ToolResult, ...]
-) -> State[Any]:
+def make_next_state(state: State, tool_results: tuple[ToolResult, ...]) -> State[Any]:
     """Create a next state with tool results."""
     next_obs = Observation(
         prompt=state.observation.prompt,
@@ -251,8 +249,7 @@ class TestToolEfficiencyReward:
         )
         action = Action(
             tool_calls=tuple(
-                ToolCall(id=str(i), name="tool", arguments={"i": i})
-                for i in range(10)
+                ToolCall(id=str(i), name="tool", arguments={"i": i}) for i in range(10)
             )
         )
         next_state = make_next_state(sample_state, ())
@@ -296,11 +293,7 @@ class TestToolMonitoringRewards:
         validity = ToolValidityReward(_weight=0.0)
         efficiency = ToolEfficiencyReward(_weight=0.0)
 
-        action = Action(
-            tool_calls=(
-                ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
-            )
-        )
+        action = Action(tool_calls=(ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),))
         tool_results = (ToolResult.success("1", "add", "3"),)
         next_state = make_next_state(sample_state, tool_results)
 
@@ -316,11 +309,7 @@ class TestToolMonitoringRewards:
     def test_monitoring_signals_still_inspectable(self, sample_state):
         """Test that zero-weight signals are present in bundle for inspection."""
         validity = ToolValidityReward(_weight=0.0)
-        action = Action(
-            tool_calls=(
-                ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),
-            )
-        )
+        action = Action(tool_calls=(ToolCall(id="1", name="add", arguments={"a": 1, "b": 2}),))
         tool_results = (ToolResult.success("1", "add", "3"),)
         next_state = make_next_state(sample_state, tool_results)
 

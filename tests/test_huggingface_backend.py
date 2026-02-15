@@ -582,9 +582,16 @@ class TestHuggingFaceChatTemplateKwargs:
         backend._model.generate.return_value = MagicMock()
 
         # Mock generate to avoid the full pipeline
-        with patch.object(backend, "generate", return_value=[GenerationResult(
-            text="ok", finish_reason=StopReason.END_OF_TEXT,
-        )]):
+        with patch.object(
+            backend,
+            "generate",
+            return_value=[
+                GenerationResult(
+                    text="ok",
+                    finish_reason=StopReason.END_OF_TEXT,
+                )
+            ],
+        ):
             backend.generate_chat(
                 [ChatMessage(role="user", content="hi")],
                 SamplingParams(max_tokens=10),
@@ -598,9 +605,16 @@ class TestHuggingFaceChatTemplateKwargs:
         """chat_template_kwargs spread into apply_chat_template in generate_chat_batch."""
         backend = self._create_mock_backend({"enable_thinking": True})
 
-        with patch.object(backend, "generate", return_value=[GenerationResult(
-            text="ok", finish_reason=StopReason.END_OF_TEXT,
-        )]):
+        with patch.object(
+            backend,
+            "generate",
+            return_value=[
+                GenerationResult(
+                    text="ok",
+                    finish_reason=StopReason.END_OF_TEXT,
+                )
+            ],
+        ):
             backend.generate_chat_batch(
                 [[ChatMessage(role="user", content="hi")]],
                 SamplingParams(max_tokens=10),
@@ -614,9 +628,16 @@ class TestHuggingFaceChatTemplateKwargs:
         """Empty chat_template_kwargs doesn't add extra args."""
         backend = self._create_mock_backend({})
 
-        with patch.object(backend, "generate", return_value=[GenerationResult(
-            text="ok", finish_reason=StopReason.END_OF_TEXT,
-        )]):
+        with patch.object(
+            backend,
+            "generate",
+            return_value=[
+                GenerationResult(
+                    text="ok",
+                    finish_reason=StopReason.END_OF_TEXT,
+                )
+            ],
+        ):
             backend.generate_chat(
                 [ChatMessage(role="user", content="hi")],
                 SamplingParams(max_tokens=10),

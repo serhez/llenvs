@@ -33,7 +33,9 @@ class _MockRewardFn:
     def reward_type(self) -> RewardType:
         return RewardType.OUTCOME
 
-    def compute(self, state: State[_MockHidden], action: Any, next_state: State[_MockHidden]) -> Signal:
+    def compute(
+        self, state: State[_MockHidden], action: Any, next_state: State[_MockHidden]
+    ) -> Signal:
         correct = (action.text or "") == state.hidden.expected_answer
         return Signal(reward=1.0 if correct else 0.0, name=self.name, reward_type=self.reward_type)
 
@@ -71,11 +73,16 @@ class MockEnv:
     def step(self, state, action):
         rewards = self.compute_rewards(state, action, state)
         next_state = State(
-            observation=state.observation, hidden=state.hidden,
+            observation=state.observation,
+            hidden=state.hidden,
             metadata=StateMetadata(step=1, episode_id=state.metadata.episode_id, is_terminal=True),
         )
-        return StepResult(next_state=next_state, rewards=rewards, terminated=True,
-                          info={"extracted_answer": action.text})
+        return StepResult(
+            next_state=next_state,
+            rewards=rewards,
+            terminated=True,
+            info={"extracted_answer": action.text},
+        )
 
     def compute_rewards(self, state, action, next_state):
         signals = tuple(fn.compute(state, action, next_state) for fn in self.reward_functions)

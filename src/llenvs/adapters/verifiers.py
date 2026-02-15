@@ -22,7 +22,12 @@ from llenvs.core.reward import (
     RewardType,
     RewardFunction,
 )
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec, _StateContinuityTracker
+from llenvs.core.environment import (
+    Environment,
+    StepResult,
+    EnvironmentSpec,
+    _StateContinuityTracker,
+)
 from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.tools import (
     ToolCall,
@@ -175,11 +180,7 @@ def _build_reward_kwargs(
         "state": {},
         "task": dataset_dict.get("task", ""),
     }
-    return {
-        name: available[name]
-        for name in sig.parameters
-        if name in available
-    }
+    return {name: available[name] for name in sig.parameters if name in available}
 
 
 @dataclass
@@ -325,9 +326,7 @@ class VerifiersSingleTurnEnvironment:
 
         task_index = options["task_index"]
         if task_index < 0 or task_index >= len(self._dataset):
-            raise ValueError(
-                f"task_index {task_index} out of bounds [0, {len(self._dataset)})"
-            )
+            raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._dataset)})")
 
         row = self._dataset[task_index]
 
@@ -349,10 +348,7 @@ class VerifiersSingleTurnEnvironment:
         expected_answer = row.get("answer")
 
         # Freeze the dataset row for hidden state
-        dataset_item = tuple(
-            (k, v) for k, v in row.items()
-            if isinstance(k, str)
-        )
+        dataset_item = tuple((k, v) for k, v in row.items() if isinstance(k, str))
 
         hidden = VerifiersHidden(
             env_id=self._env_id,
@@ -546,9 +542,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
 
         task_index = options["task_index"]
         if task_index < 0 or task_index >= len(self._dataset):
-            raise ValueError(
-                f"task_index {task_index} out of bounds [0, {len(self._dataset)})"
-            )
+            raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._dataset)})")
 
         row = self._dataset[task_index]
 
@@ -562,10 +556,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
             user_prompt = row.get("question", "")
 
         expected_answer = row.get("answer")
-        dataset_item = tuple(
-            (k, v) for k, v in row.items()
-            if isinstance(k, str)
-        )
+        dataset_item = tuple((k, v) for k, v in row.items() if isinstance(k, str))
 
         hidden = VerifiersToolHidden(
             env_id=self._env_id,
@@ -616,7 +607,9 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
         # Build next observation with tool results
         if tool_results or action.tool_calls:
             next_observation = self._build_next_observation(
-                state.observation, action, tool_results,
+                state.observation,
+                action,
+                tool_results,
             )
         else:
             # Text-only — add assistant message to history
@@ -713,11 +706,11 @@ class VerifiersAdapter:
     def _get_verifiers(self) -> Any:
         try:
             import verifiers
+
             return verifiers
         except ImportError as e:
             raise ImportError(
-                "verifiers is required for VerifiersAdapter. "
-                "Install with: pip install verifiers"
+                "verifiers is required for VerifiersAdapter. Install with: pip install verifiers"
             ) from e
 
     def list_environments(self) -> list[str]:

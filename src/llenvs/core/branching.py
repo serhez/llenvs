@@ -193,10 +193,7 @@ class ActionReplayStrategy:
         spec = getattr(env, "spec", None)
         if spec is None:
             return False
-        return (
-            getattr(spec, "supports_seed", False)
-            and getattr(spec, "supports_task_index", False)
-        )
+        return getattr(spec, "supports_seed", False) and getattr(spec, "supports_task_index", False)
 
     def create_checkpoint(
         self,
@@ -356,6 +353,7 @@ class ProcessForkStrategy:
 
 def _import_container_env():
     from llenvs.container.client import ContainerEnvironment
+
     return ContainerEnvironment
 
 
@@ -369,9 +367,7 @@ class _ForkCheckpointData:
     state: State
 
 
-def _start_threaded_server(
-    env: Any, *, hidden_type: type | None = None
-) -> tuple[str, Any]:
+def _start_threaded_server(env: Any, *, hidden_type: type | None = None) -> tuple[str, Any]:
     """Start an EnvironmentServer in a daemon thread, return (url, HTTPServer)."""
     import threading
     import http.client
@@ -391,6 +387,7 @@ def _start_threaded_server(
 
     # Wait for ready
     import time
+
     for _ in range(100):
         try:
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
@@ -459,8 +456,7 @@ def resolve_strategy(
     if preference is not None:
         if preference not in _STRATEGY_NAMES:
             raise ValueError(
-                f"Unknown branching strategy: {preference!r}. "
-                f"Available: {sorted(_STRATEGY_NAMES)}"
+                f"Unknown branching strategy: {preference!r}. Available: {sorted(_STRATEGY_NAMES)}"
             )
         return _create_strategy(preference, env, env_factory)
 
@@ -593,9 +589,7 @@ class BranchManager:
         if name in self._checkpoints:
             self._strategy.release_checkpoint(self._checkpoints[name])
 
-        handle = self._strategy.create_checkpoint(
-            self._env, state, actions, reset_options
-        )
+        handle = self._strategy.create_checkpoint(self._env, state, actions, reset_options)
         self._checkpoints[name] = handle
 
     def branch(self, name: str) -> tuple[Any, State]:
@@ -612,8 +606,7 @@ class BranchManager:
         """
         if name not in self._checkpoints:
             raise KeyError(
-                f"No checkpoint named {name!r}. "
-                f"Available: {sorted(self._checkpoints.keys())}"
+                f"No checkpoint named {name!r}. Available: {sorted(self._checkpoints.keys())}"
             )
         handle = self._checkpoints[name]
         branch = self._strategy.create_branch(handle)
@@ -630,8 +623,7 @@ class BranchManager:
         """
         if name not in self._checkpoints:
             raise KeyError(
-                f"No checkpoint named {name!r}. "
-                f"Available: {sorted(self._checkpoints.keys())}"
+                f"No checkpoint named {name!r}. Available: {sorted(self._checkpoints.keys())}"
             )
         handle = self._checkpoints.pop(name)
         self._strategy.release_checkpoint(handle)

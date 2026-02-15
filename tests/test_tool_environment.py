@@ -73,9 +73,7 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
             ToolDefinition(
                 name="submit_answer",
                 description="Submit the final answer",
-                parameters=(
-                    ToolParameter("answer", ToolParameterType.STRING, "The answer"),
-                ),
+                parameters=(ToolParameter("answer", ToolParameterType.STRING, "The answer"),),
                 is_terminal=True,
             ),
         )
@@ -89,11 +87,13 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
         def submit_answer(answer: str) -> str:
             return f"Submitted: {answer}"
 
-        self._executor = SimpleToolExecutor({
-            "add": add,
-            "multiply": multiply,
-            "submit_answer": submit_answer,
-        })
+        self._executor = SimpleToolExecutor(
+            {
+                "add": add,
+                "multiply": multiply,
+                "submit_answer": submit_answer,
+            }
+        )
 
         self._reward_functions = (CorrectnessReward(),)
 
@@ -143,9 +143,7 @@ class CalculatorEnvironment(BaseToolEnvironment[MockHidden]):
         terminated = self._check_terminal_tools(action.tool_calls)
 
         # Build next observation
-        next_obs = self._build_next_observation(
-            state.observation, action, tool_results
-        )
+        next_obs = self._build_next_observation(state.observation, action, tool_results)
 
         # Update hidden state
         new_hidden = MockHidden(
@@ -207,9 +205,7 @@ class TestBaseToolEnvironment:
 
         action = Action(
             text="Let me add 5 and 3",
-            tool_calls=(
-                ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),),
         )
 
         result = env.step(state, action)
@@ -241,9 +237,7 @@ class TestBaseToolEnvironment:
         state, _ = env.reset()
 
         action = Action(
-            tool_calls=(
-                ToolCall(id="call_1", name="submit_answer", arguments={"answer": "56"}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="submit_answer", arguments={"answer": "56"}),),
         )
 
         result = env.step(state, action)
@@ -257,9 +251,7 @@ class TestBaseToolEnvironment:
         state, _ = env.reset()
 
         action = Action(
-            tool_calls=(
-                ToolCall(id="call_1", name="divide", arguments={"a": 10, "b": 2}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="divide", arguments={"a": 10, "b": 2}),),
         )
 
         result = env.step(state, action)
@@ -287,9 +279,7 @@ class TestBaseToolEnvironment:
         # First action
         action1 = Action(
             text="Let me add 5 and 3",
-            tool_calls=(
-                ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),),
         )
         result1 = env.step(state, action1)
 
@@ -304,9 +294,7 @@ class TestBaseToolEnvironment:
         # Second action
         action2 = Action(
             text="Now multiply by 7",
-            tool_calls=(
-                ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
-            ),
+            tool_calls=(ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),),
         )
         result2 = env.step(result1.next_state, action2)
 
@@ -320,18 +308,14 @@ class TestBaseToolEnvironment:
 
         # First action
         action1 = Action(
-            tool_calls=(
-                ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),),
         )
         result1 = env.step(state, action1)
         assert len(result1.next_state.observation.tool_results) == 1
 
         # Second action
         action2 = Action(
-            tool_calls=(
-                ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
-            ),
+            tool_calls=(ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),),
         )
         result2 = env.step(result1.next_state, action2)
 
@@ -344,16 +328,12 @@ class TestBaseToolEnvironment:
         state, _ = env.reset()
 
         action1 = Action(
-            tool_calls=(
-                ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="add", arguments={"a": 5, "b": 3}),),
         )
         result1 = env.step(state, action1)
 
         action2 = Action(
-            tool_calls=(
-                ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),
-            ),
+            tool_calls=(ToolCall(id="call_2", name="multiply", arguments={"a": 8, "b": 7}),),
         )
         result2 = env.step(result1.next_state, action2)
 

@@ -300,10 +300,7 @@ class JerichoEnvironment:
         task_index = options.get("task_index", 0)
 
         if task_index < 0 or task_index >= len(self._game_files):
-            raise IndexError(
-                f"task_index {task_index} out of range "
-                f"[0, {len(self._game_files)})"
-            )
+            raise IndexError(f"task_index {task_index} out of range [0, {len(self._game_files)})")
 
         game_file = self._game_files[task_index]
         game_name = self._game_names[task_index]
@@ -415,9 +412,7 @@ class JerichoEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_prompt},
         )
-        new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages
-        )
+        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -572,8 +567,7 @@ class JerichoAdapter:
                 for g in games:
                     if g not in bundled:
                         raise ValueError(
-                            f"Unknown game: {g!r}. "
-                            f"Available: {sorted(bundled.keys())}"
+                            f"Unknown game: {g!r}. Available: {sorted(bundled.keys())}"
                         )
                     resolved_files_list.append(bundled[g])
                     resolved_names_list.append(g)
@@ -584,8 +578,7 @@ class JerichoAdapter:
                 game_name = name.split(":", 1)[1]
                 if game_name not in bundled:
                     raise ValueError(
-                        f"Unknown game: {game_name!r}. "
-                        f"Available: {sorted(bundled.keys())}"
+                        f"Unknown game: {game_name!r}. Available: {sorted(bundled.keys())}"
                     )
                 resolved_files = (bundled[game_name],)
                 resolved_names = (game_name,)

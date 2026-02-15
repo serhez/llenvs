@@ -185,10 +185,7 @@ class SegmentedEnvironment(Generic[HiddenT]):
         new_segment_index = hidden.segment_index + 1
 
         # Determine if this is the final segment
-        is_final = (
-            hidden.total_segments is not None
-            and new_segment_index >= hidden.total_segments
-        )
+        is_final = hidden.total_segments is not None and new_segment_index >= hidden.total_segments
 
         if is_final:
             # Final segment: call underlying environment to get outcome rewards

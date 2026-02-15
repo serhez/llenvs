@@ -43,9 +43,7 @@ class TestStripSpecialTokens:
         assert strip_special_tokens("<s>hello") == "hello"
 
     def test_multiple_token_types(self):
-        result = strip_special_tokens(
-            "<|endoftext|><pad>hello</s><|im_end|>"
-        )
+        result = strip_special_tokens("<|endoftext|><pad>hello</s><|im_end|>")
         assert result == "hello"
 
     def test_no_tokens_unchanged(self):
@@ -71,9 +69,7 @@ class TestStripThinkingTokens:
         assert result == "answer text"
 
     def test_multiple_closed_blocks(self):
-        result = strip_thinking_tokens(
-            "<think>first</think>middle<think>second</think>end"
-        )
+        result = strip_thinking_tokens("<think>first</think>middle<think>second</think>end")
         assert result == "middleend"
 
     def test_nested_content_removed(self):
@@ -91,9 +87,7 @@ class TestStripThinkingTokens:
 
     def test_mixed_closed_and_unclosed(self):
         """Closed block + remaining text + unclosed block at end."""
-        result = strip_thinking_tokens(
-            "<think>closed</think>answer<think>unclosed reasoning"
-        )
+        result = strip_thinking_tokens("<think>closed</think>answer<think>unclosed reasoning")
         assert result == "answer"
 
     def test_think_block_at_start(self):
@@ -220,9 +214,7 @@ class TestCleanedExtractor:
             pre_cleaners=[strip_special_tokens],
             post_cleaners=[],
         )
-        answer, meta = extractor.extract(
-            "<answer>42</answer><|endoftext|>"
-        )
+        answer, meta = extractor.extract("<answer>42</answer><|endoftext|>")
         assert answer == "42"
         assert meta["pre_cleaners_applied"] is True
         assert meta["post_cleaners_applied"] is True
@@ -249,9 +241,7 @@ class TestCleanedExtractor:
             pre_cleaners=[strip_special_tokens],
             post_cleaners=[strip_trailing_punctuation],
         )
-        answer, meta = extractor.extract(
-            "<|endoftext|><answer>42.</answer></s>"
-        )
+        answer, meta = extractor.extract("<|endoftext|><answer>42.</answer></s>")
         assert answer == "42"
         assert meta["pre_cleaners_applied"] is True
         assert meta["post_cleaners_applied"] is True

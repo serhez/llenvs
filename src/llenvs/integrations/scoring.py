@@ -79,9 +79,7 @@ class Scorer:
 
         rewards = step_result.rewards
         signals = {s.name: s.reward for s in rewards.signals}
-        metadata = {
-            s.name: s.metadata for s in rewards.signals if s.metadata is not None
-        }
+        metadata = {s.name: s.metadata for s in rewards.signals if s.metadata is not None}
 
         # Get extracted answer: prefer step info, fall back to reward metadata.
         # Both sources use None to mean "extraction failed" (not empty string).
@@ -99,9 +97,7 @@ class Scorer:
             metadata=metadata,
         )
 
-    def score_batch(
-        self, task_indices: list[int], responses: list[str]
-    ) -> list[ScoringResult]:
+    def score_batch(self, task_indices: list[int], responses: list[str]) -> list[ScoringResult]:
         """Score multiple responses in batch.
 
         Args:
@@ -119,9 +115,7 @@ class Scorer:
                 f"task_indices and responses must have the same length, "
                 f"got {len(task_indices)} and {len(responses)}"
             )
-        return [
-            self.score(idx, resp) for idx, resp in zip(task_indices, responses)
-        ]
+        return [self.score(idx, resp) for idx, resp in zip(task_indices, responses)]
 
     @classmethod
     def from_config(cls, config: Any) -> Scorer:

@@ -19,12 +19,14 @@ from llenvs.inference.protocol import (
 # Check if openai/anthropic are available
 try:
     import openai
+
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
 
 try:
     import anthropic
+
     HAS_ANTHROPIC = True
 except ImportError:
     HAS_ANTHROPIC = False
@@ -140,9 +142,7 @@ class TestChatMessageToolSupport:
         msg = ChatMessage(
             role="assistant",
             content="Let me search",
-            tool_calls=(
-                ToolCall(id="call_1", name="search", arguments={"query": "python"}),
-            ),
+            tool_calls=(ToolCall(id="call_1", name="search", arguments={"query": "python"}),),
         )
         d = msg.to_dict()
 
@@ -226,9 +226,7 @@ class TestOpenAIBackendTools:
             from llenvs.inference.backends.api import OpenAIBackend
 
             backend = OpenAIBackend(model="gpt-4o")
-            result = backend.generate_with_tools(
-                sample_messages, sample_tools, SamplingParams()
-            )
+            result = backend.generate_with_tools(sample_messages, sample_tools, SamplingParams())
 
             assert result.text == "Let me check the weather"
             assert result.finish_reason == StopReason.TOOL_USE
@@ -266,9 +264,7 @@ class TestOpenAIBackendTools:
             from llenvs.inference.backends.api import OpenAIBackend
 
             backend = OpenAIBackend(model="gpt-4o")
-            result = backend.generate_with_tools(
-                sample_messages, sample_tools, SamplingParams()
-            )
+            result = backend.generate_with_tools(sample_messages, sample_tools, SamplingParams())
 
             assert result.text == "I don't need to use tools for this"
             assert result.tool_calls == ()
@@ -308,9 +304,7 @@ class TestAnthropicBackendTools:
             from llenvs.inference.backends.api import AnthropicBackend
 
             backend = AnthropicBackend(model="claude-sonnet-4-20250514")
-            result = backend.generate_with_tools(
-                sample_messages, sample_tools, SamplingParams()
-            )
+            result = backend.generate_with_tools(sample_messages, sample_tools, SamplingParams())
 
             assert result.text == "I'll check the weather"
             assert result.finish_reason == StopReason.TOOL_USE
@@ -346,9 +340,7 @@ class TestAnthropicBackendTools:
             from llenvs.inference.backends.api import AnthropicBackend
 
             backend = AnthropicBackend(model="claude-sonnet-4-20250514")
-            result = backend.generate_with_tools(
-                sample_messages, sample_tools, SamplingParams()
-            )
+            result = backend.generate_with_tools(sample_messages, sample_tools, SamplingParams())
 
             assert result.text is None
             assert len(result.tool_calls) == 1

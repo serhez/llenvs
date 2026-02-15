@@ -124,9 +124,7 @@ class Registry(Generic[T]):
         """
         if name not in self._factories:
             if name in self._items:
-                raise KeyError(
-                    f"{self.name} '{name}' was registered as instance, not factory"
-                )
+                raise KeyError(f"{self.name} '{name}' was registered as instance, not factory")
             raise KeyError(f"{self.name} '{name}' not found. Available: {list(self.keys())}")
 
         factory = self._factories[name]
@@ -245,9 +243,7 @@ class EnvironmentRegistry:
         """
         result: list[tuple[str, str]] = []
 
-        adapters_to_check = (
-            [self._adapters[adapter]] if adapter else self._adapters.values()
-        )
+        adapters_to_check = [self._adapters[adapter]] if adapter else self._adapters.values()
 
         for adp in adapters_to_check:
             for env_name in adp.list_environments():
