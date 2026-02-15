@@ -38,6 +38,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **GEM** | Multi-turn games and benchmarks | GuessTheNumber, Wordle, Mastermind |
 | **WebShop** | E-commerce product search | Navigate, search, purchase |
 | **AlfWorld** | Text-based household tasks | pick & place, clean, heat, cool, examine |
+| **Jericho** | Classic interactive fiction games | Zork, Hitchhiker's Guide, Detective |
 | **AgentGym** | 15 multi-turn agent environments | ALFWorld, BabyAI, SciWorld, TextCraft |
 | **Verifiers** | Verifiers library environments | Rubric-scored tasks, tool-enabled envs |
 | **OpenEnv** | OpenEnv session-based environments | MCP tool servers, generic clients |
@@ -196,6 +197,7 @@ Built-in segmenters: `SentenceSegmenter`, `LineSegmenter`, `NumberedStepSegmente
 pip install llenvs[openai,reasoning-gym]   # API + reasoning tasks
 pip install llenvs[vllm,huggingface]       # Local inference + HF datasets
 pip install llenvs[alfworld]               # AlfWorld household tasks
+pip install llenvs[jericho]               # Jericho interactive fiction
 pip install llenvs[agentgym]               # AgentGym environments
 pip install llenvs[verifiers]              # Verifiers environments
 pip install llenvs[openenv]                # OpenEnv environments

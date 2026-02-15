@@ -79,6 +79,12 @@ from llenvs.adapters.alfworld import (
     AlfWorldReward,
     ALFWORLD_TASK_TYPES,
 )
+from llenvs.adapters.jericho import (
+    JerichoEnvironment,
+    JerichoHidden,
+    JerichoAdapter,
+    JerichoReward,
+)
 
 __all__ = [
     # ReasoningGym
@@ -146,6 +152,11 @@ __all__ = [
     "AlfWorldAdapter",
     "AlfWorldReward",
     "ALFWORLD_TASK_TYPES",
+    # Jericho
+    "JerichoEnvironment",
+    "JerichoHidden",
+    "JerichoAdapter",
+    "JerichoReward",
 ]
 
 
@@ -254,6 +265,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # alfworld not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register Jericho adapter if available
+    try:
+        adapter = JerichoAdapter()
+        adapter._get_jericho()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # jericho not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
