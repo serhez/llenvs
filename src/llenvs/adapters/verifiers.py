@@ -10,94 +10,32 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass
 from typing import Any
 
-import uuid
-
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import (
-    SignalBundle,
-    Signal,
-    RewardType,
-    RewardFunction,
-)
 from llenvs.core.environment import (
-    Environment,
-    StepResult,
     EnvironmentSpec,
+    StepResult,
     _StateContinuityTracker,
 )
 from llenvs.core.extraction import AnswerExtractor
+from llenvs.core.reward import (
+    RewardFunction,
+    RewardType,
+    Signal,
+    SignalBundle,
+)
+from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolCall,
-    ToolDefinition,
-    ToolParameter,
-    ToolParameterType,
     ToolResult,
     ToolResultStatus,
-    ToolExecutor,
+    oai_tools_to_definitions,
 )
-from llenvs.core.tool_environment import BaseToolEnvironment
 
 logger = logging.getLogger(__name__)
-
-
-# ── Type mapping ────────────────────────────────────────────────────
-
-_OAI_TYPE_MAP: dict[str, ToolParameterType] = {
-    "string": ToolParameterType.STRING,
-    "integer": ToolParameterType.INTEGER,
-    "number": ToolParameterType.NUMBER,
-    "boolean": ToolParameterType.BOOLEAN,
-    "array": ToolParameterType.ARRAY,
-    "object": ToolParameterType.OBJECT,
-}
-
-
-def _oai_tools_to_definitions(
-    oai_tools: list[dict[str, Any]],
-) -> tuple[ToolDefinition, ...]:
-    """Convert OpenAI-format tool schemas to ToolDefinitions.
-
-    Args:
-        oai_tools: List of OpenAI tool schema dicts.
-
-    Returns:
-        Tuple of ToolDefinition objects.
-    """
-    definitions: list[ToolDefinition] = []
-
-    for tool in oai_tools:
-        func = tool.get("function", tool)
-        name = func["name"]
-        description = func.get("description", "")
-        params_schema = func.get("parameters", {})
-        properties = params_schema.get("properties", {})
-        required_names = set(params_schema.get("required", []))
-
-        parameters: list[ToolParameter] = []
-        for param_name, param_schema in properties.items():
-            param_type_str = param_schema.get("type", "string")
-            param_type = _OAI_TYPE_MAP.get(param_type_str, ToolParameterType.STRING)
-            parameters.append(
-                ToolParameter(
-                    name=param_name,
-                    type=param_type,
-                    description=param_schema.get("description", ""),
-                    required=param_name in required_names,
-                )
-            )
-
-        definitions.append(
-            ToolDefinition(
-                name=name,
-                description=description,
-                parameters=tuple(parameters),
-            )
-        )
-
-    return tuple(definitions)
 
 
 # ── Hidden states ───────────────────────────────────────────────────
@@ -487,7 +425,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
         # Convert tools
         oai_tools = getattr(vf_env, "oai_tools", []) or []
         tool_map = getattr(vf_env, "tool_map", {}) or {}
-        self._tools = _oai_tools_to_definitions(oai_tools)
+        self._tools = oai_tools_to_definitions(oai_tools)
         self._executor = VerifiersToolExecutor(tool_map=tool_map)
 
         self._native_rewards: tuple[RewardFunction, ...] = (

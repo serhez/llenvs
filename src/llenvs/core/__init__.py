@@ -15,6 +15,7 @@ from llenvs.core.tools import (
     ToolResultStatus,
     ToolExecutor,
     SimpleToolExecutor,
+    oai_tools_to_definitions,
 )
 from llenvs.core.async_executor import AsyncToolExecutor
 from llenvs.core.mcp_executor import MCPToolExecutor, MCPServerConfig, MCPConnectionError
@@ -106,6 +107,7 @@ __all__ = [
     "ToolResultStatus",
     "ToolExecutor",
     "SimpleToolExecutor",
+    "oai_tools_to_definitions",
     "AsyncToolExecutor",
     "MCPToolExecutor",
     "MCPServerConfig",

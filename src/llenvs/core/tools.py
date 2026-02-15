@@ -422,3 +422,60 @@ class SimpleToolExecutor:
     def execute_batch(self, calls: tuple[ToolCall, ...]) -> tuple[ToolResult, ...]:
         """Execute multiple tool calls sequentially."""
         return tuple(self.execute(call) for call in calls)
+
+
+# ── OpenAI schema conversion ──────────────────────────────────────
+
+_OAI_TYPE_MAP: dict[str, ToolParameterType] = {
+    "string": ToolParameterType.STRING,
+    "integer": ToolParameterType.INTEGER,
+    "number": ToolParameterType.NUMBER,
+    "boolean": ToolParameterType.BOOLEAN,
+    "array": ToolParameterType.ARRAY,
+    "object": ToolParameterType.OBJECT,
+}
+
+
+def oai_tools_to_definitions(
+    oai_tools: list[dict[str, Any]],
+) -> tuple[ToolDefinition, ...]:
+    """Convert OpenAI-format tool schemas to ToolDefinitions.
+
+    Args:
+        oai_tools: List of OpenAI tool schema dicts.
+
+    Returns:
+        Tuple of ToolDefinition objects.
+    """
+    definitions: list[ToolDefinition] = []
+
+    for tool in oai_tools:
+        func = tool.get("function", tool)
+        name = func["name"]
+        description = func.get("description", "")
+        params_schema = func.get("parameters", {})
+        properties = params_schema.get("properties", {})
+        required_names = set(params_schema.get("required", []))
+
+        parameters: list[ToolParameter] = []
+        for param_name, param_schema in properties.items():
+            param_type_str = param_schema.get("type", "string")
+            param_type = _OAI_TYPE_MAP.get(param_type_str, ToolParameterType.STRING)
+            parameters.append(
+                ToolParameter(
+                    name=param_name,
+                    type=param_type,
+                    description=param_schema.get("description", ""),
+                    required=param_name in required_names,
+                )
+            )
+
+        definitions.append(
+            ToolDefinition(
+                name=name,
+                description=description,
+                parameters=tuple(parameters),
+            )
+        )
+
+    return tuple(definitions)

@@ -4,93 +4,100 @@ Adapters bridge between third-party libraries and our common interface.
 Available adapters are automatically registered with the environment_registry.
 """
 
-from llenvs.adapters.reasoning_gym import (
-    ReasoningGymEnvironment,
-    ReasoningGymHidden,
-    ReasoningGymAdapter,
-)
-from llenvs.adapters.huggingface import (
-    HuggingFaceEnvironment,
-    HuggingFaceHidden,
-    HuggingFaceAdapter,
-    DATASET_PRESETS,
-)
-from llenvs.adapters.gem import (
-    GemEnvironment,
-    GemHidden,
-    GemToolEnvironment,
-    GemToolHidden,
-    GemToolExecutor,
-    GemAdapter,
-    MULTI_TURN_ENVS,
-    GEM_PYTHON_TOOL,
-    GEM_SEARCH_TOOL,
-    GEM_SUBMIT_ANSWER_TOOL,
-)
-from llenvs.adapters.webshop import (
-    WebShopEnvironment,
-    WebShopHidden,
-    WebShopAdapter,
-    WebShopReward,
-)
 from llenvs.adapters.agentgym import (
+    AgentGymAdapter,
     AgentGymEnvironment,
     AgentGymHidden,
-    AgentGymAdapter,
     AgentGymReward,
 )
-from llenvs.adapters.verifiers import (
-    VerifiersSingleTurnEnvironment,
-    VerifiersToolEnvironment,
-    VerifiersHidden,
-    VerifiersToolHidden,
-    VerifiersToolExecutor,
-    VerifiersRubricReward,
-    VerifiersAdapter,
+from llenvs.adapters.alfworld import (
+    ALFWORLD_TASK_TYPES,
+    AlfWorldAdapter,
+    AlfWorldEnvironment,
+    AlfWorldHidden,
+    AlfWorldReward,
 )
-from llenvs.adapters.openenv import (
-    OpenEnvEnvironment,
-    OpenEnvToolEnvironment,
-    OpenEnvHidden,
-    OpenEnvReward,
-    OpenEnvAdapter,
+from llenvs.adapters.aviary import (
+    AVIARY_PRESETS,
+    AviaryAdapter,
+    AviaryEnvironment,
+    AviaryHidden,
+    AviaryReward,
 )
 from llenvs.adapters.dialogue import (
+    DIALOGUE_PRESETS,
+    DialogueAdapter,
     DialogueEnvironment,
     DialogueHidden,
     DialogueTask,
-    DialogueAdapter,
-    DIALOGUE_PRESETS,
+)
+from llenvs.adapters.gem import (
+    GEM_PYTHON_TOOL,
+    GEM_SEARCH_TOOL,
+    GEM_SUBMIT_ANSWER_TOOL,
+    MULTI_TURN_ENVS,
+    GemAdapter,
+    GemEnvironment,
+    GemHidden,
+    GemToolEnvironment,
+    GemToolExecutor,
+    GemToolHidden,
 )
 from llenvs.adapters.gymnasium import (
+    GYMNASIUM_PRESETS,
+    AutoActionMapper,
+    AutoObservationMapper,
+    GridObservationMapper,
+    GymnasiumAdapter,
     GymnasiumEnvironment,
     GymnasiumHidden,
     GymnasiumReward,
-    GymnasiumAdapter,
-    AutoObservationMapper,
-    AutoActionMapper,
-    GridObservationMapper,
-    GYMNASIUM_PRESETS,
 )
-from llenvs.adapters.alfworld import (
-    AlfWorldEnvironment,
-    AlfWorldHidden,
-    AlfWorldAdapter,
-    AlfWorldReward,
-    ALFWORLD_TASK_TYPES,
+from llenvs.adapters.huggingface import (
+    DATASET_PRESETS,
+    HuggingFaceAdapter,
+    HuggingFaceEnvironment,
+    HuggingFaceHidden,
 )
 from llenvs.adapters.jericho import (
+    JerichoAdapter,
     JerichoEnvironment,
     JerichoHidden,
-    JerichoAdapter,
     JerichoReward,
 )
 from llenvs.adapters.lmrl import (
+    LMRL_PRESETS,
+    LMRLAdapter,
     LMRLEnvironment,
     LMRLHidden,
-    LMRLAdapter,
     LMRLReward,
-    LMRL_PRESETS,
+)
+from llenvs.adapters.openenv import (
+    OpenEnvAdapter,
+    OpenEnvEnvironment,
+    OpenEnvHidden,
+    OpenEnvReward,
+    OpenEnvToolEnvironment,
+)
+from llenvs.adapters.reasoning_gym import (
+    ReasoningGymAdapter,
+    ReasoningGymEnvironment,
+    ReasoningGymHidden,
+)
+from llenvs.adapters.verifiers import (
+    VerifiersAdapter,
+    VerifiersHidden,
+    VerifiersRubricReward,
+    VerifiersSingleTurnEnvironment,
+    VerifiersToolEnvironment,
+    VerifiersToolExecutor,
+    VerifiersToolHidden,
+)
+from llenvs.adapters.webshop import (
+    WebShopAdapter,
+    WebShopEnvironment,
+    WebShopHidden,
+    WebShopReward,
 )
 
 __all__ = [
@@ -170,6 +177,12 @@ __all__ = [
     "LMRLAdapter",
     "LMRLReward",
     "LMRL_PRESETS",
+    # Aviary
+    "AviaryEnvironment",
+    "AviaryHidden",
+    "AviaryAdapter",
+    "AviaryReward",
+    "AVIARY_PRESETS",
 ]
 
 
@@ -298,6 +311,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # LLM_RL not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register Aviary adapter if available
+    try:
+        adapter = AviaryAdapter()
+        adapter._get_aviary()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # fhaviary not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

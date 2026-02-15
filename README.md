@@ -42,6 +42,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **AgentGym** | 15 multi-turn agent environments | ALFWorld, BabyAI, SciWorld, TextCraft |
 | **Verifiers** | Verifiers library environments | Rubric-scored tasks, tool-enabled envs |
 | **OpenEnv** | OpenEnv session-based environments | MCP tool servers, generic clients |
+| **Aviary** | Aviary tool-calling environments | GSM8K, HotPotQA, LABBench, LFRQA |
 | **LMRL-Gym** | Text-based RL environments for LMs | Wordle, Chess, Maze, Twenty Questions |
 
 ```python
@@ -202,6 +203,7 @@ pip install llenvs[jericho]               # Jericho interactive fiction
 pip install llenvs[agentgym]               # AgentGym environments
 pip install llenvs[verifiers]              # Verifiers environments
 pip install llenvs[openenv]                # OpenEnv environments
+pip install llenvs[aviary]                # Aviary tool-calling environments
 pip install llenvs[trl]                    # TRL integration
 pip install llenvs[all]                    # Everything
 ```

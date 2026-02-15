@@ -32,6 +32,7 @@ openenv = ["openenv-core>=0.1"]
 gymnasium = ["gymnasium>=0.26"]
 alfworld = ["alfworld>=0.3"]
 jericho = ["jericho>=3.0"]
+aviary = ["fhaviary>=0.30"]
 # lmrl: Install separately with pip install git+https://github.com/abdulhaim/LMRL-Gym.git
 # Not included as a formal optional dep due to pinned legacy dependencies in LMRL-Gym.
 math-verify = ["math-verify[antlr4-13-2]>=0.7"]
@@ -39,7 +40,7 @@ wandb = ["wandb>=0.16"]
 rl = ["datasets>=2.14"]
 trl = ["trl>=0.7", "datasets>=2.14"]
 all = [
-  "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,gymnasium,alfworld,jericho,vllm,openai,anthropic,transformers,math-verify,rl,wandb]",
+  "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,gymnasium,alfworld,jericho,aviary,vllm,openai,anthropic,transformers,math-verify,rl,wandb]",
 ]
 dev = [
   "pytest>=7.0",

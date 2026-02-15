@@ -1,15 +1,13 @@
 """Tests for the verifiers adapter."""
 
-import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
-from typing import Any
-from unittest.mock import MagicMock, AsyncMock, patch
 
-from llenvs.core.state import Observation, Action, State, StateMetadata
-from llenvs.core.reward import RewardType, Signal, FormatReward
 from llenvs.core.extraction import TagBasedExtractor
-from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameter, ToolParameterType
-
+from llenvs.core.reward import FormatReward, RewardType
+from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.tools import ToolCall, ToolParameterType
 
 # ── Mock verifiers objects ──────────────────────────────────────────
 
@@ -171,7 +169,7 @@ class TestVerifiersRubricReward:
         assert reward.reward_type == RewardType.OUTCOME
 
     def test_compute_correct_answer(self):
-        from llenvs.adapters.verifiers import VerifiersRubricReward, VerifiersHidden
+        from llenvs.adapters.verifiers import VerifiersHidden, VerifiersRubricReward
 
         func = _make_reward_func("correct_answer", return_value=1.0)
         rubric = _make_rubric(funcs=[func], weights=[1.0])
@@ -196,7 +194,7 @@ class TestVerifiersRubricReward:
         assert signal.reward_type == RewardType.OUTCOME
 
     def test_compute_with_weights(self):
-        from llenvs.adapters.verifiers import VerifiersRubricReward, VerifiersHidden
+        from llenvs.adapters.verifiers import VerifiersHidden, VerifiersRubricReward
 
         func1 = _make_reward_func("correctness", return_value=1.0)
         func2 = _make_reward_func("format", return_value=0.5)
@@ -221,7 +219,7 @@ class TestVerifiersRubricReward:
         assert signal.reward == pytest.approx(2.25)
 
     def test_compute_incorrect_answer(self):
-        from llenvs.adapters.verifiers import VerifiersRubricReward, VerifiersHidden
+        from llenvs.adapters.verifiers import VerifiersHidden, VerifiersRubricReward
 
         func = _make_reward_func("correct_answer", return_value=0.0)
         rubric = _make_rubric(funcs=[func], weights=[1.0])
@@ -243,7 +241,7 @@ class TestVerifiersRubricReward:
         assert signal.reward == 0.0
 
     def test_compute_exception_returns_zero(self):
-        from llenvs.adapters.verifiers import VerifiersRubricReward, VerifiersHidden
+        from llenvs.adapters.verifiers import VerifiersHidden, VerifiersRubricReward
 
         func = _make_reward_func("bad_func")
         func.side_effect = RuntimeError("boom")
@@ -800,10 +798,10 @@ class TestOaiSchemaConversion:
     """Tests for converting OpenAI tool schemas to ToolDefinition."""
 
     def test_basic_conversion(self):
-        from llenvs.adapters.verifiers import _oai_tools_to_definitions
+        from llenvs.core.tools import oai_tools_to_definitions
 
         oai_tools = _make_oai_tools()
-        defs = _oai_tools_to_definitions(oai_tools)
+        defs = oai_tools_to_definitions(oai_tools)
 
         assert len(defs) == 2
         assert defs[0].name == "search"
@@ -813,7 +811,7 @@ class TestOaiSchemaConversion:
         assert defs[0].parameters[0].required is True
 
     def test_optional_parameters(self):
-        from llenvs.adapters.verifiers import _oai_tools_to_definitions
+        from llenvs.core.tools import oai_tools_to_definitions
 
         oai_tools = [
             {
@@ -832,13 +830,13 @@ class TestOaiSchemaConversion:
                 },
             }
         ]
-        defs = _oai_tools_to_definitions(oai_tools)
+        defs = oai_tools_to_definitions(oai_tools)
         params = {p.name: p for p in defs[0].parameters}
         assert params["required_param"].required is True
         assert params["optional_param"].required is False
 
     def test_type_mapping(self):
-        from llenvs.adapters.verifiers import _oai_tools_to_definitions
+        from llenvs.core.tools import oai_tools_to_definitions
 
         oai_tools = [
             {
@@ -861,7 +859,7 @@ class TestOaiSchemaConversion:
                 },
             }
         ]
-        defs = _oai_tools_to_definitions(oai_tools)
+        defs = oai_tools_to_definitions(oai_tools)
         params = {p.name: p for p in defs[0].parameters}
         assert params["s"].type == ToolParameterType.STRING
         assert params["i"].type == ToolParameterType.INTEGER
@@ -871,12 +869,12 @@ class TestOaiSchemaConversion:
         assert params["o"].type == ToolParameterType.OBJECT
 
     def test_empty_tools(self):
-        from llenvs.adapters.verifiers import _oai_tools_to_definitions
+        from llenvs.core.tools import oai_tools_to_definitions
 
-        assert _oai_tools_to_definitions([]) == ()
+        assert oai_tools_to_definitions([]) == ()
 
     def test_no_parameters(self):
-        from llenvs.adapters.verifiers import _oai_tools_to_definitions
+        from llenvs.core.tools import oai_tools_to_definitions
 
         oai_tools = [
             {
@@ -888,6 +886,6 @@ class TestOaiSchemaConversion:
                 },
             }
         ]
-        defs = _oai_tools_to_definitions(oai_tools)
+        defs = oai_tools_to_definitions(oai_tools)
         assert len(defs) == 1
         assert len(defs[0].parameters) == 0
