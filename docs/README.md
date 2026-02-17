@@ -29,6 +29,8 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[AgentGym](adapters/agentgym.md)** - 15 multi-turn agent environments
 - **[Verifiers](adapters/verifiers.md)** - Single-turn and tool environments with rubric scoring
 - **[OpenEnv](adapters/openenv.md)** - Session-based server environments with MCP tools
+- **[SciAgentGYM](adapters/sciagentgym.md)** - Multi-step scientific tool-use across 6 domains
+- **[InterCode](adapters/intercode.md)** - Interactive code generation in Bash, SQL, Python, CTF
 
 ## Reference
 

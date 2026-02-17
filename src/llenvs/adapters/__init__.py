@@ -59,6 +59,13 @@ from llenvs.adapters.huggingface import (
     HuggingFaceEnvironment,
     HuggingFaceHidden,
 )
+from llenvs.adapters.intercode import (
+    INTERCODE_PRESETS,
+    InterCodeAdapter,
+    InterCodeEnvironment,
+    InterCodeHidden,
+    InterCodeReward,
+)
 from llenvs.adapters.jericho import (
     JerichoAdapter,
     JerichoEnvironment,
@@ -83,6 +90,13 @@ from llenvs.adapters.reasoning_gym import (
     ReasoningGymAdapter,
     ReasoningGymEnvironment,
     ReasoningGymHidden,
+)
+from llenvs.adapters.sciagentgym import (
+    SCIAGENTGYM_SUBJECTS,
+    SciAgentGymAdapter,
+    SciAgentGymEnvironment,
+    SciAgentGymHidden,
+    SciAgentGymReward,
 )
 from llenvs.adapters.verifiers import (
     VerifiersAdapter,
@@ -166,6 +180,12 @@ __all__ = [
     "AlfWorldAdapter",
     "AlfWorldReward",
     "ALFWORLD_TASK_TYPES",
+    # InterCode
+    "InterCodeEnvironment",
+    "InterCodeHidden",
+    "InterCodeAdapter",
+    "InterCodeReward",
+    "INTERCODE_PRESETS",
     # Jericho
     "JerichoEnvironment",
     "JerichoHidden",
@@ -183,6 +203,12 @@ __all__ = [
     "AviaryAdapter",
     "AviaryReward",
     "AVIARY_PRESETS",
+    # SciAgentGYM
+    "SciAgentGymEnvironment",
+    "SciAgentGymHidden",
+    "SciAgentGymAdapter",
+    "SciAgentGymReward",
+    "SCIAGENTGYM_SUBJECTS",
 ]
 
 
@@ -294,6 +320,16 @@ def _register_adapters() -> None:
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
+    # Register InterCode adapter if available
+    try:
+        adapter = InterCodeAdapter()
+        adapter._get_intercode()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # intercode not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
     # Register Jericho adapter if available
     try:
         adapter = JerichoAdapter()
@@ -321,6 +357,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # fhaviary not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register SciAgentGYM adapter if available
+    try:
+        adapter = SciAgentGymAdapter()
+        adapter._get_sciagentgym()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # SciAgentGYM not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

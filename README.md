@@ -44,6 +44,8 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **OpenEnv** | OpenEnv session-based environments | MCP tool servers, generic clients |
 | **Aviary** | Aviary tool-calling environments | GSM8K, HotPotQA, LABBench, LFRQA |
 | **LMRL-Gym** | Text-based RL environments for LMs | Wordle, Chess, Maze, Twenty Questions |
+| **SciAgentGYM** | Multi-step scientific tool-use | Physics, Chemistry, Materials Science, Astronomy |
+| **InterCode** | Interactive code generation | Bash, SQL, Python, CTF |
 
 ```python
 from llenvs.core.registry import environment_registry

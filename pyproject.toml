@@ -35,6 +35,9 @@ jericho = ["jericho>=3.0"]
 aviary = ["fhaviary>=0.30"]
 # lmrl: Install separately with pip install git+https://github.com/abdulhaim/LMRL-Gym.git
 # Not included as a formal optional dep due to pinned legacy dependencies in LMRL-Gym.
+# sciagentgym: Install separately with pip install git+https://github.com/CMarsRover/SciAgentGYM.git
+# intercode: Install separately with pip install intercode-bench
+# OR pip install git+https://github.com/princeton-nlp/intercode.git
 math-verify = ["math-verify[antlr4-13-2]>=0.7"]
 wandb = ["wandb>=0.16"]
 rl = ["datasets>=2.14"]
