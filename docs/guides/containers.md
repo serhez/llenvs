@@ -14,8 +14,8 @@ Run any environment inside a Docker container or isolated subprocess. The runner
 The simplest way to isolate an environment — no Docker required:
 
 ```python
-from llenvs.core.config import EnvironmentConfig, EnvironmentFactory
 from llenvs.container.config import ContainerConfig
+from llenvs.core.config import EnvironmentConfig, EnvironmentFactory
 
 config = EnvironmentConfig(
     name="sudoku",
@@ -70,28 +70,28 @@ env = EnvironmentFactory.create(config)
 
 ```yaml
 environments:
-  - name: sudoku
-    adapter: reasoning_gym
-    size: 100
-    container:
-      runtime: docker
-      image: llenvs-reasoning-gym:latest
-      timeout: 60
-      env_vars:
-        REASONING_GYM_CACHE: /data/cache
-      volumes:
-        /host/data: /data
+    - name: sudoku
+      adapter: reasoning_gym
+      size: 100
+      container:
+          runtime: docker
+          image: llenvs-reasoning-gym:latest
+          timeout: 60
+          env_vars:
+              REASONING_GYM_CACHE: /data/cache
+          volumes:
+              /host/data: /data
 ```
 
 Process runtime (no Docker):
 
 ```yaml
 environments:
-  - name: sudoku
-    adapter: reasoning_gym
-    size: 100
-    container:
-      runtime: process
+    - name: sudoku
+      adapter: reasoning_gym
+      size: 100
+      container:
+          runtime: process
 ```
 
 ## ContainerConfig Fields
@@ -109,16 +109,16 @@ environments:
 ## How It Works
 
 ```
-Host Process                           Container / Subprocess
-┌──────────────────────┐              ┌──────────────────────┐
-│  TrajectoryRunner     │              │  EnvironmentServer    │
-│  InferenceBackend     │    HTTP      │    ┌──────────────┐  │
-│  ContainerEnvironment │◄────────────►│    │ Environment   │  │
-│  (proxy)              │  JSON over   │    │ (real impl)   │  │
-│                       │  localhost   │    └──────────────┘  │
-│  Scorer               │              │  Rewards, tools,     │
-│  DatasetProvider      │              │  state — all here     │
-└──────────────────────┘              └──────────────────────┘
+       Host Process                       Container / Subprocess
+┌────────────────────────┐              ┌────────────────────────┐
+│  TrajectoryRunner      │              │    EnvironmentServer   │
+│  InferenceBackend      │    HTTP      │    ┌──────────────┐    │
+│  ContainerEnvironment  │◄────────────►│    │ Environment  │    │
+│  (proxy)               │  JSON over   │    │ (real impl)  │    │
+│                        │  localhost   │    └──────────────┘    │
+│  Scorer                │              │    Rewards, tools,     │
+│  DatasetProvider       │              │    state — all here    │
+└────────────────────────┘              └────────────────────────┘
 ```
 
 1. `EnvironmentFactory.create()` detects the `container` field
@@ -146,8 +146,8 @@ Host Process                           Container / Subprocess
 `Scorer` and `DatasetProvider` work through the proxy:
 
 ```python
-from llenvs.integrations.scoring import Scorer
 from llenvs.integrations.dataset_provider import DatasetProvider
+from llenvs.integrations.scoring import Scorer
 
 scorer = Scorer(env)
 result = scorer.score(task_index=0, response="<answer>42</answer>")
