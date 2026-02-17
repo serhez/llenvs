@@ -15,6 +15,10 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[Segmentation](guides/segmentation.md)** - Multi-step reasoning with segmenters
 - **[Evaluation](guides/evaluation.md)** - Running evaluations and computing metrics
 - **[Inference Backends](guides/backends.md)** - Configure model backends and prompting
+- **[LLM-as-a-Judge](guides/judge.md)** - Score responses with an LLM for open-ended tasks
+- **[Dialogue Environments](guides/dialogue.md)** - LLM-in-the-loop environments (20-questions, teacher, etc.)
+- **[Branching](guides/branching.md)** - Checkpoint, branch, and explore environment states
+- **[Parallelization](guides/parallelization.md)** - Batched evaluation with lockstep trajectories
 - **[RL Training](guides/rl-training.md)** - Integrate with veRL, TRL, and OpenRLHF
 - **[Containers](guides/containers.md)** - Run environments in Docker or isolated subprocesses
 - **[Iterative Refinement](guides/iterative.md)** - Multi-turn refinement with code execution and judge feedback
@@ -25,8 +29,13 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[ReasoningGym](adapters/reasoning-gym.md)** - Procedural reasoning tasks
 - **[HuggingFace](adapters/huggingface.md)** - AIME, GSM8K, and other HF datasets
 - **[GEM](adapters/gem.md)** - Multi-turn games and benchmarks with tool support
+- **[Gymnasium](adapters/gymnasium.md)** - Classic RL environments (Gym4Real, MarsExplorer, and custom)
 - **[WebShop](adapters/webshop.md)** - E-commerce product search and purchase
+- **[AlfWorld](adapters/alfworld.md)** - Text-based household task environments
+- **[Jericho](adapters/jericho.md)** - 50+ classic interactive fiction text adventure games
 - **[AgentGym](adapters/agentgym.md)** - 15 multi-turn agent environments
+- **[LMRL-Gym](adapters/lmrl.md)** - Multi-turn text environments (Wordle, Chess, Maze, etc.)
+- **[Aviary](adapters/aviary.md)** - FutureHouse tool-calling environments
 - **[Verifiers](adapters/verifiers.md)** - Single-turn and tool environments with rubric scoring
 - **[OpenEnv](adapters/openenv.md)** - Session-based server environments with MCP tools
 - **[SciAgentGYM](adapters/sciagentgym.md)** - Multi-step scientific tool-use across 6 domains
