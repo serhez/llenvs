@@ -190,10 +190,8 @@ class HuggingFaceBackend(ModelBackend):
             # defaults that would conflict with do_sample=False.
             "temperature": params.temperature if do_sample else 1.0,
             "top_p": params.top_p if do_sample else 1.0,
+            "top_k": params.top_k if do_sample and params.top_k > 0 else 0,
         }
-
-        if do_sample and params.top_k > 0:
-            kwargs["top_k"] = params.top_k
 
         # Map frequency_penalty to repetition_penalty if set
         # Note: HF repetition_penalty is multiplicative (1.0 = no penalty, >1 = penalty)
