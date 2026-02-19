@@ -1,0 +1,3023 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="MDP-style access to evaluation environments for LLM research">
+      
+      
+      
+        <link rel="canonical" href="https://serhez.github.io/llenvs/guides/landscape/">
+      
+      
+        <link rel="prev" href="../multimodal/">
+      
+      
+        <link rel="next" href="../../adapters/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.1">
+    
+    
+      
+        <title>Library Landscape - LLEnvs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  
+<meta property="og:type" content="website" />
+<meta property="og:title" content="Library Landscape - LLEnvs" />
+<meta property="og:description" content="MDP-style access to evaluation environments for LLM research" />
+<meta property="og:image" content="https://serhez.github.io/llenvs/assets/images/social/guides/landscape.png" />
+<meta property="og:image:type" content="image/png" />
+<meta property="og:image:width" content="1200" />
+<meta property="og:image:height" content="630" />
+<meta property="og:url" content="https://serhez.github.io/llenvs/guides/landscape/" />
+<meta property="twitter:card" content="summary_large_image" />
+<meta property="twitter:title" content="Library Landscape - LLEnvs" />
+<meta property="twitter:description" content="MDP-style access to evaluation environments for LLM research" />
+<meta property="twitter:image" content="https://serhez.github.io/llenvs/assets/images/social/guides/landscape.png" />
+</head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="amber">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#library-landscape" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="LLEnvs" class="md-header__button md-logo" aria-label="LLEnvs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1c0-.21-.07-.41-.18-.57L13 8.35V4h-2v4.35L5.18 18.43c-.11.16-.18.36-.18.57m1 3a3 3 0 0 1-3-3c0-.6.18-1.16.5-1.63L9 7.81V6a1 1 0 0 1-1-1V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v1a1 1 0 0 1-1 1v1.81l5.5 9.56c.32.47.5 1.03.5 1.63a3 3 0 0 1-3 3zm7-6 1.34-1.34L16.27 18H7.73l2.66-4.61zm-.5-4a.5.5 0 0 1 .5.5.5.5 0 0 1-.5.5.5.5 0 0 1-.5-.5.5.5 0 0 1 .5-.5"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LLEnvs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Library Landscape
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="amber"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="amber"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../getting-started/" class="md-tabs__link">
+          
+  
+  
+    
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m13.13 22.19-1.63-3.83c1.57-.58 3.04-1.36 4.4-2.27zM5.64 12.5l-3.83-1.63 6.1-2.77C7 9.46 6.22 10.93 5.64 12.5M19.22 4c.28 0 .53 0 .74.05.17 1.39-.02 4.25-3.3 7.53-1.7 1.71-3.73 3.02-6.01 3.89l-2.15-2.1c.92-2.31 2.23-4.34 3.92-6.03C15.18 4.58 17.64 4 19.22 4m0-2c-1.98 0-4.98.69-8.22 3.93-2.19 2.19-3.5 4.6-4.35 6.71-.28.75-.09 1.57.46 2.13l2.13 2.12c.38.38.89.61 1.42.61.23 0 .47-.06.7-.15A19.1 19.1 0 0 0 18.07 13c5.66-5.66 3.54-10.61 3.54-10.61S20.7 2 19.22 2m-4.68 7.46c-.78-.78-.78-2.05 0-2.83s2.05-.78 2.83 0c.77.78.78 2.05 0 2.83s-2.05.78-2.83 0m-5.66 7.07-1.41-1.41zM6.24 22l3.64-3.64c-.34-.09-.67-.24-.97-.45L4.83 22zM2 22h1.41l4.77-4.76-1.42-1.41L2 20.59zm0-2.83 4.09-4.08c-.21-.3-.36-.62-.45-.97L2 17.76z"/></svg>
+    
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
+          
+  
+  
+    
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 21.5c-1.35-.85-3.8-1.5-5.5-1.5-1.65 0-3.35.3-4.75 1.05-.1.05-.15.05-.25.05-.25 0-.5-.25-.5-.5V6c.6-.45 1.25-.75 2-1 1.11-.35 2.33-.5 3.5-.5 1.95 0 4.05.4 5.5 1.5 1.45-1.1 3.55-1.5 5.5-1.5 1.17 0 2.39.15 3.5.5.75.25 1.4.55 2 1v14.6c0 .25-.25.5-.5.5-.1 0-.15 0-.25-.05-1.4-.75-3.1-1.05-4.75-1.05-1.7 0-4.15.65-5.5 1.5M12 8v11.5c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5V7c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5m1 3.5c1.11-.68 2.6-1 4.5-1 .91 0 1.76.09 2.5.28V9.23c-.87-.15-1.71-.23-2.5-.23q-2.655 0-4.5.84zm4.5.17c-1.71 0-3.21.26-4.5.79v1.69c1.11-.65 2.6-.99 4.5-.99 1.04 0 1.88.08 2.5.24v-1.5c-.87-.16-1.71-.23-2.5-.23m2.5 2.9c-.87-.16-1.71-.24-2.5-.24-1.83 0-3.33.27-4.5.8v1.69c1.11-.66 2.6-.99 4.5-.99 1.04 0 1.88.08 2.5.24z"/></svg>
+    
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../adapters/" class="md-tabs__link">
+          
+  
+  
+    
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M22 13.5c0 1.76-1.3 3.22-3 3.46V20a2 2 0 0 1-2 2h-3.8v-.3a2.7 2.7 0 0 0-2.7-2.7c-1.5 0-2.7 1.21-2.7 2.7v.3H4a2 2 0 0 1-2-2v-3.8h.3C3.79 16.2 5 15 5 13.5s-1.21-2.7-2.7-2.7H2V7a2 2 0 0 1 2-2h3.04c.24-1.7 1.7-3 3.46-3s3.22 1.3 3.46 3H17a2 2 0 0 1 2 2v3.04c1.7.24 3 1.7 3 3.46M17 15h1.5a1.5 1.5 0 0 0 1.5-1.5 1.5 1.5 0 0 0-1.5-1.5H17V7h-5V5.5A1.5 1.5 0 0 0 10.5 4 1.5 1.5 0 0 0 9 5.5V7H4v2.12c1.76.68 3 2.38 3 4.38s-1.25 3.7-3 4.38V20h2.12a4.7 4.7 0 0 1 4.38-3c2 0 3.7 1.25 4.38 3H17z"/></svg>
+    
+  
+  Adapters
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../reference/" class="md-tabs__link">
+          
+  
+  
+    
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 2a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm0 2h7v5h5v11H6zm2 8v2h8v-2zm0 4v2h5v-2z"/></svg>
+    
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="LLEnvs" class="md-nav__button md-logo" aria-label="LLEnvs" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1c0-.21-.07-.41-.18-.57L13 8.35V4h-2v4.35L5.18 18.43c-.11.16-.18.36-.18.57m1 3a3 3 0 0 1-3-3c0-.6.18-1.16.5-1.63L9 7.81V6a1 1 0 0 1-1-1V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v1a1 1 0 0 1-1 1v1.81l5.5 9.56c.32.47.5 1.03.5 1.63a3 3 0 0 1-3 3zm7-6 1.34-1.34L16.27 18H7.73l2.66-4.61zm-.5-4a.5.5 0 0 1 .5.5.5.5 0 0 1-.5.5.5.5 0 0 1-.5-.5.5.5 0 0 1 .5-.5"/></svg>
+
+    </a>
+    LLEnvs
+  </label>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../getting-started/" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m13.13 22.19-1.63-3.83c1.57-.58 3.04-1.36 4.4-2.27zM5.64 12.5l-3.83-1.63 6.1-2.77C7 9.46 6.22 10.93 5.64 12.5M19.22 4c.28 0 .53 0 .74.05.17 1.39-.02 4.25-3.3 7.53-1.7 1.71-3.73 3.02-6.01 3.89l-2.15-2.1c.92-2.31 2.23-4.34 3.92-6.03C15.18 4.58 17.64 4 19.22 4m0-2c-1.98 0-4.98.69-8.22 3.93-2.19 2.19-3.5 4.6-4.35 6.71-.28.75-.09 1.57.46 2.13l2.13 2.12c.38.38.89.61 1.42.61.23 0 .47-.06.7-.15A19.1 19.1 0 0 0 18.07 13c5.66-5.66 3.54-10.61 3.54-10.61S20.7 2 19.22 2m-4.68 7.46c-.78-.78-.78-2.05 0-2.83s2.05-.78 2.83 0c.77.78.78 2.05 0 2.83s-2.05.78-2.83 0m-5.66 7.07-1.41-1.41zM6.24 22l3.64-3.64c-.34-.09-.67-.24-.97-.45L4.83 22zM2 22h1.41l4.77-4.76-1.42-1.41L2 20.59zm0-2.83 4.09-4.08c-.21-.3-.36-.62-.45-.97L2 17.76z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_2" id="__nav_2_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../getting-started/quickstart/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quick Start
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 21.5c-1.35-.85-3.8-1.5-5.5-1.5-1.65 0-3.35.3-4.75 1.05-.1.05-.15.05-.25.05-.25 0-.5-.25-.5-.5V6c.6-.45 1.25-.75 2-1 1.11-.35 2.33-.5 3.5-.5 1.95 0 4.05.4 5.5 1.5 1.45-1.1 3.55-1.5 5.5-1.5 1.17 0 2.39.15 3.5.5.75.25 1.4.55 2 1v14.6c0 .25-.25.5-.5.5-.1 0-.15 0-.25-.05-1.4-.75-3.1-1.05-4.75-1.05-1.7 0-4.15.65-5.5 1.5M12 8v11.5c1.35-.85 3.8-1.5 5.5-1.5 1.2 0 2.4.15 3.5.5V7c-1.1-.35-2.3-.5-3.5-.5-1.7 0-4.15.65-5.5 1.5m1 3.5c1.11-.68 2.6-1 4.5-1 .91 0 1.76.09 2.5.28V9.23c-.87-.15-1.71-.23-2.5-.23q-2.655 0-4.5.84zm4.5.17c-1.71 0-3.21.26-4.5.79v1.69c1.11-.65 2.6-.99 4.5-.99 1.04 0 1.88.08 2.5.24v-1.5c-.87-.16-1.71-.23-2.5-.23m2.5 2.9c-.87-.16-1.71-.24-2.5-.24-1.83 0-3.33.27-4.5.8v1.69c1.11-.66 2.6-.99 4.5-.99 1.04 0 1.88.08 2.5.24z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_3" id="__nav_3_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../environments/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Environments
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../evaluation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Evaluation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../backends/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Inference Backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prompts/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prompts
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tools & Function Calling
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../segmentation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Segmentation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../judge/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM-as-a-Judge
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../dialogue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Dialogue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../iterative/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Iterative Refinement
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../branching/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Branching
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../parallelization/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Parallelization
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../containers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Containers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../rl-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    RL Training
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../multimodal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Multimodal Observations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Library Landscape
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Library Landscape
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inference-backends" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference Backends
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Environment Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#llenvs-explicit-state-mdp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        llenvs — Explicit-State MDP
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openenv-client-server-with-docker-isolation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenEnv — Client-Server with Docker Isolation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifiers-rollout-driven" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        verifiers — Rollout-Driven
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#implications" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implications
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi-turn-tool-support" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-Turn &amp; Tool Support
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#answer-extraction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Answer Extraction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reward-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reward System
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reward System">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#llenvs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        llenvs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openenv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenEnv
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        verifiers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rl-training-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RL Training Integration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="RL Training Integration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#llenvs_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        llenvs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openenv_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenEnv
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifiers_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        verifiers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#batching-parallelization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batching &amp; Parallelization
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-prompt-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration &amp; Prompt Management
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ecosystem-community" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ecosystem &amp; Community
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#positioning-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Positioning Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../adapters/" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M22 13.5c0 1.76-1.3 3.22-3 3.46V20a2 2 0 0 1-2 2h-3.8v-.3a2.7 2.7 0 0 0-2.7-2.7c-1.5 0-2.7 1.21-2.7 2.7v.3H4a2 2 0 0 1-2-2v-3.8h.3C3.79 16.2 5 15 5 13.5s-1.21-2.7-2.7-2.7H2V7a2 2 0 0 1 2-2h3.04c.24-1.7 1.7-3 3.46-3s3.22 1.3 3.46 3H17a2 2 0 0 1 2 2v3.04c1.7.24 3 1.7 3 3.46M17 15h1.5a1.5 1.5 0 0 0 1.5-1.5 1.5 1.5 0 0 0-1.5-1.5H17V7h-5V5.5A1.5 1.5 0 0 0 10.5 4 1.5 1.5 0 0 0 9 5.5V7H4v2.12c1.76.68 3 2.38 3 4.38s-1.25 3.7-3 4.38V20h2.12a4.7 4.7 0 0 1 4.38-3c2 0 3.7 1.25 4.38 3H17z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Adapters
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_4" id="__nav_4_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Adapters
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/reasoning-gym/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    ReasoningGym
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/huggingface/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    HuggingFace
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/gem/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    GEM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/gymnasium/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Gymnasium
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/webshop/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    WebShop
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/alfworld/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AlfWorld
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/jericho/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Jericho
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/agentgym/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    AgentGym
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/lmrl/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LMRL-Gym
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/aviary/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Aviary
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/verifiers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Verifiers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/openenv/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    OpenEnv
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/sciagentgym/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SciAgentGYM
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/intercode/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    InterCode
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/mare/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MARE
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/tau2/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    tau2
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../adapters/craftax/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Craftax
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+          
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <div class="md-nav__link md-nav__container">
+            <a href="../../reference/" class="md-nav__link ">
+              
+  
+  
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 2a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm0 2h7v5h5v11H6zm2 8v2h8v-2zm0 4v2h5v-2z"/></svg>
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            </a>
+            
+              
+              <label class="md-nav__link " for="__nav_5" id="__nav_5_label" tabindex="0">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+            
+          </div>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/core/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Core Abstractions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tools
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/config/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inference-backends" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inference Backends
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#environment-architecture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Environment Architecture
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Environment Architecture">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#llenvs-explicit-state-mdp" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        llenvs — Explicit-State MDP
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openenv-client-server-with-docker-isolation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenEnv — Client-Server with Docker Isolation
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifiers-rollout-driven" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        verifiers — Rollout-Driven
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#implications" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Implications
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#multi-turn-tool-support" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Multi-Turn &amp; Tool Support
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#answer-extraction" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Answer Extraction
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reward-system" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reward System
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reward System">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#llenvs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        llenvs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openenv" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenEnv
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifiers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        verifiers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#rl-training-integration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        RL Training Integration
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="RL Training Integration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#llenvs_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        llenvs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#openenv_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OpenEnv
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#verifiers_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        verifiers
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#batching-parallelization" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Batching &amp; Parallelization
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration-prompt-management" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration &amp; Prompt Management
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#ecosystem-community" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Ecosystem &amp; Community
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#positioning-summary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Positioning Summary
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+                
+
+
+
+  
+
+
+  <nav class="md-path" aria-label="Navigation" >
+    <ol class="md-path__list">
+      
+        
+  
+  
+    <li class="md-path__item">
+      <a href="../.." class="md-path__link">
+        
+  <span class="md-ellipsis">
+    Home
+  </span>
+
+      </a>
+    </li>
+  
+
+      
+      
+        
+  
+  
+    
+    
+      <li class="md-path__item">
+        <a href="../" class="md-path__link">
+          
+  <span class="md-ellipsis">
+    Guides
+  </span>
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ol>
+  </nav>
+
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+
+<h1 id="library-landscape">Library Landscape<a class="headerlink" href="#library-landscape" title="Permanent link">&para;</a></h1>
+<p>An analysis of llenvs relative to other libraries in the LLM environment and evaluation space, focusing on architectural differences and positioning.</p>
+<p>The two most comparable libraries are <strong>OpenEnv</strong> (Meta + HuggingFace) and <strong>verifiers</strong> (PrimeIntellect). All three are in early stages but approach the problem from different angles.</p>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Core idea</strong></td>
+<td>Unified eval &amp; training lib with built-in inference</td>
+<td>Isolated sandbox environments for agentic RL</td>
+<td>Environment-as-package with OpenAI-protocol inference</td>
+</tr>
+<tr>
+<td><strong>Architecture</strong></td>
+<td>In-process, explicit-state MDP</td>
+<td>Client-server, Docker-isolated</td>
+<td>In-process, rollout-based</td>
+</tr>
+<tr>
+<td><strong>Backing</strong></td>
+<td>Internal</td>
+<td>Meta + HuggingFace</td>
+<td>PrimeIntellect</td>
+</tr>
+<tr>
+<td><strong>Repo</strong></td>
+<td>—</td>
+<td><a href="https://github.com/meta-pytorch/OpenEnv">meta-pytorch/OpenEnv</a></td>
+<td><a href="https://github.com/PrimeIntellect-ai/verifiers">PrimeIntellect-ai/verifiers</a></td>
+</tr>
+</tbody>
+</table>
+<h2 id="inference-backends">Inference Backends<a class="headerlink" href="#inference-backends" title="Permanent link">&para;</a></h2>
+<p><strong>llenvs</strong> bundles inference backends (vLLM, HuggingFace Transformers, OpenAI, Anthropic, OpenRouter). A single library handles both the environment and the model — a complete evaluation can run with zero external services.</p>
+<p><strong>OpenEnv</strong> includes no inference layer. It is environment-only; the agent and model are entirely external (typically Forge/TorchForge, TRL, or similar).</p>
+<p><strong>verifiers</strong> also includes no inference engine. All model communication goes through an external OpenAI-compatible API. Running evaluations always requires a separate vLLM server or cloud API endpoint.</p>
+<table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>vLLM (in-process)</td>
+<td>Yes</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>HuggingFace Transformers</td>
+<td>Yes</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>OpenAI API</td>
+<td>Yes</td>
+<td>—</td>
+<td>Via external server</td>
+</tr>
+<tr>
+<td>Anthropic API</td>
+<td>Yes</td>
+<td>—</td>
+<td>Via external server</td>
+</tr>
+<tr>
+<td>OpenRouter</td>
+<td>Yes</td>
+<td>—</td>
+<td>Via external server</td>
+</tr>
+<tr>
+<td>Logprobs</td>
+<td>Yes (vLLM, HF, OpenAI)</td>
+<td>—</td>
+<td>Depends on external server</td>
+</tr>
+<tr>
+<td>Prefix continuation</td>
+<td>Yes (vLLM, HF, Anthropic)</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>llenvs is the only library where <code>pip install</code> and a local model path are sufficient to run end-to-end evaluations. For researchers who need to quickly swap models, adjust sampling parameters, or inspect logprobs, the integrated backend avoids the overhead of orchestrating separate services.</p>
+<h2 id="environment-architecture">Environment Architecture<a class="headerlink" href="#environment-architecture" title="Permanent link">&para;</a></h2>
+<p>The three libraries use fundamentally different paradigms.</p>
+<h3 id="llenvs-explicit-state-mdp">llenvs — Explicit-State MDP<a class="headerlink" href="#llenvs-explicit-state-mdp" title="Permanent link">&para;</a></h3>
+<p>State is immutable and passed explicitly to <code>step()</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="n">result</span> <span class="o">=</span> <span class="n">env</span><span class="o">.</span><span class="n">step</span><span class="p">(</span><span class="n">state</span><span class="p">,</span> <span class="n">action</span><span class="p">)</span>  <span class="c1"># state is not modified</span>
+</code></pre></div>
+<p>Environments with <code>spec.pure_step == True</code> (single-turn adapters, GEM via snapshot/restore, Dialogue via message reconstruction) are genuine pure functions — any state can be snapshotted and resumed from, and multiple branches can diverge from the same checkpoint.</p>
+<p>Multi-turn adapters wrapping stateful backends (WebShop, AgentGym, OpenEnv, verifiers tool) have <code>pure_step=False</code> and enforce sequential continuity: only the most recent state from <code>reset()</code>/<code>step()</code> is valid. Passing a stale state raises <code>NotImplementedError</code>. However, the <code>BranchManager</code> system provides universal branching for all environments via a tiered strategy system: <code>DirectStrategy</code> (zero-cost for pure-function envs), <code>ProcessForkStrategy</code> (via <code>os.fork()</code> for mutable-backend envs on Unix), and <code>ActionReplayStrategy</code> (replays actions on a fresh env for deterministic envs).</p>
+<h3 id="openenv-client-server-with-docker-isolation">OpenEnv — Client-Server with Docker Isolation<a class="headerlink" href="#openenv-client-server-with-docker-isolation" title="Permanent link">&para;</a></h3>
+<p>Environments run inside Docker containers. The client communicates via persistent WebSocket connections. State lives server-side; the client only sees observations. Two separate interfaces exist:</p>
+<ul>
+<li><strong>MCP interface</strong> (agent-facing): tool calls only — the agent never sees <code>reset()</code> or <code>step()</code> directly</li>
+<li><strong>HTTP interface</strong> (orchestration): simulation control (<code>reset</code>, <code>step</code>, <code>state</code>)</li>
+</ul>
+<p>The deliberate hiding of <code>reset()</code> from the agent is a training-production alignment mechanism: agents cannot learn that mistakes are recoverable.</p>
+<h3 id="verifiers-rollout-driven">verifiers — Rollout-Driven<a class="headerlink" href="#verifiers-rollout-driven" title="Permanent link">&para;</a></h3>
+<p>The environment owns the full rollout loop. It calls the model, accumulates trajectory steps, and scores at the end:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="n">outputs</span> <span class="o">=</span> <span class="n">env</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">model</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">dataset</span><span class="o">=</span><span class="n">dataset</span><span class="p">)</span>
+</code></pre></div>
+<p>The environment <em>drives</em> the conversation rather than being stepped through externally. This simplifies trainer integration but gives less control over the inference loop.</p>
+<h3 id="implications">Implications<a class="headerlink" href="#implications" title="Permanent link">&para;</a></h3>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Tree search / MCTS from any state</td>
+<td>All environments (via branching strategies)</td>
+<td>Not possible (server-side state)</td>
+<td>Not possible (env owns loop)</td>
+</tr>
+<tr>
+<td>Trajectory branching / checkpointing</td>
+<td>All environments (Direct, ProcessFork, or ActionReplay)</td>
+<td>Not supported</td>
+<td>Not supported</td>
+</tr>
+<tr>
+<td>Custom sampling strategies mid-episode</td>
+<td>Full control</td>
+<td>Agent brings own</td>
+<td>Limited (env calls model)</td>
+</tr>
+<tr>
+<td>Training-production environment parity</td>
+<td>Not a goal</td>
+<td>Core design goal</td>
+<td>Not a goal</td>
+</tr>
+<tr>
+<td>Sandboxed execution</td>
+<td>Not built-in</td>
+<td>Docker isolation</td>
+<td>Prime Sandboxes</td>
+</tr>
+</tbody>
+</table>
+<h2 id="multi-turn-tool-support">Multi-Turn &amp; Tool Support<a class="headerlink" href="#multi-turn-tool-support" title="Permanent link">&para;</a></h2>
+<p>All three have first-class multi-turn support, but the mechanisms differ.</p>
+<p><strong>llenvs</strong>: Multi-turn via adapters (GEM games, WebShop, AgentGym's 15 environments). Tool support via <code>ToolDefinition</code>, <code>AsyncToolExecutor</code>, and <code>MCPToolExecutor</code>. Also offers <strong>segmented environments</strong> — decomposing single-turn responses into steps for per-segment rewards, process reward models, tree search at segment boundaries, and early exit.</p>
+<p><strong>OpenEnv</strong>: Multi-turn is the default paradigm (reset/step loop). MCP-native tool system with a <code>@tool()</code> decorator for mode-aware registration (simulation-only, production-only, or both). 24 reference environments spanning games, web/browser, code execution, robotics, and finance.</p>
+<p><strong>verifiers</strong>: Deep environment hierarchy: <code>MultiTurnEnv</code> → <code>ToolEnv</code> → <code>StatefulToolEnv</code> → <code>SandboxEnv</code> → <code>PythonEnv</code>. OpenAI function-calling native. Docker sandbox for code execution. MCP support via <code>MCPEnv</code>.</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Multi-turn games</td>
+<td>Yes (GEM, AgentGym)</td>
+<td>Yes (OpenSpiel, TextArena)</td>
+<td>Yes (TextArena, Wordle)</td>
+</tr>
+<tr>
+<td>E-commerce</td>
+<td>Yes (WebShop)</td>
+<td>Yes (browsergym)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Code sandbox</td>
+<td>—</td>
+<td>Yes (Docker)</td>
+<td>Yes (Prime Sandboxes)</td>
+</tr>
+<tr>
+<td>Browser automation</td>
+<td>—</td>
+<td>Yes (browsergym)</td>
+<td>Yes (BrowserEnv)</td>
+</tr>
+<tr>
+<td>Robotics / simulation</td>
+<td>—</td>
+<td>Yes (Unity, SUMO)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>MCP tool protocol</td>
+<td>Yes</td>
+<td>Yes (native)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Segmented environments</td>
+<td>Yes</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<p>OpenEnv and verifiers have broader coverage for agentic environments (browser, code sandbox, robotics). llenvs's segmented environments — breaking single-turn responses into steps for PRM scoring, tree search, or intervention — are unique to the library.</p>
+<h2 id="answer-extraction">Answer Extraction<a class="headerlink" href="#answer-extraction" title="Permanent link">&para;</a></h2>
+<p><strong>llenvs</strong> has a dedicated extraction system with 11 built-in extractors, composable fallback chains, and a cleaning layer:</p>
+<table>
+<thead>
+<tr>
+<th>Extractor</th>
+<th>Pattern</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tag_based</code></td>
+<td><code>&lt;answer&gt;42&lt;/answer&gt;</code></td>
+</tr>
+<tr>
+<td><code>boxed</code></td>
+<td><code>\boxed{x^2+1}</code> (balanced brace matching)</td>
+</tr>
+<tr>
+<td><code>gsm8k</code></td>
+<td><code>#### 42</code></td>
+</tr>
+<tr>
+<td><code>numeric</code></td>
+<td>Last number in text</td>
+</tr>
+<tr>
+<td><code>multiple_choice</code></td>
+<td><code>(A)</code>, <code>Answer: B</code></td>
+</tr>
+<tr>
+<td><code>pattern_answer</code></td>
+<td>"the answer is X", "therefore X"</td>
+</tr>
+<tr>
+<td><code>code_block</code></td>
+<td>Fenced code blocks</td>
+</tr>
+<tr>
+<td><code>last_line</code></td>
+<td>Last non-empty line</td>
+</tr>
+<tr>
+<td><code>regex</code></td>
+<td>Custom pattern with capture group</td>
+</tr>
+<tr>
+<td><code>raw</code></td>
+<td>Full response (explicit no-extraction)</td>
+</tr>
+<tr>
+<td><code>CompositeExtractor</code></td>
+<td>Try multiple in order (fallback chain)</td>
+</tr>
+</tbody>
+</table>
+<p>Extractors compose with pre-cleaners (strip special tokens from raw response) and post-cleaners (strip punctuation, quotes, LaTeX from extracted answer). The <code>CleanedExtractor</code> wrapper and config integration (<code>answer_extractors</code> list, <code>pre_cleaners</code>/<code>post_cleaners</code> fields) make this a first-class subsystem.</p>
+<p><strong>OpenEnv</strong> has no answer extraction. Scoring happens inside the server-side <code>Rubric</code>; any parsing logic is written into the rubric by the environment author.</p>
+<p><strong>verifiers</strong> has lightweight parsers — <code>XMLParser</code> (extracts XML-tagged fields), <code>ThinkParser</code> (content after <code>&lt;/think&gt;</code>), <code>MaybeThinkParser</code>. Reward functions receive raw completions and handle their own matching. Parsers can generate format compliance rewards via <code>parser.get_format_reward_func()</code>.</p>
+<p>For math and reasoning evaluation where parsing <code>\boxed{}</code>, <code>#### answers</code>, multiple-choice patterns, and similar formats is critical, llenvs provides the most structured tooling. verifiers takes a more ad-hoc approach. OpenEnv delegates it entirely to environment authors.</p>
+<h2 id="reward-system">Reward System<a class="headerlink" href="#reward-system" title="Permanent link">&para;</a></h2>
+<h3 id="llenvs">llenvs<a class="headerlink" href="#llenvs" title="Permanent link">&para;</a></h3>
+<p>Multi-signal typed rewards. Each transition produces a <code>SignalBundle</code> with named, weighted <code>Signal</code> instances. Each signal can carry a numeric reward, textual feedback, or both:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="n">SignalBundle</span><span class="p">(</span><span class="n">signals</span><span class="o">=</span><span class="p">(</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>    <span class="n">Signal</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;correctness&quot;</span><span class="p">,</span> <span class="n">reward_type</span><span class="o">=</span><span class="n">OUTCOME</span><span class="p">,</span> <span class="n">reward</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">weight</span><span class="o">=</span><span class="mf">2.0</span><span class="p">),</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">Signal</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;format&quot;</span><span class="p">,</span> <span class="n">reward_type</span><span class="o">=</span><span class="n">FORMAT</span><span class="p">,</span> <span class="n">reward</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">weight</span><span class="o">=</span><span class="mf">0.5</span><span class="p">),</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">Signal</span><span class="p">(</span><span class="n">name</span><span class="o">=</span><span class="s2">&quot;code_exec&quot;</span><span class="p">,</span> <span class="n">reward_type</span><span class="o">=</span><span class="n">OUTCOME</span><span class="p">,</span> <span class="n">reward</span><span class="o">=</span><span class="mf">0.6</span><span class="p">,</span> <span class="n">feedback</span><span class="o">=</span><span class="s2">&quot;3/5 tests passed&quot;</span><span class="p">),</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">))</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="c1"># bundle.total = 1.0*2.0 + 0.5*0.5 + 0.6*1.0 = 2.85</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="c1"># bundle.feedback_texts() = (&quot;3/5 tests passed&quot;,)</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="c1"># bundle.numeric_signals() returns the 3 signals with rewards</span>
+</code></pre></div>
+<p>Adapters provide only native rewards by default (wrapper fidelity). Additional rewards (<code>FormatReward</code>, <code>ToolValidityReward</code>, <code>ToolEfficiencyReward</code>) are opt-in via <code>extra_rewards</code>. Signals are queryable by name or type. The <code>weight</code> field (default 1.0) allows expressing relative importance. Feedback-only signals (<code>reward=None</code>) participate in feedback collection but do not contribute to the numeric total — useful for delivering qualitative feedback in iterative refinement environments.</p>
+<h3 id="openenv">OpenEnv<a class="headerlink" href="#openenv" title="Permanent link">&para;</a></h3>
+<p>PyTorch <code>nn.Module</code>-inspired <code>Rubric</code> system. Server-side execution during <code>env.step()</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">Rubric</span><span class="p">(</span><span class="n">ABC</span><span class="p">):</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">action</span><span class="p">,</span> <span class="n">observation</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">float</span><span class="p">:</span> <span class="o">...</span>
+</code></pre></div>
+<p>Composable via containers: <code>Sequential</code> (fail-fast), <code>Gate</code> (threshold), <code>WeightedSum</code> (parallel), <code>RubricList</code>, <code>RubricDict</code>. Supports hooks (pre/post), state dicts, and <code>TrajectoryRubric</code> for delayed rewards with discounting. <code>LLMJudge</code> for remote LLM-as-judge evaluation.</p>
+<h3 id="verifiers">verifiers<a class="headerlink" href="#verifiers" title="Permanent link">&para;</a></h3>
+<p><code>Rubric</code> class combining weighted reward functions:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">rubric</span> <span class="o">=</span> <span class="n">Rubric</span><span class="p">(</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>    <span class="n">reward_funcs</span><span class="o">=</span><span class="p">[</span><span class="n">exact_match</span><span class="p">,</span> <span class="n">format_reward</span><span class="p">],</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a>    <span class="n">weights</span><span class="o">=</span><span class="p">[</span><span class="mf">1.0</span><span class="p">,</span> <span class="mf">0.5</span><span class="p">],</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="p">)</span>
+</code></pre></div>
+<p>Functions can be individual (<code>completion, answer -&gt; float</code>) or group-level (<code>completions, answers -&gt; list[float]</code>) for relative scoring. Arguments are auto-injected by signature. Specialized rubrics: <code>JudgeRubric</code> (LLM-as-judge), <code>MathRubric</code> (symbolic math verification). Monitor rubrics auto-track metrics (turn counts, tool calls, timing).</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Multiple named signals per step</td>
+<td>Yes</td>
+<td>No (single float)</td>
+<td>No (single float)</td>
+</tr>
+<tr>
+<td>Signal types (OUTCOME, STEP, FORMAT, PROCESS)</td>
+<td>Yes</td>
+<td>Reward field on Observation</td>
+<td>Via separate reward functions</td>
+</tr>
+<tr>
+<td>Composable reward containers</td>
+<td>Via <code>extra_rewards</code> tuple</td>
+<td>nn.Module-style nesting</td>
+<td>Weighted function list</td>
+</tr>
+<tr>
+<td>Trajectory-level rewards</td>
+<td>Via trajectory total</td>
+<td><code>TrajectoryRubric</code></td>
+<td>After-rollout scoring</td>
+</tr>
+<tr>
+<td>LLM-as-judge</td>
+<td>—</td>
+<td><code>LLMJudge</code></td>
+<td><code>JudgeRubric</code></td>
+</tr>
+<tr>
+<td>Group-relative scoring</td>
+<td>—</td>
+<td>—</td>
+<td>Yes (group reward functions)</td>
+</tr>
+</tbody>
+</table>
+<h2 id="rl-training-integration">RL Training Integration<a class="headerlink" href="#rl-training-integration" title="Permanent link">&para;</a></h2>
+<h3 id="llenvs_1">llenvs<a class="headerlink" href="#llenvs_1" title="Permanent link">&para;</a></h3>
+<p>Three integration layers plus framework-specific adapters:</p>
+<ul>
+<li><strong><code>Scorer</code></strong>: Wraps a single-turn environment, exposes <code>score(task_index, response) -&gt; ScoringResult</code></li>
+<li><strong><code>DatasetProvider</code></strong>: Iterates tasks, provides prompts and ground truths, converts to HuggingFace <code>Dataset</code></li>
+<li><strong><code>TrajectoryMasker</code></strong>: Converts multi-turn <code>Trajectory</code> to <code>MaskedTrajectory</code> with per-token source masks (model tokens = 1, environment tokens = 0)</li>
+</ul>
+<p>Framework adapters for veRL, TRL, and OpenRLHF provide reward functions and rollout helpers that plug into each trainer's API.</p>
+<h3 id="openenv_1">OpenEnv<a class="headerlink" href="#openenv_1" title="Permanent link">&para;</a></h3>
+<p>Positions itself as the environment standard that RL frameworks connect to. The environment is the same in training, evaluation, and production. Confirmed integrations: Forge (Meta), TRL, VeRL, Unsloth, SkyRL, ART, Oumi. The primary demonstrated integration is with TorchForge for GRPO training.</p>
+<p>No built-in scoring API or dataset provision — those responsibilities belong to the training framework.</p>
+<h3 id="verifiers_1">verifiers<a class="headerlink" href="#verifiers_1" title="Permanent link">&para;</a></h3>
+<p><code>prime-rl</code> (PrimeIntellect's production RL trainer) is the primary path: multi-node async training, MoE support, LoRA, online difficulty filtering, NCCL-based weight sync between training and vLLM inference. Hosted training available in private beta.</p>
+<p>A legacy single-node <code>RLTrainer</code> extends HuggingFace <code>Trainer</code> with GRPO-style training and vLLM weight synchronization. Also works with external trainers (Tinker, SkyRL, rLLM).</p>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single-turn scoring API</td>
+<td><code>Scorer</code></td>
+<td>—</td>
+<td>Via rubric</td>
+</tr>
+<tr>
+<td>Dataset provision</td>
+<td><code>DatasetProvider</code></td>
+<td>—</td>
+<td>Built into environment</td>
+</tr>
+<tr>
+<td>Token-level trajectory masking</td>
+<td><code>TrajectoryMasker</code></td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>veRL integration</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Via rLLM (third-party)</td>
+</tr>
+<tr>
+<td>TRL integration</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>—</td>
+</tr>
+<tr>
+<td>OpenRLHF integration</td>
+<td>Yes</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Own RL trainer</td>
+<td>—</td>
+<td>—</td>
+<td><code>prime-rl</code> (production)</td>
+</tr>
+<tr>
+<td>Weight sync (training ↔ inference)</td>
+<td>—</td>
+<td>—</td>
+<td>NCCL-based</td>
+</tr>
+<tr>
+<td>Hosted training</td>
+<td>—</td>
+<td>—</td>
+<td>Private beta</td>
+</tr>
+</tbody>
+</table>
+<p>llenvs's <code>TrajectoryMasker</code> — providing per-token source attribution (which tokens came from the model vs. the environment) for multi-turn RL — is unique among the three.</p>
+<h2 id="batching-parallelization">Batching &amp; Parallelization<a class="headerlink" href="#batching-parallelization" title="Permanent link">&para;</a></h2>
+<p><strong>llenvs</strong>: Lockstep batching — all active trajectories advance one step together, finished ones drop out. GPU backends (vLLM, HF) do a single batched forward pass; API backends use concurrent async HTTP with semaphore (<code>max_concurrency</code>). <code>batch_size</code> parameter chunks large task sets for GPU memory management. Cross-environment batching (<code>run_multi_evaluation()</code>) interleaves trajectories from multiple environments in one loop.</p>
+<p><strong>OpenEnv</strong>: Per-session concurrency via <code>max_concurrent_envs</code> on the HTTP server. Each environment instance handles one trajectory. A batch orchestration layer (<code>EnvPool</code>) is planned but not yet implemented.</p>
+<p><strong>verifiers</strong>: Async semaphore-based concurrency (<code>max_workers</code>, default 512) for parallel rollouts. In RL training, the <code>Orchestrator</code> runs asynchronous batch generation in a separate thread parallel with training steps. <code>ZMQEnvServer</code>/<code>ZMQEnvClient</code> for distributed environment execution across processes.</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>llenvs</th>
+<th>OpenEnv</th>
+<th>verifiers</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPU batch inference</td>
+<td>Yes (vLLM, HF)</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>API concurrent requests</td>
+<td>Yes (semaphore)</td>
+<td>—</td>
+<td>Yes (semaphore)</td>
+</tr>
+<tr>
+<td>Cross-environment batching</td>
+<td>Yes</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Batch memory chunking</td>
+<td>Yes (<code>batch_size</code>)</td>
+<td>—</td>
+<td>Yes (<code>micro_batch_size</code>)</td>
+</tr>
+<tr>
+<td>Distributed environments</td>
+<td>—</td>
+<td>Docker Swarm</td>
+<td>ZMQ workers</td>
+</tr>
+</tbody>
+</table>
+<h2 id="configuration-prompt-management">Configuration &amp; Prompt Management<a class="headerlink" href="#configuration-prompt-management" title="Permanent link">&para;</a></h2>
+<p><strong>llenvs</strong>: Centralized YAML and Python config (<code>EvalConfig</code>, <code>EnvironmentConfig</code>, <code>ModelConfig</code>). Factory pattern for environments and backends. Composable prompt system: fragments (reusable snippets), system prompts (complete pre-built), templates (wrap questions), model profiles (family-specific adjustments like DeepSeek-R1, O1, Llama3, Qwen). Per-environment overrides for prompts and templates.</p>
+<p><strong>OpenEnv</strong>: Decentralized. Each environment has its own <code>openenv.yaml</code> manifest. No unified eval config or prompt management — prompt formatting is the agent's responsibility. Training config (e.g., GRPO hyperparameters) is external, typically via OmegaConf YAML.</p>
+<p><strong>verifiers</strong>: TOML configs and CLI (<code>prime eval run</code>). <code>EvalConfig</code> and <code>RLConfig</code> (extends HuggingFace <code>TrainingArguments</code>). Provides modified chat templates for specific models (Qwen3, DeepSeek) that preserve <code>&lt;think&gt;</code> sections. GEPA (Genetic-Pareto Prompt Optimization) for automatic system prompt optimization. No general prompt template/fragment system.</p>
+<h2 id="ecosystem-community">Ecosystem &amp; Community<a class="headerlink" href="#ecosystem-community" title="Permanent link">&para;</a></h2>
+<p><strong>OpenEnv</strong>: Meta + HuggingFace institutional backing. RFC-driven development process. HuggingFace Hub for environment distribution (<code>openenv push</code>, <code>AutoEnv.from_env()</code>). 24 reference environments. Community contributions via Hub.</p>
+<p><strong>verifiers</strong>: ~3.8k GitHub stars, 65 contributors. Community-driven Environments Hub with 400+ environments. Bounty program ($100–$5,000 per environment). RL residency program with 500+ applicants. Active ecosystem with categories spanning autonomous research, browser automation, theorem proving, legal/finance, and more.</p>
+<p><strong>llenvs</strong>: Internal library, comprehensive documentation and test suite (1100+ tests), 7 adapters wrapping established libraries (reasoning-gym, HuggingFace datasets, GEM, WebShop, AgentGym, verifiers, OpenEnv). The verifiers and OpenEnv adapters enable using those ecosystems' environments through llenvs's stateless MDP interface, extraction system, and evaluation runners.</p>
+<h2 id="positioning-summary">Positioning Summary<a class="headerlink" href="#positioning-summary" title="Permanent link">&para;</a></h2>
+<p>Each library occupies a distinct point in the design space:</p>
+<p><strong>llenvs</strong> is a <strong>research-oriented evaluation and training library</strong> with integrated inference. Its explicit-state environment architecture (with full branching on supported environments), built-in backends, answer extraction system, segmented environments, and token-level trajectory masking are aimed at researchers who need fine-grained control over the full pipeline — from sampling to scoring — without orchestrating external services. The tradeoff is a smaller environment catalog and no sandboxed execution.</p>
+<p><strong>OpenEnv</strong> is an <strong>environment creation and deployment standard</strong> with a production-grade isolation model. Its client-server architecture, Docker sandboxing, MCP-native tools, and simulation/production duality target the workflow of building, training on, and deploying agentic environments. The tradeoff is that inference, RL training, and answer parsing are all external concerns.</p>
+<p><strong>verifiers</strong> is an <strong>RL training ecosystem</strong> centered on environment packaging and community contribution. Its rollout-driven design, production RL trainer (prime-rl), weight synchronization, Environments Hub, and hosted training target teams running RL at scale. The tradeoff is that it requires external inference servers and gives less control over the inference loop.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+      <div class="md-progress" data-md-component="progress" role="progressbar"></div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.path", "navigation.indexes", "navigation.top", "navigation.instant", "navigation.instant.progress", "search.highlight", "search.suggest", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

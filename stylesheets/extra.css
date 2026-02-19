@@ -1,0 +1,113 @@
+/* Brighter body text in dark mode */
+[data-md-color-scheme="slate"] {
+  --md-typeset-color: rgba(255, 255, 255, 0.87);
+}
+
+/* Header backdrop blur — keep theme's default background color */
+.md-header {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* Smooth transitions on nav links */
+.md-nav__link {
+  transition: color 0.15s ease, opacity 0.15s ease;
+}
+
+.md-nav__link:hover {
+  opacity: 0.8;
+}
+
+/* Admonition polish */
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 0.5rem;
+}
+
+/* Card grid styling */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid.cards > ol > li {
+  border-radius: 0.75rem;
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid.cards > ol > li:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  transform: translateY(-2px);
+}
+
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ul > li:hover,
+[data-md-color-scheme="slate"] .md-typeset .grid.cards > ol > li:hover {
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+/* Hero section */
+.hero {
+  text-align: center;
+  padding: 2.5rem 1rem 1.5rem;
+}
+
+.hero h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.hero p {
+  font-size: 1.15rem;
+  opacity: 0.8;
+  max-width: 36rem;
+  margin: 0 auto 1.5rem;
+}
+
+.hero .hero-buttons {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.hero .hero-buttons a {
+  display: inline-block;
+  padding: 0.6rem 1.5rem;
+  border-radius: 2rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.hero .hero-buttons a:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.hero .hero-buttons a.md-button--primary {
+  background-color: var(--md-primary-fg-color);
+  color: white !important;
+}
+
+.hero .hero-buttons .md-button {
+  border: 2px solid var(--md-primary-fg-color);
+  color: var(--md-typeset-color);
+}
+
+/* Slightly tighter content spacing */
+.md-typeset h2 {
+  margin-top: 1.8em;
+}
+
+/* Code block polish */
+.md-typeset pre > code {
+  border-radius: 0.5rem;
+}
+
+/* Back-to-top button */
+.md-top {
+  border-radius: 2rem;
+}
+
+/* Tab labels */
+.md-typeset .tabbed-labels > label {
+  border-radius: 0.25rem 0.25rem 0 0;
+}
