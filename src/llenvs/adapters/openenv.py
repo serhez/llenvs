@@ -57,6 +57,10 @@ def _mcp_tools_to_definitions(
 ) -> tuple[ToolDefinition, ...]:
     """Convert MCP Tool objects to ToolDefinitions.
 
+    Preserves the original ``input_schema`` as ``raw_schema`` on each
+    ``ToolDefinition`` for full-fidelity schema passthrough.  The flat
+    ``parameters`` tuple is a best-effort parse for inspection/display.
+
     Args:
         tools: List of MCP Tool objects (name, description, input_schema).
 
@@ -83,11 +87,19 @@ def _mcp_tools_to_definitions(
                 )
             )
 
+        # Build OpenAI-style function dict for raw_schema passthrough
+        raw_schema: dict[str, Any] = {
+            "name": tool.name,
+            "description": getattr(tool, "description", ""),
+            "parameters": schema,
+        }
+
         definitions.append(
             ToolDefinition(
                 name=tool.name,
                 description=getattr(tool, "description", ""),
                 parameters=tuple(parameters),
+                raw_schema=raw_schema,
             )
         )
 

@@ -41,10 +41,53 @@ class ToolDefinition:
     description: str
     parameters: tuple[ToolParameter, ...] = ()
     is_terminal: bool = False  # Calling this tool ends the episode
+    raw_schema: dict[str, Any] | None = None  # Full-fidelity schema passthrough
 
     def to_openai_schema(self) -> dict[str, Any]: ...
     def to_anthropic_schema(self) -> dict[str, Any]: ...
 ```
+
+#### `raw_schema` — Full-Fidelity Schema Passthrough
+
+When `raw_schema` is set, `to_openai_schema()` and `to_anthropic_schema()` use it directly instead of rebuilding from flat `parameters`. This preserves nested object schemas, arrays of objects, discriminated unions, and other complex JSON Schema structures that `ToolParameter` cannot represent.
+
+The flat `parameters` tuple remains as a best-effort parse for inspection and display.
+
+```python
+# Tool with nested schema (e.g., from tau2, Aviary, Verifiers)
+tool = ToolDefinition(
+    name="update_booking",
+    description="Update a flight booking",
+    raw_schema={
+        "type": "function",
+        "function": {
+            "name": "update_booking",
+            "description": "Update a flight booking",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "passengers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "dob": {"type": "string", "format": "date"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
+
+# Produces the exact original schema
+tool.to_openai_schema()   # => raw_schema (unchanged)
+tool.to_anthropic_schema() # => converts to Anthropic format preserving nested structure
+```
+
+`raw_schema` is automatically set by `oai_tools_to_definitions()` (used by Aviary, Verifiers, SciAgentGYM, tau2 adapters) and `_mcp_tools_to_definitions()` (used by OpenEnv adapter).
 
 Example:
 

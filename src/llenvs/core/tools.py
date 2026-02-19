@@ -60,15 +60,39 @@ class ToolDefinition:
         description: Human-readable description of what the tool does.
         parameters: Tuple of parameter definitions.
         is_terminal: If True, calling this tool ends the episode.
+        raw_schema: Optional original JSON Schema dict for full-fidelity
+            passthrough. When set, ``to_openai_schema()`` and
+            ``to_anthropic_schema()`` use it directly instead of
+            rebuilding from flat ``parameters``. This preserves nested
+            object schemas, arrays of objects, discriminated unions, etc.
     """
 
     name: str
     description: str
     parameters: tuple[ToolParameter, ...] = ()
     is_terminal: bool = False
+    raw_schema: dict[str, Any] | None = None
 
     def to_openai_schema(self) -> dict[str, Any]:
         """Convert to OpenAI function/tool schema format."""
+        if self.raw_schema is not None:
+            # Use raw_schema for full fidelity
+            if "type" in self.raw_schema and "function" in self.raw_schema:
+                # Already wrapped: {"type": "function", "function": {...}}
+                return self.raw_schema
+            if "name" in self.raw_schema:
+                # Bare function dict: {"name": ..., "parameters": ...}
+                return {"type": "function", "function": self.raw_schema}
+            # Fallback: wrap with name/description
+            return {
+                "type": "function",
+                "function": {
+                    "name": self.name,
+                    "description": self.description,
+                    "parameters": self.raw_schema,
+                },
+            }
+
         properties = {}
         required = []
 
@@ -150,6 +174,25 @@ class ToolDefinition:
 
     def to_anthropic_schema(self) -> dict[str, Any]:
         """Convert to Anthropic tool schema format."""
+        if self.raw_schema is not None:
+            # Extract parameters from raw_schema
+            if "type" in self.raw_schema and "function" in self.raw_schema:
+                func = self.raw_schema["function"]
+            elif "name" in self.raw_schema and "parameters" in self.raw_schema:
+                func = self.raw_schema
+            else:
+                # raw_schema is the parameters object itself
+                return {
+                    "name": self.name,
+                    "description": self.description,
+                    "input_schema": self.raw_schema,
+                }
+            return {
+                "name": func.get("name", self.name),
+                "description": func.get("description", self.description),
+                "input_schema": func.get("parameters", {}),
+            }
+
         properties = {}
         required = []
 
@@ -441,6 +484,12 @@ def oai_tools_to_definitions(
 ) -> tuple[ToolDefinition, ...]:
     """Convert OpenAI-format tool schemas to ToolDefinitions.
 
+    Always preserves the original schema dict as ``raw_schema`` on the
+    resulting ``ToolDefinition``.  The flat ``parameters`` tuple remains
+    as a best-effort parse for inspection/display, but
+    ``to_openai_schema()`` / ``to_anthropic_schema()`` will use
+    ``raw_schema`` when present for full-fidelity roundtrip.
+
     Args:
         oai_tools: List of OpenAI tool schema dicts.
 
@@ -475,6 +524,7 @@ def oai_tools_to_definitions(
                 name=name,
                 description=description,
                 parameters=tuple(parameters),
+                raw_schema=tool,
             )
         )
 

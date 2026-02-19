@@ -41,6 +41,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[SciAgentGYM](adapters/sciagentgym.md)** - Multi-step scientific tool-use across 6 domains
 - **[InterCode](adapters/intercode.md)** - Interactive code generation in Bash, SQL, Python, CTF
 - **[MARE](adapters/mare.md)** - Meta Agents Research Environments (Gaia2 benchmark)
+- **[tau2](adapters/tau2.md)** - Multi-turn customer service benchmark (airline, retail, telecom)
 
 ## Reference
 

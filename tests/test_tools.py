@@ -11,6 +11,7 @@ from llenvs.core.tools import (
     ToolResult,
     ToolResultStatus,
     SimpleToolExecutor,
+    oai_tools_to_definitions,
 )
 
 
@@ -465,3 +466,225 @@ class TestSimpleToolExecutor:
         assert results[1].is_success
         assert results[1].output == "12"
         assert results[2].status == ToolResultStatus.INVALID_TOOL
+
+
+class TestRawSchema:
+    """Tests for raw_schema passthrough on ToolDefinition."""
+
+    def test_default_none(self):
+        """raw_schema defaults to None."""
+        tool = ToolDefinition(name="test", description="Test")
+        assert tool.raw_schema is None
+
+    def test_no_raw_schema_unchanged(self):
+        """Without raw_schema, to_openai_schema builds from parameters."""
+        tool = ToolDefinition(
+            name="get_weather",
+            description="Get weather",
+            parameters=(
+                ToolParameter(
+                    name="city",
+                    type=ToolParameterType.STRING,
+                    description="City name",
+                ),
+            ),
+        )
+        schema = tool.to_openai_schema()
+        assert schema["type"] == "function"
+        assert schema["function"]["name"] == "get_weather"
+        assert "city" in schema["function"]["parameters"]["properties"]
+
+    def test_openai_schema_wrapped_passthrough(self):
+        """raw_schema with full OpenAI wrapper passes through directly."""
+        original = {
+            "type": "function",
+            "function": {
+                "name": "complex_tool",
+                "description": "A tool with nested schemas",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "quantity": {"type": "integer"},
+                                },
+                                "required": ["name"],
+                            },
+                        },
+                    },
+                    "required": ["items"],
+                },
+            },
+        }
+        tool = ToolDefinition(
+            name="complex_tool",
+            description="A tool with nested schemas",
+            raw_schema=original,
+        )
+        assert tool.to_openai_schema() == original
+
+    def test_openai_schema_bare_function_passthrough(self):
+        """raw_schema with bare function dict gets wrapped."""
+        bare = {
+            "name": "my_tool",
+            "description": "My tool",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+            },
+        }
+        tool = ToolDefinition(name="my_tool", description="My tool", raw_schema=bare)
+        result = tool.to_openai_schema()
+        assert result["type"] == "function"
+        assert result["function"] == bare
+
+    def test_anthropic_schema_from_wrapped_raw(self):
+        """Anthropic schema from fully-wrapped raw_schema."""
+        original = {
+            "type": "function",
+            "function": {
+                "name": "nested_tool",
+                "description": "Has nested params",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "config": {
+                            "type": "object",
+                            "properties": {
+                                "key": {"type": "string"},
+                                "value": {"type": "integer"},
+                            },
+                        },
+                    },
+                },
+            },
+        }
+        tool = ToolDefinition(
+            name="nested_tool", description="Has nested params", raw_schema=original
+        )
+        anthropic = tool.to_anthropic_schema()
+        assert anthropic["name"] == "nested_tool"
+        assert anthropic["description"] == "Has nested params"
+        assert anthropic["input_schema"] == original["function"]["parameters"]
+
+    def test_anthropic_schema_from_bare_raw(self):
+        """Anthropic schema from bare function raw_schema."""
+        bare = {
+            "name": "my_tool",
+            "description": "My tool",
+            "parameters": {"type": "object", "properties": {"x": {"type": "string"}}},
+        }
+        tool = ToolDefinition(name="my_tool", description="My tool", raw_schema=bare)
+        anthropic = tool.to_anthropic_schema()
+        assert anthropic["name"] == "my_tool"
+        assert anthropic["input_schema"] == bare["parameters"]
+
+    def test_anthropic_schema_from_parameters_only_raw(self):
+        """Anthropic schema when raw_schema is just the parameters object."""
+        params = {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        }
+        tool = ToolDefinition(name="search", description="Search", raw_schema=params)
+        anthropic = tool.to_anthropic_schema()
+        assert anthropic["name"] == "search"
+        assert anthropic["description"] == "Search"
+        assert anthropic["input_schema"] == params
+
+    def test_roundtrip_oai_to_definition_to_oai(self):
+        """Round-trip: OpenAI schema -> ToolDefinition -> to_openai_schema()."""
+        original = {
+            "type": "function",
+            "function": {
+                "name": "update_booking",
+                "description": "Update a booking",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "booking_id": {"type": "string", "description": "Booking ID"},
+                        "passengers": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "dob": {"type": "string"},
+                                },
+                                "required": ["name"],
+                            },
+                            "description": "Passenger list",
+                        },
+                    },
+                    "required": ["booking_id", "passengers"],
+                },
+            },
+        }
+        defs = oai_tools_to_definitions([original])
+        assert len(defs) == 1
+        assert defs[0].name == "update_booking"
+        # Round-trip produces the original
+        assert defs[0].to_openai_schema() == original
+
+    def test_oai_conversion_preserves_nested(self):
+        """oai_tools_to_definitions preserves nested structures via raw_schema."""
+        oai_tool = {
+            "type": "function",
+            "function": {
+                "name": "create_order",
+                "description": "Create order",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "sku": {"type": "string"},
+                                    "qty": {"type": "integer"},
+                                },
+                            },
+                        },
+                    },
+                    "required": ["items"],
+                },
+            },
+        }
+        defs = oai_tools_to_definitions([oai_tool])
+        # Flat parameters are best-effort (items is just ARRAY type)
+        assert defs[0].parameters[0].name == "items"
+        assert defs[0].parameters[0].type == ToolParameterType.ARRAY
+        # But raw_schema preserves the full nested structure
+        assert defs[0].raw_schema is not None
+        result = defs[0].to_openai_schema()
+        items_schema = result["function"]["parameters"]["properties"]["items"]
+        assert "items" in items_schema  # array items preserved
+        assert items_schema["items"]["type"] == "object"
+
+    def test_oai_conversion_flat_params_still_work(self):
+        """oai_tools_to_definitions still populates flat parameters for inspection."""
+        oai_tool = {
+            "type": "function",
+            "function": {
+                "name": "simple",
+                "description": "Simple tool",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "The name"},
+                        "count": {"type": "integer", "description": "How many"},
+                    },
+                    "required": ["name"],
+                },
+            },
+        }
+        defs = oai_tools_to_definitions([oai_tool])
+        assert len(defs[0].parameters) == 2
+        params = {p.name: p for p in defs[0].parameters}
+        assert params["name"].required is True
+        assert params["count"].required is False

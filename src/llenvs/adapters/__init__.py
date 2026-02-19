@@ -105,6 +105,15 @@ from llenvs.adapters.sciagentgym import (
     SciAgentGymHidden,
     SciAgentGymReward,
 )
+from llenvs.adapters.tau2 import (
+    TAU2_DOMAINS,
+    TAU2_SPLITS,
+    Tau2Adapter,
+    Tau2DetailedRewards,
+    Tau2Environment,
+    Tau2Hidden,
+    Tau2Reward,
+)
 from llenvs.adapters.verifiers import (
     VerifiersAdapter,
     VerifiersHidden,
@@ -222,6 +231,14 @@ __all__ = [
     "MAREAdapter",
     "MAREReward",
     "MARE_CAPABILITIES",
+    # tau2
+    "Tau2Environment",
+    "Tau2Hidden",
+    "Tau2Adapter",
+    "Tau2Reward",
+    "Tau2DetailedRewards",
+    "TAU2_DOMAINS",
+    "TAU2_SPLITS",
 ]
 
 
@@ -390,6 +407,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # meta-agents-research-environments not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register tau2 adapter if available
+    try:
+        adapter = Tau2Adapter()
+        adapter._get_tau2()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # tau2 not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
