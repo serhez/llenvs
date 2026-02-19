@@ -1,5 +1,6 @@
-site_name: llenvs
+site_name: LLEnvs
 site_description: MDP-style access to evaluation environments for LLM research
+site_url: https://sergiohg.com/llenvs/
 
 theme:
   name: material
@@ -22,10 +23,19 @@ theme:
     text: Inter
     code: JetBrains Mono
   features:
+    - navigation.tabs
+    - navigation.tabs.sticky
     - navigation.sections
-    - navigation.expand
+    - navigation.path
+    - navigation.indexes
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
     - search.highlight
+    - search.suggest
     - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
 
 markdown_extensions:
   - pymdownx.highlight:
@@ -33,5 +43,71 @@ markdown_extensions:
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.inlinehilite
+  - pymdownx.keys
   - tables
   - admonition
+  - attr_list
+  - md_in_html
+  - def_list
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - social
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/install.md
+    - Quick Start: getting-started/quickstart.md
+  - Guides:
+    - guides/index.md
+    - Environments: guides/environments.md
+    - Evaluation: guides/evaluation.md
+    - Inference Backends: guides/backends.md
+    - Prompts: guides/prompts.md
+    - Tools & Function Calling: guides/tools.md
+    - Segmentation: guides/segmentation.md
+    - LLM-as-a-Judge: guides/judge.md
+    - Dialogue: guides/dialogue.md
+    - Iterative Refinement: guides/iterative.md
+    - Branching: guides/branching.md
+    - Parallelization: guides/parallelization.md
+    - Containers: guides/containers.md
+    - RL Training: guides/rl-training.md
+    - Multimodal Observations: guides/multimodal.md
+    - Library Landscape: guides/landscape.md
+  - Adapters:
+    - adapters/index.md
+    - ReasoningGym: adapters/reasoning-gym.md
+    - HuggingFace: adapters/huggingface.md
+    - GEM: adapters/gem.md
+    - Gymnasium: adapters/gymnasium.md
+    - WebShop: adapters/webshop.md
+    - AlfWorld: adapters/alfworld.md
+    - Jericho: adapters/jericho.md
+    - AgentGym: adapters/agentgym.md
+    - LMRL-Gym: adapters/lmrl.md
+    - Aviary: adapters/aviary.md
+    - Verifiers: adapters/verifiers.md
+    - OpenEnv: adapters/openenv.md
+    - SciAgentGYM: adapters/sciagentgym.md
+    - InterCode: adapters/intercode.md
+    - MARE: adapters/mare.md
+    - tau2: adapters/tau2.md
+    - Craftax: adapters/craftax.md
+  - Reference:
+    - reference/index.md
+    - Core Abstractions: reference/core.md
+    - Tools: reference/tools.md
+    - Configuration: reference/config.md

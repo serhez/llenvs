@@ -11,3 +11,4 @@ wheels/
 
 # MkDocs
 site/
+.cache/
