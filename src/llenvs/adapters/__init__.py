@@ -17,6 +17,15 @@ from llenvs.adapters.alfworld import (
     AlfWorldHidden,
     AlfWorldReward,
 )
+from llenvs.adapters.craftax import (
+    CRAFTAX_PRESETS,
+    CraftaxActionMapper,
+    CraftaxAdapter,
+    CraftaxAchievementReward,
+    CraftaxEnvironment,
+    CraftaxHidden,
+    CraftaxReward,
+)
 from llenvs.adapters.aviary import (
     AVIARY_PRESETS,
     AviaryAdapter,
@@ -231,6 +240,14 @@ __all__ = [
     "MAREAdapter",
     "MAREReward",
     "MARE_CAPABILITIES",
+    # Craftax
+    "CraftaxEnvironment",
+    "CraftaxHidden",
+    "CraftaxAdapter",
+    "CraftaxReward",
+    "CraftaxAchievementReward",
+    "CraftaxActionMapper",
+    "CRAFTAX_PRESETS",
     # tau2
     "Tau2Environment",
     "Tau2Hidden",
@@ -417,6 +434,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # tau2 not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register Craftax adapter if available
+    try:
+        adapter = CraftaxAdapter()
+        adapter._get_craftax()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # craftax not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

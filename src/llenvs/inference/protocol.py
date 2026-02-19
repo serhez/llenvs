@@ -12,7 +12,7 @@ from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from llenvs.core.state import Action
+    from llenvs.core.state import Action, ImageContent
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 
@@ -140,12 +140,77 @@ class ChatMessage:
     tool_calls: tuple["ToolCall", ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
+    images: tuple["ImageContent", ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary format for API calls."""
+        """Convert to dictionary format for API calls (OpenAI format).
+
+        When images are present, content becomes a content array with
+        text and image_url blocks (OpenAI vision format).
+        """
         result: dict[str, Any] = {"role": self.role}
 
-        if self.content is not None:
+        if self.images:
+            content_parts: list[dict[str, Any]] = []
+            if self.content is not None:
+                content_parts.append({"type": "text", "text": self.content})
+            for img in self.images:
+                content_parts.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{img.media_type};base64,{img.data}"},
+                    }
+                )
+            result["content"] = content_parts
+        elif self.content is not None:
+            result["content"] = self.content
+
+        if self.tool_calls:
+            result["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                    },
+                }
+                for tc in self.tool_calls
+            ]
+
+        if self.tool_call_id is not None:
+            result["tool_call_id"] = self.tool_call_id
+
+        if self.name is not None:
+            result["name"] = self.name
+
+        return result
+
+    def to_anthropic_dict(self) -> dict[str, Any]:
+        """Convert to dictionary format for Anthropic API calls.
+
+        When images are present, content becomes a content array with
+        image and text blocks (Anthropic vision format).
+        """
+        result: dict[str, Any] = {"role": self.role}
+
+        if self.images:
+            content_parts: list[dict[str, Any]] = []
+            for img in self.images:
+                content_parts.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.media_type,
+                            "data": img.data,
+                        },
+                    }
+                )
+            if self.content is not None:
+                content_parts.append({"type": "text", "text": self.content})
+            result["content"] = content_parts
+        elif self.content is not None:
             result["content"] = self.content
 
         if self.tool_calls:
@@ -202,6 +267,7 @@ class BackendCapabilities:
     supports_streaming: bool = False
     supports_chat: bool = True
     supports_function_calling: bool = False
+    supports_vision: bool = False
     max_batch_size: int | None = None
     max_context_length: int | None = None
     max_concurrency: int | None = None

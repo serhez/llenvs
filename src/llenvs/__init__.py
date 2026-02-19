@@ -7,7 +7,7 @@ Key capabilities:
 - Multiple inference backends (vLLM, OpenAI, Anthropic, OpenRouter)
 """
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
+from llenvs.core.state import State, StateMetadata, Observation, Action, ImageContent
 from llenvs.core.reward import Signal, SignalBundle, RewardType, RewardFunction
 from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
 from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
@@ -34,6 +34,7 @@ __all__ = [
     "StateMetadata",
     "Observation",
     "Action",
+    "ImageContent",
     # Rewards
     "Signal",
     "SignalBundle",

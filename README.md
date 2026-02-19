@@ -48,6 +48,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **InterCode** | Interactive code generation | Bash, SQL, Python, CTF |
 | **MARE** | Meta Agents Research Environments | Gaia2 benchmark (email, calendar, contacts, shopping, FS) |
 | **tau2** | Multi-turn customer service benchmark | Airline, Retail, Telecom (DB-backed tools, user simulation) |
+| **Craftax** | JAX-based survival benchmark (ICML 2024) | Open-ended crafting, combat, dungeons (text/symbolic/pixel modes) |
 
 ```python
 from llenvs.core.registry import environment_registry
@@ -208,6 +209,7 @@ pip install llenvs[agentgym]               # AgentGym environments
 pip install llenvs[verifiers]              # Verifiers environments
 pip install llenvs[openenv]                # OpenEnv environments
 pip install llenvs[aviary]                # Aviary tool-calling environments
+pip install craftax                        # Craftax survival benchmark (requires JAX)
 pip install llenvs[trl]                    # TRL integration
 pip install llenvs[all]                    # Everything
 ```

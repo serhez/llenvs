@@ -5,6 +5,7 @@ from llenvs.core.state import (
     StateMetadata,
     Observation,
     Action,
+    ImageContent,
 )
 from llenvs.core.tools import (
     ToolDefinition,
@@ -98,6 +99,7 @@ __all__ = [
     "StateMetadata",
     "Observation",
     "Action",
+    "ImageContent",
     # Tools
     "ToolDefinition",
     "ToolParameter",

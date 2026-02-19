@@ -150,6 +150,7 @@ class OpenAIBackend(ModelBackend):
             supports_streaming=True,
             supports_chat=True,
             supports_function_calling=True,
+            supports_vision=True,
             max_batch_size=None,
             max_context_length=128000,  # Varies by model
             max_concurrency=self._max_concurrency,
@@ -441,6 +442,7 @@ class AnthropicBackend(ModelBackend):
             supports_streaming=True,
             supports_chat=True,
             supports_function_calling=True,
+            supports_vision=True,
             max_batch_size=None,
             max_context_length=200000,  # Claude 3 context
             max_concurrency=self._max_concurrency,
@@ -478,7 +480,7 @@ class AnthropicBackend(ModelBackend):
             if msg.role == "system":
                 system_content = msg.content
             else:
-                chat_messages.append(msg.to_dict())
+                chat_messages.append(msg.to_anthropic_dict())
 
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -539,7 +541,7 @@ class AnthropicBackend(ModelBackend):
             if msg.role == "system":
                 system_content = msg.content
             else:
-                chat_messages.append(msg.to_dict())
+                chat_messages.append(msg.to_anthropic_dict())
 
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -835,6 +837,7 @@ class OpenRouterBackend(ModelBackend):
             supports_streaming=True,
             supports_chat=True,
             supports_function_calling=True,
+            supports_vision=True,
             max_batch_size=None,
             max_context_length=None,  # Varies by model
             max_concurrency=self._max_concurrency,

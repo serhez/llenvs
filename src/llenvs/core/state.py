@@ -17,6 +17,19 @@ HiddenT = TypeVar("HiddenT")
 
 
 @dataclass(frozen=True)
+class ImageContent:
+    """Base64-encoded image for multimodal observations.
+
+    Attributes:
+        data: Base64-encoded image data.
+        media_type: MIME type (e.g., "image/png", "image/jpeg").
+    """
+
+    data: str
+    media_type: str = "image/png"
+
+
+@dataclass(frozen=True)
 class StateMetadata:
     """Metadata associated with a state.
 
@@ -52,7 +65,7 @@ class State(Generic[HiddenT]):
     hidden: HiddenT
     metadata: StateMetadata
 
-    def with_metadata(self, **kwargs: Any) -> "State[HiddenT]":
+    def with_metadata(self, **kwargs: Any) -> State[HiddenT]:
         """Create a new state with updated metadata fields."""
         current = {
             "step": self.metadata.step,
@@ -84,8 +97,9 @@ class Observation:
 
     prompt: str
     messages: tuple[dict[str, Any], ...] = ()
-    tool_results: tuple["ToolResult", ...] = ()
-    available_tools: tuple["ToolDefinition", ...] = ()
+    tool_results: tuple[ToolResult, ...] = ()
+    available_tools: tuple[ToolDefinition, ...] = ()
+    images: tuple[ImageContent, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -101,20 +115,20 @@ class Action:
     """
 
     text: str | None = None
-    tool_calls: tuple["ToolCall", ...] = ()
+    tool_calls: tuple[ToolCall, ...] = ()
 
     @classmethod
-    def from_text(cls, text: str) -> "Action":
+    def from_text(cls, text: str) -> Action:
         """Create an action with only text."""
         return cls(text=text, tool_calls=())
 
     @classmethod
-    def from_tool_call(cls, call: "ToolCall") -> "Action":
+    def from_tool_call(cls, call: ToolCall) -> Action:
         """Create an action with a single tool call."""
         return cls(text=None, tool_calls=(call,))
 
     @classmethod
-    def from_tool_calls(cls, calls: tuple["ToolCall", ...]) -> "Action":
+    def from_tool_calls(cls, calls: tuple[ToolCall, ...]) -> Action:
         """Create an action with multiple tool calls."""
         return cls(text=None, tool_calls=calls)
 

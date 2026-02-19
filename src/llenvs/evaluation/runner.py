@@ -284,10 +284,10 @@ class TrajectoryRunner:
 
         # Add initial prompt as user message
         if not obs.messages:
-            messages.append(ChatMessage(role="user", content=obs.prompt))
+            messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
         else:
             # First message should be user with prompt
-            messages.append(ChatMessage(role="user", content=obs.prompt))
+            messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
 
             # Then add message history
             for msg in obs.messages:
@@ -330,7 +330,20 @@ class TrajectoryRunner:
                     )
 
                 elif role == "user":
-                    messages.append(ChatMessage(role="user", content=msg.get("content", "")))
+                    # Extract images from message dict if present
+                    msg_images: tuple = ()
+                    if "images" in msg:
+                        from llenvs.core.state import ImageContent
+
+                        msg_images = tuple(
+                            ImageContent(
+                                data=im["data"], media_type=im.get("media_type", "image/png")
+                            )
+                            for im in msg["images"]
+                        )
+                    messages.append(
+                        ChatMessage(role="user", content=msg.get("content", ""), images=msg_images)
+                    )
 
         # Apply prompt template to wrap the question
         if self.prompt_template is not None:

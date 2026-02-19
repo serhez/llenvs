@@ -22,6 +22,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[RL Training](guides/rl-training.md)** - Integrate with veRL, TRL, and OpenRLHF
 - **[Containers](guides/containers.md)** - Run environments in Docker or isolated subprocesses
 - **[Iterative Refinement](guides/iterative.md)** - Multi-turn refinement with code execution and judge feedback
+- **[Multimodal Observations](guides/multimodal.md)** - Image observations for vision-language models
 - **[Library Landscape](guides/landscape.md)** - Comparison with OpenEnv, verifiers, and similar libraries
 
 ## Environment Adapters
@@ -42,6 +43,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[InterCode](adapters/intercode.md)** - Interactive code generation in Bash, SQL, Python, CTF
 - **[MARE](adapters/mare.md)** - Meta Agents Research Environments (Gaia2 benchmark)
 - **[tau2](adapters/tau2.md)** - Multi-turn customer service benchmark (airline, retail, telecom)
+- **[Craftax](adapters/craftax.md)** - JAX-based open-ended survival benchmark (text/symbolic/pixel modes)
 
 ## Reference
 

@@ -187,7 +187,7 @@ class ChainOfThoughtWrapper(BaseTransformer):
         for i in range(len(result) - 1, -1, -1):
             if result[i].role == "user":
                 new_content = f"{result[i].content}\n\n{cot_prompt}"
-                result[i] = ChatMessage(role="user", content=new_content)
+                result[i] = ChatMessage(role="user", content=new_content, images=result[i].images)
                 break
 
         return result
@@ -224,14 +224,14 @@ class AnswerFormatInjector(BaseTransformer):
         for i, msg in enumerate(result):
             if msg.role == "system":
                 new_content = f"{msg.content}\n\n{format_instruction}"
-                result[i] = ChatMessage(role="system", content=new_content)
+                result[i] = ChatMessage(role="system", content=new_content, images=msg.images)
                 return result
 
         # No system message, add to last user message
         for i in range(len(result) - 1, -1, -1):
             if result[i].role == "user":
                 new_content = f"{result[i].content}\n\n{format_instruction}"
-                result[i] = ChatMessage(role="user", content=new_content)
+                result[i] = ChatMessage(role="user", content=new_content, images=result[i].images)
                 break
 
         return result
@@ -299,7 +299,7 @@ class RoleMapper(BaseTransformer):
         result = []
         for msg in messages:
             new_role = self.mapping.get(msg.role, msg.role)
-            result.append(ChatMessage(role=new_role, content=msg.content))
+            result.append(ChatMessage(role=new_role, content=msg.content, images=msg.images))
 
         return result
 
@@ -326,7 +326,7 @@ class ContentWrapper(BaseTransformer):
         for msg in messages:
             if not self.roles or msg.role in self.roles:
                 new_content = f"{self.prefix}{msg.content}{self.suffix}"
-                result.append(ChatMessage(role=msg.role, content=new_content))
+                result.append(ChatMessage(role=msg.role, content=new_content, images=msg.images))
             else:
                 result.append(msg)
         return result
@@ -355,7 +355,7 @@ class PromptTemplateTransformer(BaseTransformer):
         for i in range(len(result) - 1, -1, -1):
             if result[i].role == "user":
                 new_content = self.template.apply(result[i].content)
-                result[i] = ChatMessage(role="user", content=new_content)
+                result[i] = ChatMessage(role="user", content=new_content, images=result[i].images)
                 break
 
         return result

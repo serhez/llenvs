@@ -12,7 +12,7 @@ from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import SignalBundle, Signal, RewardType
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -247,6 +247,7 @@ def serialize_observation(obs: Observation) -> dict[str, Any]:
         "messages": [dict(m) for m in obs.messages],
         "tool_results": [serialize_tool_result(tr) for tr in obs.tool_results],
         "available_tools": [serialize_tool_definition(td) for td in obs.available_tools],
+        "images": [{"data": img.data, "media_type": img.media_type} for img in obs.images],
     }
 
 
@@ -257,6 +258,10 @@ def deserialize_observation(data: dict[str, Any]) -> Observation:
         tool_results=tuple(deserialize_tool_result(tr) for tr in data.get("tool_results", ())),
         available_tools=tuple(
             deserialize_tool_definition(td) for td in data.get("available_tools", ())
+        ),
+        images=tuple(
+            ImageContent(data=img["data"], media_type=img.get("media_type", "image/png"))
+            for img in data.get("images", ())
         ),
     )
 
