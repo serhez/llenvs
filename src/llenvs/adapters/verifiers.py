@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from llenvs.core.async_utils import run_async as _run_async
 from llenvs.core.environment import (
     EnvironmentSpec,
     StepResult,
@@ -80,23 +81,6 @@ class VerifiersToolHidden:
 
 
 # ── Rubric reward function ──────────────────────────────────────────
-
-
-def _run_async(coro: Any) -> Any:
-    """Run an async coroutine synchronously."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-
-    if loop is not None and loop.is_running():
-        # Already in an async context — run in a new thread
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    else:
-        return asyncio.run(coro)
 
 
 def _build_reward_kwargs(

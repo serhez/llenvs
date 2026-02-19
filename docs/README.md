@@ -40,6 +40,7 @@ A library providing MDP-style access to evaluation environments for LLM research
 - **[OpenEnv](adapters/openenv.md)** - Session-based server environments with MCP tools
 - **[SciAgentGYM](adapters/sciagentgym.md)** - Multi-step scientific tool-use across 6 domains
 - **[InterCode](adapters/intercode.md)** - Interactive code generation in Bash, SQL, Python, CTF
+- **[MARE](adapters/mare.md)** - Meta Agents Research Environments (Gaia2 benchmark)
 
 ## Reference
 

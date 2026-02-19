@@ -79,6 +79,13 @@ from llenvs.adapters.lmrl import (
     LMRLHidden,
     LMRLReward,
 )
+from llenvs.adapters.mare import (
+    MARE_CAPABILITIES,
+    MAREAdapter,
+    MAREEnvironment,
+    MAREHidden,
+    MAREReward,
+)
 from llenvs.adapters.openenv import (
     OpenEnvAdapter,
     OpenEnvEnvironment,
@@ -209,6 +216,12 @@ __all__ = [
     "SciAgentGymAdapter",
     "SciAgentGymReward",
     "SCIAGENTGYM_SUBJECTS",
+    # MARE
+    "MAREEnvironment",
+    "MAREHidden",
+    "MAREAdapter",
+    "MAREReward",
+    "MARE_CAPABILITIES",
 ]
 
 
@@ -367,6 +380,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # SciAgentGYM not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register MARE adapter if available
+    try:
+        adapter = MAREAdapter()
+        adapter._get_mare()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # meta-agents-research-environments not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

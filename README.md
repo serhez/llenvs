@@ -46,6 +46,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **LMRL-Gym** | Text-based RL environments for LMs | Wordle, Chess, Maze, Twenty Questions |
 | **SciAgentGYM** | Multi-step scientific tool-use | Physics, Chemistry, Materials Science, Astronomy |
 | **InterCode** | Interactive code generation | Bash, SQL, Python, CTF |
+| **MARE** | Meta Agents Research Environments | Gaia2 benchmark (email, calendar, contacts, shopping, FS) |
 
 ```python
 from llenvs.core.registry import environment_registry
