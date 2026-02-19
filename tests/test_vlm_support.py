@@ -800,6 +800,7 @@ class TestGymnasiumMultimodalIntegration:
         )
 
         mock_gym = MagicMock()
+        mock_gym.spec = None
         obs_array = np.zeros((64, 64, 3), dtype=np.uint8)
         mock_gym.reset.return_value = (obs_array, {})
         mock_gym.step.return_value = (obs_array, 1.0, False, False, {})
@@ -829,6 +830,7 @@ class TestGymnasiumMultimodalIntegration:
         )
 
         mock_gym = MagicMock()
+        mock_gym.spec = None
         obs_array = np.zeros((32, 32, 3), dtype=np.uint8)
         mock_gym.reset.return_value = (obs_array, {})
         mock_gym.step.return_value = (obs_array, 0.5, False, False, {})

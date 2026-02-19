@@ -218,7 +218,7 @@ class TestOpenAIBackendTools:
         mock_response.model = "gpt-4o"
         mock_response.id = "chatcmpl-123"
 
-        with patch("openai.OpenAI") as MockOpenAI:
+        with patch("openai.OpenAI") as MockOpenAI, patch("openai.AsyncOpenAI"):
             mock_client = MagicMock()
             mock_client.chat.completions.create.return_value = mock_response
             MockOpenAI.return_value = mock_client
@@ -256,7 +256,7 @@ class TestOpenAIBackendTools:
         mock_response.model = "gpt-4o"
         mock_response.id = "chatcmpl-456"
 
-        with patch("openai.OpenAI") as MockOpenAI:
+        with patch("openai.OpenAI") as MockOpenAI, patch("openai.AsyncOpenAI"):
             mock_client = MagicMock()
             mock_client.chat.completions.create.return_value = mock_response
             MockOpenAI.return_value = mock_client
