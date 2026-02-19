@@ -144,4 +144,12 @@ llenvs wraps 17+ environment libraries through a unified adapter interface. Each
 
     [:octicons-arrow-right-24: Craftax](craftax.md)
 
+-   :material-robot-industrial:{ .lg .middle } **MolmoSpaces**
+
+    ---
+
+    Robot manipulation & navigation with multi-view cameras and tool-based control.
+
+    [:octicons-arrow-right-24: MolmoSpaces](molmospaces.md)
+
 </div>

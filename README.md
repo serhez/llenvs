@@ -49,6 +49,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **MARE** | Meta Agents Research Environments | Gaia2 benchmark (email, calendar, contacts, shopping, FS) |
 | **tau2** | Multi-turn customer service benchmark | Airline, Retail, Telecom (DB-backed tools, user simulation) |
 | **Craftax** | JAX-based survival benchmark (ICML 2024) | Open-ended crafting, combat, dungeons (text/symbolic/pixel modes) |
+| **MolmoSpaces** | Robot manipulation & navigation benchmark | Navigate, pick, place, open/close doors |
 
 ```python
 from llenvs.core.registry import environment_registry

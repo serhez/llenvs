@@ -97,6 +97,16 @@ from llenvs.adapters.mare import (
     MAREHidden,
     MAREReward,
 )
+from llenvs.adapters.molmospaces import (
+    MOLMOSPACES_PRESETS,
+    MOLMOSPACES_TASKS,
+    MolmoSpacesAdapter,
+    MolmoSpacesEnvironment,
+    MolmoSpacesHidden,
+    MolmoSpacesReward,
+    MolmoSpacesSuccessReward,
+    MolmoSpacesToolExecutor,
+)
 from llenvs.adapters.openenv import (
     OpenEnvAdapter,
     OpenEnvEnvironment,
@@ -250,6 +260,15 @@ __all__ = [
     "CraftaxAchievementReward",
     "CraftaxActionMapper",
     "CRAFTAX_PRESETS",
+    # MolmoSpaces
+    "MolmoSpacesEnvironment",
+    "MolmoSpacesHidden",
+    "MolmoSpacesAdapter",
+    "MolmoSpacesReward",
+    "MolmoSpacesSuccessReward",
+    "MolmoSpacesToolExecutor",
+    "MOLMOSPACES_PRESETS",
+    "MOLMOSPACES_TASKS",
     # tau2
     "Tau2Environment",
     "Tau2Hidden",
@@ -426,6 +445,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # meta-agents-research-environments not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register MolmoSpaces adapter if available
+    try:
+        adapter = MolmoSpacesAdapter()
+        adapter._get_molmospaces()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # molmospaces not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

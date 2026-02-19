@@ -41,6 +41,7 @@ aviary = ["fhaviary>=0.30"]
 # mare: Install separately with pip install git+https://github.com/facebookresearch/meta-agents-research-environments.git
 # tau2: Install separately with pip install tau2
 # craftax: Install separately with pip install craftax (requires JAX)
+# molmospaces: Install separately with pip install git+https://github.com/allenai/molmospaces.git (requires MuJoCo)
 math-verify = ["math-verify[antlr4-13-2]>=0.7"]
 wandb = ["wandb>=0.16"]
 rl = ["datasets>=2.14"]
