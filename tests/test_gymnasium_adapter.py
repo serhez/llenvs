@@ -1,15 +1,14 @@
 """Tests for the Gymnasium adapter."""
 
+from dataclasses import dataclass
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from dataclasses import dataclass
-from typing import Any
 
-from llenvs.core.state import Action, Observation, State
-from llenvs.core.reward import RewardType, SignalBundle, FormatReward
 from llenvs.core.extraction import RawGenerationExtractor, TagBasedExtractor
-
+from llenvs.core.reward import FormatReward, RewardType, SignalBundle
+from llenvs.core.state import Action, Observation, State
 
 # ---------------------------------------------------------------------------
 # Mock gymnasium spaces
@@ -253,6 +252,7 @@ def mock_gymnasium_spaces(monkeypatch):
 def import_adapter(mock_gymnasium_spaces):
     """Import adapter module after gymnasium is mocked."""
     import importlib
+
     import llenvs.adapters.gymnasium as mod
 
     importlib.reload(mod)
@@ -1038,6 +1038,121 @@ class TestPresets:
     def test_preset_keys_are_strings(self, import_adapter):
         for key in import_adapter.GYMNASIUM_PRESETS:
             assert isinstance(key, str)
+
+
+# ===========================================================================
+# Atari preset tests
+# ===========================================================================
+
+
+ATARI_PRESETS = [
+    "atari/breakout",
+    "atari/pong",
+    "atari/space_invaders",
+    "atari/ms_pacman",
+    "atari/freeway",
+]
+
+
+class TestAtariPresets:
+    def test_atari_presets_exist(self, import_adapter):
+        """All Atari presets should be in GYMNASIUM_PRESETS."""
+        for name in ATARI_PRESETS:
+            assert name in import_adapter.GYMNASIUM_PRESETS, f"Missing preset: {name}"
+
+    def test_atari_preset_has_image_mapper(self, import_adapter):
+        """Each Atari preset should use ImageObservationMapper."""
+        for name in ATARI_PRESETS:
+            preset = import_adapter.GYMNASIUM_PRESETS[name]
+            mapper = preset.get("observation_mapper")
+            assert isinstance(mapper, import_adapter.ImageObservationMapper), (
+                f"{name} should have ImageObservationMapper, got {type(mapper)}"
+            )
+
+    def test_atari_preset_has_action_names(self, import_adapter):
+        """Each Atari preset should define action_names."""
+        for name in ATARI_PRESETS:
+            preset = import_adapter.GYMNASIUM_PRESETS[name]
+            assert "action_names" in preset, f"{name} missing action_names"
+            assert isinstance(preset["action_names"], dict)
+            assert len(preset["action_names"]) > 0
+
+    def test_atari_preset_has_max_steps(self, import_adapter):
+        """Each Atari preset should define max_steps."""
+        for name in ATARI_PRESETS:
+            preset = import_adapter.GYMNASIUM_PRESETS[name]
+            assert "max_steps" in preset, f"{name} missing max_steps"
+            assert preset["max_steps"] > 0
+
+    def test_atari_preset_has_env_id(self, import_adapter):
+        """Each Atari preset should have an ALE/ env_id."""
+        for name in ATARI_PRESETS:
+            preset = import_adapter.GYMNASIUM_PRESETS[name]
+            assert "env_id" in preset
+            assert preset["env_id"].startswith("ALE/")
+
+    def test_atari_preset_has_description(self, import_adapter):
+        """Each Atari preset should have a description."""
+        for name in ATARI_PRESETS:
+            preset = import_adapter.GYMNASIUM_PRESETS[name]
+            assert "description" in preset
+            assert "VLM" in preset["description"]
+
+    def test_atari_preset_integration(self, import_adapter):
+        """Integration: mock pixel env with Atari preset, verify ImageContent in observation."""
+        import sys
+
+        mock_gymnasium = sys.modules["gymnasium"]
+
+        # Create a mock env that returns pixel observations
+        pixel_obs = np.random.randint(0, 255, (210, 160, 3), dtype=np.uint8)
+        mock_gym_env = MagicMock()
+        mock_gym_env.observation_space = MockBox(0, 255, shape=(210, 160, 3), dtype=np.uint8)
+        mock_gym_env.action_space = MockDiscrete(4)
+        mock_gym_env.spec = MockSpec(id="ALE/Breakout-v5")
+        mock_gym_env.reset.return_value = (pixel_obs, {})
+        mock_gym_env.step.return_value = (pixel_obs, 1.0, False, False, {})
+
+        mock_gymnasium.make = MagicMock(return_value=mock_gym_env)
+
+        adapter = import_adapter.GymnasiumAdapter()
+        env = adapter.get_environment("atari/breakout", num_tasks=10)
+
+        # Verify the mapper is ImageObservationMapper
+        assert isinstance(env._observation_mapper, import_adapter.ImageObservationMapper)
+
+        # Reset and check observation has images
+        state, _ = env.reset()
+        assert len(state.observation.images) == 1
+
+        from llenvs.core.state import ImageContent
+
+        assert isinstance(state.observation.images[0], ImageContent)
+
+        # Step and check images
+        result = env.step(state, Action(text="fire"))
+        assert len(result.next_state.observation.images) == 1
+
+    def test_atari_preset_max_steps_merges(self, import_adapter):
+        """Preset max_steps should be used when not explicitly overridden."""
+        import sys
+
+        mock_gymnasium = sys.modules["gymnasium"]
+        mock_gym_env = MagicMock()
+        mock_gym_env.observation_space = MockBox(0, 255, shape=(210, 160, 3), dtype=np.uint8)
+        mock_gym_env.action_space = MockDiscrete(4)
+        mock_gym_env.spec = MockSpec(id="ALE/Breakout-v5")
+        mock_gymnasium.make = MagicMock(return_value=mock_gym_env)
+
+        adapter = import_adapter.GymnasiumAdapter()
+
+        # Without explicit max_steps, should use preset (2000)
+        env = adapter.get_environment("atari/breakout", num_tasks=1)
+        assert env.spec.max_steps == 2000
+
+        # With explicit max_steps, should override
+        env2 = adapter.get_environment("atari/breakout", num_tasks=1, max_steps=500)
+        assert env2.spec.max_steps == 500
 
 
 # ===========================================================================

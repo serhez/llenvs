@@ -395,6 +395,7 @@ from llenvs.evaluation import LogConfig
 LogConfig(
     targets=("console",),        # Log targets: "console", "file", "wandb"
     log_dir=".logs",             # Directory for JSONL file logs
+    strip_images=False,          # Strip images from logged events
     wandb_run=None,              # Existing wandb.Run (skips init)
     wandb_project=None,          # W&B project name (auto-creates run)
     wandb_name=None,             # W&B run name (auto-generated if None)
@@ -427,6 +428,7 @@ runner = TrajectoryRunner(
     prompt_template=TEMPLATE_REGISTRY["math"],  # Optional template
     model_profile=PROFILE_REGISTRY["deepseek_r1"],  # Optional profile
     prompt_pipeline=pipeline,        # Optional low-level pipeline
+    max_image_history=None,          # Limit images in message history (None = keep all)
 )
 
 # Run evaluation

@@ -61,6 +61,8 @@ from llenvs.adapters.gymnasium import (
     GymnasiumEnvironment,
     GymnasiumHidden,
     GymnasiumReward,
+    ImageObservationMapper,
+    MultimodalObservationMapper,
 )
 from llenvs.adapters.huggingface import (
     DATASET_PRESETS,

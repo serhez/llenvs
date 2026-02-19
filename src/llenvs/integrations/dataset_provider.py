@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llenvs.core.environment import Environment
+from llenvs.core.state import ImageContent
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class TaskItem:
         messages: Chat-format messages from the observation.
         ground_truth: Expected answer (None for multi-turn environments).
         metadata: Additional task metadata.
+        images: Images from the observation (empty for text-only tasks).
     """
 
     task_index: int
@@ -29,6 +31,7 @@ class TaskItem:
     messages: tuple[dict[str, Any], ...]
     ground_truth: str | None
     metadata: dict[str, Any]
+    images: tuple[ImageContent, ...] = ()
 
 
 class DatasetProvider:
@@ -84,6 +87,7 @@ class DatasetProvider:
                 "episode_id": state.metadata.episode_id,
                 **info,
             },
+            images=state.observation.images,
         )
 
     def get_items(self, indices: list[int] | None = None) -> list[TaskItem]:
@@ -113,14 +117,22 @@ class DatasetProvider:
         from datasets import Dataset
 
         items = self.get_items(indices)
-        return Dataset.from_dict(
-            {
-                "task_index": [item.task_index for item in items],
-                "prompt": [item.prompt for item in items],
-                "ground_truth": [item.ground_truth for item in items],
-                "messages": [list(item.messages) for item in items],
-            }
-        )
+        data: dict[str, list[Any]] = {
+            "task_index": [item.task_index for item in items],
+            "prompt": [item.prompt for item in items],
+            "ground_truth": [item.ground_truth for item in items],
+            "messages": [list(item.messages) for item in items],
+        }
+
+        # Include images as serialized dicts (base64 data + media_type)
+        has_images = any(item.images for item in items)
+        if has_images:
+            data["images"] = [
+                [{"data": img.data, "media_type": img.media_type} for img in item.images]
+                for item in items
+            ]
+
+        return Dataset.from_dict(data)
 
     @classmethod
     def from_config(cls, config: Any) -> DatasetProvider:

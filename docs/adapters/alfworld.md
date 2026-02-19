@@ -197,8 +197,41 @@ result = runner.run_trajectory(task_index=0)
 print(f"Won: {result.trajectory.final_state.metadata.info['won']}")
 ```
 
+## Visual Mode (AI2-THOR)
+
+AlfWorld can render ego-centric RGB frames via AI2-THOR's 3D simulator. When `visual=True`, each observation includes an image alongside the text:
+
+```python
+adapter = AlfWorldAdapter()
+env = adapter.get_environment(
+    "alfworld:eval_out_of_distribution",
+    visual=True,
+)
+
+state, info = env.reset(options={"task_index": 0})
+print(len(state.observation.images))  # 1 (ImageContent with RGB frame)
+print(state.observation.prompt)        # Text observation still present
+```
+
+Visual mode requires:
+- `ai2thor` package (GPU + OpenGL + ~2GB download)
+- A VLM backend for meaningful evaluation
+
+Text mode (default) is unchanged — `visual=False` uses the lightweight `AlfredTWEnv` text-only backend with no additional dependencies.
+
+```python
+# Text-only (default) — no ai2thor needed
+env = adapter.get_environment()
+
+# Visual — includes RGB frames as ImageContent
+env = adapter.get_environment(visual=True)
+```
+
+Images flow through the full multimodal pipeline (see [Multimodal Observations](../guides/multimodal.md)).
+
 ## Limitations
 
 - Non-pure (`pure_step=False`) — cannot branch with `DirectStrategy`; use `ActionReplay` or `ProcessFork` strategies
 - No seed support — AlfWorld games are deterministic per game file
 - Requires AlfWorld data download (`alfworld-download`) before use
+- Visual mode requires `ai2thor` with GPU/OpenGL support

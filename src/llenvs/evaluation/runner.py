@@ -49,6 +49,81 @@ from llenvs.evaluation.continuation import (
 
 logger = logging.getLogger(__name__)
 
+
+def _truncate_image_history(
+    messages: list[ChatMessage],
+    max_images: int,
+) -> list[ChatMessage]:
+    """Keep only the most recent N images across all messages.
+
+    Images beyond the limit are stripped (images field set to empty tuple).
+    Text content is preserved.
+
+    Args:
+        messages: List of ChatMessages.
+        max_images: Maximum number of images to keep (from the end).
+
+    Returns:
+        New list of ChatMessages with older images removed.
+    """
+    # Count total images and find which messages have them
+    image_positions: list[tuple[int, int]] = []  # (msg_index, num_images)
+    for i, msg in enumerate(messages):
+        if msg.images:
+            image_positions.append((i, len(msg.images)))
+
+    total = sum(n for _, n in image_positions)
+    if total <= max_images:
+        return messages
+
+    # Determine how many to keep from the end
+    keep = max_images
+    keep_from: dict[int, int] = {}  # msg_index -> num images to keep from this msg
+    for msg_idx, n in reversed(image_positions):
+        if keep <= 0:
+            keep_from[msg_idx] = 0
+        elif keep >= n:
+            keep_from[msg_idx] = n
+            keep -= n
+        else:
+            keep_from[msg_idx] = keep
+            keep = 0
+
+    result = []
+    for i, msg in enumerate(messages):
+        if i in keep_from:
+            n_keep = keep_from[i]
+            if n_keep == 0:
+                result.append(
+                    ChatMessage(
+                        role=msg.role,
+                        content=msg.content,
+                        tool_calls=msg.tool_calls,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                        images=(),
+                    )
+                )
+            elif n_keep < len(msg.images):
+                # Keep only the last n_keep images
+                result.append(
+                    ChatMessage(
+                        role=msg.role,
+                        content=msg.content,
+                        tool_calls=msg.tool_calls,
+                        tool_call_id=msg.tool_call_id,
+                        name=msg.name,
+                        images=msg.images[-n_keep:],
+                    )
+                )
+            else:
+                result.append(msg)
+        else:
+            result.append(msg)
+
+    return result
+
+
 # Sentinel value: when a step_callback returns COMPLETE, the segment loop
 # breaks immediately and returns a SegmentedTrajectoryHandle for later
 # completion via complete_trajectory().
@@ -261,6 +336,7 @@ class TrajectoryRunner:
     model_profile: "ModelProfile | None" = None
     tool_call_parser: "ToolCallParser | None" = None
     log: LogConfig | None = None
+    max_image_history: int | None = None
 
     def _build_messages(
         self,
@@ -358,6 +434,10 @@ class TrajectoryRunner:
         # Apply prompt pipeline if configured
         if self.prompt_pipeline:
             messages = self.prompt_pipeline.transform(messages)
+
+        # Truncate image history if configured
+        if self.max_image_history is not None:
+            messages = _truncate_image_history(messages, self.max_image_history)
 
         return messages
 

@@ -1,22 +1,23 @@
 """Tests for the AlfWorld adapter."""
 
-import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
+import numpy as np
+import pytest
+
 from llenvs.adapters.alfworld import (
-    AlfWorldEnvironment,
-    AlfWorldHidden,
-    AlfWorldAdapter,
-    AlfWorldReward,
     ALFWORLD_TASK_TYPES,
     DEFAULT_ALFWORLD_PROMPTS,
+    AlfWorldAdapter,
+    AlfWorldEnvironment,
+    AlfWorldHidden,
+    AlfWorldReward,
     _extract_objective,
     _extract_task_type,
 )
-
+from llenvs.core.reward import RewardType
+from llenvs.core.state import Action, ImageContent, Observation
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -125,14 +126,12 @@ def _make_env(
         mock_gym = MockAlfWorldGymEnv()
 
     # Patch _init_game to use our mock instead of real textworld
-    original_init_game = env._init_game
-
-    def mock_init_game(game_file: str) -> tuple[str, dict[str, Any]]:
+    def mock_init_game(game_file: str) -> tuple[str, dict[str, Any], tuple]:
         env._gym_env = mock_gym
         obs_list, infos = mock_gym.reset()
         raw_obs = obs_list[0]
         info = {k: v[0] for k, v in infos.items()}
-        return raw_obs, info
+        return raw_obs, info, ()
 
     env._init_game = mock_init_game  # type: ignore[assignment]
     return env
@@ -900,3 +899,236 @@ class TestAlfWorldRegistration:
         with patch.object(adapter, "_get_alfworld", side_effect=ImportError("no alfworld")):
             with pytest.raises(ImportError):
                 adapter._get_alfworld()
+
+
+# ---------------------------------------------------------------------------
+# Visual mode mock
+# ---------------------------------------------------------------------------
+
+
+class MockThorGymEnv:
+    """Mock THOR gym environment returning dict observations with RGB frames.
+
+    Simulates the batched interface: reset/step return lists.
+    THOR mode returns ``{"text": str, "rgb": np.ndarray(H, W, 3)}``.
+    """
+
+    def __init__(self) -> None:
+        self._step_count = 0
+        self._won = False
+        self._closed = False
+
+    def reset(self) -> tuple[list[dict[str, Any]], dict[str, list]]:
+        self._step_count = 0
+        self._won = False
+        obs = {
+            "text": (
+                "-= Welcome to TextWorld, ALFRED! =-\n\n"
+                "You are in the middle of a room. Looking quickly around you, "
+                "you see a desk 1, a shelf 1, and a drawer 1.\n\n"
+                "Your task is to: put a clean mug on desk 1."
+            ),
+            "rgb": np.random.randint(0, 255, (300, 300, 3), dtype=np.uint8),
+        }
+        infos = {
+            "won": [False],
+            "admissible_commands": [
+                ["go to desk 1", "go to shelf 1", "go to drawer 1", "inventory", "look"]
+            ],
+        }
+        return [obs], infos
+
+    def step(
+        self, actions: list[str]
+    ) -> tuple[list[dict[str, Any]], list[float], list[bool], dict[str, list]]:
+        self._step_count += 1
+        action = actions[0]
+
+        frame = np.random.randint(0, 255, (300, 300, 3), dtype=np.uint8)
+
+        if action == "put mug 1 in/on desk 1":
+            obs = {"text": "You put the mug 1 in/on the desk 1.", "rgb": frame}
+            self._won = True
+            return [obs], [1.0], [True], {"won": [True], "admissible_commands": [[]]}
+        else:
+            obs = {"text": "You look around.", "rgb": frame}
+            admissible = ["go to desk 1", "go to shelf 1", "inventory", "look"]
+            return [obs], [0.0], [False], {"won": [False], "admissible_commands": [admissible]}
+
+    def close(self) -> None:
+        self._closed = True
+
+
+def _make_visual_env(
+    game_files: tuple[str, ...] = MOCK_GAME_FILES,
+    mock_gym: MockThorGymEnv | None = None,
+    **kwargs: Any,
+) -> AlfWorldEnvironment:
+    """Create an AlfWorldEnvironment with visual=True and mocked THOR env."""
+    env = AlfWorldEnvironment(game_files=game_files, config={}, visual=True, **kwargs)
+
+    if mock_gym is None:
+        mock_gym = MockThorGymEnv()
+
+    def mock_init_game(game_file: str) -> tuple[str, dict[str, Any], tuple]:
+        env._gym_env = mock_gym
+        obs_list, infos = mock_gym.reset()
+        obs_dict = obs_list[0]
+        info = {k: v[0] for k, v in infos.items()}
+
+        raw_text = obs_dict.get("text", str(obs_dict))
+        frame = obs_dict.get("rgb")
+        images: tuple[ImageContent, ...] = ()
+        if frame is not None:
+            images = (env._frame_to_image(frame),)
+        return raw_text, info, images
+
+    env._init_game = mock_init_game  # type: ignore[assignment]
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Visual mode tests
+# ---------------------------------------------------------------------------
+
+
+class TestAlfWorldVisualMode:
+    """Tests for AlfWorld visual (AI2-THOR) mode."""
+
+    def test_visual_flag_stored(self):
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={}, visual=True)
+        assert env._visual is True
+
+    def test_default_not_visual(self):
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
+        assert env._visual is False
+
+    def test_text_mode_unchanged(self, env: AlfWorldEnvironment):
+        """Default text mode should have no images."""
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.observation.images == ()
+
+    def test_visual_reset_has_images(self):
+        """Visual mode reset should include ImageContent."""
+        env = _make_visual_env()
+        state, _ = env.reset(options={"task_index": 0})
+        assert len(state.observation.images) == 1
+        assert isinstance(state.observation.images[0], ImageContent)
+        assert state.observation.images[0].media_type == "image/png"
+
+    def test_visual_reset_still_has_text(self):
+        """Visual mode should still have text in prompt."""
+        env = _make_visual_env()
+        state, _ = env.reset(options={"task_index": 0})
+        assert "desk 1" in state.observation.prompt or "room" in state.observation.prompt
+        assert len(state.observation.prompt) > 0
+
+    def test_visual_step_has_images(self):
+        """Visual mode step should include images in observation."""
+        env = _make_visual_env()
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="look"))
+        assert len(result.next_state.observation.images) == 1
+        assert isinstance(result.next_state.observation.images[0], ImageContent)
+
+    def test_visual_step_images_in_history(self):
+        """Visual mode should include image data in message history."""
+        env = _make_visual_env()
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="look"))
+        user_msgs = [m for m in result.next_state.observation.messages if m.get("role") == "user"]
+        assert len(user_msgs) > 0
+        assert "images" in user_msgs[-1]
+
+    def test_visual_won_still_works(self):
+        """Task completion should still work in visual mode."""
+        env = _make_visual_env()
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="put mug 1 in/on desk 1"))
+        assert result.terminated is True
+        signal = result.rewards.by_name("task_completion")
+        assert signal is not None
+        assert signal.reward == 1.0
+
+    def test_frame_to_image(self):
+        """_frame_to_image should convert numpy array to ImageContent."""
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={}, visual=True)
+        frame = np.random.randint(0, 255, (64, 64, 3), dtype=np.uint8)
+        img = env._frame_to_image(frame)
+        assert isinstance(img, ImageContent)
+        assert img.media_type == "image/png"
+
+        import base64
+
+        decoded = base64.b64decode(img.data)
+        assert decoded[:4] == b"\x89PNG"
+
+    def test_visual_spec_metadata(self):
+        """Visual mode should be reflected in spec metadata."""
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={}, visual=True)
+        assert env.spec.metadata.get("visual") is True
+
+    def test_text_mode_spec_no_visual(self):
+        """Text mode spec should not have visual=True."""
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
+        assert env.spec.metadata.get("visual") is not True
+
+    def test_visual_frame_missing_graceful(self):
+        """If THOR returns no rgb frame, images should be empty."""
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={}, visual=True)
+
+        # Mock that returns dict without "rgb" key
+        mock_gym = MagicMock()
+        mock_gym.reset.return_value = (
+            [{"text": "You are in a room.\n\nYour task is to: test"}],
+            {"won": [False], "admissible_commands": [["look"]]},
+        )
+
+        def mock_init_game(game_file):
+            env._gym_env = mock_gym
+            obs_list, infos = mock_gym.reset()
+            obs_dict = obs_list[0]
+            info = {k: v[0] for k, v in infos.items()}
+            raw_text = obs_dict.get("text", str(obs_dict))
+            frame = obs_dict.get("rgb")
+            images: tuple[ImageContent, ...] = ()
+            if frame is not None:
+                images = (env._frame_to_image(frame),)
+            return raw_text, info, images
+
+        env._init_game = mock_init_game  # type: ignore[assignment]
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.observation.images == ()
+
+
+class TestAlfWorldAdapterVisual:
+    """Tests for visual parameter on AlfWorldAdapter."""
+
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_adapter_passes_visual_flag(self, mock_get):
+        mock_alfworld = MagicMock()
+        mock_alfworld.getconfig.return_value = {}
+        mock_env_mod = MagicMock()
+        mock_tw_env = MagicMock()
+        mock_tw_env.game_files = list(MOCK_GAME_FILES)
+        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        adapter = AlfWorldAdapter()
+        env = adapter.get_environment(visual=True)
+        assert isinstance(env, AlfWorldEnvironment)
+        assert env._visual is True
+
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_adapter_default_not_visual(self, mock_get):
+        mock_alfworld = MagicMock()
+        mock_alfworld.getconfig.return_value = {}
+        mock_env_mod = MagicMock()
+        mock_tw_env = MagicMock()
+        mock_tw_env.game_files = list(MOCK_GAME_FILES)
+        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        adapter = AlfWorldAdapter()
+        env = adapter.get_environment()
+        assert env._visual is False

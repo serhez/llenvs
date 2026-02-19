@@ -7,15 +7,14 @@ Agents navigate rooms and manipulate objects using text commands.
 Reference: https://github.com/alfworld/alfworld
 """
 
-from dataclasses import dataclass
-from typing import Any
 import re
 import uuid
+from dataclasses import dataclass
+from typing import Any
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
-
+from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
 
 ALFWORLD_TASK_TYPES: dict[int, str] = {
     1: "pick_and_place_simple",
@@ -162,6 +161,7 @@ class AlfWorldEnvironment:
         max_steps: int = 50,
         include_admissible_commands: bool = True,
         include_objective_in_obs: bool = True,
+        visual: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
     ) -> None:
@@ -175,6 +175,9 @@ class AlfWorldEnvironment:
                 commands to each observation.
             include_objective_in_obs: Whether to prepend the task
                 objective to each observation.
+            visual: Enable AI2-THOR visual rendering. When True,
+                observations include ego-centric RGB frames as
+                ``ImageContent`` alongside text. Requires ``ai2thor``.
             extra_rewards: Additional reward functions appended after
                 native rewards.
             prompts: Override default prompt components. Keys:
@@ -185,6 +188,7 @@ class AlfWorldEnvironment:
         self._max_steps = max_steps
         self._include_admissible_commands = include_admissible_commands
         self._include_objective_in_obs = include_objective_in_obs
+        self._visual = visual
         self._native_rewards: tuple[RewardFunction, ...] = (AlfWorldReward(),)
         self._extra_rewards = extra_rewards
         self._prompts = {**DEFAULT_ALFWORLD_PROMPTS}
@@ -209,9 +213,42 @@ class AlfWorldEnvironment:
         """No tools available in AlfWorld environments."""
         return ()
 
+    def _frame_to_image(self, frame: Any) -> ImageContent:
+        """Convert an RGB frame (numpy array) to ImageContent.
+
+        Args:
+            frame: RGB array of shape (H, W, 3), dtype uint8.
+
+        Returns:
+            Base64-encoded PNG as ImageContent.
+        """
+        import base64
+        import io
+
+        import numpy as np
+        from PIL import Image
+
+        arr = np.asarray(frame, dtype=np.uint8)
+        img = Image.fromarray(arr, mode="RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        data = base64.b64encode(buf.getvalue()).decode("ascii")
+        return ImageContent(data=data, media_type="image/png")
+
     @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
+        desc = (
+            "Visual household task environment (AI2-THOR)"
+            if self._visual
+            else "Text-based household task environment"
+        )
+        metadata: dict[str, Any] = {
+            "num_games": len(self._game_files),
+            "description": desc,
+        }
+        if self._visual:
+            metadata["visual"] = True
         return EnvironmentSpec(
             name="alfworld",
             adapter="alfworld",
@@ -223,10 +260,7 @@ class AlfWorldEnvironment:
             supports_len=True,
             supports_seed=False,
             pure_step=False,
-            metadata={
-                "num_games": len(self._game_files),
-                "description": "Text-based household task environment",
-            },
+            metadata=metadata,
         )
 
     @property
@@ -236,14 +270,14 @@ class AlfWorldEnvironment:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
-    def _init_game(self, game_file: str) -> tuple[str, dict[str, Any]]:
+    def _init_game(self, game_file: str) -> tuple[str, dict[str, Any], tuple[ImageContent, ...]]:
         """Initialize a single game via textworld.gym.
 
         Args:
             game_file: Path to the game file.
 
         Returns:
-            Tuple of (initial_observation, info_dict).
+            Tuple of (initial_observation_text, info_dict, images).
         """
         import textworld.gym
 
@@ -270,7 +304,18 @@ class AlfWorldEnvironment:
         if isinstance(infos, dict):
             info = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in infos.items()}
 
-        return raw_obs, info
+        # Extract text and images from observation
+        images: tuple[ImageContent, ...] = ()
+        if self._visual and isinstance(raw_obs, dict):
+            raw_text = raw_obs.get("text", str(raw_obs))
+            frame = raw_obs.get("rgb")
+            if frame is not None:
+                images = (self._frame_to_image(frame),)
+            raw_obs = raw_text
+        elif isinstance(raw_obs, dict):
+            raw_obs = raw_obs.get("text", str(raw_obs))
+
+        return raw_obs, info, images
 
     def _build_observation_prompt(
         self,
@@ -331,7 +376,7 @@ class AlfWorldEnvironment:
         game_file = self._game_files[task_index]
 
         # Initialize the game
-        raw_obs, init_info = self._init_game(game_file)
+        raw_obs, init_info, images = self._init_game(game_file)
 
         # Extract objective and task type
         objective = _extract_objective(raw_obs)
@@ -354,7 +399,7 @@ class AlfWorldEnvironment:
             admissible_commands=admissible_commands,
         )
 
-        observation = Observation(prompt=obs_prompt)
+        observation = Observation(prompt=obs_prompt, images=images)
 
         metadata = StateMetadata(
             step=0,
@@ -412,6 +457,18 @@ class AlfWorldEnvironment:
                 ac_val[0] if isinstance(ac_val, (list, tuple)) and ac_val else ac_val
             )
 
+        # Extract text and images from observation
+        images: tuple[ImageContent, ...] = ()
+        if self._visual and isinstance(raw_obs, dict):
+            obs_text = raw_obs.get("text", str(raw_obs))
+            frame = raw_obs.get("rgb")
+            if frame is not None:
+                images = (self._frame_to_image(frame),)
+        elif isinstance(raw_obs, dict):
+            obs_text = raw_obs.get("text", str(raw_obs))
+        else:
+            obs_text = raw_obs
+
         # Check truncation
         next_step = state.hidden.episode_step + 1
         terminated = bool(won)
@@ -419,7 +476,7 @@ class AlfWorldEnvironment:
 
         # Build next observation
         obs_prompt = self._build_observation_prompt(
-            raw_obs, state.hidden.objective, admissible_commands
+            obs_text, state.hidden.objective, admissible_commands
         )
 
         new_hidden = AlfWorldHidden(
@@ -432,11 +489,19 @@ class AlfWorldEnvironment:
             admissible_commands=admissible_commands,
         )
 
+        user_msg: dict[str, Any] = {"role": "user", "content": obs_prompt}
+        if images:
+            user_msg["images"] = [
+                {"data": img.data, "media_type": img.media_type} for img in images
+            ]
+
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},
-            {"role": "user", "content": obs_prompt},
+            user_msg,
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt, messages=new_messages, images=images
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -548,6 +613,7 @@ class AlfWorldAdapter:
         max_steps: int = 50,
         include_admissible_commands: bool = True,
         include_objective_in_obs: bool = True,
+        visual: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         **kwargs: Any,
@@ -568,6 +634,10 @@ class AlfWorldAdapter:
                 commands in observations.
             include_objective_in_obs: Whether to prepend objective
                 to observations.
+            visual: Enable AI2-THOR visual rendering. When True,
+                uses ``AlfredThorEnv`` for 3D rendering and includes
+                RGB frames as ``ImageContent`` in observations.
+                Requires ``ai2thor`` (GPU + OpenGL).
             extra_rewards: Additional reward functions.
             prompts: Override default prompt components.
             **kwargs: Additional arguments (unused).
@@ -629,6 +699,7 @@ class AlfWorldAdapter:
             max_steps=max_steps,
             include_admissible_commands=include_admissible_commands,
             include_objective_in_obs=include_objective_in_obs,
+            visual=visual,
             extra_rewards=extra_rewards,
             prompts=prompts,
         )

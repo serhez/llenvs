@@ -8,10 +8,16 @@ Features:
 - Log probabilities via output_scores
 - Prefix continuation
 - Chat via tokenizer.apply_chat_template()
+- Vision Language Model (VLM) support via AutoProcessor
 """
 
+from __future__ import annotations
+
+import base64
+import io
 from typing import Any
 
+from llenvs.core.state import ImageContent
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
@@ -21,6 +27,70 @@ from llenvs.inference.protocol import (
     StopReason,
     TokenLogprob,
 )
+
+# Known VLM model types for HuggingFace detection
+_VLM_MODEL_TYPES = frozenset(
+    {
+        "llava",
+        "llava_next",
+        "llava_onevision",
+        "qwen2_vl",
+        "paligemma",
+        "paligemma2",
+        "internvl_chat",
+        "phi3_v",
+        "fuyu",
+        "idefics2",
+        "idefics3",
+        "mllama",
+        "pixtral",
+        "molmo",
+    }
+)
+
+
+def _is_vlm_model(config: Any) -> bool:
+    """Detect whether a model config represents a VLM.
+
+    Args:
+        config: HuggingFace model config object.
+
+    Returns:
+        True if the model is a VLM.
+    """
+    model_type = getattr(config, "model_type", "")
+    return model_type in _VLM_MODEL_TYPES
+
+
+def _decode_image(img: ImageContent) -> Any:
+    """Decode a base64-encoded ImageContent to a PIL Image.
+
+    Args:
+        img: ImageContent with base64-encoded data.
+
+    Returns:
+        PIL.Image.Image instance.
+    """
+    from PIL import Image
+
+    raw = base64.b64decode(img.data)
+    return Image.open(io.BytesIO(raw))
+
+
+def _extract_images(messages: list[ChatMessage]) -> list[ImageContent]:
+    """Extract all images from a list of ChatMessages in order.
+
+    Args:
+        messages: List of chat messages.
+
+    Returns:
+        List of ImageContent objects in conversation order.
+    """
+    images: list[ImageContent] = []
+    for msg in messages:
+        if msg.images:
+            images.extend(msg.images)
+    return images
 
 
 def _convert_stop_reason(
@@ -130,7 +200,20 @@ class HuggingFaceBackend(ModelBackend):
         elif resolved_device != "cpu":
             load_kwargs["device_map"] = resolved_device
 
-        self._model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+        # Detect VLM before loading model
+        from transformers import AutoConfig
+
+        model_config = AutoConfig.from_pretrained(model_path)
+        self._is_vlm = _is_vlm_model(model_config)
+
+        if self._is_vlm:
+            from transformers import AutoProcessor, AutoModelForVision2Seq
+
+            self._processor = AutoProcessor.from_pretrained(model_path)
+            self._model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs)
+        else:
+            self._processor = None
+            self._model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
 
         # Apply torch.compile if requested
         if torch_compile:
@@ -154,6 +237,7 @@ class HuggingFaceBackend(ModelBackend):
             supports_streaming=False,
             supports_chat=True,
             supports_function_calling=False,
+            supports_vision=self._is_vlm,
             max_batch_size=None,
             max_context_length=self._max_context_length,
         )

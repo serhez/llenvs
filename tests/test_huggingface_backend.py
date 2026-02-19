@@ -72,6 +72,8 @@ class TestHuggingFaceBackendUnit:
                 backend._device = "cpu"
                 backend._max_context_length = 2048
                 backend._chat_template_kwargs = {}
+                backend._is_vlm = False
+                backend._processor = None
 
                 return backend, mock_tokenizer, mock_model, mock_torch
 
@@ -503,6 +505,7 @@ class TestHuggingFaceBackendMockedGeneration:
         with (
             patch("transformers.AutoTokenizer.from_pretrained") as mock_tok,
             patch("transformers.AutoModelForCausalLM.from_pretrained") as mock_model_cls,
+            patch("transformers.AutoConfig.from_pretrained") as mock_config_cls,
         ):
             # Setup tokenizer mock
             mock_tokenizer = MagicMock()
@@ -527,6 +530,11 @@ class TestHuggingFaceBackendMockedGeneration:
             mock_model.config.max_position_embeddings = 2048
             mock_model.generate.return_value = torch.tensor([[1, 2, 3, 4, 5, 6]])
             mock_model_cls.return_value = mock_model
+
+            # Setup config mock (non-VLM)
+            mock_config = MagicMock()
+            mock_config.model_type = "gpt2"
+            mock_config_cls.return_value = mock_config
 
             from llenvs.inference.backends import HuggingFaceBackend
 
@@ -568,6 +576,8 @@ class TestHuggingFaceChatTemplateKwargs:
         backend._device = "cpu"
         backend._max_context_length = 2048
         backend._chat_template_kwargs = chat_template_kwargs or {}
+        backend._is_vlm = False
+        backend._processor = None
         return backend
 
     def test_stored_correctly(self):
@@ -665,6 +675,8 @@ class TestHuggingFaceThinkingBudget:
         backend._device = "cpu"
         backend._max_context_length = 2048
         backend._chat_template_kwargs = {}
+        backend._is_vlm = False
+        backend._processor = None
         return backend
 
     def test_thinking_budget_popped_from_extra(self):

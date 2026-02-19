@@ -11,18 +11,16 @@ via ``gymnasium.make()``.
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
 import uuid
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
+from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.extraction import AnswerExtractor, RawGenerationExtractor
-
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
 
 # =============================================================================
 # Mapper Protocols
@@ -35,6 +33,37 @@ class ObservationMapper(Protocol):
 
     def map(self, obs: Any, info: dict[str, Any]) -> str:
         """Convert gym observation to text."""
+        ...
+
+    def describe(self) -> str:
+        """Describe the observation space for the initial prompt."""
+        ...
+
+
+@runtime_checkable
+class MultimodalObservationMapper(Protocol):
+    """Convert gym observations to text + images.
+
+    Unlike ObservationMapper which returns only text, this protocol
+    returns both text and ImageContent objects for multimodal observations
+    (e.g., pixel/image-based gymnasium environments).
+
+    Implementors must set ``_multimodal = True`` as a class attribute
+    to distinguish from text-only ObservationMapper.
+    """
+
+    _multimodal: bool
+
+    def map(self, obs: Any, info: dict[str, Any]) -> tuple[str, tuple[ImageContent, ...]]:
+        """Convert gym observation to text and images.
+
+        Args:
+            obs: Raw gymnasium observation.
+            info: Step info dict from gymnasium.
+
+        Returns:
+            Tuple of (text_description, image_contents).
+        """
         ...
 
     def describe(self) -> str:
@@ -450,6 +479,87 @@ class GridObservationMapper:
 
 
 # =============================================================================
+# Image Observation Mapper
+# =============================================================================
+
+
+class ImageObservationMapper:
+    """Renders gymnasium pixel observations as ImageContent.
+
+    Converts numpy RGB/grayscale/RGBA arrays to base64-encoded images
+    and attaches them to the Observation alongside a text description.
+
+    Args:
+        text_description: Text to accompany the image observation.
+        format: Image format ("png" or "jpeg").
+        quality: JPEG quality (1-100), only used for JPEG.
+    """
+
+    _multimodal = True
+
+    def __init__(
+        self,
+        text_description: str = "Current visual observation:",
+        format: str = "png",
+        quality: int = 85,
+    ) -> None:
+        self._text_description = text_description
+        self._format = format.lower()
+        self._quality = quality
+
+    def map(self, obs: Any, info: dict[str, Any]) -> tuple[str, tuple[ImageContent, ...]]:
+        """Convert numpy array observation to text and ImageContent.
+
+        Args:
+            obs: Numpy array observation (H,W), (H,W,3), or (H,W,4).
+            info: Step info dict.
+
+        Returns:
+            Tuple of (text_description, (ImageContent,)).
+        """
+        import base64
+        import io
+
+        from PIL import Image as PILImage
+
+        arr = np.asarray(obs)
+
+        # Handle different array shapes
+        if arr.ndim == 2:
+            # Grayscale (H, W) -> convert to RGB
+            pil_img = PILImage.fromarray(arr, mode="L")
+        elif arr.ndim == 3 and arr.shape[2] == 4:
+            # RGBA (H, W, 4)
+            pil_img = PILImage.fromarray(arr, mode="RGBA")
+        elif arr.ndim == 3 and arr.shape[2] == 3:
+            # RGB (H, W, 3)
+            pil_img = PILImage.fromarray(arr, mode="RGB")
+        else:
+            # Fallback: try to interpret as RGB
+            pil_img = PILImage.fromarray(arr)
+
+        # Encode to bytes
+        buffer = io.BytesIO()
+        save_kwargs: dict[str, Any] = {}
+        if self._format == "jpeg":
+            pil_img = pil_img.convert("RGB")  # JPEG doesn't support alpha
+            save_kwargs["quality"] = self._quality
+            media_type = "image/jpeg"
+        else:
+            media_type = "image/png"
+
+        pil_img.save(buffer, format=self._format.upper(), **save_kwargs)
+        b64_data = base64.b64encode(buffer.getvalue()).decode()
+
+        img_content = ImageContent(data=b64_data, media_type=media_type)
+        return self._text_description, (img_content,)
+
+    def describe(self) -> str:
+        """Describe the visual observation space."""
+        return "Visual observation rendered as an image."
+
+
+# =============================================================================
 # Hidden State
 # =============================================================================
 
@@ -661,13 +771,21 @@ class GymnasiumEnvironment:
             return self._seeds[task_index]
         return None
 
-    def _render_observation(self, raw_obs: Any, info: dict[str, Any]) -> str:
-        """Render an observation to text, using ANSI render if enabled."""
+    def _render_observation(
+        self, raw_obs: Any, info: dict[str, Any]
+    ) -> tuple[str, tuple[ImageContent, ...]]:
+        """Render an observation to text (and optionally images).
+
+        Returns:
+            Tuple of (text, images). images is empty for text-only mappers.
+        """
         if self._use_ansi_render:
             rendered = self._gym_env.render()
             if rendered is not None:
-                return str(rendered)
-        return self._observation_mapper.map(raw_obs, info)
+                return str(rendered), ()
+        if isinstance(self._observation_mapper, MultimodalObservationMapper):
+            return self._observation_mapper.map(raw_obs, info)
+        return self._observation_mapper.map(raw_obs, info), ()
 
     def _build_initial_prompt(self, obs_text: str) -> str:
         """Build the full initial prompt including space descriptions."""
@@ -778,7 +896,7 @@ class GymnasiumEnvironment:
         raw_obs, info = self._gym_env.reset(**reset_kwargs)
 
         # Render observation
-        obs_text = self._render_observation(raw_obs, info)
+        obs_text, obs_images = self._render_observation(raw_obs, info)
 
         # Build prompt
         prompt = self._build_initial_prompt(obs_text)
@@ -792,7 +910,7 @@ class GymnasiumEnvironment:
             gym_reward=0.0,
         )
 
-        observation = Observation(prompt=prompt)
+        observation = Observation(prompt=prompt, images=obs_images)
 
         metadata = StateMetadata(
             step=0,
@@ -859,7 +977,7 @@ class GymnasiumEnvironment:
         truncated = truncated_gym or (self._max_steps is not None and next_step >= self._max_steps)
 
         # Render observation
-        obs_text = self._render_observation(raw_obs, info)
+        obs_text, obs_images = self._render_observation(raw_obs, info)
 
         new_hidden = GymnasiumHidden(
             task_index=state.hidden.task_index,
@@ -870,11 +988,19 @@ class GymnasiumEnvironment:
             gym_reward=cumulative_reward,
         )
 
+        user_msg: dict[str, Any] = {"role": "user", "content": f"[Step {next_step}]\n{obs_text}"}
+        if obs_images:
+            user_msg["images"] = [
+                {"data": img.data, "media_type": img.media_type} for img in obs_images
+            ]
+
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},
-            {"role": "user", "content": f"[Step {next_step}]\n{obs_text}"},
+            user_msg,
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt, messages=new_messages, images=obs_images
+        )
 
         is_terminal = terminated or truncated
         new_metadata = StateMetadata(
@@ -962,6 +1088,66 @@ GYMNASIUM_PRESETS: dict[str, dict[str, Any]] = {
         "observation_mapper": GridObservationMapper(
             value_map={0.0: ".", 0.3: " ", 0.6: "R", 1.0: "#"},
         ),
+    },
+    # Atari environments (requires gymnasium[atari] + ale-py, VLM backend)
+    "atari/breakout": {
+        "description": "Atari Breakout — break bricks with a ball and paddle. Pixel observations (requires VLM).",
+        "env_id": "ALE/Breakout-v5",
+        "observation_mapper": ImageObservationMapper(),
+        "action_names": {0: "noop", 1: "fire", 2: "right", 3: "left"},
+        "max_steps": 2000,
+    },
+    "atari/pong": {
+        "description": "Atari Pong — table tennis against AI opponent. Pixel observations (requires VLM).",
+        "env_id": "ALE/Pong-v5",
+        "observation_mapper": ImageObservationMapper(),
+        "action_names": {
+            0: "noop",
+            1: "fire",
+            2: "right",
+            3: "left",
+            4: "right+fire",
+            5: "left+fire",
+        },
+        "max_steps": 2000,
+    },
+    "atari/space_invaders": {
+        "description": "Atari Space Invaders — defend Earth from descending aliens. Pixel observations (requires VLM).",
+        "env_id": "ALE/SpaceInvaders-v5",
+        "observation_mapper": ImageObservationMapper(),
+        "action_names": {
+            0: "noop",
+            1: "fire",
+            2: "right",
+            3: "left",
+            4: "right+fire",
+            5: "left+fire",
+        },
+        "max_steps": 2000,
+    },
+    "atari/ms_pacman": {
+        "description": "Atari Ms. Pac-Man — navigate mazes, eat pellets, avoid ghosts. Pixel observations (requires VLM).",
+        "env_id": "ALE/MsPacman-v5",
+        "observation_mapper": ImageObservationMapper(),
+        "action_names": {
+            0: "noop",
+            1: "up",
+            2: "right",
+            3: "left",
+            4: "down",
+            5: "up+right",
+            6: "up+left",
+            7: "down+right",
+            8: "down+left",
+        },
+        "max_steps": 2000,
+    },
+    "atari/freeway": {
+        "description": "Atari Freeway — cross a busy highway without getting hit. Pixel observations (requires VLM).",
+        "env_id": "ALE/Freeway-v5",
+        "observation_mapper": ImageObservationMapper(),
+        "action_names": {0: "noop", 1: "up", 2: "down"},
+        "max_steps": 2000,
     },
 }
 
@@ -1068,6 +1254,8 @@ class GymnasiumAdapter:
             action_names = preset.get("action_names")
         if observation_labels is None:
             observation_labels = preset.get("observation_labels")
+        if max_steps is None:
+            max_steps = preset.get("max_steps")
 
         # Build prompts from preset + explicit
         merged_prompts: dict[str, str] = {}

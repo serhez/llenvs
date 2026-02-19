@@ -80,19 +80,39 @@ msg.to_anthropic_dict()
 
 ## Backend Support
 
-| Backend | Vision Support |
-|---------|---------------|
-| OpenAI | Yes |
-| Anthropic | Yes |
-| OpenRouter | Yes |
-| vLLM | No |
-| HuggingFace | No |
+| Backend | Vision Support | Notes |
+|---------|---------------|-------|
+| OpenAI | Yes | Via `image_url` content blocks |
+| Anthropic | Yes | Via `base64` source blocks |
+| OpenRouter | Yes | Via OpenAI format |
+| vLLM | Auto-detected | VLMs (LLaVA, Qwen-VL, PaliGemma, etc.) via `multi_modal_data` |
+| HuggingFace | Auto-detected | VLMs via `AutoProcessor` + `AutoModelForVision2Seq` |
 
 Check at runtime:
 
 ```python
 backend.capabilities.supports_vision  # True/False
 ```
+
+### Local VLM Support (vLLM / HuggingFace)
+
+Both local backends auto-detect vision-language models by checking `model_type` against a known list (llava, qwen2_vl, paligemma, internvl_chat, phi3_v, etc.). When a VLM is detected:
+
+- `capabilities.supports_vision` returns `True`
+- Images from `ChatMessage.images` are decoded from base64 to PIL Images
+- **vLLM**: Images are passed via `multi_modal_data={"image": [pil_img, ...]}` alongside the text prompt
+- **HuggingFace**: Uses `AutoProcessor` (combined tokenizer + image processor) and `AutoModelForVision2Seq` instead of `AutoModelForCausalLM`
+
+No configuration is needed — just use a VLM model path:
+
+```python
+from llenvs.inference.backends import VLLMBackend
+
+backend = VLLMBackend(model_path="llava-hf/llava-1.5-7b-hf")
+print(backend.capabilities.supports_vision)  # True
+```
+
+Batch generation with images works automatically — each conversation in a batch can have different images.
 
 ## Creating Visual Environments
 
@@ -128,12 +148,55 @@ obs = Observation(
 )
 ```
 
+## Memory Management
+
+Multi-turn trajectories with images at every step can consume large amounts of memory. Several mechanisms help control this.
+
+### Image History Truncation
+
+Limit how many images are kept in the message history during evaluation:
+
+```python
+from llenvs.evaluation import TrajectoryRunner
+
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    max_image_history=5,  # Keep only 5 most recent images
+)
+```
+
+When `max_image_history` is set, older images are stripped from messages while preserving the text content. `None` (default) keeps all images.
+
+### Trajectory Image Stripping
+
+Remove all images from a completed trajectory (e.g., before serialization or logging):
+
+```python
+stripped = trajectory.strip_images()
+# Returns a new Trajectory with all Observation.images set to ()
+```
+
+### Log Image Stripping
+
+Strip images from evaluation logs to reduce JSONL/wandb payload size:
+
+```python
+from llenvs.evaluation.logging import LogConfig
+
+log = LogConfig(
+    targets=["file"],
+    strip_images=True,  # Images stripped before logging
+)
+```
+
 ## Adapters with Image Support
 
 | Adapter | Image Mode |
 |---------|-----------|
 | [Craftax](../adapters/craftax.md) | `observation_mode="pixels"` — renders game frames as PNG |
-| [Gymnasium](../adapters/gymnasium.md) | Custom `ObservationMapper` needed for 2D+ observations |
+| [Gymnasium](../adapters/gymnasium.md) | `ImageObservationMapper` for pixel observations (Atari presets included) |
+| [AlfWorld](../adapters/alfworld.md) | `visual=True` — AI2-THOR ego-centric RGB frames |
 
 ## Container Serialization
 

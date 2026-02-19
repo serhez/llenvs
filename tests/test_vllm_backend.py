@@ -24,6 +24,7 @@ class TestVLLMChatTemplateKwargs:
         backend._llm = MagicMock()
         backend._max_context_length = 4096
         backend._chat_template_kwargs = chat_template_kwargs or {}
+        backend._is_vlm = False
         return backend
 
     def test_stored_correctly(self):
@@ -92,6 +93,7 @@ class TestVLLMThinkingBudget:
         backend._llm = MagicMock()
         backend._max_context_length = 4096
         backend._chat_template_kwargs = {}
+        backend._is_vlm = False
         return backend
 
     def test_thinking_budget_popped_from_extra(self):

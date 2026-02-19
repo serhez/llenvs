@@ -5,10 +5,16 @@ vLLM provides full feature support including:
 - Log probabilities
 - Prefix continuation
 - Streaming
+- Vision Language Model (VLM) support
 """
 
+from __future__ import annotations
+
+import base64
+import io
 from typing import Any
 
+from llenvs.core.state import ImageContent
 from llenvs.inference.protocol import (
     ModelBackend,
     BackendCapabilities,
@@ -17,6 +23,30 @@ from llenvs.inference.protocol import (
     ChatMessage,
     StopReason,
     TokenLogprob,
+)
+
+# Known VLM model types (checked against model_config.hf_config.model_type)
+_VLM_MODEL_TYPES = frozenset(
+    {
+        "llava",
+        "llava_next",
+        "llava_next_video",
+        "llava_onevision",
+        "qwen2_vl",
+        "paligemma",
+        "paligemma2",
+        "internvl_chat",
+        "phi3_v",
+        "fuyu",
+        "chameleon",
+        "minicpmv",
+        "mllama",
+        "pixtral",
+        "idefics2",
+        "idefics3",
+        "molmo",
+        "aria",
+    }
 )
 
 
@@ -34,11 +64,60 @@ def _convert_stop_reason(reason: str | None) -> StopReason:
     return StopReason.UNKNOWN
 
 
+def _decode_image(img: ImageContent) -> Any:
+    """Decode a base64-encoded ImageContent to a PIL Image.
+
+    Args:
+        img: ImageContent with base64-encoded data.
+
+    Returns:
+        PIL.Image.Image instance.
+    """
+    from PIL import Image
+
+    raw = base64.b64decode(img.data)
+    return Image.open(io.BytesIO(raw))
+
+
+def _extract_images(messages: list[ChatMessage]) -> list[ImageContent]:
+    """Extract all images from a list of ChatMessages in order.
+
+    Args:
+        messages: List of chat messages.
+
+    Returns:
+        List of ImageContent objects in conversation order.
+    """
+    images: list[ImageContent] = []
+    for msg in messages:
+        if msg.images:
+            images.extend(msg.images)
+    return images
+
+
+def _is_vlm_model(model_config: Any) -> bool:
+    """Detect whether a vLLM model config represents a VLM.
+
+    Args:
+        model_config: vLLM's ModelConfig object.
+
+    Returns:
+        True if the model is a VLM.
+    """
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is not None:
+        model_type = getattr(hf_config, "model_type", "")
+        if model_type in _VLM_MODEL_TYPES:
+            return True
+    return False
+
+
 class VLLMBackend(ModelBackend):
     """vLLM-based inference backend.
 
     Provides high-performance local inference with full feature support.
-    Requires a GPU with sufficient memory for the model.
+    Requires a GPU with sufficient memory for the model. Automatically
+    detects VLMs and enables multimodal input via ``multi_modal_data``.
 
     Attributes:
         model_path: Path or HuggingFace model ID.
@@ -102,6 +181,9 @@ class VLLMBackend(ModelBackend):
         model_config = self._llm.llm_engine.model_config
         self._max_context_length = getattr(model_config, "max_model_len", None)
 
+        # Detect VLM
+        self._is_vlm = _is_vlm_model(model_config)
+
     @property
     def capabilities(self) -> BackendCapabilities:
         """vLLM supports all major features."""
@@ -112,6 +194,7 @@ class VLLMBackend(ModelBackend):
             supports_streaming=True,
             supports_chat=True,
             supports_function_calling=False,
+            supports_vision=self._is_vlm,
             max_batch_size=None,  # Limited by GPU memory
             max_context_length=self._max_context_length,
         )
@@ -196,6 +279,61 @@ class VLLMBackend(ModelBackend):
 
         return tuple(logprobs) if logprobs else None
 
+    def _generate_vlm(
+        self,
+        prompts: list[str],
+        params: SamplingParams,
+        per_prompt_images: list[list[Any]] | None = None,
+    ) -> list[GenerationResult]:
+        """Generate completions with optional multi_modal_data for VLMs.
+
+        Args:
+            prompts: List of prompt strings.
+            params: Sampling parameters.
+            per_prompt_images: List of PIL Image lists, one per prompt.
+                None or empty lists for text-only prompts.
+
+        Returns:
+            List of GenerationResults.
+        """
+        vllm_params = self._to_vllm_params(params)
+
+        if per_prompt_images:
+            inputs = []
+            for prompt, imgs in zip(prompts, per_prompt_images):
+                if imgs:
+                    inputs.append(
+                        {
+                            "prompt": prompt,
+                            "multi_modal_data": {"image": imgs if len(imgs) > 1 else imgs[0]},
+                        }
+                    )
+                else:
+                    inputs.append(prompt)
+            outputs = self._llm.generate(inputs, vllm_params, use_tqdm=False)
+        else:
+            outputs = self._llm.generate(prompts, vllm_params, use_tqdm=False)
+
+        results = []
+        for output in outputs:
+            completion = output.outputs[0]
+            token_logprobs = self._extract_logprobs(completion)
+
+            results.append(
+                GenerationResult(
+                    text=completion.text,
+                    finish_reason=_convert_stop_reason(completion.finish_reason),
+                    token_logprobs=token_logprobs,
+                    prompt_tokens=len(output.prompt_token_ids),
+                    completion_tokens=len(completion.token_ids),
+                    metadata={
+                        "request_id": output.request_id,
+                    },
+                )
+            )
+
+        return results
+
     def generate(
         self,
         prompts: list[str],
@@ -245,9 +383,11 @@ class VLLMBackend(ModelBackend):
 
         Converts each conversation to a prompt string via the chat template,
         then passes all prompts to generate() for efficient GPU batching.
+        For VLMs, images are extracted and passed via multi_modal_data.
         """
         if not messages_batch:
             return []
+
         prompts = [
             self._tokenizer.apply_chat_template(
                 [m.to_dict() for m in msgs],
@@ -257,6 +397,21 @@ class VLLMBackend(ModelBackend):
             )
             for msgs in messages_batch
         ]
+
+        if self._is_vlm:
+            per_prompt_images: list[list[Any]] = []
+            has_any_images = False
+            for msgs in messages_batch:
+                img_contents = _extract_images(msgs)
+                if img_contents:
+                    has_any_images = True
+                    per_prompt_images.append([_decode_image(ic) for ic in img_contents])
+                else:
+                    per_prompt_images.append([])
+
+            if has_any_images:
+                return self._generate_vlm(prompts, params, per_prompt_images)
+
         return self.generate(prompts, params)
 
     def generate_chat(
@@ -265,6 +420,9 @@ class VLLMBackend(ModelBackend):
         params: SamplingParams,
     ) -> GenerationResult:
         """Generate a response for a chat conversation.
+
+        For VLMs, images are extracted from messages and passed via
+        multi_modal_data to the vLLM engine.
 
         Args:
             messages: List of chat messages.
@@ -283,6 +441,14 @@ class VLLMBackend(ModelBackend):
             add_generation_prompt=True,
             **self._chat_template_kwargs,
         )
+
+        # For VLMs, extract and decode images
+        if self._is_vlm:
+            img_contents = _extract_images(messages)
+            if img_contents:
+                pil_images = [_decode_image(ic) for ic in img_contents]
+                results = self._generate_vlm([prompt], params, [pil_images])
+                return results[0]
 
         results = self.generate([prompt], params)
         return results[0]

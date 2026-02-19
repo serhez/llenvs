@@ -88,6 +88,7 @@ class TaskItem:
     messages: tuple[dict[str, Any], ...]
     ground_truth: str | None    # None for multi-turn environments
     metadata: dict[str, Any]
+    images: tuple[ImageContent, ...] = ()  # Images from the observation
 ```
 
 ## Token Masking for Multi-Turn

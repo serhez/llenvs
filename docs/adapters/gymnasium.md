@@ -108,6 +108,51 @@ R....
 .....
 ```
 
+### ImageObservationMapper
+
+For environments with pixel observations (2D+ `Box` spaces), `ImageObservationMapper` converts numpy arrays to `ImageContent`:
+
+```python
+from llenvs.adapters.gymnasium import GymnasiumEnvironment, ImageObservationMapper
+
+mapper = ImageObservationMapper(
+    text_description="Current game frame:",
+    image_format="png",   # "png" (default) or "jpeg"
+    jpeg_quality=85,       # JPEG quality, only used for JPEG
+)
+
+env = GymnasiumEnvironment(
+    gym_env=gymnasium.make("ALE/Breakout-v5"),
+    observation_mapper=mapper,
+    action_names={0: "noop", 1: "fire", 2: "right", 3: "left"},
+    num_tasks=100,
+)
+
+state, _ = env.reset()
+# state.observation.images contains (ImageContent(...),)
+# state.observation.prompt contains the text description
+```
+
+`ImageObservationMapper` implements the `MultimodalObservationMapper` protocol, which returns both text and images:
+
+```python
+class MultimodalObservationMapper(Protocol):
+    _multimodal: bool  # Must be True
+
+    def map(self, obs: Any, info: dict[str, Any]) -> tuple[str, tuple[ImageContent, ...]]:
+        """Return (text_description, images)."""
+        ...
+
+    def describe(self) -> str: ...
+```
+
+Supported input formats:
+- Grayscale arrays (H, W) — converted to RGB
+- RGB arrays (H, W, 3)
+- RGBA arrays (H, W, 4) — alpha channel dropped
+
+The images are included in `Observation.images` and flow through the full multimodal pipeline (see [Multimodal Observations](../guides/multimodal.md)).
+
 ### Custom Observation Mapper
 
 Implement the protocol for complex observations:
@@ -227,6 +272,31 @@ Built-in presets for popular gymnasium-compatible environments:
 |-----------|-------------|-------------|
 | `mars_explorer` | Grid exploration | Discrete (right/left/up/down) |
 
+### Atari (Visual)
+
+Atari presets use `ImageObservationMapper` — observations are rendered as images. Requires a VLM backend and `gymnasium[atari]` + `ale-py`.
+
+| Preset ID | Description | Actions |
+|-----------|-------------|---------|
+| `atari/breakout` | Break bricks with a ball and paddle | noop, fire, right, left |
+| `atari/pong` | Table tennis against AI opponent | noop, fire, right, left, right+fire, left+fire |
+| `atari/space_invaders` | Defend Earth from descending aliens | noop, fire, right, left, right+fire, left+fire |
+| `atari/ms_pacman` | Navigate mazes, eat pellets, avoid ghosts | noop, up, right, left, down, up+right, up+left, down+right, down+left |
+| `atari/freeway` | Cross a busy highway without getting hit | noop, up, down |
+
+```python
+adapter = GymnasiumAdapter()
+
+# Atari environment — needs VLM backend
+env = adapter.get_environment("atari/breakout", num_tasks=100)
+state, _ = env.reset()
+print(len(state.observation.images))  # 1 (ImageContent)
+
+# Install dependencies: pip install gymnasium[atari] ale-py
+```
+
+### Using Presets
+
 ```python
 adapter = GymnasiumAdapter()
 env = adapter.get_environment("gym4real/elevator-v0", num_tasks=50)
@@ -327,6 +397,6 @@ class GymnasiumHidden:
 
 ## Limitations
 
-- Image observations (`Box` with ndim >= 2) require a custom `ObservationMapper`
+- Image observations (`Box` with ndim >= 2) are not handled by `AutoObservationMapper` — use `ImageObservationMapper` or a custom mapper
 - Non-pure (`pure_step=False`) — cannot branch with `DirectStrategy`; use `ActionReplay` or `ProcessFork` strategies
 - State snapshotting depends on the underlying gymnasium environment's behavior

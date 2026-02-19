@@ -199,6 +199,7 @@ class TestVLLMBatchChat:
         mock_tokenizer.apply_chat_template = fake_apply_template
         backend._tokenizer = mock_tokenizer
         backend._chat_template_kwargs = {}
+        backend._is_vlm = False
 
         # Mock generate to return results
         def fake_generate(prompts, params):

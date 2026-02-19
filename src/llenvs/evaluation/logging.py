@@ -34,6 +34,7 @@ class LogConfig:
         wandb_project: W&B project name for auto-created runs.
         wandb_name: W&B run name (auto-generated if None).
         wandb_config: Extra config dict to log to W&B.
+        strip_images: Strip images from trajectory events before logging.
     """
 
     targets: tuple[str, ...] = ("console",)
@@ -42,6 +43,7 @@ class LogConfig:
     wandb_project: str | None = None
     wandb_name: str | None = None
     wandb_config: dict[str, Any] | None = None
+    strip_images: bool = False
 
     def __post_init__(self) -> None:
         unknown = set(self.targets) - _VALID_TARGETS

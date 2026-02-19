@@ -192,3 +192,53 @@ class Trajectory(Generic[HiddenT]):
     def is_terminal(self) -> bool:
         """Whether the trajectory has reached a terminal state."""
         return self.current_state.metadata.is_terminal
+
+    def strip_images(self) -> "Trajectory[HiddenT]":
+        """Return a new Trajectory with all images removed from observations.
+
+        Useful for reducing memory usage when storing trajectories for later
+        analysis. All other state (text, hidden, metadata, rewards) is preserved.
+
+        Returns:
+            New Trajectory with empty images in all observations.
+        """
+        from llenvs.core.state import Observation
+
+        def _strip_obs(obs: Observation) -> Observation:
+            if not obs.images:
+                return obs
+            return Observation(
+                prompt=obs.prompt,
+                messages=obs.messages,
+                tool_results=obs.tool_results,
+                available_tools=obs.available_tools,
+                images=(),
+            )
+
+        def _strip_state(state: State[HiddenT]) -> State[HiddenT]:
+            stripped_obs = _strip_obs(state.observation)
+            if stripped_obs is state.observation:
+                return state
+            return State(
+                observation=stripped_obs,
+                hidden=state.hidden,
+                metadata=state.metadata,
+            )
+
+        new_initial = _strip_state(self.initial_state)
+        new_traj: Trajectory[HiddenT] = Trajectory(
+            episode_id=self.episode_id,
+            initial_state=new_initial,
+        )
+
+        for t in self._transitions:
+            new_t = Transition(
+                state=_strip_state(t.state),
+                action=t.action,
+                next_state=_strip_state(t.next_state),
+                rewards=t.rewards,
+                info=t.info,
+            )
+            new_traj.add_transition(new_t)
+
+        return new_traj

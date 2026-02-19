@@ -6,11 +6,11 @@
 
 | Backend | Package | Features |
 |---------|---------|----------|
-| vLLM | `vllm` | Logprobs, batching, prefix continuation, streaming |
-| HuggingFace | `transformers` | Logprobs, batching, prefix continuation, chat templates |
-| OpenAI | `openai` | Logprobs, batching (concurrent), streaming, function calling |
-| Anthropic | `anthropic` | Batching (concurrent), prefix continuation (prefill), streaming |
-| OpenRouter | `openai` | Batching (concurrent), access to multiple models |
+| vLLM | `vllm` | Logprobs, batching, prefix continuation, streaming, vision (auto-detected VLMs) |
+| HuggingFace | `transformers` | Logprobs, batching, prefix continuation, chat templates, vision (auto-detected VLMs) |
+| OpenAI | `openai` | Logprobs, batching (concurrent), streaming, function calling, vision |
+| Anthropic | `anthropic` | Batching (concurrent), prefix continuation (prefill), streaming, vision |
+| OpenRouter | `openai` | Batching (concurrent), access to multiple models, vision |
 
 ## vLLM (Local Inference)
 
@@ -138,6 +138,7 @@ for i, cont in enumerate(continuations):
 | streaming | ✗ | Would require TextIteratorStreamer |
 | chat | ✓ | Via `tokenizer.apply_chat_template()` |
 | function_calling | ✗ | Not directly supported |
+| vision | Auto | VLMs detected and loaded with `AutoProcessor` + `AutoModelForVision2Seq` |
 
 ## OpenAI
 
