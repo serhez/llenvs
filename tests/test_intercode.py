@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from llenvs.core.reward import RewardType
-from llenvs.core.state import Action, Observation
+from llenvs.core.state import Action, Observation, ObservationContent
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -674,6 +674,13 @@ class TestInterCodeFullEpisode:
 
         assert state.metadata.step == 0
 
+        # task and state are set on reset
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert isinstance(state.observation.state, ObservationContent)
+        assert state.observation.state.text == state.observation.prompt
+        reset_task = state.observation.task
+
         # Explore
         actions = ["ls -la", "cat file.txt", "pwd"]
         for i, act_text in enumerate(actions):
@@ -684,11 +691,20 @@ class TestInterCodeFullEpisode:
             assert state.hidden.last_action == act_text
             assert result.terminated is False
 
+            # task carried forward, state updated to step obs
+            assert state.observation.task is reset_task
+            assert isinstance(state.observation.state, ObservationContent)
+            step_obs = state.observation.messages[-1]["content"]
+            assert state.observation.state.text == step_obs
+
         # Submit
         result = env.step(state, Action(text="submit solution_0"))
         state = result.next_state
         assert result.terminated is True
         assert state.metadata.is_terminal is True
+
+        # task still carried forward on terminal step
+        assert state.observation.task is reset_task
 
         # Check OUTCOME reward
         signal = result.rewards.by_name("intercode")

@@ -642,10 +642,13 @@ class TestGymnasiumEnvironment:
         prompt = state.observation.prompt
         assert "left" in prompt.lower() or "right" in prompt.lower()
 
-    def test_reset_initial_observation_in_prompt(self, discrete_env):
+    def test_reset_initial_observation_in_messages(self, discrete_env):
         state, _ = discrete_env.reset()
-        # The initial observation should be rendered in the prompt
-        assert "Step 0" in state.observation.prompt or "step 0" in state.observation.prompt.lower()
+        # Step 0 observation should be in messages, not in prompt
+        assert "Step 0" not in state.observation.prompt
+        assert len(state.observation.messages) >= 1
+        step_0_msg = state.observation.messages[0]
+        assert "Step 0" in step_0_msg["content"]
 
     def test_reset_hidden_state(self, discrete_env, import_adapter):
         state, _ = discrete_env.reset(seed=42)
@@ -664,9 +667,12 @@ class TestGymnasiumEnvironment:
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
 
-    def test_reset_messages_empty(self, discrete_env):
+    def test_reset_messages_has_step_0(self, discrete_env):
         state, _ = discrete_env.reset()
-        assert state.observation.messages == ()
+        # Messages should contain the step-0 observation
+        assert len(state.observation.messages) == 1
+        assert state.observation.messages[0]["role"] == "user"
+        assert "Step 0" in state.observation.messages[0]["content"]
 
     # --- Step ---
 
@@ -729,15 +735,18 @@ class TestGymnasiumEnvironment:
 
     def test_step_messages_accumulate(self, discrete_env):
         state, _ = discrete_env.reset()
-        # Step 1
-        result = discrete_env.step(state, Action(text="1"))
-        assert len(result.next_state.observation.messages) == 2
-        assert result.next_state.observation.messages[0]["role"] == "assistant"
-        assert result.next_state.observation.messages[1]["role"] == "user"
+        # After reset: 1 message (step-0 observation)
+        assert len(state.observation.messages) == 1
 
-        # Step 2
+        # Step 1: +2 (assistant + user) = 3 total
+        result = discrete_env.step(state, Action(text="1"))
+        assert len(result.next_state.observation.messages) == 3
+        assert result.next_state.observation.messages[1]["role"] == "assistant"
+        assert result.next_state.observation.messages[2]["role"] == "user"
+
+        # Step 2: +2 = 5 total
         result2 = discrete_env.step(result.next_state, Action(text="0"))
-        assert len(result2.next_state.observation.messages) == 4
+        assert len(result2.next_state.observation.messages) == 5
 
     def test_step_prompt_stays_constant(self, discrete_env):
         state, _ = discrete_env.reset()
@@ -905,8 +914,9 @@ class TestGymnasiumEnvironment:
             num_tasks=1,
         )
         state, _ = env.reset()
-        # The prompt or observation should contain the ANSI output
-        assert "ANSI output here" in state.observation.prompt
+        # The ANSI output should be in the state content and messages
+        assert "ANSI output here" in state.observation.state.text
+        assert "ANSI output here" in state.observation.messages[0]["content"]
 
     def test_ansi_render_fallback_to_mapper(self, import_adapter):
         gym_env = MockGymEnv()
@@ -1284,3 +1294,200 @@ class TestFullEpisode:
 
         result = env.step(state, Action(text="right"))
         assert result.next_state.metadata.step == 1
+
+
+# =============================================================================
+# FrozenLake Observation Mapper
+# =============================================================================
+
+
+class TestFrozenLakeObservationMapper:
+    """Tests for FrozenLakeObservationMapper."""
+
+    @pytest.fixture
+    def import_adapter(self, mock_gymnasium_spaces):
+        import importlib
+
+        import llenvs.adapters.gymnasium as mod
+
+        importlib.reload(mod)
+        return mod
+
+    def test_4x4_grid_rendering(self, import_adapter):
+        desc = ["SFFF", "FHFH", "FFFH", "HFFG"]
+        mapper = import_adapter.FrozenLakeObservationMapper(desc=desc)
+        # Agent at position 0 (top-left = S)
+        result = mapper.map(0, {})
+        assert "@ F F F" in result
+        # Position 5 (row 1, col 1 = H)
+        result = mapper.map(5, {})
+        lines = result.split("\n")
+        assert lines[1] == "F @ F H"
+
+    def test_8x8_grid_rendering(self, import_adapter):
+        desc = [
+            "SFFFFFFF",
+            "FFFFFFFF",
+            "FFFHFFFF",
+            "FFFFFHFF",
+            "FFFHFFFF",
+            "FHHFFFHF",
+            "FHFFHFHF",
+            "FFFHFFFG",
+        ]
+        mapper = import_adapter.FrozenLakeObservationMapper(desc=desc)
+        # Position 0 (top-left)
+        result = mapper.map(0, {})
+        assert result.startswith("@ F F F F F F F")
+        # Position 63 (bottom-right = G)
+        result = mapper.map(63, {})
+        last_line = result.split("\n")[-1]
+        assert last_line.endswith("@")
+
+    def test_numpy_byte_desc(self, import_adapter):
+        desc = np.array([[b"S", b"F"], [b"H", b"G"]])
+        mapper = import_adapter.FrozenLakeObservationMapper(desc=desc)
+        result = mapper.map(0, {})
+        assert "@ F" in result
+
+    def test_describe(self, import_adapter):
+        desc = ["SFFF", "FHFH", "FFFH", "HFFG"]
+        mapper = import_adapter.FrozenLakeObservationMapper(desc=desc)
+        description = mapper.describe()
+        assert "start" in description.lower() or "S" in description
+        assert "goal" in description.lower() or "G" in description
+        assert "hole" in description.lower() or "H" in description
+        assert "4x4" in description
+
+    def test_agent_char_custom(self, import_adapter):
+        desc = ["SF", "HG"]
+        mapper = import_adapter.FrozenLakeObservationMapper(desc=desc, agent_char="A")
+        result = mapper.map(0, {})
+        assert "A" in result
+        assert "@" not in result
+
+
+# =============================================================================
+# FrozenLake Presets
+# =============================================================================
+
+
+class TestFrozenLakePreset:
+    """Tests for FrozenLake presets in GYMNASIUM_PRESETS."""
+
+    def test_preset_exists(self):
+        from llenvs.adapters.gymnasium import GYMNASIUM_PRESETS
+
+        assert "frozen_lake" in GYMNASIUM_PRESETS
+        assert "frozen_lake/8x8" in GYMNASIUM_PRESETS
+
+    def test_preset_fields(self):
+        from llenvs.adapters.gymnasium import GYMNASIUM_PRESETS
+
+        preset = GYMNASIUM_PRESETS["frozen_lake"]
+        assert preset["env_id"] == "FrozenLake-v1"
+        assert preset["max_steps"] == 100
+        assert preset["action_names"] == {0: "left", 1: "down", 2: "right", 3: "up"}
+
+    def test_preset_8x8_has_make_kwargs(self):
+        from llenvs.adapters.gymnasium import GYMNASIUM_PRESETS
+
+        preset = GYMNASIUM_PRESETS["frozen_lake/8x8"]
+        assert preset["make_kwargs"] == {"map_name": "8x8"}
+        assert preset["max_steps"] == 200
+
+
+# =============================================================================
+# Prompt Separation (task vs state)
+# =============================================================================
+
+
+class TestPromptSeparation:
+    """Tests verifying task/state separation in observations."""
+
+    @pytest.fixture
+    def env(self, import_adapter):
+        gym_env = MockGymEnv()
+        return import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            action_names={0: "left", 1: "right", 2: "up"},
+            num_tasks=10,
+        )
+
+    def test_prompt_has_no_step_0(self, env):
+        state, _ = env.reset()
+        assert "Step 0" not in state.observation.prompt
+        assert "State:" not in state.observation.prompt
+
+    def test_step_0_in_messages(self, env):
+        state, _ = env.reset()
+        assert len(state.observation.messages) == 1
+        assert "Step 0" in state.observation.messages[0]["content"]
+
+    def test_prompt_stable_across_steps(self, env):
+        state, _ = env.reset()
+        initial_prompt = state.observation.prompt
+
+        result = env.step(state, Action(text="1"))
+        assert result.next_state.observation.prompt == initial_prompt
+
+        result2 = env.step(result.next_state, Action(text="0"))
+        assert result2.next_state.observation.prompt == initial_prompt
+
+
+# =============================================================================
+# Structured Observation (task/state fields)
+# =============================================================================
+
+
+class TestStructuredObservation:
+    """Tests for ObservationContent task/state fields on Observation."""
+
+    @pytest.fixture
+    def env(self, import_adapter):
+        gym_env = MockGymEnv()
+        return import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            action_names={0: "left", 1: "right", 2: "up"},
+            num_tasks=10,
+        )
+
+    def test_task_set_on_reset(self, env):
+        state, _ = env.reset()
+        obs = state.observation
+        assert obs.task is not None
+        assert "gymnasium environment" in obs.task.text.lower()
+        assert "Action space" in obs.task.text
+
+    def test_state_set_on_reset(self, env):
+        state, _ = env.reset()
+        obs = state.observation
+        assert obs.state is not None
+        assert "Step 0" in obs.state.text
+
+    def test_state_updates_on_step(self, env):
+        state, _ = env.reset()
+        result = env.step(state, Action(text="1"))
+        next_obs = result.next_state.observation
+        assert next_obs.state is not None
+        assert "Step 1" in next_obs.state.text
+        assert "Step 0" not in next_obs.state.text
+
+    def test_task_stable_across_steps(self, env):
+        state, _ = env.reset()
+        task_text = state.observation.task.text
+
+        result = env.step(state, Action(text="1"))
+        assert result.next_state.observation.task.text == task_text
+
+        result2 = env.step(result.next_state, Action(text="0"))
+        assert result2.next_state.observation.task.text == task_text
+
+    def test_error_step_has_task_and_state(self, env):
+        state, _ = env.reset()
+        # Trigger an error by sending invalid action
+        result = env.step(state, Action(text="invalid_action_xyz"))
+        next_obs = result.next_state.observation
+        assert next_obs.task is not None
+        assert next_obs.state is not None
+        assert "Error" in next_obs.state.text

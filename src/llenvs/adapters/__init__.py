@@ -17,21 +17,21 @@ from llenvs.adapters.alfworld import (
     AlfWorldHidden,
     AlfWorldReward,
 )
-from llenvs.adapters.craftax import (
-    CRAFTAX_PRESETS,
-    CraftaxActionMapper,
-    CraftaxAdapter,
-    CraftaxAchievementReward,
-    CraftaxEnvironment,
-    CraftaxHidden,
-    CraftaxReward,
-)
 from llenvs.adapters.aviary import (
     AVIARY_PRESETS,
     AviaryAdapter,
     AviaryEnvironment,
     AviaryHidden,
     AviaryReward,
+)
+from llenvs.adapters.craftax import (
+    CRAFTAX_PRESETS,
+    CraftaxAchievementReward,
+    CraftaxActionMapper,
+    CraftaxAdapter,
+    CraftaxEnvironment,
+    CraftaxHidden,
+    CraftaxReward,
 )
 from llenvs.adapters.dialogue import (
     DIALOGUE_PRESETS,
@@ -56,6 +56,7 @@ from llenvs.adapters.gymnasium import (
     GYMNASIUM_PRESETS,
     AutoActionMapper,
     AutoObservationMapper,
+    FrozenLakeObservationMapper,
     GridObservationMapper,
     GymnasiumAdapter,
     GymnasiumEnvironment,
@@ -209,6 +210,7 @@ __all__ = [
     "GymnasiumAdapter",
     "AutoObservationMapper",
     "AutoActionMapper",
+    "FrozenLakeObservationMapper",
     "GridObservationMapper",
     "GYMNASIUM_PRESETS",
     # AlfWorld

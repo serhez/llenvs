@@ -82,6 +82,19 @@ class State(Generic[HiddenT]):
 
 
 @dataclass(frozen=True)
+class ObservationContent:
+    """Structured content for task descriptions or state observations.
+
+    Attributes:
+        text: Text content.
+        images: Optional image content.
+    """
+
+    text: str
+    images: tuple[ImageContent, ...] = ()
+
+
+@dataclass(frozen=True)
 class Observation:
     """Unified observation for all environments.
 
@@ -93,6 +106,9 @@ class Observation:
         messages: Chat message history (including tool calls/results).
         tool_results: Results from the most recent tool calls.
         available_tools: Tools the model can call.
+        images: Image content for the observation.
+        task: Static task description (same every turn). None = not supported.
+        state: Dynamic state observation (changes each turn). None = not supported.
     """
 
     prompt: str
@@ -100,6 +116,8 @@ class Observation:
     tool_results: tuple[ToolResult, ...] = ()
     available_tools: tuple[ToolDefinition, ...] = ()
     images: tuple[ImageContent, ...] = ()
+    task: ObservationContent | None = None
+    state: ObservationContent | None = None
 
 
 @dataclass(frozen=True)

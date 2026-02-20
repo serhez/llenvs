@@ -27,7 +27,7 @@ from llenvs.core.reward import (
     Signal,
     SignalBundle,
 )
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolCall,
@@ -287,7 +287,10 @@ class VerifiersSingleTurnEnvironment:
             info={"task_index": task_index},
         )
 
-        observation = Observation(prompt=user_prompt)
+        observation = Observation(
+            prompt=user_prompt,
+            task=ObservationContent(text=user_prompt),
+        )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
 
         info: dict[str, Any] = {
@@ -500,6 +503,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
         observation = Observation(
             prompt=user_prompt,
             available_tools=self._tools,
+            task=ObservationContent(text=user_prompt),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -541,6 +545,7 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
                 prompt=state.observation.prompt,
                 messages=tuple(messages),
                 available_tools=self._tools,
+                task=state.observation.task,
             )
 
         terminated = False  # Only truncation ends tool episodes

@@ -30,7 +30,7 @@ from llenvs.core.reward import (
     Signal,
     SignalBundle,
 )
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolDefinition,
@@ -360,6 +360,7 @@ class MAREEnvironment(BaseToolEnvironment[MAREHidden]):
         observation = Observation(
             prompt=prompt,
             available_tools=self._tools,
+            task=ObservationContent(text=prompt),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -521,6 +522,7 @@ class MAREEnvironment(BaseToolEnvironment[MAREHidden]):
                 messages=tuple(messages),
                 tool_results=next_obs.tool_results,
                 available_tools=next_obs.available_tools,
+                task=next_obs.task,
             )
 
         next_hidden = MAREHidden(

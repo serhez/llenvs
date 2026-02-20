@@ -8,7 +8,7 @@ import pytest
 
 from llenvs.core.extraction import TagBasedExtractor
 from llenvs.core.reward import FormatReward, RewardType
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tools import ToolCall, ToolParameterType
 
 # ── Mock tau2 objects ────────────────────────────────────────────
@@ -564,6 +564,12 @@ class TestTau2Environment:
         assert state.metadata.is_terminal is False
         assert info["task_index"] == 0
 
+        # Structured observation: task set on reset (tool env, no state)
+        obs = state.observation
+        assert isinstance(obs.task, ObservationContent)
+        assert obs.task.text == obs.prompt
+        assert obs.state is None  # tool adapters don't set state
+
     def test_reset_tools_available(self):
         env = self._make_env()
         state, info = env.reset(options={"task_index": 0})
@@ -609,6 +615,12 @@ class TestTau2Environment:
         assert result.terminated is False
         assert result.next_state.hidden.episode_step == 1
         assert len(result.next_state.observation.messages) > 0
+
+        # Structured observation: task carried forward on step (tool env, no state)
+        next_obs = result.next_state.observation
+        assert next_obs.task is not None
+        assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
+        assert next_obs.state is None  # tool adapters don't set state
 
     def test_step_text_to_user(self):
         """Text-only action goes to user simulator."""

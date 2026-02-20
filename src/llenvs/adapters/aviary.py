@@ -34,7 +34,7 @@ from llenvs.core.reward import (
     Signal,
     SignalBundle,
 )
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolDefinition,
@@ -133,6 +133,7 @@ def _aviary_messages_to_observation(
     prior_messages: tuple[dict[str, Any], ...],
     action: Action,
     available_tools: tuple[ToolDefinition, ...],
+    task: ObservationContent | None = None,
 ) -> tuple[Observation, tuple[ToolResult, ...]]:
     """Convert Aviary response messages to an Observation.
 
@@ -145,6 +146,7 @@ def _aviary_messages_to_observation(
         prior_messages: Previous message history.
         action: The Action that was taken.
         available_tools: Current tool definitions.
+        task: Task observation content to carry forward.
 
     Returns:
         Tuple of (new Observation, tool results).
@@ -199,6 +201,7 @@ def _aviary_messages_to_observation(
             messages=tuple(new_messages),
             tool_results=tuple(tool_results),
             available_tools=available_tools,
+            task=task,
         ),
         tuple(tool_results),
     )
@@ -382,6 +385,7 @@ class AviaryEnvironment(BaseToolEnvironment[AviaryHidden]):
         observation = Observation(
             prompt=prompt,
             available_tools=self._tools,
+            task=ObservationContent(text=prompt),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -424,6 +428,7 @@ class AviaryEnvironment(BaseToolEnvironment[AviaryHidden]):
             prior_messages=state.observation.messages,
             action=action,
             available_tools=self._tools,
+            task=state.observation.task,
         )
 
         next_hidden = AviaryHidden(

@@ -20,7 +20,14 @@ import numpy as np
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.extraction import AnswerExtractor, RawGenerationExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
 
 # =============================================================================
 # Mapper Protocols
@@ -479,6 +486,81 @@ class GridObservationMapper:
 
 
 # =============================================================================
+# FrozenLake Observation Mapper
+# =============================================================================
+
+
+class FrozenLakeObservationMapper:
+    """Maps FrozenLake discrete-position observations to ASCII grid text.
+
+    FrozenLake's observation is ``Discrete(16)`` (or 64 for 8x8) — an integer
+    representing the agent's position. This mapper renders the full grid with
+    the agent's position marked.
+
+    Args:
+        desc: Grid description — list of strings (e.g., ``["SFFF", "FHFH", ...]``)
+            or numpy byte array from ``env.unwrapped.desc``.
+        agent_char: Character to mark the agent's position.
+    """
+
+    def __init__(
+        self,
+        desc: Any,
+        agent_char: str = "@",
+    ) -> None:
+        # Convert numpy byte array to list of strings
+        if hasattr(desc, "dtype"):
+            self._rows = [
+                "".join(c.decode() if isinstance(c, bytes) else str(c) for c in row) for row in desc
+            ]
+        else:
+            self._rows = [str(row) for row in desc]
+        self._nrows = len(self._rows)
+        self._ncols = len(self._rows[0]) if self._rows else 0
+        self._agent_char = agent_char
+
+    def map(self, obs: Any, info: dict[str, Any]) -> str:
+        """Render the grid with the agent at the given position.
+
+        Args:
+            obs: Integer position (row-major index).
+            info: Step info dict.
+
+        Returns:
+            ASCII grid with agent marked and space-separated characters.
+        """
+        pos = int(obs)
+        row = pos // self._ncols
+        col = pos % self._ncols
+
+        lines = []
+        for r, row_str in enumerate(self._rows):
+            chars = []
+            for c, ch in enumerate(row_str):
+                if r == row and c == col:
+                    chars.append(self._agent_char)
+                else:
+                    chars.append(ch)
+            lines.append(" ".join(chars))
+        return "\n".join(lines)
+
+    def describe(self) -> str:
+        """Describe the grid layout with a tile legend."""
+        # Render static grid (no agent)
+        lines = []
+        for row_str in self._rows:
+            lines.append(" ".join(row_str))
+        grid_text = "\n".join(lines)
+
+        legend = (
+            "Tiles: S = start, F = frozen (safe), H = hole (fall = lose), G = goal (win). "
+            f"The agent's position is marked with '{self._agent_char}'. "
+            f"Grid size: {self._nrows}x{self._ncols}."
+        )
+        return f"{grid_text}\n\n{legend}"
+
+
+# =============================================================================
 # Image Observation Mapper
 # =============================================================================
 
@@ -787,8 +869,8 @@ class GymnasiumEnvironment:
             return self._observation_mapper.map(raw_obs, info)
         return self._observation_mapper.map(raw_obs, info), ()
 
-    def _build_initial_prompt(self, obs_text: str) -> str:
-        """Build the full initial prompt including space descriptions."""
+    def _build_task_description(self) -> str:
+        """Build the static task description (no step-specific observation)."""
         parts = []
 
         # Environment description
@@ -809,11 +891,6 @@ class GymnasiumEnvironment:
         # Action space description
         parts.append("Action space:")
         parts.append(self._action_mapper.describe())
-        parts.append("")
-
-        # Initial observation
-        parts.append("[Step 0]")
-        parts.append(obs_text)
 
         return "\n".join(parts)
 
@@ -839,11 +916,19 @@ class GymnasiumEnvironment:
             gym_reward=state.hidden.gym_reward,
         )
 
+        error_text = f"[Step {next_step}] Error: {error_msg}"
+        state_content = ObservationContent(text=error_text)
+
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},
-            {"role": "user", "content": f"[Step {next_step}] Error: {error_msg}"},
+            {"role": "user", "content": error_text},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=state_content,
+        )
 
         new_metadata = StateMetadata(
             step=meta_step,
@@ -898,8 +983,23 @@ class GymnasiumEnvironment:
         # Render observation
         obs_text, obs_images = self._render_observation(raw_obs, info)
 
-        # Build prompt
-        prompt = self._build_initial_prompt(obs_text)
+        # Build structured observation components
+        task_desc = self._build_task_description()
+        task_content = ObservationContent(text=task_desc)
+        state_text = f"[Step 0]\n{obs_text}"
+        state_content = ObservationContent(text=state_text, images=obs_images)
+
+        # Legacy prompt = task description (for backward compat)
+        prompt = task_desc
+
+        # Legacy messages: step-0 observation as first user message
+        initial_messages: tuple[dict[str, Any], ...] = ()
+        step_msg: dict[str, Any] = {"role": "user", "content": state_text}
+        if obs_images:
+            step_msg["images"] = [
+                {"data": img.data, "media_type": img.media_type} for img in obs_images
+            ]
+        initial_messages = (step_msg,)
 
         hidden = GymnasiumHidden(
             task_index=task_index,
@@ -910,7 +1010,13 @@ class GymnasiumEnvironment:
             gym_reward=0.0,
         )
 
-        observation = Observation(prompt=prompt, images=obs_images)
+        observation = Observation(
+            prompt=prompt,
+            messages=initial_messages,
+            images=obs_images,
+            task=task_content,
+            state=state_content,
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -988,7 +1094,10 @@ class GymnasiumEnvironment:
             gym_reward=cumulative_reward,
         )
 
-        user_msg: dict[str, Any] = {"role": "user", "content": f"[Step {next_step}]\n{obs_text}"}
+        state_text = f"[Step {next_step}]\n{obs_text}"
+        state_content = ObservationContent(text=state_text, images=obs_images)
+
+        user_msg: dict[str, Any] = {"role": "user", "content": state_text}
         if obs_images:
             user_msg["images"] = [
                 {"data": img.data, "media_type": img.media_type} for img in obs_images
@@ -999,7 +1108,11 @@ class GymnasiumEnvironment:
             user_msg,
         )
         new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages, images=obs_images
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            images=obs_images,
+            task=state.observation.task,
+            state=state_content,
         )
 
         is_terminal = terminated or truncated
@@ -1057,6 +1170,20 @@ class GymnasiumEnvironment:
 
 
 GYMNASIUM_PRESETS: dict[str, dict[str, Any]] = {
+    # FrozenLake environments
+    "frozen_lake": {
+        "description": "Navigate a frozen lake from start (S) to goal (G) without falling into holes (H). The surface is slippery.",
+        "env_id": "FrozenLake-v1",
+        "action_names": {0: "left", 1: "down", 2: "right", 3: "up"},
+        "max_steps": 100,
+    },
+    "frozen_lake/8x8": {
+        "description": "Navigate a frozen lake (8x8) from start (S) to goal (G) without falling into holes (H). The surface is slippery.",
+        "env_id": "FrozenLake-v1",
+        "action_names": {0: "left", 1: "down", 2: "right", 3: "up"},
+        "max_steps": 200,
+        "make_kwargs": {"map_name": "8x8"},
+    },
     # Gym4Real environments
     "gym4real/dam-v0": {
         "description": "Minimize unmet demand while avoiding floods by controlling water release.",
@@ -1267,12 +1394,21 @@ class GymnasiumAdapter:
         # Create gym env if not provided
         if gym_env is None:
             gymnasium = self._get_gymnasium()
-            make_kwargs_final = dict(make_kwargs)
+            # Merge make_kwargs: preset defaults + user overrides
+            make_kwargs_final: dict[str, Any] = dict(preset.get("make_kwargs", {}))
+            make_kwargs_final.update(make_kwargs)
             if use_ansi_render and render_mode is None:
                 make_kwargs_final["render_mode"] = "ansi"
             elif render_mode is not None:
                 make_kwargs_final["render_mode"] = render_mode
             gym_env = gymnasium.make(env_id, **make_kwargs_final)
+
+        # Auto-create FrozenLake observation mapper when no explicit mapper
+        if observation_mapper is None and env_id == "FrozenLake-v1":
+            unwrapped = getattr(gym_env, "unwrapped", gym_env)
+            desc = getattr(unwrapped, "desc", None)
+            if desc is not None:
+                observation_mapper = FrozenLakeObservationMapper(desc=desc)
 
         return GymnasiumEnvironment(
             gym_env=gym_env,

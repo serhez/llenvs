@@ -1,14 +1,14 @@
 """Tests for the OpenEnv adapter."""
 
-import pytest
-from typing import Any
-from unittest.mock import MagicMock, patch, PropertyMock
 from dataclasses import dataclass
+from typing import Any
+from unittest.mock import MagicMock
 
-from llenvs.core.state import Observation, Action, State, StateMetadata
-from llenvs.core.reward import RewardType, Signal
-from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameterType
+import pytest
 
+from llenvs.core.reward import RewardType
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
+from llenvs.core.tools import ToolCall
 
 # ── Mock OpenEnv objects ────────────────────────────────────────────
 
@@ -161,8 +161,9 @@ class TestCoerceObservation:
         assert _coerce_observation({"message": "msg"}) == "msg"
 
     def test_fallback_to_json(self):
-        from llenvs.adapters.openenv import _coerce_observation
         import json
+
+        from llenvs.adapters.openenv import _coerce_observation
 
         obs = {"foo": 42, "bar": "baz"}
         result = _coerce_observation(obs)
@@ -200,7 +201,7 @@ class TestOpenEnvReward:
         assert reward.reward_type == RewardType.OUTCOME
 
     def test_compute_with_reward(self):
-        from llenvs.adapters.openenv import OpenEnvReward, OpenEnvHidden
+        from llenvs.adapters.openenv import OpenEnvHidden, OpenEnvReward
 
         reward_fn = OpenEnvReward()
         hidden = OpenEnvHidden(
@@ -236,7 +237,7 @@ class TestOpenEnvReward:
         assert signal.reward_type == RewardType.OUTCOME
 
     def test_compute_no_reward(self):
-        from llenvs.adapters.openenv import OpenEnvReward, OpenEnvHidden
+        from llenvs.adapters.openenv import OpenEnvHidden, OpenEnvReward
 
         reward_fn = OpenEnvReward()
         hidden = OpenEnvHidden(
@@ -256,7 +257,7 @@ class TestOpenEnvReward:
 
     def test_step_reward_type(self):
         """Non-terminal steps use STEP type."""
-        from llenvs.adapters.openenv import OpenEnvReward, OpenEnvHidden
+        from llenvs.adapters.openenv import OpenEnvHidden, OpenEnvReward
 
         reward_fn = OpenEnvReward()
         hidden = OpenEnvHidden(
@@ -389,6 +390,14 @@ class TestOpenEnvEnvironment:
         )
         env = self._make_env(client=client)
         state, _ = env.reset()
+
+        # task and state are set on reset
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert isinstance(state.observation.state, ObservationContent)
+        assert state.observation.state.text == state.observation.prompt
+        reset_task = state.observation.task
+
         result = env.step(state, Action(text="go north"))
 
         # New observation appears in message history (prompt stays from reset)
@@ -396,6 +405,11 @@ class TestOpenEnvEnvironment:
         assert any("forest" in m.get("content", "") for m in messages)
         assert result.next_state.hidden.episode_step == 1
         assert result.next_state.hidden.last_action == "go north"
+
+        # task carried forward, state updated to step obs
+        assert result.next_state.observation.task is reset_task
+        assert isinstance(result.next_state.observation.state, ObservationContent)
+        assert result.next_state.observation.state.text == "You moved north. You see a forest."
 
     def test_step_with_reward(self):
         client = MockSyncClient(

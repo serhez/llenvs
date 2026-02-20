@@ -175,4 +175,5 @@ class BaseToolEnvironment(Generic[HiddenT]):
             messages=tuple(messages),
             tool_results=tool_results,
             available_tools=self._tools,
+            task=current_obs.task,
         )

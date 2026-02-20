@@ -6,25 +6,25 @@ a common interface. Most HF datasets are single-turn (question -> answer).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from llenvs.inference.prompts import PromptTemplate
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.extraction import (
     AnswerExtractor,
-    TagBasedExtractor,
     BoxedExtractor,
-    NumericExtractor,
     LastLineExtractor,
+    NumericExtractor,
     RawGenerationExtractor,
+    TagBasedExtractor,
 )
-
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 # Type alias for scoring functions
 ScoringFunction = Callable[[str, str], float]
@@ -385,7 +385,10 @@ class HuggingFaceEnvironment:
             expected_answer = str(raw_answer).strip()
 
         # Create observation
-        observation = Observation(prompt=question)
+        observation = Observation(
+            prompt=question,
+            task=ObservationContent(text=question),
+        )
 
         # Create hidden state
         hidden = HuggingFaceHidden(
@@ -660,7 +663,7 @@ class HuggingFaceAdapter:
         """HuggingFace datasets are raw, no default system prompt."""
         return None
 
-    def get_prompt_template(self, name: str) -> "PromptTemplate | None":
+    def get_prompt_template(self, name: str) -> PromptTemplate | None:
         """Return a prompt template based on dataset presets.
 
         Math-related datasets get the math template; others return None.

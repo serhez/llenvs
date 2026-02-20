@@ -7,24 +7,31 @@ Key capabilities:
 - Multiple inference backends (vLLM, OpenAI, Anthropic, OpenRouter)
 """
 
-from llenvs.core.state import State, StateMetadata, Observation, Action, ImageContent
-from llenvs.core.reward import Signal, SignalBundle, RewardType, RewardFunction
-from llenvs.core.trajectory import Trajectory, Transition, Checkpoint
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.adapters.iterative import IterativeEnvironment
+from llenvs.core.branching import BranchManager
+from llenvs.core.config import EvalConfig
+from llenvs.core.environment import Environment, EnvironmentSpec, StepResult
 from llenvs.core.extraction import (
     AnswerExtractor,
-    TagBasedExtractor,
-    RegexExtractor,
     GSM8KExtractor,
     MultipleChoiceExtractor,
+    RegexExtractor,
+    TagBasedExtractor,
 )
-from llenvs.core.config import EvalConfig
 from llenvs.core.judge import JudgeReward
-from llenvs.core.branching import BranchManager
-from llenvs.adapters.iterative import IterativeEnvironment
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
+from llenvs.core.trajectory import Checkpoint, Trajectory, Transition
 from llenvs.environments.coding import IterativeCodingEnvironment
-from llenvs.integrations.scoring import Scorer, ScoringResult
 from llenvs.integrations.dataset_provider import DatasetProvider, TaskItem
+from llenvs.integrations.scoring import Scorer, ScoringResult
 
 __version__ = "0.1.0"
 
@@ -33,6 +40,7 @@ __all__ = [
     "State",
     "StateMetadata",
     "Observation",
+    "ObservationContent",
     "Action",
     "ImageContent",
     # Rewards

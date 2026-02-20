@@ -11,14 +11,14 @@ wrapping an inner environment.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.extraction import RawGenerationExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, Observation, State, StateMetadata
-
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -251,7 +251,11 @@ class IterativeEnvironment:
 
         episode_id = options.get("episode_id", str(uuid.uuid4()))
         state = State(
-            observation=Observation(prompt=initial_text, messages=()),
+            observation=Observation(
+                prompt=initial_text,
+                messages=(),
+                task=ObservationContent(text=initial_text),
+            ),
             hidden=hidden,
             metadata=StateMetadata(
                 step=0,
@@ -349,7 +353,12 @@ class IterativeEnvironment:
             messages = self._build_messages(state, action_text, obs_text)
 
         next_state = State(
-            observation=Observation(prompt=obs_text, messages=messages),
+            observation=Observation(
+                prompt=obs_text,
+                messages=messages,
+                task=state.observation.task,
+                state=ObservationContent(text=obs_text),
+            ),
             hidden=new_hidden,
             metadata=StateMetadata(
                 step=state.metadata.step + 1,

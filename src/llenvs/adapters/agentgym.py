@@ -15,14 +15,13 @@ import socket
 import subprocess
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from typing import Any
-import uuid
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
-
+from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 # ---------------------------------------------------------------------------
 # Environment registry: env_name -> (client_class_name, cli_command)
@@ -249,7 +248,11 @@ class AgentGymEnvironment:
             available_actions=available_actions,
         )
 
-        observation = Observation(prompt=obs_text)
+        observation = Observation(
+            prompt=obs_text,
+            task=ObservationContent(text=obs_text),
+            state=ObservationContent(text=obs_text),
+        )
 
         # Build info dict
         info: dict[str, Any] = {
@@ -308,7 +311,12 @@ class AgentGymEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_text},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=ObservationContent(text=obs_text),
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,

@@ -2,22 +2,18 @@
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec
+from llenvs.core.reward import RewardType, Signal
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.inference.protocol import (
-    ChatMessage,
     GenerationResult,
     SamplingParams,
     StopReason,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -114,7 +110,7 @@ class TestDialogueTask:
 
 class TestDialogueHidden:
     def test_creation(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueHidden
+        from llenvs.adapters.dialogue import DialogueHidden, DialogueTask
 
         task = DialogueTask(prompt="Q", ground_truth="A")
         hidden = DialogueHidden(task_index=0, task=task, step_count=0)
@@ -123,7 +119,7 @@ class TestDialogueHidden:
         assert hidden.step_count == 0
 
     def test_frozen(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueHidden
+        from llenvs.adapters.dialogue import DialogueHidden, DialogueTask
 
         task = DialogueTask(prompt="Q")
         hidden = DialogueHidden(task_index=0, task=task, step_count=0)
@@ -131,14 +127,14 @@ class TestDialogueHidden:
             hidden.step_count = 5  # type: ignore[misc]
 
     def test_ground_truth_property(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueHidden
+        from llenvs.adapters.dialogue import DialogueHidden, DialogueTask
 
         task = DialogueTask(prompt="Q", ground_truth="cat")
         hidden = DialogueHidden(task_index=0, task=task, step_count=0)
         assert hidden.ground_truth == "cat"
 
     def test_ground_truth_empty(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueHidden
+        from llenvs.adapters.dialogue import DialogueHidden, DialogueTask
 
         task = DialogueTask(prompt="Q")
         hidden = DialogueHidden(task_index=0, task=task, step_count=0)
@@ -152,7 +148,7 @@ class TestDialogueHidden:
 
 class TestDialogueEnvironmentReset:
     def test_initial_state(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         tasks = (DialogueTask(prompt="Hello agent"),)
@@ -167,7 +163,7 @@ class TestDialogueEnvironmentReset:
         assert state.metadata.is_terminal is False
 
     def test_task_prompt_in_observation(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         tasks = (
@@ -181,7 +177,7 @@ class TestDialogueEnvironmentReset:
         assert state.hidden.task_index == 1
 
     def test_hidden_state_populated(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         task = DialogueTask(prompt="Q", context="ctx", ground_truth="GT")
@@ -192,7 +188,7 @@ class TestDialogueEnvironmentReset:
         assert state.hidden.task.ground_truth == "GT"
 
     def test_task_index_bounds_check(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
@@ -204,7 +200,7 @@ class TestDialogueEnvironmentReset:
             env.reset(options={"task_index": -1})
 
     def test_default_task_index(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
@@ -212,7 +208,7 @@ class TestDialogueEnvironmentReset:
         assert state.hidden.task_index == 0
 
     def test_len(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         tasks = tuple(DialogueTask(prompt=f"Q{i}") for i in range(5))
@@ -227,7 +223,7 @@ class TestDialogueEnvironmentReset:
 
 class TestDialogueEnvironmentStep:
     def test_env_llm_called_with_correct_messages(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("No.")
         task = DialogueTask(
@@ -255,7 +251,7 @@ class TestDialogueEnvironmentStep:
         assert messages[1].content == "Is it a dog?"
 
     def test_response_becomes_observation(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("No, try again.")
         env = DialogueEnvironment(
@@ -275,7 +271,7 @@ class TestDialogueEnvironmentStep:
         assert msgs[1]["content"] == "No, try again."
 
     def test_message_history_grows(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend_sequence(["No.", "No.", "Correct!"])
         env = DialogueEnvironment(
@@ -299,7 +295,7 @@ class TestDialogueEnvironmentStep:
         assert len(result3.next_state.observation.messages) == 6
 
     def test_step_count_increments(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("No.")
         env = DialogueEnvironment(
@@ -314,7 +310,7 @@ class TestDialogueEnvironmentStep:
         assert result.next_state.metadata.step == 1
 
     def test_action_text_in_messages(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Response")
         env = DialogueEnvironment(
@@ -329,7 +325,7 @@ class TestDialogueEnvironmentStep:
         assert any(m.content == "My specific text" for m in messages)
 
     def test_none_action_text_becomes_empty(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Response")
         env = DialogueEnvironment(
@@ -346,7 +342,7 @@ class TestDialogueEnvironmentStep:
         assert user_msgs[-1].content == ""
 
     def test_system_prompt_without_context(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("OK")
         task = DialogueTask(prompt="Q", context="")
@@ -365,7 +361,7 @@ class TestDialogueEnvironmentStep:
 
     def test_conversation_history_in_backend_call(self):
         """After multiple steps, the full history is sent to the backend."""
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend_sequence(["R1", "R2"])
         env = DialogueEnvironment(
@@ -393,7 +389,7 @@ class TestDialogueEnvironmentStep:
 
 class TestDialogueTermination:
     def test_is_terminal_callback(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Correct!")
 
@@ -413,7 +409,7 @@ class TestDialogueTermination:
         assert result.truncated is False
 
     def test_max_steps_truncation(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("No.")
         env = DialogueEnvironment(
@@ -428,7 +424,7 @@ class TestDialogueTermination:
         assert result.truncated is True
 
     def test_not_done_continues(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("No.")
         env = DialogueEnvironment(
@@ -445,7 +441,7 @@ class TestDialogueTermination:
 
     def test_terminal_and_truncated_both_set(self):
         """If terminal triggers on the last step, both flags can be true."""
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Correct!")
 
@@ -472,14 +468,14 @@ class TestDialogueTermination:
 
 class TestDialogueRewards:
     def test_no_native_rewards(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
         assert env.reward_functions == ()
 
     def test_extra_rewards_included(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         dummy = DummyReward(0.7, "test_reward")
@@ -492,7 +488,7 @@ class TestDialogueRewards:
         assert env.reward_functions[0].name == "test_reward"
 
     def test_rewards_computed_on_step(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Response")
         dummy = DummyReward(0.7, "test_reward")
@@ -509,7 +505,7 @@ class TestDialogueRewards:
 
     def test_judge_reward_compatibility(self):
         """DialogueHidden.ground_truth is accessible for JudgeReward."""
-        from llenvs.adapters.dialogue import DialogueTask, DialogueHidden
+        from llenvs.adapters.dialogue import DialogueHidden, DialogueTask
         from llenvs.core.judge import _gather_judge_context
 
         task = DialogueTask(prompt="Question", ground_truth="expected_answer")
@@ -534,7 +530,7 @@ class TestDialogueRewards:
 
 class TestDialogueSpec:
     def test_spec_properties(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         env = DialogueEnvironment(
@@ -550,14 +546,14 @@ class TestDialogueSpec:
         assert spec.pure_step is True
 
     def test_prompts_empty(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
         assert env.prompts == {}
 
     def test_available_tools_empty(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend()
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
@@ -625,7 +621,7 @@ class TestTaskCreation:
         assert len(env) == 2
 
     def test_from_direct_tasks(self):
-        from llenvs.adapters.dialogue import DialogueAdapter, DialogueTask
+        from llenvs.adapters.dialogue import DialogueAdapter
 
         backend = _mock_backend()
         adapter = DialogueAdapter()
@@ -741,8 +737,8 @@ class TestEnvironmentLLMConfig:
     def test_with_inference(self):
         from llenvs.core.config import (
             EnvironmentLLMConfig,
-            ModelConfig,
             InferenceConfig,
+            ModelConfig,
         )
 
         config = EnvironmentLLMConfig(
@@ -795,11 +791,11 @@ class TestEnvironmentLLMConfig:
 
     def test_to_dict_with_env_llm(self):
         from llenvs.core.config import (
-            EvalConfig,
             EnvironmentConfig,
             EnvironmentLLMConfig,
-            ModelConfig,
+            EvalConfig,
             InferenceConfig,
+            ModelConfig,
         )
 
         env_config = EnvironmentConfig(
@@ -823,7 +819,7 @@ class TestEnvironmentLLMConfig:
         assert env_d["env_llm"]["inference"]["max_tokens"] == 256
 
     def test_to_dict_without_env_llm(self):
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         config = EvalConfig(
             environments=[EnvironmentConfig(name="sudoku")],
@@ -900,21 +896,40 @@ class TestFullEpisode:
         state, info = env.reset(options={"task_index": 0})
         assert state.hidden.task.ground_truth == "cat"
 
+        # task is set on reset, state is None (no env response yet)
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert state.observation.state is None
+        reset_task = state.observation.task
+
         # Turn 1
         result = env.step(state, Action.from_text("Is it an animal?"))
         assert result.done is False
         assert result.next_state.hidden.step_count == 1
+
+        # After step, task carried forward, state updated to env response
+        assert result.next_state.observation.task is reset_task
+        assert isinstance(result.next_state.observation.state, ObservationContent)
+        assert result.next_state.observation.state.text == "No."
 
         # Turn 2
         result = env.step(result.next_state, Action.from_text("Is it a dog?"))
         assert result.done is False
         assert result.next_state.hidden.step_count == 2
 
+        # task still the same, state updated
+        assert result.next_state.observation.task is reset_task
+        assert result.next_state.observation.state.text == "No."
+
         # Turn 3 - correct guess
         result = env.step(result.next_state, Action.from_text("Is it a cat?"))
         assert result.terminated is True
         assert result.next_state.hidden.step_count == 3
         assert len(result.next_state.observation.messages) == 6  # 3 pairs
+
+        # task still carried forward on terminal step
+        assert result.next_state.observation.task is reset_task
+        assert result.next_state.observation.state.text == "Correct! The word was cat."
 
     def test_teacher_session(self):
         """Simulate a 2-turn teacher session."""
@@ -952,7 +967,7 @@ class TestFullEpisode:
 
 class TestComputeRewards:
     def test_compute_rewards_directly(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Response")
         dummy = DummyReward(0.9, "direct_test")
@@ -968,7 +983,7 @@ class TestComputeRewards:
         assert bundle.signals[0].reward == 0.9
 
     def test_empty_rewards(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("Response")
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
@@ -986,7 +1001,7 @@ class TestComputeRewards:
 
 class TestSamplingParams:
     def test_default_sampling_params(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("OK")
         env = DialogueEnvironment(backend=backend, tasks=(DialogueTask(prompt="Q"),))
@@ -1001,7 +1016,7 @@ class TestSamplingParams:
         assert params.max_tokens == 512
 
     def test_custom_sampling_params(self):
-        from llenvs.adapters.dialogue import DialogueTask, DialogueEnvironment
+        from llenvs.adapters.dialogue import DialogueEnvironment, DialogueTask
 
         backend = _mock_backend("OK")
         custom_params = SamplingParams(temperature=0.7, max_tokens=256)

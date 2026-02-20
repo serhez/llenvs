@@ -29,7 +29,7 @@ from llenvs.core.reward import (
     Signal,
     SignalBundle,
 )
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolDefinition,
@@ -394,6 +394,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
         observation = Observation(
             prompt=prompt,
             available_tools=self._tools,
+            task=ObservationContent(text=prompt),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -543,6 +544,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
                 prompt=state.observation.prompt,
                 messages=tuple(obs_messages),
                 available_tools=self._tools,
+                task=state.observation.task,
             )
 
         next_hidden = Tau2Hidden(

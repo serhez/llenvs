@@ -17,7 +17,7 @@ from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 INTERCODE_PRESETS: dict[str, dict[str, str]] = {
     "bash": {
@@ -238,7 +238,11 @@ class InterCodeEnvironment:
             trajectory=(),
         )
 
-        observation = Observation(prompt=str(raw_obs))
+        observation = Observation(
+            prompt=str(raw_obs),
+            task=ObservationContent(text=str(raw_obs)),
+            state=ObservationContent(text=str(raw_obs)),
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -301,7 +305,12 @@ class InterCodeEnvironment:
             {"role": "assistant", "content": action_text},
             {"role": "user", "content": str(raw_obs)},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=ObservationContent(text=str(raw_obs)),
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,

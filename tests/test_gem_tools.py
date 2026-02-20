@@ -1,26 +1,24 @@
 """Tests for GEM tool environment integration."""
 
-import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.tools import (
-    ToolCall,
-    ToolDefinition,
-    ToolParameterType,
-    ToolResult,
-    ToolResultStatus,
-)
-from llenvs.core.reward import RewardType
+import pytest
+
 from llenvs.adapters.gem import (
-    GemAdapter,
-    GemToolEnvironment,
-    GemToolHidden,
-    GemToolExecutor,
     GEM_PYTHON_TOOL,
     GEM_SEARCH_TOOL,
     GEM_SUBMIT_ANSWER_TOOL,
+    GemAdapter,
+    GemToolEnvironment,
+    GemToolExecutor,
+    GemToolHidden,
+)
+from llenvs.core.state import Action, Observation, ObservationContent
+from llenvs.core.tools import (
+    ToolCall,
+    ToolParameterType,
+    ToolResultStatus,
 )
 
 
@@ -371,6 +369,12 @@ class TestGemToolEnvironment:
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
 
+        # Structured observation: task set on reset (tool env, no state)
+        obs = state.observation
+        assert isinstance(obs.task, ObservationContent)
+        assert obs.task.text == obs.prompt
+        assert obs.state is None  # tool adapters don't set state
+
     @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_step_with_tool_call(self, mock_create_tools, mock_gem_env):
         """Test stepping with a tool call."""
@@ -402,6 +406,12 @@ class TestGemToolEnvironment:
 
         # Check next observation includes tool results
         assert len(result.next_state.observation.tool_results) == 1
+
+        # Structured observation: task carried forward on step (tool env, no state)
+        next_obs = result.next_state.observation
+        assert next_obs.task is not None
+        assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
+        assert next_obs.state is None  # tool adapters don't set state
 
     @patch("llenvs.adapters.gem.GemToolEnvironment._create_gem_tools")
     def test_submit_answer_terminates(self, mock_create_tools, mock_gem_env):

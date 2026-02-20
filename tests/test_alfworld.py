@@ -17,7 +17,7 @@ from llenvs.adapters.alfworld import (
     _extract_task_type,
 )
 from llenvs.core.reward import RewardType
-from llenvs.core.state import Action, ImageContent, Observation
+from llenvs.core.state import Action, ImageContent, Observation, ObservationContent
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -371,6 +371,14 @@ class TestAlfWorldEnvironment:
         assert info["task_index"] == 0
         assert info["task_type"] == "pick_and_place_simple"
 
+        # Structured observation: task and state set on reset
+        obs = state.observation
+        assert isinstance(obs.task, ObservationContent)
+        assert obs.task.text == obs.prompt
+        assert isinstance(obs.state, ObservationContent)
+        assert obs.state.text == obs.prompt
+        assert obs.state.images == ()  # text mode: no images in state
+
     def test_reset_default_task_index(self, env: AlfWorldEnvironment):
         state, info = env.reset()
         assert state.hidden.task_index == 0
@@ -395,6 +403,14 @@ class TestAlfWorldEnvironment:
         assert result.next_state.hidden.last_action == "go to desk 1"
         assert result.next_state.metadata.step == 1
         assert result.next_state.metadata.is_terminal is False
+
+        # Structured observation: task carried forward, state updated
+        next_obs = result.next_state.observation
+        assert next_obs.task is not None
+        assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
+        assert next_obs.state is not None
+        assert "desk 1" in next_obs.state.text  # state reflects step observation
+        assert next_obs.state.images == ()  # text mode
 
     def test_step_updates_admissible_commands(self, env: AlfWorldEnvironment):
         state, _ = env.reset(options={"task_index": 0})
@@ -1015,6 +1031,13 @@ class TestAlfWorldVisualMode:
         assert len(state.observation.images) == 1
         assert isinstance(state.observation.images[0], ImageContent)
         assert state.observation.images[0].media_type == "image/png"
+
+        # Structured observation: state includes images in visual mode
+        obs = state.observation
+        assert isinstance(obs.task, ObservationContent)
+        assert isinstance(obs.state, ObservationContent)
+        assert len(obs.state.images) == 1
+        assert obs.state.images[0].media_type == "image/png"
 
     def test_visual_reset_still_has_text(self):
         """Visual mode should still have text in prompt."""

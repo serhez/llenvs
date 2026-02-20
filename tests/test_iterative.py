@@ -1,15 +1,13 @@
 """Tests for iterative refinement environment."""
 
-import pytest
 from llenvs.adapters.iterative import (
     IterativeEnvironment,
     IterativeHidden,
     IterativeTask,
 )
 from llenvs.core.environment import StepResult
-from llenvs.core.reward import RewardType, Signal, SignalBundle, RewardFunction
-from llenvs.core.state import Action, Observation, State, StateMetadata
-
+from llenvs.core.reward import RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -178,6 +176,11 @@ class TestIterativeEnvironmentStandalone:
         assert state.hidden.turn == 0
         assert state.hidden.max_turns == 3
 
+        # Structured observation: task set on reset
+        obs = state.observation
+        assert isinstance(obs.task, ObservationContent)
+        assert obs.task.text == obs.prompt
+
     def test_len(self):
         env = self._make_env()
         assert len(env) == 2
@@ -198,6 +201,13 @@ class TestIterativeEnvironmentStandalone:
         assert result.rewards.feedback_texts()
         assert result.next_state.hidden.turn == 1
         assert len(result.next_state.hidden.submissions) == 1
+
+        # Structured observation: task carried forward, state updated on step
+        next_obs = result.next_state.observation
+        assert next_obs.task is not None
+        assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
+        assert isinstance(next_obs.state, ObservationContent)
+        assert next_obs.state.text == next_obs.prompt  # state reflects feedback observation
 
     def test_max_turns_truncation(self):
         env = self._make_env(max_turns=2)

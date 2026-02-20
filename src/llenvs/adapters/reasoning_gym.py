@@ -4,14 +4,14 @@ Reasoning-gym tasks are single-turn (question -> answer), but the MDP
 interface generalizes to multi-turn for future adapters.
 """
 
-from dataclasses import dataclass, field
-from typing import Any
 import uuid
+from dataclasses import dataclass
+from typing import Any
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 
 @dataclass(frozen=True)
@@ -197,7 +197,10 @@ class ReasoningGymEnvironment:
         entry = self._dataset[task_index]
 
         # Create observation (what model sees)
-        observation = Observation(prompt=entry["question"])
+        observation = Observation(
+            prompt=entry["question"],
+            task=ObservationContent(text=entry["question"]),
+        )
 
         # Create hidden state (for reward computation)
         hidden = ReasoningGymHidden(

@@ -21,7 +21,14 @@ import numpy as np
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.extraction import AnswerExtractor, RawGenerationExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
 
 # =============================================================================
 # Actions
@@ -509,7 +516,8 @@ class CraftaxEnvironment:
             text = _render_symbolic(raw_obs, self._is_classic)
             return text, ()
 
-    def _build_initial_prompt(self, obs_text: str) -> str:
+    def _build_task_description(self) -> str:
+        """Build the static task description (no step-specific observation)."""
         variant = "Craftax Classic" if self._is_classic else "Craftax"
         parts = []
 
@@ -526,9 +534,6 @@ class CraftaxEnvironment:
         parts.append("")
         parts.append("Action space:")
         parts.append(self._action_mapper.describe())
-        parts.append("")
-        parts.append("[Step 0]")
-        parts.append(obs_text)
 
         return "\n".join(parts)
 
@@ -554,11 +559,19 @@ class CraftaxEnvironment:
             is_classic=state.hidden.is_classic,
         )
 
+        error_text = f"[Step {next_step}] Error: {error_msg}"
+        state_content = ObservationContent(text=error_text)
+
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},
-            {"role": "user", "content": f"[Step {next_step}] Error: {error_msg}"},
+            {"role": "user", "content": error_text},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=state_content,
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -604,7 +617,23 @@ class CraftaxEnvironment:
 
         # Render observation
         obs_text, images = self._render_observation(raw_obs, craftax_state)
-        prompt = self._build_initial_prompt(obs_text)
+
+        # Build structured observation components
+        task_desc = self._build_task_description()
+        task_content = ObservationContent(text=task_desc)
+        state_text = f"[Step 0]\n{obs_text}"
+        state_content = ObservationContent(text=state_text, images=images)
+
+        # Legacy prompt = task description
+        prompt = task_desc
+
+        # Legacy messages: step-0 observation as first user message
+        step_msg: dict[str, Any] = {"role": "user", "content": state_text}
+        if images:
+            step_msg["images"] = [
+                {"data": img.data, "media_type": img.media_type} for img in images
+            ]
+        initial_messages: tuple[dict[str, Any], ...] = (step_msg,)
 
         # Get initial achievements
         achievements = getattr(craftax_state, "achievements", np.zeros(22, dtype=bool))
@@ -621,7 +650,13 @@ class CraftaxEnvironment:
             is_classic=self._is_classic,
         )
 
-        observation = Observation(prompt=prompt, images=images)
+        observation = Observation(
+            prompt=prompt,
+            messages=initial_messages,
+            images=images,
+            task=task_content,
+            state=state_content,
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -692,14 +727,19 @@ class CraftaxEnvironment:
             is_classic=state.hidden.is_classic,
         )
 
+        state_text = f"[Step {next_step}]\n{obs_text}"
+        state_content = ObservationContent(text=state_text, images=images)
+
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},
-            {"role": "user", "content": f"[Step {next_step}]\n{obs_text}"},
+            {"role": "user", "content": state_text},
         )
         new_observation = Observation(
             prompt=state.observation.prompt,
             messages=new_messages,
             images=images,
+            task=state.observation.task,
+            state=state_content,
         )
 
         is_terminal = terminated or truncated

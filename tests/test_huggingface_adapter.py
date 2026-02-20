@@ -1,24 +1,22 @@
 """Tests for the HuggingFace adapter."""
 
-import pytest
 from typing import Any
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
-from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
+import pytest
+
 from llenvs.adapters.huggingface import (
+    DATASET_PRESETS,
+    HuggingFaceAdapter,
     HuggingFaceEnvironment,
     HuggingFaceHidden,
-    HuggingFaceAdapter,
-    HuggingFaceCorrectnessReward,
     normalize_numeric,
     score_exact_match,
     score_numeric,
     score_numeric_tolerance,
-    DATASET_PRESETS,
 )
-from llenvs.core.reward import FormatReward
+from llenvs.core.extraction import RegexExtractor
 from llenvs.core.registry import EnvironmentRegistry
+from llenvs.core.state import Action, Observation, ObservationContent
 
 
 class MockHFDataset:
@@ -196,6 +194,12 @@ class TestHuggingFaceEnvironment:
         # Check observation
         assert isinstance(state.observation, Observation)
         assert "2 + 2" in state.observation.prompt
+
+        # Check task/state structured fields
+        assert state.observation.task is not None
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert state.observation.state is None
 
         # Check hidden state
         assert isinstance(state.hidden, HuggingFaceHidden)

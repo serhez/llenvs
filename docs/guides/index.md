@@ -88,6 +88,14 @@ In-depth guides covering every aspect of the library.
 
     [:octicons-arrow-right-24: Branching](branching.md)
 
+-   :material-history:{ .lg .middle } **History Control**
+
+    ---
+
+    Manage conversation history in multi-turn environments with windowing and reasoning stripping.
+
+    [:octicons-arrow-right-24: History Control](history-control.md)
+
 -   :material-run-fast:{ .lg .middle } **Parallelization**
 
     ---

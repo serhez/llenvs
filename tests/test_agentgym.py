@@ -7,16 +7,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from llenvs.adapters.agentgym import (
+    ENV_REGISTRY,
     AgentGymAdapter,
     AgentGymEnvironment,
     AgentGymHidden,
     AgentGymReward,
-    ENV_REGISTRY,
     _ServerManager,
 )
 from llenvs.core.reward import RewardType
-from llenvs.core.state import Action, Observation
-
+from llenvs.core.state import Action, ObservationContent
 
 # ---------------------------------------------------------------------------
 # Mock helpers
@@ -365,6 +364,13 @@ class TestAgentGymEnvironment:
         env = self._make_env(client=client)
         state, _ = env.reset(options={"task_index": 0})
 
+        # task and state are set on reset
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert isinstance(state.observation.state, ObservationContent)
+        assert state.observation.state.text == state.observation.prompt
+        reset_task = state.observation.task
+
         action = Action(text="go north")
         result = env.step(state, action)
 
@@ -374,6 +380,11 @@ class TestAgentGymEnvironment:
         assert result.terminated is False
         assert result.truncated is False
         assert result.info["agentgym_reward"] == 0.5
+
+        # task carried forward, state updated to step obs
+        assert result.next_state.observation.task is reset_task
+        assert isinstance(result.next_state.observation.state, ObservationContent)
+        assert result.next_state.observation.state.text == "You see a door."
 
     def test_step_calls_client(self):
         client = _make_mock_client()

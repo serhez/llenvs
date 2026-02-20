@@ -7,15 +7,14 @@ Agents interact through free-form text commands and receive score-based rewards.
 Reference: https://github.com/microsoft/jericho
 """
 
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-import uuid
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
-
+from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 DEFAULT_JERICHO_PROMPTS: dict[str, str] = {
     "valid_actions_prefix": "Valid actions:",
@@ -333,7 +332,11 @@ class JerichoEnvironment:
             valid_actions=valid_actions,
         )
 
-        observation = Observation(prompt=obs_prompt)
+        observation = Observation(
+            prompt=obs_prompt,
+            task=ObservationContent(text=obs_prompt),
+            state=ObservationContent(text=obs_prompt),
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -412,7 +415,12 @@ class JerichoEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_prompt},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=ObservationContent(text=obs_prompt),
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,

@@ -453,8 +453,11 @@ class TestCraftaxEnvironment:
 
     def test_step_messages_accumulate(self, env):
         state, _ = env.reset(options={"task_index": 0})
+        # After reset: 1 message (step-0 observation)
+        assert len(state.observation.messages) == 1
         result = env.step(state, Action(text="0"))
-        assert len(result.next_state.observation.messages) == 2  # assistant + user
+        # After step: 3 messages (step-0 + assistant + step-1)
+        assert len(result.next_state.observation.messages) == 3
 
     def test_truncation_at_max_steps(self, env):
         state, _ = env.reset(options={"task_index": 0})

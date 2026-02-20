@@ -10,23 +10,23 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import (
-    SignalBundle,
-    Signal,
-    RewardType,
-    RewardFunction,
-)
 from llenvs.core.environment import (
-    Environment,
-    StepResult,
     EnvironmentSpec,
+    StepResult,
     _StateContinuityTracker,
 )
-from llenvs.core.extraction import AnswerExtractor
+from llenvs.core.reward import (
+    RewardFunction,
+    RewardType,
+    Signal,
+    SignalBundle,
+)
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
+from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -35,7 +35,6 @@ from llenvs.core.tools import (
     ToolResult,
     ToolResultStatus,
 )
-from llenvs.core.tool_environment import BaseToolEnvironment
 
 logger = logging.getLogger(__name__)
 
@@ -270,7 +269,11 @@ class OpenEnvEnvironment:
             info={},
         )
 
-        observation = Observation(prompt=obs_text)
+        observation = Observation(
+            prompt=obs_text,
+            task=ObservationContent(text=obs_text),
+            state=ObservationContent(text=obs_text),
+        )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
 
@@ -304,6 +307,8 @@ class OpenEnvEnvironment:
         next_observation = Observation(
             prompt=state.observation.prompt,
             messages=tuple(messages),
+            task=state.observation.task,
+            state=ObservationContent(text=obs_text),
         )
 
         # Get session info
@@ -463,6 +468,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
         observation = Observation(
             prompt=obs_text,
             available_tools=self._tools,
+            task=ObservationContent(text=obs_text),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -553,6 +559,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
                 prompt=state.observation.prompt,
                 messages=tuple(messages),
                 available_tools=self._tools,
+                task=state.observation.task,
             )
 
         next_hidden = OpenEnvHidden(

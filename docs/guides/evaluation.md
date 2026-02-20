@@ -372,6 +372,8 @@ runner = TrajectoryRunner(
 
 The message build order is: system prompt → observation → prompt template → model profile → prompt pipeline. See the [Prompts guide](prompts.md) for full details.
 
+For multi-turn environments with structured observations, you can also control how much conversation history the model sees. See the [History Control guide](history-control.md).
+
 ## Convenience Function
 
 ```python

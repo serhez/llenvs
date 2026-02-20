@@ -8,13 +8,13 @@ free-form text, receiving text observations and scalar rewards.
 Reference: https://github.com/abdulhaim/LMRL-Gym
 """
 
+import uuid
 from dataclasses import dataclass
 from typing import Any
-import uuid
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import StepResult, EnvironmentSpec, _StateContinuityTracker
+from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 
 @dataclass(frozen=True)
@@ -282,7 +282,11 @@ class LMRLEnvironment:
             text_history=tuple(text_history),
         )
 
-        observation = Observation(prompt=obs_text)
+        observation = Observation(
+            prompt=obs_text,
+            task=ObservationContent(text=obs_text),
+            state=ObservationContent(text=obs_text),
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -353,7 +357,12 @@ class LMRLEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_text},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=ObservationContent(text=obs_text),
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -467,8 +476,7 @@ def _create_chess(**kwargs: Any) -> Any:
 def _create_chess_endgame(**kwargs: Any) -> Any:
     """Create a Chess endgame TextEnv."""
     try:
-        from llm_rl_scripts.chess.env.env import FenChessHistoryEnv
-        from llm_rl_scripts.chess.env.env import large_piece_random_endgame
+        from llm_rl_scripts.chess.env.env import FenChessHistoryEnv, large_piece_random_endgame
     except ImportError as e:
         raise ImportError(
             "Chess endgame environment requires LMRL-Gym chess module. "

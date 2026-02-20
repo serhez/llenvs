@@ -1,24 +1,23 @@
 """Tests for the GEM adapter."""
 
-import pytest
 from typing import Any
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
-from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
+import pytest
+
 from llenvs.adapters.gem import (
-    GemEnvironment,
-    GemHidden,
+    MULTI_TURN_ENVS,
     GemAdapter,
     GemCorrectnessReward,
-    MULTI_TURN_ENVS,
-    MULTI_TURN_PREFIXES,
-    _is_multi_turn_env,
+    GemEnvironment,
+    GemHidden,
     _freeze_dict,
+    _is_multi_turn_env,
     _unfreeze_dict,
 )
-from llenvs.core.reward import FormatReward
+from llenvs.core.extraction import RegexExtractor, TagBasedExtractor
 from llenvs.core.registry import EnvironmentRegistry
+from llenvs.core.reward import FormatReward, RewardType
+from llenvs.core.state import Action, Observation, ObservationContent
 
 
 class MockGemEnv:
@@ -295,6 +294,13 @@ class TestGemEnvironment:
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
 
+        # Structured observation: task and state set on reset
+        obs = state.observation
+        assert isinstance(obs.task, ObservationContent)
+        assert obs.task.text == obs.prompt
+        assert isinstance(obs.state, ObservationContent)
+        assert obs.state.text == obs.prompt
+
     def test_step_correct_guess(self, mock_gem_env):
         """Test step with correct answer."""
         mock_gem_env.target = 50
@@ -343,6 +349,13 @@ class TestGemEnvironment:
 
         # Check observation indicates too low (in messages, not prompt)
         assert "too low" in result.next_state.observation.messages[-1]["content"].lower()
+
+        # Structured observation: task carried forward, state updated
+        next_obs = result.next_state.observation
+        assert next_obs.task is not None
+        assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
+        assert next_obs.state is not None
+        assert "too low" in next_obs.state.text.lower()  # state reflects step feedback
 
     def test_multi_step_game(self, mock_gem_env):
         """Test playing through multiple steps."""

@@ -6,7 +6,7 @@ import pytest
 
 from llenvs.core.extraction import TagBasedExtractor
 from llenvs.core.reward import FormatReward, RewardType
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tools import ToolCall, ToolParameterType
 
 # ── Mock verifiers objects ──────────────────────────────────────────
@@ -327,6 +327,12 @@ class TestVerifiersSingleTurnEnvironment:
         assert state.metadata.is_terminal is False
         assert info["task_index"] == 0
 
+        # Check task/state structured fields
+        assert state.observation.task is not None
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert state.observation.state is None
+
     def test_reset_extracts_system_prompt_from_dataset(self):
         """System prompt comes from dataset row's prompt messages."""
         env = self._make_env()
@@ -611,6 +617,12 @@ class TestVerifiersToolEnvironment:
         assert state.hidden.episode_step == 0
         assert state.hidden.last_action is None
         assert state.metadata.is_terminal is False
+
+        # Check task/state structured fields
+        assert state.observation.task is not None
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert state.observation.state is None
 
     def test_step_text_only(self):
         """Text-only action in a tool env (no tool calls)."""

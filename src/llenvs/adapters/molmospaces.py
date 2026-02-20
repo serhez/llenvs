@@ -37,7 +37,14 @@ from llenvs.core.reward import (
     Signal,
     SignalBundle,
 )
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolCall,
@@ -821,6 +828,7 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
             prompt=prompt,
             images=images,
             available_tools=self._tools,
+            task=ObservationContent(text=prompt),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -904,6 +912,7 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 tool_results=next_obs.tool_results,
                 available_tools=next_obs.available_tools,
                 images=images,
+                task=next_obs.task,
             )
         else:
             next_obs = Observation(
@@ -911,6 +920,7 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 messages=state.observation.messages,
                 available_tools=self._tools,
                 images=images,
+                task=state.observation.task,
             )
 
         # Add proprioception if enabled
@@ -925,6 +935,7 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 tool_results=next_obs.tool_results,
                 available_tools=next_obs.available_tools,
                 images=next_obs.images,
+                task=next_obs.task,
             )
 
         # Read current robot state

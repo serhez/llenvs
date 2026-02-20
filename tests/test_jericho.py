@@ -1,21 +1,20 @@
 """Tests for the Jericho adapter."""
 
-import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
+import pytest
+
 from llenvs.adapters.jericho import (
+    DEFAULT_JERICHO_PROMPTS,
+    JerichoAdapter,
     JerichoEnvironment,
     JerichoHidden,
-    JerichoAdapter,
     JerichoReward,
-    DEFAULT_JERICHO_PROMPTS,
     _game_name_from_path,
-    _list_bundled_games,
 )
-
+from llenvs.core.reward import RewardType
+from llenvs.core.state import Action, Observation, ObservationContent
 
 # ---------------------------------------------------------------------------
 # Mocks
@@ -807,6 +806,13 @@ class TestJerichoFullEpisode:
         assert state.metadata.step == 0
         assert state.hidden.score == 0
 
+        # task and state are set on reset
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert isinstance(state.observation.state, ObservationContent)
+        assert state.observation.state.text == state.observation.prompt
+        reset_task = state.observation.task
+
         # Explore and earn points
         actions = ["open mailbox", "take leaflet", "go north"]
 
@@ -816,6 +822,12 @@ class TestJerichoFullEpisode:
             assert state.metadata.step == i + 1
             assert state.hidden.episode_step == i + 1
             assert state.hidden.last_action == act_text
+
+            # task carried forward, state updated to step obs
+            assert state.observation.task is reset_task
+            assert isinstance(state.observation.state, ObservationContent)
+            step_obs = state.observation.messages[-1]["content"]
+            assert state.observation.state.text == step_obs
 
         assert state.hidden.score == 5  # only "take leaflet" gives points
 

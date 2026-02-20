@@ -1,22 +1,22 @@
 """Tests for the LMRL-Gym adapter."""
 
-import pytest
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
+import pytest
+
 from llenvs.adapters.lmrl import (
+    LMRL_PRESETS,
+    LMRLAdapter,
     LMRLEnvironment,
     LMRLHidden,
-    LMRLAdapter,
     LMRLReward,
-    LMRL_PRESETS,
-    _LMRLText,
     _create_text_env,
+    _LMRLText,
 )
-
+from llenvs.core.reward import RewardType
+from llenvs.core.state import Action, Observation, ObservationContent
 
 # ---------------------------------------------------------------------------
 # Mock TextEnv — simulates a simple number guessing game
@@ -59,7 +59,7 @@ class MockTextEnv:
         self._guesses = 0
 
         initial_obs = MockText(
-            text=f"Guess a number between 1 and 10.",
+            text="Guess a number between 1 and 10.",
             is_action=False,
         )
         return (initial_obs,)
@@ -658,20 +658,40 @@ class TestLMRLFullEpisode:
     def test_full_episode_correct_guess(self, env: LMRLEnvironment):
         state, _ = env.reset()  # target = 7
 
+        # task and state are set on reset
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert isinstance(state.observation.state, ObservationContent)
+        assert state.observation.state.text == state.observation.prompt
+        reset_task = state.observation.task
+
         # Guess too low
         result = env.step(state, Action(text="3"))
         assert result.terminated is False
         assert result.next_state.hidden.episode_step == 1
+
+        # task carried forward, state updated to step obs
+        assert result.next_state.observation.task is reset_task
+        assert isinstance(result.next_state.observation.state, ObservationContent)
+        assert "Too low" in result.next_state.observation.state.text
 
         # Guess too high
         result = env.step(result.next_state, Action(text="9"))
         assert result.terminated is False
         assert result.next_state.hidden.episode_step == 2
 
+        # task still the same, state updated
+        assert result.next_state.observation.task is reset_task
+        assert "Too high" in result.next_state.observation.state.text
+
         # Correct guess
         result = env.step(result.next_state, Action(text="7"))
         assert result.terminated is True
         assert result.next_state.hidden.cumulative_reward == pytest.approx(-0.1 + -0.1 + 1.0)
+
+        # task still carried forward on terminal step
+        assert result.next_state.observation.task is reset_task
+        assert "Correct" in result.next_state.observation.state.text
 
     def test_full_episode_all_wrong(self, mock_text_env: MockTextEnv):
         env = _make_env(text_env=mock_text_env, max_steps=3)

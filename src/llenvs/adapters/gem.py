@@ -5,19 +5,21 @@ and evaluating LLMs, including multi-turn games and single-turn benchmarks.
 """
 
 import copy
+import uuid
 from dataclasses import dataclass
 from typing import Any
-import uuid
 
+from llenvs.core.environment import EnvironmentSpec, StepResult
+from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
 from llenvs.core.state import (
+    Action,
+    Observation,
+    ObservationContent,
     State,
     StateMetadata,
-    Observation,
-    Action,
 )
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
-from llenvs.core.extraction import AnswerExtractor, TagBasedExtractor
+from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -25,10 +27,7 @@ from llenvs.core.tools import (
     ToolParameterType,
     ToolResult,
     ToolResultStatus,
-    ToolExecutor,
 )
-from llenvs.core.tool_environment import BaseToolEnvironment
-
 
 # Multi-turn environments (games) - these are natively multi-step
 MULTI_TURN_ENVS = {
@@ -345,7 +344,11 @@ class GemEnvironment:
             episode_step=0,
         )
 
-        observation = Observation(prompt=str(obs))
+        observation = Observation(
+            prompt=str(obs),
+            task=ObservationContent(text=str(obs)),
+            state=ObservationContent(text=str(obs)),
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -397,7 +400,12 @@ class GemEnvironment:
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": str(obs)},
         )
-        new_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        new_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=ObservationContent(text=str(obs)),
+        )
 
         new_metadata = StateMetadata(
             step=state.metadata.step + 1,
@@ -913,6 +921,7 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             messages=(),
             tool_results=(),
             available_tools=self._tools,
+            task=ObservationContent(text=str(obs)),
         )
 
         state = State(

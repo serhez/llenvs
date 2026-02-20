@@ -1,17 +1,17 @@
 """Tests for the ReasoningGym adapter."""
 
 import pytest
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
-from llenvs.core.extraction import TagBasedExtractor, RegexExtractor
+
 from llenvs.adapters.reasoning_gym import (
+    CorrectnessRewardFunction,
+    ReasoningGymAdapter,
     ReasoningGymEnvironment,
     ReasoningGymHidden,
-    ReasoningGymAdapter,
-    CorrectnessRewardFunction,
 )
-from llenvs.core.reward import FormatReward
+from llenvs.core.extraction import RegexExtractor, TagBasedExtractor
 from llenvs.core.registry import EnvironmentRegistry
+from llenvs.core.reward import FormatReward, RewardType
+from llenvs.core.state import Action, Observation, ObservationContent
 
 
 class TestReasoningGymEnvironment:
@@ -73,6 +73,12 @@ class TestReasoningGymEnvironment:
         # Check observation
         assert isinstance(state.observation, Observation)
         assert state.observation.prompt == "What is 3 * 3?"
+
+        # Check task/state structured fields
+        assert state.observation.task is not None
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert state.observation.state is None
 
         # Check hidden state
         assert isinstance(state.hidden, ReasoningGymHidden)

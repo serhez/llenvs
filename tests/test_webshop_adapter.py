@@ -1,18 +1,19 @@
 """Tests for the WebShop adapter."""
 
-import pytest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from llenvs.core.state import Observation, Action
-from llenvs.core.reward import RewardType
+import pytest
+
 from llenvs.adapters.webshop import (
+    DEFAULT_WEBSHOP_PROMPTS,
+    WebShopAdapter,
     WebShopEnvironment,
     WebShopHidden,
-    WebShopAdapter,
     WebShopReward,
-    DEFAULT_WEBSHOP_PROMPTS,
 )
+from llenvs.core.reward import RewardType
+from llenvs.core.state import Action, Observation, ObservationContent
 
 
 class MockWebShopEnv:
@@ -515,11 +516,24 @@ class TestWebShopMultiStepEpisode:
         assert "red wireless headphone" in info["instruction"].lower()
         assert state.metadata.step == 0
 
+        # task and state are set on reset
+        assert isinstance(state.observation.task, ObservationContent)
+        assert state.observation.task.text == state.observation.prompt
+        assert isinstance(state.observation.state, ObservationContent)
+        assert state.observation.state.text == state.observation.prompt
+        reset_task = state.observation.task
+
         # Step 1: Search
         action1 = Action(text="search[red wireless headphones]")
         result1 = env.step(state, action1)
         assert not result1.terminated
         assert result1.next_state.metadata.step == 1
+
+        # task carried forward, state updated
+        assert result1.next_state.observation.task is reset_task
+        assert isinstance(result1.next_state.observation.state, ObservationContent)
+        step1_obs = result1.next_state.observation.messages[-1]["content"]
+        assert result1.next_state.observation.state.text == step1_obs
 
         # Step 2: Click on product
         action2 = Action(text="click[Product 1 - Red Headphones $45]")
@@ -527,11 +541,19 @@ class TestWebShopMultiStepEpisode:
         assert not result2.terminated
         assert result2.next_state.metadata.step == 2
 
+        # task still the same object, state updated to new obs
+        assert result2.next_state.observation.task is reset_task
+        step2_obs = result2.next_state.observation.messages[-1]["content"]
+        assert result2.next_state.observation.state.text == step2_obs
+
         # Step 3: Buy
         action3 = Action(text="click[Buy Now]")
         result3 = env.step(result2.next_state, action3)
         assert result3.terminated
         assert result3.next_state.metadata.step == 3
+
+        # task still carried forward on terminal step
+        assert result3.next_state.observation.task is reset_task
 
         # Check final reward
         assert result3.info["webshop_reward"] == 0.8

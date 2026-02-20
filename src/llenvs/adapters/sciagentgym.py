@@ -30,7 +30,7 @@ from llenvs.core.reward import (
     Signal,
     SignalBundle,
 )
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.tool_environment import BaseToolEnvironment
 from llenvs.core.tools import (
     ToolCall,
@@ -355,6 +355,7 @@ class SciAgentGymEnvironment(BaseToolEnvironment[SciAgentGymHidden]):
         observation = Observation(
             prompt=prompt,
             available_tools=self._tools,
+            task=ObservationContent(text=prompt),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)

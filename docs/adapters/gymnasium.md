@@ -35,8 +35,8 @@ env = GymnasiumEnvironment(
 )
 
 state, _ = env.reset(seed=42)
-print(state.observation.prompt)
-# Shows observation/action space descriptions + initial observation
+print(state.observation.prompt)   # Static task description (space descriptions)
+print(state.observation.state.text)  # Dynamic step-0 observation
 
 result = env.step(state, Action(text="left"))
 print(result.rewards.total)
@@ -107,6 +107,25 @@ R....
 .....
 .....
 ```
+
+### FrozenLakeObservationMapper
+
+For FrozenLake environments, which use `Discrete` observations (integer position), a specialized mapper renders the full grid with the agent's position:
+
+```python
+from llenvs.adapters import FrozenLakeObservationMapper
+
+mapper = FrozenLakeObservationMapper(
+    desc=["SFFF", "FHFH", "FFFH", "HFFG"],
+    agent_char="@",
+)
+
+print(mapper.map(5, {}))
+# F @ F H
+# ...
+```
+
+This mapper is auto-created when using the `frozen_lake` preset or when `env_id == "FrozenLake-v1"` (from `env.unwrapped.desc`). Accepts list-of-strings or numpy byte arrays.
 
 ### ImageObservationMapper
 
@@ -256,6 +275,27 @@ state, _ = env.reset(seed=42)  # explicit seed always takes priority
 
 Built-in presets for popular gymnasium-compatible environments:
 
+### FrozenLake
+
+| Preset ID | Description | Grid | Max Steps |
+|-----------|-------------|------|-----------|
+| `frozen_lake` | Navigate frozen lake 4x4 (slippery) | 4x4 | 100 |
+| `frozen_lake/8x8` | Navigate frozen lake 8x8 (slippery) | 8x8 | 200 |
+
+Actions: `left`, `down`, `right`, `up`. Observation: ASCII grid rendered by `FrozenLakeObservationMapper` (auto-created from the gym env's `desc`). The 8x8 preset passes `make_kwargs={"map_name": "8x8"}` to `gymnasium.make()`.
+
+```python
+adapter = GymnasiumAdapter()
+env = adapter.get_environment("frozen_lake", num_tasks=100)
+state, _ = env.reset()
+print(state.observation.state.text)
+# [Step 0]
+# @ F F F
+# F H F H
+# F F F H
+# H F F G
+```
+
 ### Gym4Real
 
 | Preset ID | Description | Action Type |
@@ -394,6 +434,17 @@ class GymnasiumHidden:
     raw_observation: Any    # raw gymnasium observation
     gym_reward: float       # cumulative episode reward
 ```
+
+## Observation Structure
+
+Gymnasium observations use structured `task`/`state` fields on `Observation`:
+
+- **`observation.task`** (`ObservationContent`): Static task description — environment name, observation space description, action space description. Set once in `reset()`, carried forward unchanged.
+- **`observation.state`** (`ObservationContent`): Dynamic per-step observation — `"[Step N]\n{rendered_obs}"`. Updated each step.
+- **`observation.prompt`**: Contains the task description text (for legacy runner compatibility).
+- **`observation.messages`**: Accumulates step-0 observation + assistant/user message pairs (for legacy runner compatibility).
+
+When used with `TrajectoryRunner`, the runner detects the `task` field and builds messages from the trajectory's structured fields instead of replaying the message history, avoiding stale state in the context.
 
 ## Limitations
 

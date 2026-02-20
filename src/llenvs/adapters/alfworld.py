@@ -14,7 +14,14 @@ from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
 
 ALFWORLD_TASK_TYPES: dict[int, str] = {
     1: "pick_and_place_simple",
@@ -399,7 +406,12 @@ class AlfWorldEnvironment:
             admissible_commands=admissible_commands,
         )
 
-        observation = Observation(prompt=obs_prompt, images=images)
+        observation = Observation(
+            prompt=obs_prompt,
+            images=images,
+            task=ObservationContent(text=obs_prompt),
+            state=ObservationContent(text=obs_prompt, images=images),
+        )
 
         metadata = StateMetadata(
             step=0,
@@ -500,7 +512,11 @@ class AlfWorldEnvironment:
             user_msg,
         )
         new_observation = Observation(
-            prompt=state.observation.prompt, messages=new_messages, images=images
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            images=images,
+            task=state.observation.task,
+            state=ObservationContent(text=obs_prompt, images=images),
         )
 
         new_metadata = StateMetadata(

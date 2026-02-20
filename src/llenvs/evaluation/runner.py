@@ -6,45 +6,44 @@ collecting results.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
 import logging
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from llenvs.core.tool_parsing import ToolCallParser
+    from llenvs.evaluation.history import HistoryFn
     from llenvs.inference.prompts import ModelProfile, PromptTemplate
 
+from llenvs.core.environment import Environment, StepResult
+from llenvs.core.reward import RewardType
+from llenvs.core.segmented_environment import SegmentedEnvironment
+from llenvs.core.state import Action, Observation, State
+from llenvs.core.trajectory import Trajectory, Transition
+from llenvs.evaluation.continuation import (
+    _BUFFER_ONLY_RESULT,
+    ContinuationStrategy,
+    SegmentContext,
+    select_strategy,
+)
 from llenvs.evaluation.logging import (
     LogConfig,
     _BatchEndEvent,
     _BatchStartEvent,
     _ErrorEvent,
-    _EvaluationLogger as _EvalLogger,
     _StepEvent,
     _TrajectoryEndEvent,
 )
-
-from llenvs.core.state import State, Observation, Action
-from llenvs.core.environment import Environment, StepResult
-from llenvs.core.segmented_environment import SegmentedEnvironment
-from llenvs.core.trajectory import Trajectory, Transition
-from llenvs.core.reward import SignalBundle, RewardType
-from llenvs.inference.protocol import (
-    ModelBackend,
-    SamplingParams,
-    ChatMessage,
-    GenerationResult,
-    StopReason,
+from llenvs.evaluation.logging import (
+    _EvaluationLogger as _EvalLogger,
 )
 from llenvs.inference.prompting import PromptPipeline, PromptTemplateTransformer
-from llenvs.evaluation.continuation import (
-    ContinuationStrategy,
-    TokenContinuationStrategy,
-    BoundaryContinuationStrategy,
-    SegmentContext,
-    select_strategy,
-    _BUFFER_ONLY_RESULT,
+from llenvs.inference.protocol import (
+    ChatMessage,
+    GenerationResult,
+    ModelBackend,
+    SamplingParams,
 )
 
 logger = logging.getLogger(__name__)
@@ -210,7 +209,7 @@ class _ActiveSegmentedTrajectory:
     generation_done: bool = False
 
 
-def _error_metadata(task_index: int) -> "StateMetadata":
+def _error_metadata(task_index: int) -> StateMetadata:
     """Create dummy metadata for error cases."""
     from llenvs.core.state import StateMetadata
 
@@ -311,6 +310,50 @@ def _finalize_trajectory(t: _ActiveTrajectory | _ActiveSegmentedTrajectory) -> T
     )
 
 
+def _coalesce_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
+    """Merge consecutive same-role messages by joining content.
+
+    Consecutive messages with the same role are merged into a single message
+    with content joined by ``"\\n\\n"`` and images concatenated. This avoids
+    issues with APIs that reject consecutive same-role messages (e.g., two
+    user messages in a row).
+
+    Only merges messages with role "user" or "assistant". System and tool
+    messages are never merged.
+
+    Args:
+        messages: List of ChatMessages.
+
+    Returns:
+        New list with consecutive same-role messages merged.
+    """
+    if not messages:
+        return messages
+
+    result: list[ChatMessage] = []
+    for msg in messages:
+        if (
+            result
+            and msg.role == result[-1].role
+            and msg.role in ("user", "assistant")
+            and not msg.tool_calls
+            and not msg.tool_call_id
+            and not result[-1].tool_calls
+            and not result[-1].tool_call_id
+        ):
+            prev = result[-1]
+            merged_content = "\n\n".join(part for part in [prev.content, msg.content] if part)
+            merged_images = prev.images + msg.images
+            result[-1] = ChatMessage(
+                role=prev.role,
+                content=merged_content,
+                images=merged_images,
+            )
+        else:
+            result.append(msg)
+    return result
+
+
 @dataclass
 class TrajectoryRunner:
     """Runs trajectories through an environment with a model backend.
@@ -332,27 +375,174 @@ class TrajectoryRunner:
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     prompt_pipeline: PromptPipeline | None = None
     system_prompt: str | None = None
-    prompt_template: "PromptTemplate | None" = None
-    model_profile: "ModelProfile | None" = None
-    tool_call_parser: "ToolCallParser | None" = None
+    prompt_template: PromptTemplate | None = None
+    model_profile: ModelProfile | None = None
+    tool_call_parser: ToolCallParser | None = None
     log: LogConfig | None = None
     max_image_history: int | None = None
+    history_fn: HistoryFn | None = None
+    include_reasoning_in_history: bool = False
 
     def _build_messages(
         self,
         state: State[Any],
+        trajectory: Trajectory[Any] | None = None,
     ) -> list[ChatMessage]:
         """Build chat messages from state including tool results.
 
+        When the observation has structured ``task``/``state`` fields and a
+        trajectory is provided, uses structured mode: builds messages from
+        the trajectory's task description and per-step state observations.
+        Otherwise falls back to legacy mode (prompt + messages).
+
         Args:
             state: Current environment state.
+            trajectory: Optional trajectory for structured message building.
 
         Returns:
             List of ChatMessages for the model.
         """
+        obs = state.observation
+
+        # Structured mode: when task field is set, trajectory available,
+        # and no tools (tool environments need legacy message formatting)
+        if obs.task is not None and trajectory is not None and not obs.available_tools:
+            messages = self._build_structured_messages(state, trajectory)
+        else:
+            messages = self._build_legacy_messages(state)
+
+        # Apply prompt template to wrap the question
+        if self.prompt_template is not None:
+            transformer = PromptTemplateTransformer(template=self.prompt_template)
+            messages = transformer.transform(messages)
+
+        # Apply model profile transformers
+        if self.model_profile is not None:
+            for t in self.model_profile.build_transformers():
+                messages = t.transform(messages)
+
+        # Apply prompt pipeline if configured
+        if self.prompt_pipeline:
+            messages = self.prompt_pipeline.transform(messages)
+
+        # Truncate image history if configured
+        if self.max_image_history is not None:
+            messages = _truncate_image_history(messages, self.max_image_history)
+
+        # Coalesce consecutive same-role messages
+        messages = _coalesce_messages(messages)
+
+        return messages
+
+    def _build_structured_messages(
+        self,
+        state: State[Any],
+        trajectory: Trajectory[Any],
+    ) -> list[ChatMessage]:
+        """Build messages from structured task/state fields.
+
+        Sequence:
+        1. [system: system_prompt] (if any)
+        2. [user: task.text + task.images]
+        3. history_fn(entries) — prior (action, observation) pairs
+        4. [user: current state.text + state.images]
+
+        When ``history_fn`` is None (default), ``full_history`` is used.
+        The ``include_reasoning_in_history`` flag controls whether prior
+        actions show the full model response or the extracted action.
+        """
+        from llenvs.evaluation.history import HistoryEntry, full_history
+
         messages: list[ChatMessage] = []
 
-        # Add system prompt if provided
+        if self.system_prompt:
+            messages.append(ChatMessage(role="system", content=self.system_prompt))
+
+        obs = state.observation
+        task = obs.task
+
+        # Task description
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=task.text,
+                images=task.images,
+            )
+        )
+
+        # Build history entries from prior transitions.
+        # The last transition's next_state IS the current state, so we
+        # exclude its observation from the history (it's added separately).
+        transitions = trajectory.transitions
+        history_entries: list[HistoryEntry] = []
+        for i, transition in enumerate(transitions):
+            action_text = self._resolve_action_text(transition)
+            is_last = i == len(transitions) - 1
+
+            next_obs = transition.next_state.observation
+            if not is_last and next_obs.state is not None:
+                history_entries.append(
+                    HistoryEntry(
+                        action_text=action_text,
+                        observation_text=next_obs.state.text,
+                        observation_images=next_obs.state.images,
+                        step=transition.next_state.metadata.step,
+                    )
+                )
+            else:
+                # Last transition or no state: action only
+                history_entries.append(
+                    HistoryEntry(
+                        action_text=action_text,
+                        observation_text="",
+                        step=transition.next_state.metadata.step,
+                    )
+                )
+
+        # Apply history function
+        fn = self.history_fn if self.history_fn is not None else full_history
+        messages.extend(fn(history_entries))
+
+        # Always add current state observation
+        if obs.state is not None:
+            messages.append(
+                ChatMessage(
+                    role="user",
+                    content=obs.state.text,
+                    images=obs.state.images,
+                )
+            )
+
+        return messages
+
+    def _resolve_action_text(self, transition: Transition[Any]) -> str:
+        """Get the action text for a transition, respecting reasoning stripping.
+
+        When ``include_reasoning_in_history`` is False (default), looks for
+        ``extracted_action`` or ``extracted_answer`` in the transition's step
+        info and uses that instead of the full model response.
+        """
+        full_text = transition.action.text or ""
+
+        if self.include_reasoning_in_history:
+            return full_text
+
+        # Try to find extracted action/answer from step info
+        step_info = transition.info.get("step", {})
+        if isinstance(step_info, dict):
+            extracted = step_info.get("extracted_action") or step_info.get("extracted_answer")
+            if extracted:
+                return extracted
+
+        return full_text
+
+    def _build_legacy_messages(
+        self,
+        state: State[Any],
+    ) -> list[ChatMessage]:
+        """Build messages using legacy prompt + messages fields."""
+        messages: list[ChatMessage] = []
+
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
 
@@ -421,29 +611,12 @@ class TrajectoryRunner:
                         ChatMessage(role="user", content=msg.get("content", ""), images=msg_images)
                     )
 
-        # Apply prompt template to wrap the question
-        if self.prompt_template is not None:
-            transformer = PromptTemplateTransformer(template=self.prompt_template)
-            messages = transformer.transform(messages)
-
-        # Apply model profile transformers
-        if self.model_profile is not None:
-            for t in self.model_profile.build_transformers():
-                messages = t.transform(messages)
-
-        # Apply prompt pipeline if configured
-        if self.prompt_pipeline:
-            messages = self.prompt_pipeline.transform(messages)
-
-        # Truncate image history if configured
-        if self.max_image_history is not None:
-            messages = _truncate_image_history(messages, self.max_image_history)
-
         return messages
 
     def _generate_action(
         self,
         state: State[Any],
+        trajectory: Trajectory[Any] | None = None,
     ) -> tuple[Action, GenerationResult]:
         """Generate an action (model response) for the current state.
 
@@ -451,11 +624,12 @@ class TrajectoryRunner:
 
         Args:
             state: Current environment state.
+            trajectory: Optional trajectory for structured message building.
 
         Returns:
             Tuple of (Action, GenerationResult).
         """
-        messages = self._build_messages(state)
+        messages = self._build_messages(state, trajectory=trajectory)
         tools = list(state.observation.available_tools)
 
         if tools and self.backend.capabilities.supports_function_calling:
@@ -500,7 +674,7 @@ class TrajectoryRunner:
     def _generate_with_text_tools(
         self,
         messages: list[ChatMessage],
-        tools: tuple["ToolDefinition", ...],
+        tools: tuple[ToolDefinition, ...],
     ) -> GenerationResult:
         """Generate with text-based tool calling.
 
@@ -561,7 +735,7 @@ class TrajectoryRunner:
         task_index: int,
         trajectory_id: str | None,
         max_steps: int | None,
-        eval_logger: "_EvalLogger | None",
+        eval_logger: _EvalLogger | None,
     ) -> TrajectoryResult:
         # Reset environment
         options = {"task_index": task_index}
@@ -577,7 +751,7 @@ class TrajectoryRunner:
         step_count = 0
         while not state.metadata.is_terminal and step_count < max_steps:
             # Generate action
-            action, gen_result = self._generate_action(state)
+            action, gen_result = self._generate_action(state, trajectory=trajectory)
 
             # Take step (apply transition function)
             step_result = self.environment.step(state, action)
@@ -698,7 +872,7 @@ class TrajectoryRunner:
         task_indices: list[int],
         batch_size: int | None,
         progress_callback: Callable[[int, int], None] | None,
-        eval_logger: "_EvalLogger | None",
+        eval_logger: _EvalLogger | None,
     ) -> BatchResult:
         if not task_indices:
             return _aggregate_results([])
@@ -739,7 +913,7 @@ class TrajectoryRunner:
         self,
         task_indices: list[int],
         progress_callback: Callable[[int, int], None] | None,
-        eval_logger: "_EvalLogger | None",
+        eval_logger: _EvalLogger | None,
     ) -> BatchResult:
         if not task_indices:
             return _aggregate_results([])
@@ -796,7 +970,9 @@ class TrajectoryRunner:
             if not remaining:
                 break
 
-            messages_batch = [self._build_messages(t.state) for t in remaining]
+            messages_batch = [
+                self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+            ]
 
             # Use tool calling if tools available and backend supports it
             first_obs = remaining[0].state.observation
@@ -962,7 +1138,10 @@ def _run_multi_lockstep(
         if not remaining:
             break
 
-        messages_batch = [t.runner._build_messages(t.inner.state) for t in remaining]
+        messages_batch = [
+            t.runner._build_messages(t.inner.state, trajectory=t.inner.trajectory)
+            for t in remaining
+        ]
         gen_results = backend.generate_chat_batch(messages_batch, sampling_params)
 
         for t, gen_result in zip(remaining, gen_results):
@@ -1082,7 +1261,7 @@ def _run_multi_eval_impl(
     sampling_params: SamplingParams,
     batch_size: int | None,
     progress_callback: Callable[[int, int], None] | None,
-    entry_loggers: dict[int, "_EvalLogger"],
+    entry_loggers: dict[int, _EvalLogger],
 ) -> list[BatchResult]:
     # Compute max_steps per entry
     max_steps_per_entry: dict[int, int] = {}
@@ -1215,12 +1394,14 @@ def run_evaluation(
     sampling_params: SamplingParams | None = None,
     prompt_pipeline: PromptPipeline | None = None,
     system_prompt: str | None = None,
-    prompt_template: "PromptTemplate | None" = None,
-    model_profile: "ModelProfile | None" = None,
+    prompt_template: PromptTemplate | None = None,
+    model_profile: ModelProfile | None = None,
     batch_size: int | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
-    tool_call_parser: "ToolCallParser | None" = None,
+    tool_call_parser: ToolCallParser | None = None,
     log: LogConfig | None = None,
+    history_fn: HistoryFn | None = None,
+    include_reasoning_in_history: bool = False,
 ) -> BatchResult:
     """Convenience function to run an evaluation.
 
@@ -1239,6 +1420,9 @@ def run_evaluation(
         tool_call_parser: Optional text-based tool call parser for backends
             that don't support native function calling.
         log: Optional logging configuration.
+        history_fn: Optional history function for structured message building.
+        include_reasoning_in_history: Whether to include full model reasoning
+            in prior actions (default False strips to extracted action).
 
     Returns:
         BatchResult with evaluation results.
@@ -1258,6 +1442,8 @@ def run_evaluation(
         model_profile=model_profile,
         tool_call_parser=tool_call_parser,
         log=log,
+        history_fn=history_fn,
+        include_reasoning_in_history=include_reasoning_in_history,
     )
 
     return runner.run_batch(
@@ -1292,8 +1478,8 @@ class SegmentedTrajectoryRunner:
     sampling_params: SamplingParams = field(default_factory=SamplingParams)
     prompt_pipeline: PromptPipeline | None = None
     system_prompt: str | None = None
-    prompt_template: "PromptTemplate | None" = None
-    model_profile: "ModelProfile | None" = None
+    prompt_template: PromptTemplate | None = None
+    model_profile: ModelProfile | None = None
     chunk_max_tokens: int = 256
     log: LogConfig | None = None
 
@@ -1936,8 +2122,8 @@ def run_segmented_evaluation(
     sampling_params: SamplingParams | None = None,
     prompt_pipeline: PromptPipeline | None = None,
     system_prompt: str | None = None,
-    prompt_template: "PromptTemplate | None" = None,
-    model_profile: "ModelProfile | None" = None,
+    prompt_template: PromptTemplate | None = None,
+    model_profile: ModelProfile | None = None,
     step_callback: Callable[[StepResult[Any]], str | ForceAction | None] | None = None,
     max_steps: int | None = None,
     chunk_max_tokens: int = 256,

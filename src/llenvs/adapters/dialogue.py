@@ -8,14 +8,14 @@ Provides ``DialogueEnvironment`` for alternating-turns patterns where
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import SignalBundle, RewardFunction, Signal
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.reward import RewardFunction, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 from llenvs.inference.protocol import ChatMessage, SamplingParams
-
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -195,7 +195,9 @@ class DialogueEnvironment:
             raise ValueError(f"task_index {task_index} out of bounds [0, {len(self._tasks)})")
 
         task = self._tasks[task_index]
-        observation = Observation(prompt=task.prompt, messages=())
+        observation = Observation(
+            prompt=task.prompt, messages=(), task=ObservationContent(text=task.prompt)
+        )
         hidden = DialogueHidden(task_index=task_index, task=task, step_count=0)
 
         episode_id = options.get("episode_id", str(uuid.uuid4()))
@@ -261,7 +263,12 @@ class DialogueEnvironment:
             {"role": "assistant", "content": action_text},
             {"role": "user", "content": env_response},
         )
-        next_observation = Observation(prompt=state.observation.prompt, messages=new_messages)
+        next_observation = Observation(
+            prompt=state.observation.prompt,
+            messages=new_messages,
+            task=state.observation.task,
+            state=ObservationContent(text=env_response),
+        )
 
         # 6. Build next hidden and state
         next_hidden = DialogueHidden(
