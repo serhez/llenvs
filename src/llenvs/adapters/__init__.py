@@ -40,6 +40,13 @@ from llenvs.adapters.dialogue import (
     DialogueHidden,
     DialogueTask,
 )
+from llenvs.adapters.harbor import (
+    HarborAdapter,
+    HarborEnvironment,
+    HarborHidden,
+    HarborReward,
+    HarborToolEnvironment,
+)
 from llenvs.adapters.gem import (
     GEM_PYTHON_TOOL,
     GEM_SEARCH_TOOL,
@@ -162,6 +169,12 @@ __all__ = [
     "HuggingFaceHidden",
     "HuggingFaceAdapter",
     "DATASET_PRESETS",
+    # Harbor
+    "HarborEnvironment",
+    "HarborToolEnvironment",
+    "HarborHidden",
+    "HarborReward",
+    "HarborAdapter",
     # GEM
     "GemEnvironment",
     "GemHidden",
@@ -467,6 +480,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # tau2 not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register Harbor adapter if available
+    try:
+        adapter = HarborAdapter()
+        adapter._get_harbor()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # harbor not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 

@@ -40,6 +40,7 @@ aviary = ["fhaviary>=0.30"]
 # OR pip install git+https://github.com/princeton-nlp/intercode.git
 # mare: Install separately with pip install git+https://github.com/facebookresearch/meta-agents-research-environments.git
 # tau2: Install separately with pip install tau2
+# harbor: Install separately with pip install harbor
 # craftax: Install separately with pip install craftax (requires JAX)
 # molmospaces: Install separately with pip install git+https://github.com/allenai/molmospaces.git (requires MuJoCo)
 math-verify = ["math-verify[antlr4-13-2]>=0.7"]

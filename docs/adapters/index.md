@@ -4,7 +4,7 @@ icon: material/puzzle-outline
 
 # Adapters
 
-llenvs wraps 17+ environment libraries through a unified adapter interface. Each adapter translates a third-party library's API into llenvs `Environment` protocol.
+llenvs wraps 18+ environment libraries through a unified adapter interface. Each adapter translates a third-party library's API into llenvs `Environment` protocol.
 
 <div class="grid cards" markdown>
 
@@ -151,5 +151,13 @@ llenvs wraps 17+ environment libraries through a unified adapter interface. Each
     Robot manipulation & navigation with multi-view cameras and tool-based control.
 
     [:octicons-arrow-right-24: MolmoSpaces](molmospaces.md)
+
+-   :material-docker:{ .lg .middle } **Harbor**
+
+    ---
+
+    Containerized terminal tasks — Terminal-Bench, aider-polyglot, and more.
+
+    [:octicons-arrow-right-24: Harbor](harbor.md)
 
 </div>

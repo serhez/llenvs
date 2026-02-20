@@ -107,6 +107,7 @@ nav:
     - tau2: adapters/tau2.md
     - Craftax: adapters/craftax.md
     - MolmoSpaces: adapters/molmospaces.md
+    - Harbor: adapters/harbor.md
   - Reference:
     - reference/index.md
     - Core Abstractions: reference/core.md

@@ -50,6 +50,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **tau2** | Multi-turn customer service benchmark | Airline, Retail, Telecom (DB-backed tools, user simulation) |
 | **Craftax** | JAX-based survival benchmark (ICML 2024) | Open-ended crafting, combat, dungeons (text/symbolic/pixel modes) |
 | **MolmoSpaces** | Robot manipulation & navigation benchmark | Navigate, pick, place, open/close doors |
+| **Harbor** | Containerized terminal evaluation | Terminal-Bench, aider-polyglot, swe-bench (text + tool modes) |
 
 ```python
 from llenvs.core.registry import environment_registry
