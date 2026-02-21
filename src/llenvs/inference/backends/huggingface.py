@@ -417,7 +417,7 @@ class HuggingFaceBackend(ModelBackend):
         for i, (seq, prompt_len) in enumerate(zip(sequences, prompt_lengths)):
             # Extract generated tokens (excluding prompt)
             generated_ids = seq[prompt_len:]
-            generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
+            generated_text = self._tokenizer.decode(generated_ids.tolist(), skip_special_tokens=True)
 
             # Count tokens
             completion_tokens = len(generated_ids)
@@ -580,7 +580,7 @@ class HuggingFaceBackend(ModelBackend):
         results = []
         for i, seq in enumerate(sequences):
             generated_ids = seq[prompt_length:]
-            generated_text = self._tokenizer.decode(generated_ids, skip_special_tokens=True)
+            generated_text = self._tokenizer.decode(generated_ids.tolist(), skip_special_tokens=True)
 
             completion_tokens = len(generated_ids)
             last_token_id = generated_ids[-1].item() if len(generated_ids) > 0 else None
