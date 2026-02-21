@@ -422,6 +422,51 @@ env = GymnasiumEnvironment(
 )
 ```
 
+## Pure Step (DirectStrategy Branching)
+
+By default, gymnasium environments are non-pure (`pure_step=False`) because `step()` mutates the internal gym env. For picklable environments, set `pure_step=True` to enable zero-cost `DirectStrategy` branching:
+
+```python
+env = GymnasiumEnvironment(
+    gym_env=gymnasium.make("FrozenLake-v1"),
+    action_names={0: "left", 1: "down", 2: "right", 3: "up"},
+    num_tasks=100,
+    pure_step=True,
+)
+
+# Or via adapter
+env = adapter.get_environment("frozen_lake", num_tasks=100, pure_step=True)
+```
+
+When `pure_step=True`:
+- Gym env state is pickled after each `reset()` and `step()`, stored in `GymnasiumHidden.gym_snapshot`
+- Before each `step()`, the gym env is restored from the snapshot in `state.hidden`
+- `step()` becomes a pure function of `(state, action)` — stepping from any previous state works
+- `_StateContinuityTracker` is skipped (not needed)
+- `spec.pure_step` reports `True`, enabling `DirectStrategy` in `BranchManager`
+- A `TypeError` is raised at construction if the gym env is not picklable
+
+This is ideal for simple, self-contained envs like FrozenLake, CartPole, and Taxi. Environments with external resources (network connections, file handles) are typically not picklable.
+
+```python
+from llenvs.core.branching import BranchManager
+from llenvs.core import Action
+
+state, _ = env.reset(seed=42)
+result = env.step(state, Action(text="right"))
+state_1 = result.next_state
+
+with BranchManager.create(env) as mgr:  # auto-selects DirectStrategy
+    mgr.checkpoint("s1", state_1, actions=(Action(text="right"),),
+                   reset_options={"seed": 42, "task_index": 0})
+
+    # Try different continuations from the same state
+    for action_text in ["left", "right", "up", "down"]:
+        branch_env, branch_state = mgr.branch("s1")
+        result = branch_env.step(branch_state, Action(text=action_text))
+        print(f"{action_text}: reward={result.rewards.total()}")
+```
+
 ## Hidden State
 
 ```python
@@ -433,6 +478,7 @@ class GymnasiumHidden:
     last_action: str | None
     raw_observation: Any    # raw gymnasium observation
     gym_reward: float       # cumulative episode reward
+    gym_snapshot: bytes | None  # pickled gym env (only when pure_step=True)
 ```
 
 ## Observation Structure
@@ -449,5 +495,5 @@ When used with `TrajectoryRunner`, the runner detects the `task` field and build
 ## Limitations
 
 - Image observations (`Box` with ndim >= 2) are not handled by `AutoObservationMapper` — use `ImageObservationMapper` or a custom mapper
-- Non-pure (`pure_step=False`) — cannot branch with `DirectStrategy`; use `ActionReplay` or `ProcessFork` strategies
-- State snapshotting depends on the underlying gymnasium environment's behavior
+- Default is non-pure (`pure_step=False`); set `pure_step=True` for picklable envs to enable `DirectStrategy` branching
+- `pure_step=True` adds pickle overhead per step — best for simple envs with small state

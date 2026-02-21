@@ -183,6 +183,8 @@ When `None` (default), `BranchManager.create()` auto-resolves the best strategy.
 | gem | True | Yes | Yes | Yes |
 | dialogue | True | Yes | Yes | Yes |
 | verifiers (single-turn) | True | Yes | Yes | Yes |
+| gymnasium (`pure_step=True`) | True | Yes | Yes | Yes |
+| gymnasium (default) | False | No | Yes | Yes |
 | verifiers (tool) | False | No | Yes | No |
 | webshop | False | No | Yes | No |
 | agentgym | False | No | Yes | No |

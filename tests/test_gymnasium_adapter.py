@@ -1491,3 +1491,154 @@ class TestStructuredObservation:
         assert next_obs.task is not None
         assert next_obs.state is not None
         assert "Error" in next_obs.state.text
+
+
+# =============================================================================
+# Pure Step (pickle-based state snapshots)
+# =============================================================================
+
+
+class TestPureStep:
+    """Tests for pure_step=True mode with pickle-based gym state snapshots."""
+
+    @pytest.fixture
+    def pure_env(self, import_adapter):
+        """Create a pure_step=True gymnasium environment."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+            terminal_step=10,
+            reward_per_step=0.1,
+            terminal_reward=1.0,
+        )
+        return import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            action_names={0: "left", 1: "right", 2: "up"},
+            num_tasks=10,
+            pure_step=True,
+        )
+
+    def test_pure_step_basic(self, pure_env):
+        """pure_step=True works for basic reset and step."""
+        state, _ = pure_env.reset(seed=42)
+        assert state.hidden.gym_snapshot is not None
+        assert isinstance(state.hidden.gym_snapshot, bytes)
+
+        result = pure_env.step(state, Action(text="right"))
+        assert result.next_state.metadata.step == 1
+        assert result.next_state.hidden.gym_snapshot is not None
+
+    def test_spec_reflects_pure_step(self, pure_env, import_adapter):
+        """env.spec.pure_step should match constructor arg."""
+        assert pure_env.spec.pure_step is True
+
+        # Default (False)
+        gym_env = MockGymEnv()
+        env = import_adapter.GymnasiumEnvironment(gym_env=gym_env, num_tasks=1)
+        assert env.spec.pure_step is False
+
+    def test_stepping_from_stale_state_works(self, pure_env):
+        """With pure_step=True, stepping from a previous state should work."""
+        state, _ = pure_env.reset(seed=42)
+        # Step to get state_1
+        result1 = pure_env.step(state, Action(text="right"))
+        state_1 = result1.next_state
+
+        # Step from state_1 to get state_2
+        result2 = pure_env.step(state_1, Action(text="left"))
+
+        # Now step from the *original* state again — this would fail without pure_step
+        result_from_stale = pure_env.step(state, Action(text="up"))
+        assert result_from_stale.next_state.metadata.step == 1
+        assert result_from_stale.next_state.hidden.episode_step == 1
+
+    def test_branching_produces_independent_trajectories(self, pure_env):
+        """Checkpoint, branch, and verify divergent trajectories from same state."""
+        state, _ = pure_env.reset(seed=42)
+
+        # Take 2 steps
+        result = pure_env.step(state, Action(text="right"))
+        state_1 = result.next_state
+        result = pure_env.step(state_1, Action(text="left"))
+        state_2 = result.next_state
+
+        # Branch A: take "right" from state_2
+        result_a = pure_env.step(state_2, Action(text="right"))
+        # Branch B: take "up" from the same state_2
+        result_b = pure_env.step(state_2, Action(text="up"))
+
+        # Both should advance from the same checkpoint
+        assert result_a.next_state.hidden.episode_step == 3
+        assert result_b.next_state.hidden.episode_step == 3
+        # But with different actions
+        assert result_a.next_state.hidden.last_action == "right"
+        assert result_b.next_state.hidden.last_action == "up"
+
+    def test_error_step_preserves_snapshot(self, pure_env):
+        """Invalid action shouldn't corrupt gym state; next valid step works."""
+        state, _ = pure_env.reset(seed=42)
+
+        # Invalid action
+        result = pure_env.step(state, Action(text="invalid_garbage"))
+        error_state = result.next_state
+        assert error_state.hidden.gym_snapshot is not None
+        # Snapshot should be the same as the original state's snapshot
+        assert error_state.hidden.gym_snapshot == state.hidden.gym_snapshot
+
+        # Next valid step should work from the error state
+        result2 = pure_env.step(error_state, Action(text="right"))
+        assert result2.next_state.metadata.step == 2
+        assert result2.next_state.hidden.gym_snapshot is not None
+
+    def test_unpicklable_env_raises_type_error(self, import_adapter):
+        """pure_step=True with unpicklable env should raise TypeError eagerly."""
+
+        class UnpicklableEnv:
+            observation_space = MockDiscrete(4)
+            action_space = MockDiscrete(3)
+            spec = MockSpec()
+            render_mode = None
+
+            def __reduce__(self):
+                raise TypeError("cannot pickle")
+
+            def render(self):
+                return None
+
+        with pytest.raises(TypeError, match="pickle|picklable"):
+            import_adapter.GymnasiumEnvironment(
+                gym_env=UnpicklableEnv(),
+                num_tasks=1,
+                pure_step=True,
+            )
+
+    def test_default_pure_step_false_unchanged(self, import_adapter):
+        """Default (pure_step=False) should still enforce StateContinuityTracker."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+            terminal_step=10,
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            num_tasks=10,
+        )
+        assert env.spec.pure_step is False
+
+        state, _ = env.reset()
+        # Hidden should NOT have a snapshot
+        assert state.hidden.gym_snapshot is None
+
+        result = env.step(state, Action(text="1"))
+        assert result.next_state.hidden.gym_snapshot is None
+
+        # Stale state should raise (StateContinuityTracker enforced)
+        with pytest.raises(NotImplementedError, match="stale"):
+            env.step(state, Action(text="0"))
+
+    def test_adapter_pure_step_passthrough(self, import_adapter):
+        """GymnasiumAdapter.get_environment should pass pure_step through."""
+        gym_env = MockGymEnv()
+        adapter = import_adapter.GymnasiumAdapter()
+        env = adapter.get_environment("test", gym_env=gym_env, num_tasks=1, pure_step=True)
+        assert env.spec.pure_step is True

@@ -11,8 +11,9 @@ via ``gymnasium.make()``.
 
 from __future__ import annotations
 
+import pickle
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -657,6 +658,7 @@ class GymnasiumHidden:
         last_action: The last action text (before extraction).
         raw_observation: Raw gymnasium observation value.
         gym_reward: Cumulative gymnasium reward for this episode.
+        gym_snapshot: Pickled gym env state (only when ``pure_step=True``).
     """
 
     task_index: int | None
@@ -665,6 +667,7 @@ class GymnasiumHidden:
     last_action: str | None
     raw_observation: Any
     gym_reward: float
+    gym_snapshot: bytes | None = field(default=None, repr=False)
 
 
 # =============================================================================
@@ -721,8 +724,9 @@ class GymnasiumEnvironment:
     LLM agents. Uses ObservationMapper to render observations as text and
     ActionMapper to parse text actions into gymnasium values.
 
-    Non-pure (stateful) — uses ``_StateContinuityTracker`` to enforce
-    sequential stepping.
+    By default, non-pure (stateful) — uses ``_StateContinuityTracker`` to
+    enforce sequential stepping. Set ``pure_step=True`` for picklable envs
+    to enable zero-cost DirectStrategy branching.
 
     Args:
         gym_env: The underlying gymnasium environment.
@@ -738,6 +742,11 @@ class GymnasiumEnvironment:
         use_ansi_render: Use gym's ANSI render output for observations.
         extra_rewards: Additional reward functions.
         prompts: Custom prompt components.
+        pure_step: Enable pickle-based state snapshots for pure stepping.
+            When True, gym env state is pickled after each reset/step and
+            restored before each step, making ``step()`` a pure function
+            of ``(state, action)``. Raises ``TypeError`` if the gym env
+            is not picklable.
 
     Example:
         >>> import gymnasium
@@ -766,6 +775,7 @@ class GymnasiumEnvironment:
         use_ansi_render: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        pure_step: bool = False,
     ) -> None:
         self._gym_env = gym_env
         self._env_id = env_id or getattr(getattr(gym_env, "spec", None), "id", "gymnasium")
@@ -773,6 +783,17 @@ class GymnasiumEnvironment:
         self._seeds = seeds
         self._num_tasks = num_tasks
         self._answer_extractor = answer_extractor or RawGenerationExtractor()
+        self._pure_step = pure_step
+
+        # Eagerly validate picklability when pure_step=True
+        if pure_step:
+            try:
+                pickle.dumps(gym_env)
+            except (TypeError, pickle.PicklingError) as e:
+                raise TypeError(
+                    f"pure_step=True requires a picklable gym environment, "
+                    f"but pickling failed: {e}"
+                ) from e
 
         # Resolve observation mapper
         if observation_mapper is not None:
@@ -806,8 +827,8 @@ class GymnasiumEnvironment:
         # Prompts
         self._prompts = dict(prompts) if prompts else {}
 
-        # State continuity tracking (non-pure env)
-        self._state_tracker = _StateContinuityTracker()
+        # State continuity tracking (only for non-pure envs)
+        self._state_tracker = None if pure_step else _StateContinuityTracker()
 
     def __len__(self) -> int:
         if self._seeds is not None:
@@ -836,7 +857,7 @@ class GymnasiumEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
-            pure_step=False,
+            pure_step=self._pure_step,
             supports_seed=True,
             metadata={"env_id": self._env_id},
         )
@@ -914,6 +935,7 @@ class GymnasiumEnvironment:
             last_action=action.text,
             raw_observation=state.hidden.raw_observation,
             gym_reward=state.hidden.gym_reward,
+            gym_snapshot=state.hidden.gym_snapshot,
         )
 
         error_text = f"[Step {next_step}] Error: {error_msg}"
@@ -1001,6 +1023,9 @@ class GymnasiumEnvironment:
             ]
         initial_messages = (step_msg,)
 
+        # Snapshot gym env for pure_step mode
+        gym_snapshot = pickle.dumps(self._gym_env) if self._pure_step else None
+
         hidden = GymnasiumHidden(
             task_index=task_index,
             seed=resolved_seed,
@@ -1008,6 +1033,7 @@ class GymnasiumEnvironment:
             last_action=None,
             raw_observation=raw_obs,
             gym_reward=0.0,
+            gym_snapshot=gym_snapshot,
         )
 
         observation = Observation(
@@ -1029,7 +1055,8 @@ class GymnasiumEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
-        self._state_tracker.track(state)
+        if self._state_tracker is not None:
+            self._state_tracker.track(state)
 
         return state, {"task_index": task_index, "seed": resolved_seed}
 
@@ -1054,7 +1081,8 @@ class GymnasiumEnvironment:
         Returns:
             StepResult containing next state, rewards, and done flags.
         """
-        self._state_tracker.validate(state, "GymnasiumEnvironment")
+        if self._state_tracker is not None:
+            self._state_tracker.validate(state, "GymnasiumEnvironment")
 
         # Step 1: Extract action text
         extracted, extraction_meta = self._answer_extractor.extract(action.text or "")
@@ -1062,7 +1090,8 @@ class GymnasiumEnvironment:
             result = self._build_error_step(
                 state, action, "Could not extract action from response."
             )
-            self._state_tracker.track(result.next_state)
+            if self._state_tracker is not None:
+                self._state_tracker.track(result.next_state)
             return result
 
         # Step 2: Map to gymnasium action
@@ -1070,8 +1099,13 @@ class GymnasiumEnvironment:
             gym_action = self._action_mapper.map(extracted)
         except ValueError as e:
             result = self._build_error_step(state, action, str(e))
-            self._state_tracker.track(result.next_state)
+            if self._state_tracker is not None:
+                self._state_tracker.track(result.next_state)
             return result
+
+        # Restore gym env from snapshot for pure_step mode
+        if self._pure_step:
+            self._gym_env = pickle.loads(state.hidden.gym_snapshot)
 
         # Step the gymnasium environment
         raw_obs, reward, terminated, truncated_gym, info = self._gym_env.step(gym_action)
@@ -1085,6 +1119,9 @@ class GymnasiumEnvironment:
         # Render observation
         obs_text, obs_images = self._render_observation(raw_obs, info)
 
+        # Snapshot gym env for pure_step mode
+        gym_snapshot = pickle.dumps(self._gym_env) if self._pure_step else None
+
         new_hidden = GymnasiumHidden(
             task_index=state.hidden.task_index,
             seed=state.hidden.seed,
@@ -1092,6 +1129,7 @@ class GymnasiumEnvironment:
             last_action=action.text,
             raw_observation=raw_obs,
             gym_reward=cumulative_reward,
+            gym_snapshot=gym_snapshot,
         )
 
         state_text = f"[Step {next_step}]\n{obs_text}"
@@ -1135,7 +1173,8 @@ class GymnasiumEnvironment:
         )
 
         rewards = self.compute_rewards(state, action, next_state)
-        self._state_tracker.track(next_state)
+        if self._state_tracker is not None:
+            self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,
@@ -1338,6 +1377,7 @@ class GymnasiumAdapter:
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         render_mode: str | None = None,
+        pure_step: bool = False,
         **make_kwargs: Any,
     ) -> GymnasiumEnvironment:
         """Create a gymnasium environment.
@@ -1361,6 +1401,7 @@ class GymnasiumAdapter:
             prompts: Custom prompt components.
             render_mode: Gymnasium render mode (auto ``"ansi"`` when
                 ``use_ansi_render=True``).
+            pure_step: Enable pickle-based state snapshots for pure stepping.
             **make_kwargs: Extra arguments to ``gymnasium.make()``.
 
         Returns:
@@ -1424,6 +1465,7 @@ class GymnasiumAdapter:
             use_ansi_render=use_ansi_render,
             extra_rewards=extra_rewards,
             prompts=merged_prompts or None,
+            pure_step=pure_step,
         )
 
     def get_default_system_prompt(self, name: str) -> None:
