@@ -118,8 +118,9 @@ class TestHuggingFaceBackendUnit:
         assert kwargs["max_new_tokens"] == 100
         assert kwargs["do_sample"] is False
         assert kwargs["num_return_sequences"] == 1
-        assert kwargs["temperature"] == 1.0  # Neutral default overrides model config
-        assert kwargs["top_p"] == 1.0
+        assert "temperature" not in kwargs
+        assert "top_p" not in kwargs
+        assert "top_k" not in kwargs
 
     def test_to_generate_kwargs_sampling(self):
         """Test conversion of SamplingParams to generate kwargs (sampling)."""

@@ -215,6 +215,14 @@ class HuggingFaceBackend(ModelBackend):
             self._processor = None
             self._model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
 
+        # Clear sampling params from the model's generation_config so they
+        # don't trigger "not valid and may be ignored" warnings when
+        # do_sample=False.  We set these explicitly in _to_generate_kwargs().
+        gen_config = self._model.generation_config
+        gen_config.temperature = None
+        gen_config.top_p = None
+        gen_config.top_k = None
+
         # Apply torch.compile if requested
         if torch_compile:
             self._model = torch.compile(self._model)
@@ -270,12 +278,13 @@ class HuggingFaceBackend(ModelBackend):
             "num_return_sequences": params.n,
             "pad_token_id": self._tokenizer.pad_token_id,
             "eos_token_id": self._tokenizer.eos_token_id,
-            # Always set explicitly to override model generation_config
-            # defaults that would conflict with do_sample=False.
-            "temperature": params.temperature if do_sample else 1.0,
-            "top_p": params.top_p if do_sample else 1.0,
-            "top_k": params.top_k if do_sample and params.top_k > 0 else 0,
         }
+
+        if do_sample:
+            kwargs["temperature"] = params.temperature
+            kwargs["top_p"] = params.top_p
+            if params.top_k > 0:
+                kwargs["top_k"] = params.top_k
 
         # Map frequency_penalty to repetition_penalty if set
         # Note: HF repetition_penalty is multiplicative (1.0 = no penalty, >1 = penalty)
@@ -400,6 +409,9 @@ class HuggingFaceBackend(ModelBackend):
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         prompt_lengths = inputs["attention_mask"].sum(dim=1).tolist()
+        # Padded input length — the correct slice point for extracting
+        # generated tokens, since generate() output includes padding.
+        input_length = inputs["input_ids"].shape[1]
 
         # Generate
         generate_kwargs = self._to_generate_kwargs(params)
@@ -413,11 +425,17 @@ class HuggingFaceBackend(ModelBackend):
             sequences = outputs
             scores = None
 
+        vocab_size = len(self._tokenizer)
+
         results = []
         for i, (seq, prompt_len) in enumerate(zip(sequences, prompt_lengths)):
-            # Extract generated tokens (excluding prompt)
-            generated_ids = seq[prompt_len:]
-            generated_text = self._tokenizer.decode(generated_ids.tolist(), skip_special_tokens=True)
+            # Extract generated tokens (excluding full padded input)
+            generated_ids = seq[input_length:]
+            # Filter out invalid token IDs (e.g. negative values from MPS
+            # numerical issues) before passing to the Rust tokenizer which
+            # expects u32 values.
+            id_list = [t for t in generated_ids.tolist() if 0 <= t < vocab_size]
+            generated_text = self._tokenizer.decode(id_list, skip_special_tokens=True)
 
             # Count tokens
             completion_tokens = len(generated_ids)
@@ -577,10 +595,13 @@ class HuggingFaceBackend(ModelBackend):
             sequences = outputs
             scores = None
 
+        vocab_size = len(self._tokenizer)
+
         results = []
         for i, seq in enumerate(sequences):
             generated_ids = seq[prompt_length:]
-            generated_text = self._tokenizer.decode(generated_ids.tolist(), skip_special_tokens=True)
+            id_list = [t for t in generated_ids.tolist() if 0 <= t < vocab_size]
+            generated_text = self._tokenizer.decode(id_list, skip_special_tokens=True)
 
             completion_tokens = len(generated_ids)
             last_token_id = generated_ids[-1].item() if len(generated_ids) > 0 else None
