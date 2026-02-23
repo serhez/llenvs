@@ -534,7 +534,9 @@ class TrajectoryRunner:
             if extracted:
                 return extracted
 
-        return full_text
+        from llenvs.core.cleaning import strip_thinking_tokens
+
+        return strip_thinking_tokens(full_text)
 
     def _build_legacy_messages(
         self,

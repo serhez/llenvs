@@ -548,6 +548,90 @@ class TestIncludeReasoningInHistory:
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0].content == "go north"
 
+    def test_fallback_strips_thinking_tokens(self):
+        """When no extracted_action and include_reasoning=False, strip <think> from fallback."""
+        runner = self._make_runner(include_reasoning_in_history=False)
+
+        task = ObservationContent(text="Solve it.")
+        state0 = ObservationContent(text="[Step 0]\nStart")
+        state1 = ObservationContent(text="[Step 1]\nNext")
+
+        s0 = _make_state(prompt="Solve it.", task=task, state=state0)
+        s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0,
+                action=Action(text="<think>long reasoning here</think>\ngo north"),
+                next_state=s1,
+                rewards=SignalBundle(signals=()),
+                info={"step": {"error": "invalid action"}},  # error step, no extracted_action
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        assistant_msgs = [m for m in messages if m.role == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert "<think>" not in assistant_msgs[0].content
+        assert "go north" in assistant_msgs[0].content
+
+    def test_fallback_strips_unclosed_thinking_tokens(self):
+        """Unclosed <think> blocks (truncation) are also stripped in fallback."""
+        runner = self._make_runner(include_reasoning_in_history=False)
+
+        task = ObservationContent(text="Solve it.")
+        state0 = ObservationContent(text="[Step 0]\nStart")
+        state1 = ObservationContent(text="[Step 1]\nNext")
+
+        s0 = _make_state(prompt="Solve it.", task=task, state=state0)
+        s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
+
+        # Simulate truncation: thinking consumed entire budget, no closing tag
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0,
+                action=Action(text="<think>very long reasoning that consumed entire budget"),
+                next_state=s1,
+                rewards=SignalBundle(signals=()),
+                info={},  # no step info at all
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        assistant_msgs = [m for m in messages if m.role == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert "<think>" not in assistant_msgs[0].content
+        assert "very long reasoning" not in assistant_msgs[0].content
+
+    def test_fallback_no_stripping_when_include_reasoning_true(self):
+        """When include_reasoning=True, thinking tokens are preserved even in fallback."""
+        runner = self._make_runner(include_reasoning_in_history=True)
+
+        task = ObservationContent(text="Solve it.")
+        state0 = ObservationContent(text="[Step 0]\nStart")
+        state1 = ObservationContent(text="[Step 1]\nNext")
+
+        s0 = _make_state(prompt="Solve it.", task=task, state=state0)
+        s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0,
+                action=Action(text="<think>reasoning</think>\ngo north"),
+                next_state=s1,
+                rewards=SignalBundle(signals=()),
+                info={"step": {"error": "invalid action"}},
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        assistant_msgs = [m for m in messages if m.role == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert "<think>" in assistant_msgs[0].content
+
     def test_extracted_answer_also_works(self):
         """extracted_answer (single-turn naming) is also checked."""
         runner = self._make_runner(include_reasoning_in_history=False)
