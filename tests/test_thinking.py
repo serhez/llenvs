@@ -220,3 +220,136 @@ class TestHFProcessor:
 
         result = proc.hf_processor(input_ids, scores)
         assert result[0][0] == 1.0  # unchanged
+
+
+class TestFromTokenIds:
+    """Tests for ThinkingBudgetProcessor.from_token_ids()."""
+
+    def test_creation(self):
+        """Creates processor with pre-resolved token IDs."""
+        proc = ThinkingBudgetProcessor.from_token_ids(think_id=100, end_think_id=101, budget=64)
+        assert proc._think_id == 100
+        assert proc._end_think_id == 101
+        assert proc._budget == 64
+
+    def test_enforcement(self):
+        """Budget enforcement works with from_token_ids-created processor."""
+        proc = ThinkingBudgetProcessor.from_token_ids(think_id=100, end_think_id=101, budget=2)
+        # <think>=100, then 2 tokens (= budget), should force </think>
+        logits = [1.0] * 200
+        result = proc.vllm_processor([100, 5, 6], logits)
+        assert result[101] == 0.0  # </think> allowed
+        assert result[0] == float("-inf")  # other tokens masked
+
+    def test_zero_budget(self):
+        """budget=0 immediately forces </think> when thinking starts."""
+        proc = ThinkingBudgetProcessor.from_token_ids(think_id=100, end_think_id=101, budget=0)
+        logits = [1.0] * 200
+        result = proc.vllm_processor([100], logits)
+        assert result[101] == 0.0
+        assert result[0] == float("-inf")
+
+
+class TestV1ProcessorClass:
+    """Tests for make_v1_thinking_processor_class()."""
+
+    def _make_v1_class(self):
+        """Create V1 processor class with a mocked AdapterLogitsProcessor base."""
+        import sys
+        from unittest.mock import MagicMock
+
+        # Create a mock AdapterLogitsProcessor base class
+        class MockAdapterLogitsProcessor:
+            pass
+
+        # Mock the vllm module
+        mock_module = MagicMock()
+        mock_module.AdapterLogitsProcessor = MockAdapterLogitsProcessor
+        sys.modules["vllm.v1.sample.logits_processor"] = mock_module
+
+        from llenvs.inference.thinking import make_v1_thinking_processor_class
+
+        cls = make_v1_thinking_processor_class()
+
+        # Clean up
+        del sys.modules["vllm.v1.sample.logits_processor"]
+
+        return cls, MockAdapterLogitsProcessor
+
+    def test_returns_class(self):
+        """Factory returns a class subclassing AdapterLogitsProcessor."""
+        cls, base = self._make_v1_class()
+        assert cls is not None
+        assert issubclass(cls, base)
+
+    def test_returns_none_without_vllm(self):
+        """Returns None when vllm V1 API is not importable."""
+        from llenvs.inference.thinking import make_v1_thinking_processor_class
+
+        cls = make_v1_thinking_processor_class()
+        assert cls is None
+
+    def test_validate_params_accepts_valid(self):
+        """validate_params accepts valid thinking_budget int."""
+        cls, _ = self._make_v1_class()
+        params = MagicMock()
+        params.extra_args = {"thinking_budget": 512}
+        # Should not raise
+        cls.validate_params(params)
+
+    def test_validate_params_accepts_absent(self):
+        """validate_params accepts missing thinking_budget."""
+        cls, _ = self._make_v1_class()
+        params = MagicMock()
+        params.extra_args = {}
+        cls.validate_params(params)
+
+    def test_validate_params_rejects_invalid_type(self):
+        """validate_params rejects non-int thinking_budget."""
+        cls, _ = self._make_v1_class()
+        params = MagicMock()
+        params.extra_args = {"thinking_budget": "not_an_int"}
+        with pytest.raises(ValueError, match="must be an integer"):
+            cls.validate_params(params)
+
+    def test_is_argmax_invariant(self):
+        """is_argmax_invariant returns False."""
+        cls, _ = self._make_v1_class()
+        instance = cls.__new__(cls)
+        assert instance.is_argmax_invariant() is False
+
+    def test_new_req_returns_none_without_budget(self):
+        """new_req_logits_processor returns None when no budget in extra_args."""
+        cls, _ = self._make_v1_class()
+        instance = cls.__new__(cls)
+        instance._available = True
+        instance._think_id = 100
+        instance._end_think_id = 101
+
+        params = MagicMock()
+        params.extra_args = {}
+        assert instance.new_req_logits_processor(params) is None
+
+    def test_new_req_returns_callable_with_budget(self):
+        """new_req_logits_processor returns a callable when budget is set."""
+        cls, _ = self._make_v1_class()
+        instance = cls.__new__(cls)
+        instance._available = True
+        instance._think_id = 100
+        instance._end_think_id = 101
+
+        params = MagicMock()
+        params.extra_args = {"thinking_budget": 512}
+        result = instance.new_req_logits_processor(params)
+        assert callable(result)
+
+    def test_new_req_raises_when_unavailable(self):
+        """new_req_logits_processor raises when tokens couldn't be resolved."""
+        cls, _ = self._make_v1_class()
+        instance = cls.__new__(cls)
+        instance._available = False
+
+        params = MagicMock()
+        params.extra_args = {"thinking_budget": 512}
+        with pytest.raises(ValueError, match="think.*token"):
+            instance.new_req_logits_processor(params)

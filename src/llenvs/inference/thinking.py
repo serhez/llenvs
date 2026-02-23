@@ -29,6 +29,26 @@ class ThinkingBudgetProcessor:
         self._think_id = self._resolve_token(tokenizer, "<think>")
         self._end_think_id = self._resolve_token(tokenizer, "</think>")
 
+    @classmethod
+    def from_token_ids(
+        cls, think_id: int, end_think_id: int, budget: int
+    ) -> "ThinkingBudgetProcessor":
+        """Create a processor with pre-resolved token IDs.
+
+        Useful when token IDs have already been resolved (e.g. at engine
+        init time) and you want to avoid re-resolving per request.
+
+        Args:
+            think_id: Token ID for ``<think>``.
+            end_think_id: Token ID for ``</think>``.
+            budget: Maximum tokens allowed inside each thinking block.
+        """
+        instance = cls.__new__(cls)
+        instance._budget = budget
+        instance._think_id = think_id
+        instance._end_think_id = end_think_id
+        return instance
+
     @staticmethod
     def _resolve_token(tokenizer: Any, token: str) -> int:
         """Resolve a special token string to its integer ID.
@@ -126,3 +146,90 @@ class ThinkingBudgetProcessor:
             in_thinking, count = self._count_thinking(seq)
             self._apply_budget(in_thinking, count, scores[i])
         return scores
+
+
+def make_v1_thinking_processor_class() -> type | None:
+    """Create a vLLM V1-compatible thinking budget processor class.
+
+    Returns a class subclassing ``AdapterLogitsProcessor`` that can be
+    registered at ``LLM()`` init time. Per-request budgets are passed via
+    ``SamplingParams.extra_args["thinking_budget"]``.
+
+    Returns:
+        The processor class, or ``None`` if the vLLM V1 API is not available
+        (e.g. vLLM <0.8 or not installed).
+    """
+    try:
+        from vllm.v1.sample.logits_processor import AdapterLogitsProcessor
+    except ImportError:
+        return None
+
+    class V1ThinkingBudgetProcessor(AdapterLogitsProcessor):
+        """V1-compatible thinking budget processor.
+
+        Registered once at engine init. Resolves ``<think>``/``</think>``
+        token IDs from the model's tokenizer. Per-request budgets are read
+        from ``params.extra_args["thinking_budget"]``.
+        """
+
+        def __init__(self, vllm_config: Any, device: Any, is_pin_memory: bool = False) -> None:
+            self._available = False
+            self._think_id = -1
+            self._end_think_id = -1
+
+            try:
+                model_config = vllm_config.model_config
+                model_name = model_config.model
+
+                # Try vLLM's tokenizer utility first, fall back to transformers
+                tokenizer = None
+                try:
+                    from vllm.transformers_utils.tokenizer import get_tokenizer
+
+                    tokenizer = get_tokenizer(model_name)
+                except Exception:
+                    pass
+
+                if tokenizer is None:
+                    from transformers import AutoTokenizer
+
+                    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+                self._think_id = ThinkingBudgetProcessor._resolve_token(tokenizer, "<think>")
+                self._end_think_id = ThinkingBudgetProcessor._resolve_token(tokenizer, "</think>")
+                self._available = True
+            except Exception:
+                # Model doesn't have <think>/<think> tokens — that's fine,
+                # we just can't enforce budgets
+                pass
+
+        @classmethod
+        def validate_params(cls, params: Any) -> None:
+            """Validate extra_args for thinking_budget type."""
+            extra = getattr(params, "extra_args", None) or {}
+            budget = extra.get("thinking_budget")
+            if budget is not None and not isinstance(budget, int):
+                raise ValueError(f"thinking_budget must be an integer, got {type(budget).__name__}")
+
+        def is_argmax_invariant(self) -> bool:
+            return False
+
+        def new_req_logits_processor(self, params: Any) -> Any:
+            """Return a per-request logits processor callable, or None."""
+            extra = getattr(params, "extra_args", None) or {}
+            budget = extra.get("thinking_budget")
+            if budget is None:
+                return None
+
+            if not self._available:
+                raise ValueError(
+                    "thinking_budget requested but <think>/<think> tokens "
+                    "could not be resolved from the model's tokenizer."
+                )
+
+            proc = ThinkingBudgetProcessor.from_token_ids(
+                self._think_id, self._end_think_id, int(budget)
+            )
+            return proc.vllm_processor
+
+    return V1ThinkingBudgetProcessor

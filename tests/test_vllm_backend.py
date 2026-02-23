@@ -26,6 +26,7 @@ class TestVLLMChatTemplateKwargs:
         backend._max_context_length = 4096
         backend._chat_template_kwargs = chat_template_kwargs or {}
         backend._is_vlm = False
+        backend._has_v1_thinking_processor = False
         return backend
 
     def test_stored_correctly(self):
@@ -83,7 +84,7 @@ class TestVLLMChatTemplateKwargs:
 class TestVLLMThinkingBudget:
     """Tests for thinking_budget interception in VLLMBackend."""
 
-    def _create_mock_backend(self, *, is_v1=False):
+    def _create_mock_backend(self, *, is_v1=False, has_v1_thinking_processor=False):
         from llenvs.inference.backends.vllm import VLLMBackend
 
         backend = VLLMBackend.__new__(VLLMBackend)
@@ -96,6 +97,7 @@ class TestVLLMThinkingBudget:
         backend._chat_template_kwargs = {}
         backend._is_vlm = False
         backend._is_v1 = is_v1
+        backend._has_v1_thinking_processor = has_v1_thinking_processor
         return backend
 
     def test_thinking_budget_popped_from_extra(self):
@@ -139,15 +141,41 @@ class TestVLLMThinkingBudget:
         assert len(call_kwargs["logits_processors"]) == 2
         assert call_kwargs["logits_processors"][0] is existing_proc
 
-    def test_thinking_budget_raises_on_v1(self):
-        """thinking_budget raises ValueError when V1 engine is active."""
-        backend = self._create_mock_backend(is_v1=True)
+    def test_thinking_budget_v1_uses_extra_args(self):
+        """thinking_budget routes via extra_args on V1 with processor registered."""
+        backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=True)
         params = SamplingParams(
             max_tokens=100,
             extra={"thinking_budget": 512},
         )
-        with pytest.raises(ValueError, match="V1 engine"):
+        backend._to_vllm_params(params)
+
+        call_kwargs = backend._VLLMSamplingParams.call_args[1]
+        assert "logits_processors" not in call_kwargs
+        assert call_kwargs["extra_args"]["thinking_budget"] == 512
+
+    def test_thinking_budget_v1_without_processor_raises(self):
+        """thinking_budget raises when V1 is active but processor not registered."""
+        backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=False)
+        params = SamplingParams(
+            max_tokens=100,
+            extra={"thinking_budget": 512},
+        )
+        with pytest.raises(ValueError, match="V1"):
             backend._to_vllm_params(params)
+
+    def test_thinking_budget_v1_preserves_existing_extra_args(self):
+        """thinking_budget merges into existing extra_args on V1."""
+        backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=True)
+        params = SamplingParams(
+            max_tokens=100,
+            extra={"thinking_budget": 256, "extra_args": {"some_key": "value"}},
+        )
+        backend._to_vllm_params(params)
+
+        call_kwargs = backend._VLLMSamplingParams.call_args[1]
+        assert call_kwargs["extra_args"]["thinking_budget"] == 256
+        assert call_kwargs["extra_args"]["some_key"] == "value"
 
     def test_no_thinking_budget_works_on_v1(self):
         """Normal params work fine on V1 engine."""
@@ -189,14 +217,10 @@ class TestVLLMV1Detection:
 
     def test_detects_v1_engine(self):
         """V1 engine is detected from module path."""
-        backend = self._create_mock_backend_with_engine_module(
-            "vllm.v1.engine.llm_engine"
-        )
+        backend = self._create_mock_backend_with_engine_module("vllm.v1.engine.llm_engine")
         assert backend._is_v1 is True
 
     def test_detects_v0_engine(self):
         """V0 engine is not flagged as V1."""
-        backend = self._create_mock_backend_with_engine_module(
-            "vllm.engine.llm_engine"
-        )
+        backend = self._create_mock_backend_with_engine_module("vllm.engine.llm_engine")
         assert backend._is_v1 is False

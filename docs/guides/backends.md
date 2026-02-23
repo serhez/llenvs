@@ -339,7 +339,7 @@ Requirements:
 - The tokenizer must have `<think>` and `</think>` as single dedicated tokens
 - Works with both vLLM (`logits_processors`) and HuggingFace (`logits_processor`) backends
 - The processor is stateless and safe for batched generation
-- **vLLM V1 limitation**: vLLM's V1 engine (default since vLLM 0.8) does not support per-request logits processors. Set `VLLM_USE_V1=0` before importing vllm to fall back to the V0 engine (available in vLLM <0.10), or omit `thinking_budget` when using V1
+- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set `thinking_budget` in `extra`
 
 ## Batch Generation
 

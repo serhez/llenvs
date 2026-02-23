@@ -16,11 +16,11 @@ from typing import Any
 
 from llenvs.core.state import ImageContent
 from llenvs.inference.protocol import (
-    ModelBackend,
     BackendCapabilities,
-    SamplingParams,
-    GenerationResult,
     ChatMessage,
+    GenerationResult,
+    ModelBackend,
+    SamplingParams,
     StopReason,
     TokenLogprob,
 )
@@ -152,7 +152,8 @@ class VLLMBackend(ModelBackend):
             ImportError: If vLLM is not installed.
         """
         try:
-            from vllm import LLM, SamplingParams as VLLMSamplingParams
+            from vllm import LLM
+            from vllm import SamplingParams as VLLMSamplingParams
         except ImportError as e:
             raise ImportError(
                 "vLLM is required for VLLMBackend. Install with: pip install vllm"
@@ -174,6 +175,14 @@ class VLLMBackend(ModelBackend):
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = max_model_len
 
+        # Register V1 thinking budget processor class (no-op on vLLM <0.8)
+        from llenvs.inference.thinking import make_v1_thinking_processor_class
+
+        v1_cls = make_v1_thinking_processor_class()
+        if v1_cls is not None:
+            existing = llm_kwargs.get("logits_processors") or []
+            llm_kwargs["logits_processors"] = list(existing) + [v1_cls]
+
         self._llm = LLM(**llm_kwargs)
         self._tokenizer = self._llm.get_tokenizer()
 
@@ -187,6 +196,7 @@ class VLLMBackend(ModelBackend):
         # Detect V1 engine (default since vLLM 0.8, V0 removed in 0.10)
         engine_module = type(self._llm.llm_engine).__module__ or ""
         self._is_v1 = ".v1." in engine_module or engine_module.startswith("v1.")
+        self._has_v1_thinking_processor = self._is_v1 and v1_cls is not None
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -245,18 +255,20 @@ class VLLMBackend(ModelBackend):
 
             if thinking_budget is not None:
                 if self._is_v1:
-                    raise ValueError(
-                        "thinking_budget requires per-request logits processors, "
-                        "which are not supported by vLLM's V1 engine. "
-                        "Set VLLM_USE_V1=0 before importing vllm to use the "
-                        "V0 engine (available in vLLM <0.10), or remove "
-                        "thinking_budget from extra params."
-                    )
-                from llenvs.inference.thinking import ThinkingBudgetProcessor
+                    if not self._has_v1_thinking_processor:
+                        raise ValueError(
+                            "thinking_budget requires the V1 AdapterLogitsProcessor API, "
+                            "which could not be imported. Ensure vLLM >=0.8 is installed."
+                        )
+                    extra_args = kwargs.get("extra_args") or {}
+                    extra_args["thinking_budget"] = int(thinking_budget)
+                    kwargs["extra_args"] = extra_args
+                else:
+                    from llenvs.inference.thinking import ThinkingBudgetProcessor
 
-                processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
-                processors = kwargs.get("logits_processors", [])
-                kwargs["logits_processors"] = list(processors) + [processor.vllm_processor]
+                    processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
+                    processors = kwargs.get("logits_processors", [])
+                    kwargs["logits_processors"] = list(processors) + [processor.vllm_processor]
 
         return self._VLLMSamplingParams(**kwargs)
 
