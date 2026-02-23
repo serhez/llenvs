@@ -173,6 +173,7 @@ def make_v1_thinking_processor_class() -> type | None:
         """
 
         def __init__(self, vllm_config: Any, device: Any, is_pin_memory: bool = False) -> None:
+            super().__init__(vllm_config, device, is_pin_memory)
             self._available = False
             self._think_id = -1
             self._end_think_id = -1
