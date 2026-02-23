@@ -14,6 +14,23 @@
 
 ## vLLM (Local Inference)
 
+vLLM runs in-process — no external server needed. Just point it at a model and a GPU.
+
+### YAML Config
+
+```yaml
+model:
+  backend: vllm
+  model: meta-llama/Llama-3.1-8B-Instruct
+  params:
+    tensor_parallel_size: 2
+    dtype: bfloat16
+    max_model_len: 4096
+    gpu_memory_utilization: 0.9
+```
+
+### Python API
+
 ```python
 from llenvs.inference.backends import VLLMBackend
 
@@ -24,10 +41,6 @@ backend = VLLMBackend(
     max_model_len=4096,
     gpu_memory_utilization=0.9,
 )
-
-# Full feature support
-print(backend.capabilities.supports_logprobs)  # True
-print(backend.capabilities.supports_batching)  # True
 
 # Batch generation
 results = backend.generate(
@@ -44,6 +57,20 @@ results = backend.generate_with_logprobs(
 for token_lp in results[0].token_logprobs:
     print(f"{token_lp.token}: {token_lp.logprob:.3f}")
 ```
+
+### Capabilities
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| logprobs | ✓ | Native support |
+| prefix_continuation | ✓ | Native support |
+| batching | ✓ | Single batched GPU call |
+| streaming | ✓ | Via async iterator |
+| chat | ✓ | Via `tokenizer.apply_chat_template()` |
+| function_calling | ✗ | Not supported |
+| vision | Auto | VLMs detected automatically |
+
+> **Tip:** If you already have a remote `vllm serve` instance running, use `OpenAIBackend(model="your-model", base_url="http://host:port/v1")` instead — vLLM's server exposes an OpenAI-compatible API.
 
 ## HuggingFace Transformers (Local Inference)
 
