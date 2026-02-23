@@ -184,6 +184,10 @@ class VLLMBackend(ModelBackend):
         # Detect VLM
         self._is_vlm = _is_vlm_model(model_config)
 
+        # Detect V1 engine (default since vLLM 0.8, V0 removed in 0.10)
+        engine_module = type(self._llm.llm_engine).__module__ or ""
+        self._is_v1 = ".v1." in engine_module or engine_module.startswith("v1.")
+
     @property
     def capabilities(self) -> BackendCapabilities:
         """vLLM supports all major features."""
@@ -240,6 +244,14 @@ class VLLMBackend(ModelBackend):
             kwargs.update(extra)
 
             if thinking_budget is not None:
+                if self._is_v1:
+                    raise ValueError(
+                        "thinking_budget requires per-request logits processors, "
+                        "which are not supported by vLLM's V1 engine. "
+                        "Set VLLM_USE_V1=0 before importing vllm to use the "
+                        "V0 engine (available in vLLM <0.10), or remove "
+                        "thinking_budget from extra params."
+                    )
                 from llenvs.inference.thinking import ThinkingBudgetProcessor
 
                 processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
