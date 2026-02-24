@@ -30,6 +30,12 @@ from llenvs.core.state import (
     StateMetadata,
 )
 
+def _truncate_for_error(text: str, max_len: int = 100) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "... [truncated]"
+
+
 # =============================================================================
 # Mapper Protocols
 # =============================================================================
@@ -320,11 +326,11 @@ class AutoActionMapper:
         if self._action_names:
             valid = ", ".join(f"{i}: {n}" for i, n in sorted(self._action_names.items()))
             raise ValueError(
-                f"Invalid action '{text}'. Expected a number "
+                f"Invalid action '{_truncate_for_error(text)}'. Expected a number "
                 f"(0-{self._space.n - 1}) or one of: {valid}"
             )
         raise ValueError(
-            f"Invalid action '{text}'. Expected a number in range [0, {self._space.n - 1}]."
+            f"Invalid action '{_truncate_for_error(text)}'. Expected a number in range [0, {self._space.n - 1}]."
         )
 
     def _parse_values(self, text: str) -> list[str]:

@@ -400,6 +400,15 @@ class TestAutoActionMapper:
         with pytest.raises(ValueError):
             mapper.map("not_a_number")
 
+    def test_discrete_long_invalid_text_truncated(self, import_adapter):
+        space = MockDiscrete(3)
+        mapper = import_adapter.AutoActionMapper(space)
+        long_text = "x" * 500
+        with pytest.raises(ValueError, match=r"x{100}\.\.\. \[truncated\]") as exc_info:
+            mapper.map(long_text)
+        # Ensure the full 500-char string is NOT in the message
+        assert long_text not in str(exc_info.value)
+
     def test_box_single(self, import_adapter):
         space = MockBox(-1.0, 1.0, shape=(1,))
         mapper = import_adapter.AutoActionMapper(space)

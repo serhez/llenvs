@@ -30,6 +30,12 @@ from llenvs.core.state import (
     StateMetadata,
 )
 
+def _truncate_for_error(text: str, max_len: int = 100) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[:max_len] + "... [truncated]"
+
+
 # =============================================================================
 # Actions
 # =============================================================================
@@ -127,7 +133,7 @@ class CraftaxActionMapper:
 
         valid = ", ".join(f"{i}: {n}" for i, n in sorted(self._actions.items()))
         raise ValueError(
-            f"Invalid action '{text}'. Expected a number "
+            f"Invalid action '{_truncate_for_error(text)}'. Expected a number "
             f"(0-{self.num_actions - 1}) or one of: {valid}"
         )
 

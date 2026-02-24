@@ -125,6 +125,12 @@ class TestCraftaxActionMapper:
         with pytest.raises(ValueError, match="Invalid action"):
             classic_mapper.map("fly")
 
+    def test_long_invalid_text_truncated(self, classic_mapper):
+        long_text = "x" * 500
+        with pytest.raises(ValueError, match=r"x{100}\.\.\. \[truncated\]") as exc_info:
+            classic_mapper.map(long_text)
+        assert long_text not in str(exc_info.value)
+
     def test_classic_has_17_actions(self, classic_mapper):
         assert classic_mapper.num_actions == 17
 
