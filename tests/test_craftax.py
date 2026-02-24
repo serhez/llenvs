@@ -453,9 +453,34 @@ class TestCraftaxEnvironment:
         result = env.step(state, Action(text="fly"))
         # Should produce error step (wasted turn)
         assert result.next_state.metadata.step == 1
-        assert "error" in result.info or "Error" in result.next_state.observation.messages[-1].get(
-            "content", ""
-        )
+        assert "error" in result.info or "Invalid action" in result.next_state.observation.messages[
+            -1
+        ].get("content", "")
+
+    def test_error_observation_includes_action_format_and_state(self, env):
+        """Error observation includes expected action format and current state."""
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="fly"))
+        error_obs = result.next_state.observation.state.text
+        # Should have action format section
+        assert "Expected action format:" in error_obs
+        assert "noop" in error_obs  # classic action name
+        # Should have current state section
+        assert "Current state:" in error_obs
+
+    def test_last_obs_text_set_on_reset(self, env):
+        """Hidden state stores last_obs_text after reset."""
+        state, _ = env.reset(options={"task_index": 0})
+        assert hasattr(state.hidden, "last_obs_text")
+        assert isinstance(state.hidden.last_obs_text, str)
+        assert len(state.hidden.last_obs_text) > 0
+
+    def test_last_obs_text_updated_on_step(self, env):
+        """Hidden state updates last_obs_text after valid step."""
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="0"))
+        assert isinstance(result.next_state.hidden.last_obs_text, str)
+        assert len(result.next_state.hidden.last_obs_text) > 0
 
     def test_step_messages_accumulate(self, env):
         state, _ = env.reset(options={"task_index": 0})

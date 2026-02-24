@@ -9,10 +9,44 @@ others enforce sequential continuity and raise on stale states.
 from dataclasses import dataclass, field
 from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
 
-from llenvs.core.state import Action, Observation, State, StateMetadata
-from llenvs.core.reward import SignalBundle, RewardFunction
+from llenvs.core.reward import RewardFunction, SignalBundle
+from llenvs.core.state import Action, State
 
 HiddenT = TypeVar("HiddenT")
+
+
+def format_action_error(
+    step: int,
+    error_msg: str,
+    *,
+    current_state: str | None = None,
+    action_hint: str | None = None,
+) -> str:
+    """Format an enriched error observation for invalid actions.
+
+    Builds a structured error message that includes the error, guidance,
+    expected action format, and current environment state.
+
+    Args:
+        step: The step number.
+        error_msg: The error description.
+        current_state: Rendered current environment state.
+        action_hint: Description of valid action format.
+
+    Returns:
+        Formatted error observation string.
+    """
+    parts = [f"[Step {step}] Invalid action: {error_msg}"]
+    parts.append("Please provide a valid action.")
+    if action_hint is not None:
+        parts.append("")
+        parts.append("Expected action format:")
+        parts.append(action_hint)
+    if current_state is not None:
+        parts.append("")
+        parts.append("Current state:")
+        parts.append(current_state)
+    return "\n".join(parts)
 
 
 @dataclass(frozen=True)

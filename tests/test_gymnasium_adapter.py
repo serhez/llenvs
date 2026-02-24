@@ -975,9 +975,9 @@ class TestInvalidActionText:
         result = env.step(state, Action(text="<action></action>"))
         assert result.next_state.metadata.step == 1
         assert result.terminated is False
-        # Error observation should mention extraction failure
+        # Error observation should mention invalid action
         error_obs = result.next_state.observation.state.text
-        assert "Error" in error_obs
+        assert "Invalid action" in error_obs
 
     def test_default_invalid_action_text_in_messages(self, import_adapter):
         """Error step stores default placeholder as assistant content."""
@@ -1620,7 +1620,18 @@ class TestStructuredObservation:
         next_obs = result.next_state.observation
         assert next_obs.task is not None
         assert next_obs.state is not None
-        assert "Error" in next_obs.state.text
+        assert "Invalid action" in next_obs.state.text
+
+    def test_error_observation_includes_action_format_and_state(self, env):
+        """Error observation includes expected action format and current state."""
+        state, _ = env.reset()
+        result = env.step(state, Action(text="invalid_action_xyz"))
+        error_obs = result.next_state.observation.state.text
+        # Should have action format section
+        assert "Expected action format:" in error_obs
+        assert "left" in error_obs  # action name from fixture
+        # Should have current state section
+        assert "Current state:" in error_obs
 
 
 # =============================================================================

@@ -18,7 +18,12 @@ from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
-from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.environment import (
+    EnvironmentSpec,
+    StepResult,
+    _StateContinuityTracker,
+    format_action_error,
+)
 from llenvs.core.extraction import AnswerExtractor, RawGenerationExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
 from llenvs.core.state import (
@@ -29,6 +34,7 @@ from llenvs.core.state import (
     State,
     StateMetadata,
 )
+
 
 def _truncate_for_error(text: str, max_len: int = 100) -> str:
     if len(text) <= max_len:
@@ -955,7 +961,20 @@ class GymnasiumEnvironment:
             gym_snapshot=state.hidden.gym_snapshot,
         )
 
-        error_text = f"[Step {next_step}] Error: {error_msg}"
+        # Re-render current state from raw observation
+        try:
+            current_state_text = self._observation_mapper.map(state.hidden.raw_observation, {})
+            if isinstance(current_state_text, tuple):
+                current_state_text = current_state_text[0]
+        except Exception:
+            current_state_text = None
+
+        error_text = format_action_error(
+            next_step,
+            error_msg,
+            current_state=current_state_text,
+            action_hint=self._action_mapper.describe(),
+        )
         state_content = ObservationContent(text=error_text)
 
         assistant_content = (

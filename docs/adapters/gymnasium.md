@@ -216,7 +216,27 @@ result = env.step(state, Action(text="0"))      # by number
 
 ### Invalid Actions
 
-Invalid actions (extraction failure or mapping error) waste a turn: the step counter advances, an error message is returned as the observation, but no gymnasium step occurs. Empty extraction results (e.g. when the model outputs only thinking tokens) are treated the same as extraction failure.
+Invalid actions (extraction failure or mapping error) waste a turn: the step counter advances, an error observation is returned, but no gymnasium step occurs. Empty extraction results (e.g. when the model outputs only thinking tokens) are treated the same as extraction failure.
+
+The error observation includes the expected action format and the current environment state, giving the model enough context to recover:
+
+```
+[Step 3] Invalid action: Could not extract action from response.
+Please provide a valid action.
+
+Expected action format:
+Choose one action by name or number:
+  0: left
+  1: down
+  2: right
+  3: up
+
+Current state:
+@ F F F
+F H F H
+F F F H
+H F F G
+```
 
 The `invalid_action_text` parameter controls what is stored as the assistant message in history when an action fails. By default it is `"[invalid action]"`, replacing the raw model output (which may contain thinking tokens or other artifacts unhelpful for subsequent turns). Set to `None` to store the original model response instead:
 

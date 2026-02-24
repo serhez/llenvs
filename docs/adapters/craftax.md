@@ -101,7 +101,7 @@ All Classic actions plus: diamond tools, armour, arrows, torches, rubies, sapphi
 
 ### Invalid Actions
 
-Invalid actions (unrecognized name, out-of-range index) waste a turn: the step counter advances and an error message is returned, but no environment step occurs.
+Invalid actions (unrecognized name, out-of-range index) waste a turn: the step counter advances and an error observation is returned, but no environment step occurs. The error observation includes the expected action format and the current environment state, giving the model enough context to recover.
 
 The `invalid_action_text` parameter controls what appears as the assistant message in history for invalid actions:
 
@@ -237,6 +237,7 @@ class CraftaxHidden:
     cumulative_reward: float
     achievements: Any       # JAX boolean array
     is_classic: bool
+    last_obs_text: str      # most recent rendered observation text
 ```
 
 ## Extra Rewards

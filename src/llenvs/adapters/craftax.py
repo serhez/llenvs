@@ -18,7 +18,7 @@ from typing import Any
 
 import numpy as np
 
-from llenvs.core.environment import EnvironmentSpec, StepResult
+from llenvs.core.environment import EnvironmentSpec, StepResult, format_action_error
 from llenvs.core.extraction import AnswerExtractor, RawGenerationExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
 from llenvs.core.state import (
@@ -29,6 +29,7 @@ from llenvs.core.state import (
     State,
     StateMetadata,
 )
+
 
 def _truncate_for_error(text: str, max_len: int = 100) -> str:
     if len(text) <= max_len:
@@ -327,6 +328,7 @@ class CraftaxHidden:
     cumulative_reward: float
     achievements: Any
     is_classic: bool
+    last_obs_text: str = ""
 
 
 # =============================================================================
@@ -575,9 +577,15 @@ class CraftaxEnvironment:
             cumulative_reward=state.hidden.cumulative_reward,
             achievements=state.hidden.achievements,
             is_classic=state.hidden.is_classic,
+            last_obs_text=state.hidden.last_obs_text,
         )
 
-        error_text = f"[Step {next_step}] Error: {error_msg}"
+        error_text = format_action_error(
+            next_step,
+            error_msg,
+            current_state=state.hidden.last_obs_text or None,
+            action_hint=self._action_mapper.describe(),
+        )
         state_content = ObservationContent(text=error_text)
 
         assistant_content = (
@@ -671,6 +679,7 @@ class CraftaxEnvironment:
             cumulative_reward=0.0,
             achievements=np.asarray(achievements),
             is_classic=self._is_classic,
+            last_obs_text=obs_text,
         )
 
         observation = Observation(
@@ -758,6 +767,7 @@ class CraftaxEnvironment:
             cumulative_reward=cumulative_reward,
             achievements=new_achievements_arr,
             is_classic=state.hidden.is_classic,
+            last_obs_text=obs_text,
         )
 
         state_text = f"[Step {next_step}]\n{obs_text}"
