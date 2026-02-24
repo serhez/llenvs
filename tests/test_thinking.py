@@ -353,3 +353,199 @@ class TestV1ProcessorClass:
         params.extra_args = {"thinking_budget": 512}
         with pytest.raises(ValueError, match="think.*token"):
             instance.new_req_logits_processor(params)
+
+    def test_new_req_forwards_soft_ratio(self):
+        """new_req_logits_processor creates processor with soft_budget_ratio."""
+        cls, _ = self._make_v1_class()
+        instance = cls.__new__(cls)
+        instance._available = True
+        instance._think_id = 100
+        instance._end_think_id = 101
+
+        params = MagicMock()
+        params.extra_args = {
+            "thinking_budget": 512,
+            "thinking_budget_soft_ratio": 0.9,
+        }
+        result = instance.new_req_logits_processor(params)
+        assert callable(result)
+
+    def test_new_req_ignores_soft_ratio_without_budget(self):
+        """soft_ratio alone without budget still returns None."""
+        cls, _ = self._make_v1_class()
+        instance = cls.__new__(cls)
+        instance._available = True
+        instance._think_id = 100
+        instance._end_think_id = 101
+
+        params = MagicMock()
+        params.extra_args = {"thinking_budget_soft_ratio": 0.9}
+        assert instance.new_req_logits_processor(params) is None
+
+    def test_validate_params_accepts_soft_ratio(self):
+        """validate_params accepts valid thinking_budget_soft_ratio float."""
+        cls, _ = self._make_v1_class()
+        params = MagicMock()
+        params.extra_args = {"thinking_budget": 512, "thinking_budget_soft_ratio": 0.9}
+        cls.validate_params(params)
+
+    def test_validate_params_rejects_invalid_soft_ratio_type(self):
+        """validate_params rejects non-float thinking_budget_soft_ratio."""
+        cls, _ = self._make_v1_class()
+        params = MagicMock()
+        params.extra_args = {"thinking_budget_soft_ratio": "not_a_float"}
+        with pytest.raises(ValueError, match="must be a float"):
+            cls.validate_params(params)
+
+    def test_validate_params_rejects_out_of_range_soft_ratio(self):
+        """validate_params rejects soft_ratio outside (0, 1)."""
+        cls, _ = self._make_v1_class()
+        params = MagicMock()
+        params.extra_args = {"thinking_budget_soft_ratio": 1.5}
+        with pytest.raises(ValueError, match="between 0 and 1"):
+            cls.validate_params(params)
+
+
+class TestVectorizedApplyBudget:
+    """Tests for vectorized _apply_budget with tensor-like objects."""
+
+    def test_tensor_masking_uses_fill(self):
+        """When logits has fill_(), uses vectorized path."""
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=5)
+
+        class FakeTensor:
+            def __init__(self, size):
+                self._data = [1.0] * size
+
+            def fill_(self, val):
+                for i in range(len(self._data)):
+                    self._data[i] = val
+                return self
+
+            def __setitem__(self, idx, val):
+                self._data[idx] = val
+
+            def __getitem__(self, idx):
+                return self._data[idx]
+
+            def __len__(self):
+                return len(self._data)
+
+        logits = FakeTensor(200)
+        result = proc._apply_budget(True, 5, logits)
+        assert result[101] == 0.0
+        assert result[0] == float("-inf")
+        assert result[50] == float("-inf")
+
+    def test_list_masking_still_works(self):
+        """Plain list logits still work (fallback path)."""
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=5)
+        logits = [1.0] * 200
+        result = proc._apply_budget(True, 5, logits)
+        assert result[101] == 0.0
+        assert result[0] == float("-inf")
+
+
+class TestSoftBudgetTransition:
+    """Tests for soft_budget_ratio feature."""
+
+    def test_default_no_soft_budget(self):
+        """By default, soft_budget_ratio is None."""
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100)
+        assert proc._soft_budget_ratio is None
+
+    def test_soft_budget_ratio_stored(self):
+        """soft_budget_ratio is stored on the processor."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        assert proc._soft_budget_ratio == 0.9
+
+    def test_constructor_soft_budget_ratio(self):
+        """soft_budget_ratio works via main constructor."""
+        tok = _make_tokenizer()
+        proc = ThinkingBudgetProcessor(tok, budget=100, soft_budget_ratio=0.8)
+        assert proc._soft_budget_ratio == 0.8
+
+    def test_no_boost_before_soft_threshold(self):
+        """Logits unchanged before soft threshold (ratio * budget)."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        logits = [1.0] * 200
+        # At count=80, threshold=90 → no boost
+        result = proc._apply_budget(True, 80, logits)
+        assert result[101] == 1.0  # unchanged
+
+    def test_boost_after_soft_threshold(self):
+        """</think> logit is boosted between soft threshold and hard budget."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        logits = [1.0] * 200
+        # At count=95, threshold=90, budget=100 → should boost </think>
+        result = proc._apply_budget(True, 95, logits)
+        assert result[101] > 1.0  # boosted
+        # Other tokens unchanged
+        assert result[0] == 1.0
+
+    def test_boost_increases_linearly(self):
+        """Boost grows linearly from threshold to budget."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        # Threshold = 90, budget = 100
+        # At count=90: progress=0.0 → no boost
+        logits_90 = [1.0] * 200
+        proc._apply_budget(True, 90, logits_90)
+
+        # At count=95: progress=0.5 → medium boost
+        logits_95 = [1.0] * 200
+        proc._apply_budget(True, 95, logits_95)
+
+        # At count=99: progress=0.9 → near-max boost
+        logits_99 = [1.0] * 200
+        proc._apply_budget(True, 99, logits_99)
+
+        assert logits_90[101] <= logits_95[101] <= logits_99[101]
+
+    def test_hard_cutoff_still_works_with_soft(self):
+        """At budget, hard cutoff still forces </think> even with soft ratio."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        logits = [1.0] * 200
+        result = proc._apply_budget(True, 100, logits)
+        assert result[101] == 0.0
+        assert result[0] == float("-inf")
+
+    def test_soft_budget_no_effect_when_not_thinking(self):
+        """Soft budget has no effect when not in a thinking block."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        logits = [1.0] * 200
+        result = proc._apply_budget(False, 95, logits)
+        assert result[101] == 1.0  # unchanged
+
+    def test_soft_budget_via_vllm_processor(self):
+        """Soft budget works through the vllm_processor interface."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=10, soft_budget_ratio=0.8
+        )
+        # threshold=8, at count=9 (in soft zone)
+        # <think>=100 then 9 tokens
+        logits = [1.0] * 200
+        result = proc.vllm_processor([100] + list(range(9)), logits)
+        assert result[101] > 1.0  # boosted
+
+    def test_max_boost_capped_at_5(self):
+        """Maximum boost is approximately 5.0."""
+        proc = ThinkingBudgetProcessor.from_token_ids(
+            100, 101, budget=100, soft_budget_ratio=0.9
+        )
+        logits = [1.0] * 200
+        # At count=99, progress = 9/10 = 0.9 → boost = 0.9 * 5.0 = 4.5
+        proc._apply_budget(True, 99, logits)
+        # Boost should be original + boost_value, where boost_value <= 5.0
+        assert logits[101] <= 1.0 + 5.0 + 0.01  # small epsilon

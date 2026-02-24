@@ -335,11 +335,37 @@ inference:
 
 When the budget is reached, all logits are masked to `-inf` except the `</think>` token, forcing the model to close the thinking block and continue with its answer. Each `<think>` block gets an independent budget — if the model opens a second thinking block, the counter resets.
 
+#### Soft Budget Transition
+
+The hard cutoff can cause reasoning to leak into the response when the model is mid-thought. To mitigate this, set `thinking_budget_soft_ratio` to begin boosting the `</think>` logit before the hard cutoff:
+
+```python
+params = SamplingParams(
+    max_tokens=4096,
+    extra={
+        "thinking_budget": 512,
+        "thinking_budget_soft_ratio": 0.9,
+    },
+)
+```
+
+```yaml
+inference:
+  max_tokens: 4096
+  extra:
+    thinking_budget: 512
+    thinking_budget_soft_ratio: 0.9
+```
+
+With `soft_ratio=0.9` and `budget=512`, the `</think>` logit boost begins at token 460 (90% of 512) and ramps linearly up to a max boost of ~5.0 at token 511. At token 512 the hard cutoff forces `</think>` as before. This gives the model a chance to close its thinking block naturally before being forced.
+
+The feature is opt-in — omitting `thinking_budget_soft_ratio` preserves the hard-cutoff-only behavior. The ratio must be between 0 and 1 (exclusive).
+
 Requirements:
 - The tokenizer must have `<think>` and `</think>` as single dedicated tokens
 - Works with both vLLM (`logits_processors`) and HuggingFace (`logits_processor`) backends
 - The processor is stateless and safe for batched generation
-- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set `thinking_budget` in `extra`
+- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set `thinking_budget` and `thinking_budget_soft_ratio` in `extra`
 
 ## Batch Generation
 

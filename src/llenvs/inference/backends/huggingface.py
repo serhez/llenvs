@@ -318,12 +318,17 @@ class HuggingFaceBackend(ModelBackend):
         if params.extra:
             extra = dict(params.extra)
             thinking_budget = extra.pop("thinking_budget", None)
+            soft_ratio = extra.pop("thinking_budget_soft_ratio", None)
             kwargs.update(extra)
 
             if thinking_budget is not None:
                 from llenvs.inference.thinking import ThinkingBudgetProcessor
 
-                processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
+                processor = ThinkingBudgetProcessor(
+                    self._tokenizer,
+                    int(thinking_budget),
+                    soft_budget_ratio=float(soft_ratio) if soft_ratio is not None else None,
+                )
                 processors = kwargs.get("logits_processor", [])
                 kwargs["logits_processor"] = list(processors) + [processor.hf_processor]
 

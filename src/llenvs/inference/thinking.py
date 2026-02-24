@@ -24,14 +24,24 @@ class ThinkingBudgetProcessor:
             Once reached, the model is forced to emit ``</think>``.
     """
 
-    def __init__(self, tokenizer: Any, budget: int) -> None:
+    def __init__(
+        self,
+        tokenizer: Any,
+        budget: int,
+        soft_budget_ratio: float | None = None,
+    ) -> None:
         self._budget = budget
+        self._soft_budget_ratio = soft_budget_ratio
         self._think_id = self._resolve_token(tokenizer, "<think>")
         self._end_think_id = self._resolve_token(tokenizer, "</think>")
 
     @classmethod
     def from_token_ids(
-        cls, think_id: int, end_think_id: int, budget: int
+        cls,
+        think_id: int,
+        end_think_id: int,
+        budget: int,
+        soft_budget_ratio: float | None = None,
     ) -> "ThinkingBudgetProcessor":
         """Create a processor with pre-resolved token IDs.
 
@@ -42,9 +52,12 @@ class ThinkingBudgetProcessor:
             think_id: Token ID for ``<think>``.
             end_think_id: Token ID for ``</think>``.
             budget: Maximum tokens allowed inside each thinking block.
+            soft_budget_ratio: If set, begin boosting ``</think>`` logit
+                at ``ratio * budget`` tokens (linear ramp to max ~5.0).
         """
         instance = cls.__new__(cls)
         instance._budget = budget
+        instance._soft_budget_ratio = soft_budget_ratio
         instance._think_id = think_id
         instance._end_think_id = end_think_id
         return instance
@@ -108,20 +121,41 @@ class ThinkingBudgetProcessor:
         return in_thinking, count
 
     def _apply_budget(self, in_thinking: bool, count: int, logits: Any) -> Any:
-        """Mask logits if the thinking budget is exceeded.
+        """Mask or boost logits based on thinking budget.
 
         When ``in_thinking`` and ``count >= budget``, sets all logits to
         ``-inf`` except the ``</think>`` token (set to ``0.0``).
 
+        When ``soft_budget_ratio`` is set and ``count`` is between
+        ``ratio * budget`` and ``budget``, boosts the ``</think>`` logit
+        with a linear ramp (max boost ~5.0) to encourage natural closing.
+
         Returns the (possibly modified) logits object.
         """
-        if not in_thinking or count < self._budget:
+        if not in_thinking:
             return logits
 
-        # Budget exceeded — force </think>
-        for i in range(len(logits)):
-            logits[i] = float("-inf")
-        logits[self._end_think_id] = 0.0
+        # Hard cutoff — force </think>
+        if count >= self._budget:
+            if hasattr(logits, "fill_"):
+                logits.fill_(float("-inf"))
+                logits[self._end_think_id] = 0.0
+            else:
+                for i in range(len(logits)):
+                    logits[i] = float("-inf")
+                logits[self._end_think_id] = 0.0
+            return logits
+
+        # Soft transition — boost </think> logit
+        if self._soft_budget_ratio is not None and self._budget > 0:
+            threshold = int(self._soft_budget_ratio * self._budget)
+            if count >= threshold:
+                ramp_length = self._budget - threshold
+                if ramp_length > 0:
+                    progress = (count - threshold) / ramp_length
+                    boost = progress * 5.0
+                    logits[self._end_think_id] = logits[self._end_think_id] + boost
+
         return logits
 
     def vllm_processor(self, token_ids: list[int], logits: Any) -> Any:
@@ -206,11 +240,19 @@ def make_v1_thinking_processor_class() -> type | None:
 
         @classmethod
         def validate_params(cls, params: Any) -> None:
-            """Validate extra_args for thinking_budget type."""
+            """Validate extra_args for thinking_budget and soft_ratio types."""
             extra = getattr(params, "extra_args", None) or {}
             budget = extra.get("thinking_budget")
             if budget is not None and not isinstance(budget, int):
                 raise ValueError(f"thinking_budget must be an integer, got {type(budget).__name__}")
+            soft_ratio = extra.get("thinking_budget_soft_ratio")
+            if soft_ratio is not None:
+                if not isinstance(soft_ratio, (int, float)):
+                    raise ValueError(
+                        f"thinking_budget_soft_ratio must be a float, got {type(soft_ratio).__name__}"
+                    )
+                if not (0 < soft_ratio < 1):
+                    raise ValueError("thinking_budget_soft_ratio must be between 0 and 1 (exclusive)")
 
         def is_argmax_invariant(self) -> bool:
             return False
@@ -228,8 +270,12 @@ def make_v1_thinking_processor_class() -> type | None:
                     "could not be resolved from the model's tokenizer."
                 )
 
+            soft_ratio = extra.get("thinking_budget_soft_ratio")
             proc = ThinkingBudgetProcessor.from_token_ids(
-                self._think_id, self._end_think_id, int(budget)
+                self._think_id,
+                self._end_think_id,
+                int(budget),
+                soft_budget_ratio=float(soft_ratio) if soft_ratio is not None else None,
             )
             return proc.vllm_processor
 

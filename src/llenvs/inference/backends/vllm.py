@@ -251,6 +251,7 @@ class VLLMBackend(ModelBackend):
         if params.extra:
             extra = dict(params.extra)
             thinking_budget = extra.pop("thinking_budget", None)
+            soft_ratio = extra.pop("thinking_budget_soft_ratio", None)
             kwargs.update(extra)
 
             if thinking_budget is not None:
@@ -262,11 +263,17 @@ class VLLMBackend(ModelBackend):
                         )
                     extra_args = kwargs.get("extra_args") or {}
                     extra_args["thinking_budget"] = int(thinking_budget)
+                    if soft_ratio is not None:
+                        extra_args["thinking_budget_soft_ratio"] = float(soft_ratio)
                     kwargs["extra_args"] = extra_args
                 else:
                     from llenvs.inference.thinking import ThinkingBudgetProcessor
 
-                    processor = ThinkingBudgetProcessor(self._tokenizer, int(thinking_budget))
+                    processor = ThinkingBudgetProcessor(
+                        self._tokenizer,
+                        int(thinking_budget),
+                        soft_budget_ratio=float(soft_ratio) if soft_ratio is not None else None,
+                    )
                     processors = kwargs.get("logits_processors", [])
                     kwargs["logits_processors"] = list(processors) + [processor.vllm_processor]
 
