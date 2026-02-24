@@ -216,7 +216,22 @@ result = env.step(state, Action(text="0"))      # by number
 
 ### Invalid Actions
 
-Invalid actions (extraction failure or mapping error) waste a turn: the step counter advances, an error message is returned as the observation, but no gymnasium step occurs.
+Invalid actions (extraction failure or mapping error) waste a turn: the step counter advances, an error message is returned as the observation, but no gymnasium step occurs. Empty extraction results (e.g. when the model outputs only thinking tokens) are treated the same as extraction failure.
+
+The `invalid_action_text` parameter controls what is stored as the assistant message in history when an action fails. By default it is `"[invalid action]"`, replacing the raw model output (which may contain thinking tokens or other artifacts unhelpful for subsequent turns). Set to `None` to store the original model response instead:
+
+```python
+env = GymnasiumEnvironment(
+    gym_env=gym_env,
+    invalid_action_text="[no valid action]",  # custom placeholder
+    # invalid_action_text=None,               # keep raw model output
+    num_tasks=100,
+)
+```
+
+### Resolved Action
+
+On successful steps, `StepResult.resolved_action` contains the extracted action text (e.g., `"left"`, `"2"`). On invalid action steps (extraction or mapping failure), it is `None`.
 
 ### Using AnswerExtractor
 
@@ -488,7 +503,7 @@ Gymnasium observations use structured `task`/`state` fields on `Observation`:
 - **`observation.task`** (`ObservationContent`): Static task description — environment name, observation space description, action space description. Set once in `reset()`, carried forward unchanged.
 - **`observation.state`** (`ObservationContent`): Dynamic per-step observation — `"[Step N]\n{rendered_obs}"`. Updated each step.
 - **`observation.prompt`**: Contains the task description text (for legacy runner compatibility).
-- **`observation.messages`**: Accumulates step-0 observation + assistant/user message pairs (for legacy runner compatibility).
+- **`observation.messages`**: Starts empty at reset, then accumulates assistant/user message pairs during steps (for legacy runner compatibility).
 
 When used with `TrajectoryRunner`, the runner detects the `task` field and builds messages from the trajectory's structured fields instead of replaying the message history, avoiding stale state in the context.
 

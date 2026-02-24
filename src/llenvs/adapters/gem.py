@@ -435,6 +435,7 @@ class GemEnvironment:
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
+            resolved_action=extracted,
             info={
                 "gem_reward": reward,
                 "gem_info": info,

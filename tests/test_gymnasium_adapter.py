@@ -642,13 +642,12 @@ class TestGymnasiumEnvironment:
         prompt = state.observation.prompt
         assert "left" in prompt.lower() or "right" in prompt.lower()
 
-    def test_reset_initial_observation_in_messages(self, discrete_env):
+    def test_reset_initial_observation_in_state(self, discrete_env):
         state, _ = discrete_env.reset()
-        # Step 0 observation should be in messages, not in prompt
+        # Step 0 observation is in obs.state, not prompt or messages
         assert "Step 0" not in state.observation.prompt
-        assert len(state.observation.messages) >= 1
-        step_0_msg = state.observation.messages[0]
-        assert "Step 0" in step_0_msg["content"]
+        assert len(state.observation.messages) == 0
+        assert "Step 0" in state.observation.state.text
 
     def test_reset_hidden_state(self, discrete_env, import_adapter):
         state, _ = discrete_env.reset(seed=42)
@@ -667,12 +666,11 @@ class TestGymnasiumEnvironment:
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
 
-    def test_reset_messages_has_step_0(self, discrete_env):
+    def test_reset_messages_empty(self, discrete_env):
         state, _ = discrete_env.reset()
-        # Messages should contain the step-0 observation
-        assert len(state.observation.messages) == 1
-        assert state.observation.messages[0]["role"] == "user"
-        assert "Step 0" in state.observation.messages[0]["content"]
+        # Messages are empty at reset — step-0 observation is in obs.state
+        assert len(state.observation.messages) == 0
+        assert "Step 0" in state.observation.state.text
 
     # --- Step ---
 
@@ -735,18 +733,18 @@ class TestGymnasiumEnvironment:
 
     def test_step_messages_accumulate(self, discrete_env):
         state, _ = discrete_env.reset()
-        # After reset: 1 message (step-0 observation)
-        assert len(state.observation.messages) == 1
+        # After reset: 0 messages
+        assert len(state.observation.messages) == 0
 
-        # Step 1: +2 (assistant + user) = 3 total
+        # Step 1: +2 (assistant + user) = 2 total
         result = discrete_env.step(state, Action(text="1"))
-        assert len(result.next_state.observation.messages) == 3
-        assert result.next_state.observation.messages[1]["role"] == "assistant"
-        assert result.next_state.observation.messages[2]["role"] == "user"
+        assert len(result.next_state.observation.messages) == 2
+        assert result.next_state.observation.messages[0]["role"] == "assistant"
+        assert result.next_state.observation.messages[1]["role"] == "user"
 
-        # Step 2: +2 = 5 total
+        # Step 2: +2 = 4 total
         result2 = discrete_env.step(result.next_state, Action(text="0"))
-        assert len(result2.next_state.observation.messages) == 5
+        assert len(result2.next_state.observation.messages) == 4
 
     def test_step_prompt_stays_constant(self, discrete_env):
         state, _ = discrete_env.reset()
@@ -914,9 +912,9 @@ class TestGymnasiumEnvironment:
             num_tasks=1,
         )
         state, _ = env.reset()
-        # The ANSI output should be in the state content and messages
+        # The ANSI output should be in the state content
         assert "ANSI output here" in state.observation.state.text
-        assert "ANSI output here" in state.observation.messages[0]["content"]
+        assert len(state.observation.messages) == 0
 
     def test_ansi_render_fallback_to_mapper(self, import_adapter):
         gym_env = MockGymEnv()
@@ -938,6 +936,129 @@ class TestGymnasiumEnvironment:
         result = discrete_env.step(state, Action(text="1"))
         rewards = discrete_env.compute_rewards(state, Action(text="1"), result.next_state)
         assert isinstance(rewards, SignalBundle)
+
+
+# ===========================================================================
+# Invalid action text + empty extraction tests
+# ===========================================================================
+
+
+class TestInvalidActionText:
+    """Tests for invalid_action_text param and empty extraction handling."""
+
+    @pytest.fixture
+    def import_adapter(self):
+        return pytest.importorskip("llenvs.adapters.gymnasium")
+
+    def test_empty_extraction_treated_as_failure(self, import_adapter):
+        """Empty string extraction result is treated as extraction failure."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            answer_extractor=TagBasedExtractor(tag_name="action"),
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        # Empty tag content -> extraction returns "" -> should be treated as failure
+        result = env.step(state, Action(text="<action></action>"))
+        assert result.next_state.metadata.step == 1
+        assert result.terminated is False
+        # Error observation should mention extraction failure
+        error_obs = result.next_state.observation.state.text
+        assert "Error" in error_obs
+
+    def test_default_invalid_action_text_in_messages(self, import_adapter):
+        """Error step stores default placeholder as assistant content."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            answer_extractor=TagBasedExtractor(tag_name="action"),
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        result = env.step(state, Action(text="no tag here"))
+        # The assistant message should use the default placeholder
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["content"] == "[invalid action]"
+
+    def test_custom_invalid_action_text(self, import_adapter):
+        """Custom invalid_action_text is used in error step messages."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        custom_text = "[model failed to produce action]"
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            answer_extractor=TagBasedExtractor(tag_name="action"),
+            invalid_action_text=custom_text,
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        result = env.step(state, Action(text="no tag here"))
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["content"] == custom_text
+
+    def test_invalid_action_text_used_for_mapping_failure(self, import_adapter):
+        """Placeholder is also used when extraction succeeds but mapping fails."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            invalid_action_text="[bad action]",
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        # RawGenerationExtractor returns the full text; mapper can't map "garbage"
+        result = env.step(state, Action(text="garbage"))
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["content"] == "[bad action]"
+
+    def test_valid_action_stores_original_text(self, import_adapter):
+        """Valid actions still store the original model response, not placeholder."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            invalid_action_text="[bad]",
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        result = env.step(state, Action(text="1"))
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["content"] == "1"
+
+    def test_none_invalid_action_text_preserves_original(self, import_adapter):
+        """When invalid_action_text is None, original model text is stored."""
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            answer_extractor=TagBasedExtractor(tag_name="action"),
+            invalid_action_text=None,
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        result = env.step(state, Action(text="raw model output"))
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["role"] == "assistant"
+        assert assistant_msg["content"] == "raw model output"
 
 
 # ===========================================================================
@@ -1419,10 +1540,10 @@ class TestPromptSeparation:
         assert "Step 0" not in state.observation.prompt
         assert "State:" not in state.observation.prompt
 
-    def test_step_0_in_messages(self, env):
+    def test_step_0_in_state(self, env):
         state, _ = env.reset()
-        assert len(state.observation.messages) == 1
-        assert "Step 0" in state.observation.messages[0]["content"]
+        assert len(state.observation.messages) == 0
+        assert "Step 0" in state.observation.state.text
 
     def test_prompt_stable_across_steps(self, env):
         state, _ = env.reset()

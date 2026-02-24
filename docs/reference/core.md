@@ -113,12 +113,15 @@ class StepResult(Generic[HiddenT]):
     rewards: SignalBundle
     terminated: bool  # Episode ended naturally
     truncated: bool   # Episode cut off (max steps, etc.)
+    resolved_action: str | None  # Effective action after extraction (None = no extraction)
     info: dict[str, Any]
 
     @property
     def done(self) -> bool:
         return self.terminated or self.truncated
 ```
+
+`resolved_action` is the effective action text after answer extraction — what the environment actually understood from the model's response. Set by extracting adapters (reasoning_gym, huggingface, gymnasium, craftax, gem, verifiers, iterative); `None` for non-extracting adapters (webshop, agentgym, dialogue, etc.) or when extraction fails. When `None`, consumers fall back to `action.text`.
 
 ### EnvironmentSpec
 
@@ -301,6 +304,7 @@ class Transition(Generic[HiddenT]):
     action: Action
     next_state: State[HiddenT]
     rewards: SignalBundle
+    resolved_action: str | None  # Propagated from StepResult.resolved_action
     info: dict[str, Any]
 ```
 

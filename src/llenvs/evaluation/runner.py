@@ -519,15 +519,20 @@ class TrajectoryRunner:
         """Get the action text for a transition, respecting reasoning stripping.
 
         When ``include_reasoning_in_history`` is False (default), looks for
+        ``resolved_action`` on the transition first, then falls back to
         ``extracted_action`` or ``extracted_answer`` in the transition's step
-        info and uses that instead of the full model response.
+        info, and uses that instead of the full model response.
         """
         full_text = transition.action.text or ""
 
         if self.include_reasoning_in_history:
             return full_text
 
-        # Try to find extracted action/answer from step info
+        # Prefer first-class resolved_action field
+        if transition.resolved_action is not None:
+            return transition.resolved_action
+
+        # Legacy fallback: extracted action/answer from step info
         step_info = transition.info.get("step", {})
         if isinstance(step_info, dict):
             extracted = step_info.get("extracted_action") or step_info.get("extracted_answer")
@@ -773,6 +778,7 @@ class TrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                resolved_action=step_result.resolved_action,
                 info={
                     "generation": gen_info,
                     "step": step_result.info,
@@ -1038,6 +1044,7 @@ class TrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        resolved_action=step_result.resolved_action,
                         info={
                             "generation": gen_info,
                             "step": step_result.info,
@@ -1156,6 +1163,7 @@ def _run_multi_lockstep(
                     action=action,
                     next_state=step_result.next_state,
                     rewards=step_result.rewards,
+                    resolved_action=step_result.resolved_action,
                     info={
                         "generation": {
                             "prompt_tokens": gen_result.prompt_tokens,
@@ -1574,6 +1582,7 @@ class SegmentedTrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                resolved_action=step_result.resolved_action,
                 info={
                     "generation": {
                         "prompt_tokens": gen_result.prompt_tokens,
@@ -1656,6 +1665,7 @@ class SegmentedTrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        resolved_action=step_result.resolved_action,
                         info={
                             "replayed": True,
                             "step": step_result.info,
@@ -1681,6 +1691,7 @@ class SegmentedTrajectoryRunner:
                         action=pair_action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        resolved_action=step_result.resolved_action,
                         info={
                             "replayed": True,
                             "step": step_result.info,
@@ -1744,6 +1755,7 @@ class SegmentedTrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                resolved_action=step_result.resolved_action,
                 info=trans_info,
             )
             trajectory.add_transition(transition)
@@ -1784,6 +1796,7 @@ class SegmentedTrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                resolved_action=step_result.resolved_action,
                 info={"step": step_result.info},
             )
             trajectory.add_transition(transition)
@@ -1815,6 +1828,7 @@ class SegmentedTrajectoryRunner:
                 action=Action(text=""),
                 next_state=finalize_result.next_state,
                 rewards=finalize_result.rewards,
+                resolved_action=finalize_result.resolved_action,
                 info={"step": finalize_result.info, "finalize": True},
             )
             trajectory.add_transition(transition)
@@ -1995,6 +2009,7 @@ class SegmentedTrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        resolved_action=step_result.resolved_action,
                         info=trans_info,
                     )
                     t.trajectory.add_transition(transition)
@@ -2050,6 +2065,7 @@ class SegmentedTrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        resolved_action=step_result.resolved_action,
                         info={"step": step_result.info},
                     )
                     t.trajectory.add_transition(transition)
@@ -2096,6 +2112,7 @@ class SegmentedTrajectoryRunner:
                         action=Action(text=""),
                         next_state=finalize_result.next_state,
                         rewards=finalize_result.rewards,
+                        resolved_action=finalize_result.resolved_action,
                         info={"step": finalize_result.info, "finalize": True},
                     )
                     t.trajectory.add_transition(transition)

@@ -776,6 +776,7 @@ class GymnasiumEnvironment:
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
+        invalid_action_text: str | None = "[invalid action]",
     ) -> None:
         self._gym_env = gym_env
         self._env_id = env_id or getattr(getattr(gym_env, "spec", None), "id", "gymnasium")
@@ -784,6 +785,7 @@ class GymnasiumEnvironment:
         self._num_tasks = num_tasks
         self._answer_extractor = answer_extractor or RawGenerationExtractor()
         self._pure_step = pure_step
+        self._invalid_action_text = invalid_action_text
 
         # Eagerly validate picklability when pure_step=True
         if pure_step:
@@ -791,8 +793,7 @@ class GymnasiumEnvironment:
                 pickle.dumps(gym_env)
             except (TypeError, pickle.PicklingError) as e:
                 raise TypeError(
-                    f"pure_step=True requires a picklable gym environment, "
-                    f"but pickling failed: {e}"
+                    f"pure_step=True requires a picklable gym environment, but pickling failed: {e}"
                 ) from e
 
         # Resolve observation mapper
@@ -920,8 +921,18 @@ class GymnasiumEnvironment:
         state: State[GymnasiumHidden],
         action: Action,
         error_msg: str,
+        *,
+        assistant_content_override: str | None = None,
     ) -> StepResult[GymnasiumHidden]:
-        """Build a StepResult for an invalid/failed action (wasted turn)."""
+        """Build a StepResult for an invalid/failed action (wasted turn).
+
+        Args:
+            state: Current state.
+            action: The failed action.
+            error_msg: Error description for the observation.
+            assistant_content_override: If set, use this instead of
+                ``action.text`` as the assistant message content in history.
+        """
         next_step = state.hidden.episode_step + 1
         meta_step = state.metadata.step + 1
 
@@ -941,8 +952,13 @@ class GymnasiumEnvironment:
         error_text = f"[Step {next_step}] Error: {error_msg}"
         state_content = ObservationContent(text=error_text)
 
+        assistant_content = (
+            assistant_content_override
+            if assistant_content_override is not None
+            else (action.text or "")
+        )
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action.text or ""},
+            {"role": "assistant", "content": assistant_content},
             {"role": "user", "content": error_text},
         )
         new_observation = Observation(
@@ -1014,14 +1030,9 @@ class GymnasiumEnvironment:
         # Legacy prompt = task description (for backward compat)
         prompt = task_desc
 
-        # Legacy messages: step-0 observation as first user message
+        # No initial messages — step-0 observation is in obs.state.
+        # History is built from (assistant, user) pairs during step().
         initial_messages: tuple[dict[str, Any], ...] = ()
-        step_msg: dict[str, Any] = {"role": "user", "content": state_text}
-        if obs_images:
-            step_msg["images"] = [
-                {"data": img.data, "media_type": img.media_type} for img in obs_images
-            ]
-        initial_messages = (step_msg,)
 
         # Snapshot gym env for pure_step mode
         gym_snapshot = pickle.dumps(self._gym_env) if self._pure_step else None
@@ -1086,9 +1097,12 @@ class GymnasiumEnvironment:
 
         # Step 1: Extract action text
         extracted, extraction_meta = self._answer_extractor.extract(action.text or "")
-        if extracted is None:
+        if extracted is None or extracted.strip() == "":
             result = self._build_error_step(
-                state, action, "Could not extract action from response."
+                state,
+                action,
+                "Could not extract action from response.",
+                assistant_content_override=self._invalid_action_text,
             )
             if self._state_tracker is not None:
                 self._state_tracker.track(result.next_state)
@@ -1098,7 +1112,12 @@ class GymnasiumEnvironment:
         try:
             gym_action = self._action_mapper.map(extracted)
         except ValueError as e:
-            result = self._build_error_step(state, action, str(e))
+            result = self._build_error_step(
+                state,
+                action,
+                str(e),
+                assistant_content_override=self._invalid_action_text,
+            )
             if self._state_tracker is not None:
                 self._state_tracker.track(result.next_state)
             return result
@@ -1181,6 +1200,7 @@ class GymnasiumEnvironment:
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
+            resolved_action=extracted,
             info={
                 "gym_reward": reward,
                 "gym_info": info,
@@ -1378,6 +1398,7 @@ class GymnasiumAdapter:
         prompts: dict[str, str] | None = None,
         render_mode: str | None = None,
         pure_step: bool = False,
+        invalid_action_text: str | None = "[invalid action]",
         **make_kwargs: Any,
     ) -> GymnasiumEnvironment:
         """Create a gymnasium environment.
@@ -1466,6 +1487,7 @@ class GymnasiumAdapter:
             extra_rewards=extra_rewards,
             prompts=merged_prompts or None,
             pure_step=pure_step,
+            invalid_action_text=invalid_action_text,
         )
 
     def get_default_system_prompt(self, name: str) -> None:

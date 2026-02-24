@@ -33,6 +33,7 @@ class Transition(Generic[HiddenT]):
     action: Any
     next_state: State[HiddenT]
     rewards: SignalBundle
+    resolved_action: str | None = None
     info: dict[str, Any] = field(default_factory=dict)
 
 
@@ -237,6 +238,7 @@ class Trajectory(Generic[HiddenT]):
                 action=t.action,
                 next_state=_strip_state(t.next_state),
                 rewards=t.rewards,
+                resolved_action=t.resolved_action,
                 info=t.info,
             )
             new_traj.add_transition(new_t)

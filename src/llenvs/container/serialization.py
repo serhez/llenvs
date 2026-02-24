@@ -345,13 +345,16 @@ def deserialize_action(data: dict[str, Any]) -> Action:
 
 
 def serialize_step_result(result: StepResult) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "next_state": serialize_state(result.next_state),
         "rewards": serialize_reward_bundle(result.rewards),
         "terminated": result.terminated,
         "truncated": result.truncated,
         "info": result.info,
     }
+    if result.resolved_action is not None:
+        d["resolved_action"] = result.resolved_action
+    return d
 
 
 def deserialize_step_result(data: dict[str, Any]) -> StepResult[OpaqueHidden]:
@@ -360,6 +363,7 @@ def deserialize_step_result(data: dict[str, Any]) -> StepResult[OpaqueHidden]:
         rewards=deserialize_reward_bundle(data["rewards"]),
         terminated=data.get("terminated", False),
         truncated=data.get("truncated", False),
+        resolved_action=data.get("resolved_action"),
         info=data.get("info", {}),
     )
 

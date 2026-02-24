@@ -432,6 +432,7 @@ class CraftaxEnvironment:
         answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        invalid_action_text: str | None = "[invalid action]",
         _jax_random: Any = None,
         _text_renderer: Any = None,
     ) -> None:
@@ -444,6 +445,7 @@ class CraftaxEnvironment:
         self._native_rewards: tuple[RewardFunction, ...] = (CraftaxReward(),)
         self._extra_rewards = extra_rewards
         self._prompts = dict(prompts) if prompts else {}
+        self._invalid_action_text = invalid_action_text
         self._text_renderer = _text_renderer
 
         # Resolve max_steps
@@ -542,8 +544,18 @@ class CraftaxEnvironment:
         state: State[CraftaxHidden],
         action: Action,
         error_msg: str,
+        *,
+        assistant_content_override: str | None = None,
     ) -> StepResult[CraftaxHidden]:
-        """Build a StepResult for an invalid action (wasted turn)."""
+        """Build a StepResult for an invalid action (wasted turn).
+
+        Args:
+            state: Current state.
+            action: The failed action.
+            error_msg: Error description for the observation.
+            assistant_content_override: If set, use this instead of
+                ``action.text`` as the assistant message content in history.
+        """
         next_step = state.hidden.episode_step + 1
         truncated = self._max_steps is not None and next_step >= self._max_steps
 
@@ -562,8 +574,13 @@ class CraftaxEnvironment:
         error_text = f"[Step {next_step}] Error: {error_msg}"
         state_content = ObservationContent(text=error_text)
 
+        assistant_content = (
+            assistant_content_override
+            if assistant_content_override is not None
+            else (action.text or "")
+        )
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action.text or ""},
+            {"role": "assistant", "content": assistant_content},
             {"role": "user", "content": error_text},
         )
         new_observation = Observation(
@@ -676,13 +693,23 @@ class CraftaxEnvironment:
         # Extract action text
         extracted, extraction_meta = self._answer_extractor.extract(action.text or "")
         if extracted is None:
-            return self._build_error_step(state, action, "Could not extract action from response.")
+            return self._build_error_step(
+                state,
+                action,
+                "Could not extract action from response.",
+                assistant_content_override=self._invalid_action_text,
+            )
 
         # Map to Craftax action
         try:
             action_idx = self._action_mapper.map(extracted)
         except ValueError as e:
-            return self._build_error_step(state, action, str(e))
+            return self._build_error_step(
+                state,
+                action,
+                str(e),
+                assistant_content_override=self._invalid_action_text,
+            )
 
         # Split RNG key
         keys = self._jax_random.split(state.hidden.rng_key)
@@ -768,6 +795,7 @@ class CraftaxEnvironment:
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
+            resolved_action=extracted,
             info={
                 "craftax_reward": float(reward),
                 "new_achievements": new_achievement_indices,
@@ -866,6 +894,7 @@ class CraftaxAdapter:
         answer_extractor: AnswerExtractor | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        invalid_action_text: str | None = "[invalid action]",
         **kwargs: Any,
     ) -> CraftaxEnvironment:
         """Create a Craftax environment.
@@ -935,6 +964,7 @@ class CraftaxAdapter:
             answer_extractor=answer_extractor,
             extra_rewards=extra_rewards,
             prompts=merged_prompts or None,
+            invalid_action_text=invalid_action_text,
             _text_renderer=text_renderer,
         )
 

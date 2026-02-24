@@ -324,16 +324,19 @@ class VerifiersSingleTurnEnvironment:
             "expected_answer": state.hidden.expected_answer,
         }
 
+        resolved: str | None = None
         if self._answer_extractor is not None:
             extracted, extraction_meta = self._answer_extractor.extract(action.text)
             info["extracted_answer"] = extracted
             info["extraction_metadata"] = extraction_meta
+            resolved = extracted
 
         return StepResult(
             next_state=next_state,
             rewards=rewards,
             terminated=True,
             truncated=False,
+            resolved_action=resolved,
             info=info,
         )
 

@@ -378,6 +378,7 @@ class IterativeEnvironment:
             rewards=combined,
             terminated=terminated,
             truncated=truncated,
+            resolved_action=submission,
             info={
                 "turn": new_turn,
                 "submission": submission,

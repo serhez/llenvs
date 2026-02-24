@@ -31,6 +31,7 @@ class StepResult(Generic[HiddenT]):
     rewards: SignalBundle
     terminated: bool = False
     truncated: bool = False
+    resolved_action: str | None = None
     info: dict[str, Any] = field(default_factory=dict)
 
     @property

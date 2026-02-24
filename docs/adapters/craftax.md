@@ -103,6 +103,24 @@ All Classic actions plus: diamond tools, armour, arrows, torches, rubies, sapphi
 
 Invalid actions (unrecognized name, out-of-range index) waste a turn: the step counter advances and an error message is returned, but no environment step occurs.
 
+The `invalid_action_text` parameter controls what appears as the assistant message in history for invalid actions:
+
+```python
+env = adapter.get_environment(
+    "craftax",
+    invalid_action_text="[invalid action]",  # default
+    num_tasks=50,
+)
+```
+
+- `"[invalid action]"` (default): Replaces the model's full response in history
+- `None`: Preserves the original model response verbatim
+- Any string: Custom placeholder text
+
+### Resolved Action
+
+On successful steps, `StepResult.resolved_action` contains the extracted action text (e.g., `"left"`, `"make_stone_pickaxe"`). On invalid action steps, it is `None`.
+
 ## Achievements
 
 Craftax tracks in-game achievements (crafting milestones, combat kills, exploration progress). These are available in the hidden state and step info:
