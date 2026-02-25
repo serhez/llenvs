@@ -65,6 +65,7 @@ class StepResult[HiddenT]:
     rewards: SignalBundle
     terminated: bool = False
     truncated: bool = False
+    extracted_action: str | None = None
     resolved_action: str | None = None
     info: dict[str, Any] = field(default_factory=dict)
 

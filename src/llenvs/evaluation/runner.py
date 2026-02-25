@@ -527,7 +527,11 @@ class TrajectoryRunner:
         if self.include_reasoning_in_history:
             return full_text
 
-        # Prefer first-class resolved_action field
+        # Prefer extracted_action (strips reasoning even on mapping failure)
+        if transition.extracted_action is not None:
+            return transition.extracted_action
+
+        # Then resolved_action (backward compat)
         if transition.resolved_action is not None:
             return transition.resolved_action
 
@@ -777,6 +781,7 @@ class TrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                extracted_action=step_result.extracted_action,
                 resolved_action=step_result.resolved_action,
                 info={
                     "generation": gen_info,
@@ -1043,6 +1048,7 @@ class TrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        extracted_action=step_result.extracted_action,
                         resolved_action=step_result.resolved_action,
                         info={
                             "generation": gen_info,
@@ -1162,6 +1168,7 @@ def _run_multi_lockstep(
                     action=action,
                     next_state=step_result.next_state,
                     rewards=step_result.rewards,
+                    extracted_action=step_result.extracted_action,
                     resolved_action=step_result.resolved_action,
                     info={
                         "generation": {
@@ -1581,6 +1588,7 @@ class SegmentedTrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                extracted_action=step_result.extracted_action,
                 resolved_action=step_result.resolved_action,
                 info={
                     "generation": {
@@ -1664,6 +1672,7 @@ class SegmentedTrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        extracted_action=step_result.extracted_action,
                         resolved_action=step_result.resolved_action,
                         info={
                             "replayed": True,
@@ -1690,6 +1699,7 @@ class SegmentedTrajectoryRunner:
                         action=pair_action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        extracted_action=step_result.extracted_action,
                         resolved_action=step_result.resolved_action,
                         info={
                             "replayed": True,
@@ -1754,6 +1764,7 @@ class SegmentedTrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                extracted_action=step_result.extracted_action,
                 resolved_action=step_result.resolved_action,
                 info=trans_info,
             )
@@ -1795,6 +1806,7 @@ class SegmentedTrajectoryRunner:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                extracted_action=step_result.extracted_action,
                 resolved_action=step_result.resolved_action,
                 info={"step": step_result.info},
             )
@@ -1827,6 +1839,7 @@ class SegmentedTrajectoryRunner:
                 action=Action(text=""),
                 next_state=finalize_result.next_state,
                 rewards=finalize_result.rewards,
+                extracted_action=finalize_result.extracted_action,
                 resolved_action=finalize_result.resolved_action,
                 info={"step": finalize_result.info, "finalize": True},
             )
@@ -2008,6 +2021,7 @@ class SegmentedTrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        extracted_action=step_result.extracted_action,
                         resolved_action=step_result.resolved_action,
                         info=trans_info,
                     )
@@ -2064,6 +2078,7 @@ class SegmentedTrajectoryRunner:
                         action=action,
                         next_state=step_result.next_state,
                         rewards=step_result.rewards,
+                        extracted_action=step_result.extracted_action,
                         resolved_action=step_result.resolved_action,
                         info={"step": step_result.info},
                     )
@@ -2111,6 +2126,7 @@ class SegmentedTrajectoryRunner:
                         action=Action(text=""),
                         next_state=finalize_result.next_state,
                         rewards=finalize_result.rewards,
+                        extracted_action=finalize_result.extracted_action,
                         resolved_action=finalize_result.resolved_action,
                         info={"step": finalize_result.info, "finalize": True},
                     )

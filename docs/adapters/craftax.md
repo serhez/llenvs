@@ -117,9 +117,13 @@ env = adapter.get_environment(
 - `None`: Preserves the original model response verbatim
 - Any string: Custom placeholder text
 
-### Resolved Action
+### Action Fields
 
-On successful steps, `StepResult.resolved_action` contains the extracted action text (e.g., `"left"`, `"make_stone_pickaxe"`). On invalid action steps, it is `None`.
+On successful steps, both action fields are populated:
+- `extracted_action`: after answer extraction (e.g., `"5"`)
+- `resolved_action`: the Craftax action name via `CraftaxActionMapper.format_action()` (e.g., `"do"`)
+
+The raw model generation is available on the `Action` object passed to `step()`. On extraction failure, both fields are `None`. On mapping failure (extraction succeeded but action invalid), `extracted_action` is set but `resolved_action` is `None`.
 
 ## Achievements
 

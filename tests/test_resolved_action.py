@@ -1,4 +1,7 @@
-"""Tests for the resolved_action field on StepResult and Transition."""
+"""Tests for the action fields on StepResult and Transition.
+
+Fields: extracted_action, resolved_action.
+"""
 
 import json
 
@@ -27,59 +30,87 @@ def _empty_bundle():
 
 
 # ===========================================================================
-# Core dataclasses
+# Core dataclasses — all three fields
 # ===========================================================================
 
 
-class TestStepResultResolvedAction:
-    """resolved_action field on StepResult."""
+class TestStepResultActionFields:
+    """extracted_action, resolved_action on StepResult."""
 
-    def test_default_none(self):
+    def test_all_default_none(self):
         sr = StepResult(
             next_state=_make_state(),
             rewards=_empty_bundle(),
         )
+        assert sr.extracted_action is None
         assert sr.resolved_action is None
 
-    def test_explicit_value(self):
+    def test_explicit_values(self):
         sr = StepResult(
             next_state=_make_state(),
             rewards=_empty_bundle(),
-            resolved_action="42",
+            extracted_action="0",
+            resolved_action="left",
         )
-        assert sr.resolved_action == "42"
+        assert sr.extracted_action == "0"
+        assert sr.resolved_action == "left"
 
     def test_frozen(self):
         sr = StepResult(
             next_state=_make_state(),
             rewards=_empty_bundle(),
-            resolved_action="x",
+            extracted_action="y",
+            resolved_action="z",
         )
         with pytest.raises(AttributeError):
-            sr.resolved_action = "y"  # type: ignore
+            sr.extracted_action = "b"  # type: ignore
+        with pytest.raises(AttributeError):
+            sr.resolved_action = "c"  # type: ignore
+
+    def test_extraction_failure(self):
+        """Extraction failure: both fields None."""
+        sr = StepResult(
+            next_state=_make_state(),
+            rewards=_empty_bundle(),
+        )
+        assert sr.extracted_action is None
+        assert sr.resolved_action is None
+
+    def test_mapping_failure(self):
+        """Mapping failure: extracted set, resolved None."""
+        sr = StepResult(
+            next_state=_make_state(),
+            rewards=_empty_bundle(),
+            extracted_action="999",
+        )
+        assert sr.extracted_action == "999"
+        assert sr.resolved_action is None
 
 
-class TestTransitionResolvedAction:
-    """resolved_action field on Transition."""
+class TestTransitionActionFields:
+    """extracted_action, resolved_action on Transition."""
 
-    def test_default_none(self):
+    def test_all_default_none(self):
         t = Transition(
             state=_make_state(0),
             action=Action(text="a"),
             next_state=_make_state(1),
             rewards=_empty_bundle(),
         )
+        assert t.extracted_action is None
         assert t.resolved_action is None
 
-    def test_explicit_value(self):
+    def test_explicit_values(self):
         t = Transition(
             state=_make_state(0),
             action=Action(text="a"),
             next_state=_make_state(1),
             rewards=_empty_bundle(),
-            resolved_action="extracted",
+            extracted_action="extracted",
+            resolved_action="resolved",
         )
-        assert t.resolved_action == "extracted"
+        assert t.extracted_action == "extracted"
+        assert t.resolved_action == "resolved"
 
     def test_frozen(self):
         t = Transition(
@@ -87,19 +118,20 @@ class TestTransitionResolvedAction:
             action=Action(text="a"),
             next_state=_make_state(1),
             rewards=_empty_bundle(),
-            resolved_action="x",
+            extracted_action="y",
+            resolved_action="z",
         )
         with pytest.raises(AttributeError):
-            t.resolved_action = "y"  # type: ignore
+            t.extracted_action = "b"  # type: ignore
 
 
 # ===========================================================================
-# strip_images preserves resolved_action
+# strip_images preserves all three fields
 # ===========================================================================
 
 
-class TestStripImagesPreservesResolvedAction:
-    def test_preserves_resolved_action(self):
+class TestStripImagesPreservesActionFields:
+    def test_preserves_all_fields(self):
         state = State(
             observation=Observation(
                 prompt="start",
@@ -122,16 +154,19 @@ class TestStripImagesPreservesResolvedAction:
                 metadata=StateMetadata(step=1, episode_id="ep"),
             ),
             rewards=_empty_bundle(),
-            resolved_action="clean answer",
+            extracted_action="extracted",
+            resolved_action="resolved",
         )
         traj.add_transition(t)
 
         stripped = traj.strip_images()
-        assert stripped.transitions[0].resolved_action == "clean answer"
+        st = stripped.transitions[0]
+        assert st.extracted_action == "extracted"
+        assert st.resolved_action == "resolved"
         # Images should be removed
-        assert stripped.transitions[0].state.observation.images == ()
+        assert st.state.observation.images == ()
 
-    def test_none_resolved_action_preserved(self):
+    def test_none_fields_preserved(self):
         state = _make_state(0)
         traj = Trajectory.create(state)
         t = Transition(
@@ -143,7 +178,9 @@ class TestStripImagesPreservesResolvedAction:
         traj.add_transition(t)
 
         stripped = traj.strip_images()
-        assert stripped.transitions[0].resolved_action is None
+        st = stripped.transitions[0]
+        assert st.extracted_action is None
+        assert st.resolved_action is None
 
 
 # ===========================================================================
@@ -151,8 +188,8 @@ class TestStripImagesPreservesResolvedAction:
 # ===========================================================================
 
 
-class TestSerializationResolvedAction:
-    def test_round_trip_with_resolved_action(self):
+class TestSerializationActionFields:
+    def test_round_trip_all_fields(self):
         from llenvs.container.serialization import (
             deserialize_step_result,
             serialize_step_result,
@@ -162,16 +199,19 @@ class TestSerializationResolvedAction:
             next_state=_make_state(1, is_terminal=True),
             rewards=SignalBundle.single(1.0, "correct", RewardType.OUTCOME),
             terminated=True,
+            extracted_action="42",
             resolved_action="42",
             info={"extracted_answer": "42"},
         )
         data = serialize_step_result(sr)
+        assert data["extracted_action"] == "42"
         assert data["resolved_action"] == "42"
 
         restored = deserialize_step_result(data)
+        assert restored.extracted_action == "42"
         assert restored.resolved_action == "42"
 
-    def test_round_trip_none_resolved_action(self):
+    def test_round_trip_none_fields(self):
         from llenvs.container.serialization import (
             deserialize_step_result,
             serialize_step_result,
@@ -182,10 +222,31 @@ class TestSerializationResolvedAction:
             rewards=_empty_bundle(),
         )
         data = serialize_step_result(sr)
-        # None should not be in serialized data
+        assert "extracted_action" not in data
         assert "resolved_action" not in data
 
         restored = deserialize_step_result(data)
+        assert restored.extracted_action is None
+        assert restored.resolved_action is None
+
+    def test_round_trip_partial_fields(self):
+        """Mapping failure: extracted set, resolved None."""
+        from llenvs.container.serialization import (
+            deserialize_step_result,
+            serialize_step_result,
+        )
+
+        sr = StepResult(
+            next_state=_make_state(1),
+            rewards=_empty_bundle(),
+            extracted_action="bad",
+        )
+        data = serialize_step_result(sr)
+        assert data["extracted_action"] == "bad"
+        assert "resolved_action" not in data
+
+        restored = deserialize_step_result(data)
+        assert restored.extracted_action == "bad"
         assert restored.resolved_action is None
 
     def test_json_round_trip(self):
@@ -197,30 +258,30 @@ class TestSerializationResolvedAction:
         sr = StepResult(
             next_state=_make_state(1),
             rewards=SignalBundle.single(0.5),
-            resolved_action="answer text",
+            extracted_action="answer",
+            resolved_action="answer",
         )
         data = serialize_step_result(sr)
         json_str = json.dumps(data)
         restored = deserialize_step_result(json.loads(json_str))
-        assert restored.resolved_action == "answer text"
+        assert restored.extracted_action == "answer"
+        assert restored.resolved_action == "answer"
 
 
 # ===========================================================================
-# Adapter tests: resolved_action set correctly
+# Adapter tests: all three fields set correctly
 # ===========================================================================
 
 
-class TestReasoningGymResolvedAction:
+class TestReasoningGymActionFields:
     @pytest.fixture
     def import_adapter(self):
         return pytest.importorskip("llenvs.adapters.reasoning_gym")
 
-    def test_step_sets_resolved_action(self, import_adapter):
-        """step() should set resolved_action to the extracted answer."""
+    def test_step_sets_all_fields(self, import_adapter):
         mod = import_adapter
         from unittest.mock import MagicMock
 
-        # Build a minimal environment
         mock_dataset = MagicMock()
         mock_dataset.__len__ = MagicMock(return_value=1)
         mock_dataset.__getitem__ = MagicMock(
@@ -237,10 +298,10 @@ class TestReasoningGymResolvedAction:
         )
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="The answer is \\boxed{2}"))
+        assert result.extracted_action == "2"
         assert result.resolved_action == "2"
 
-    def test_no_match_resolved_action_none(self, import_adapter):
-        """If extraction finds nothing, resolved_action is None."""
+    def test_no_match_all_fields(self, import_adapter):
         mod = import_adapter
         from unittest.mock import MagicMock
 
@@ -260,15 +321,16 @@ class TestReasoningGymResolvedAction:
         )
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="no boxed answer here"))
+        assert result.extracted_action is None
         assert result.resolved_action is None
 
 
-class TestHuggingFaceResolvedAction:
+class TestHuggingFaceActionFields:
     @pytest.fixture
     def import_adapter(self):
         return pytest.importorskip("llenvs.adapters.huggingface")
 
-    def test_step_sets_resolved_action(self, import_adapter):
+    def test_step_sets_all_fields(self, import_adapter):
         mod = import_adapter
         from unittest.mock import MagicMock
 
@@ -290,16 +352,17 @@ class TestHuggingFaceResolvedAction:
         )
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="\\boxed{42}"))
+        assert result.extracted_action == "42"
         assert result.resolved_action == "42"
 
 
-class TestGymnasiumResolvedAction:
+class TestGymnasiumActionFields:
     @pytest.fixture
     def import_adapter(self):
         return pytest.importorskip("llenvs.adapters.gymnasium")
 
-    def test_valid_action_sets_resolved_action(self, import_adapter):
-        """Successful step sets resolved_action to extracted text."""
+    def test_success_all_fields(self, import_adapter):
+        """Successful step: both fields set, resolved uses format_action."""
         gymnasium = pytest.importorskip("gymnasium")
         gym_env = gymnasium.make("FrozenLake-v1", is_slippery=False)
         env = import_adapter.GymnasiumEnvironment(
@@ -309,9 +372,11 @@ class TestGymnasiumResolvedAction:
         )
         state, _ = env.reset(seed=0)
         result = env.step(state, Action(text="down"))
+        assert result.extracted_action == "down"
         assert result.resolved_action == "down"
 
-    def test_extraction_failure_resolved_action_none(self, import_adapter):
+    def test_extraction_failure(self, import_adapter):
+        """Extraction fails: both fields None, metadata in info."""
         from llenvs.core.extraction import TagBasedExtractor
         from tests.test_gymnasium_adapter import MockDiscrete, MockGymEnv
 
@@ -326,18 +391,37 @@ class TestGymnasiumResolvedAction:
         )
         state, _ = env.reset()
         result = env.step(state, Action(text="no tag here"))
-        # Error step — resolved_action should be None
+        assert result.extracted_action is None
         assert result.resolved_action is None
+        assert "extraction_metadata" in result.info
+
+    def test_mapping_failure(self, import_adapter):
+        """Extraction OK but mapping fails: extracted set, resolved None."""
+        from llenvs.core.extraction import TagBasedExtractor
+        from tests.test_gymnasium_adapter import MockDiscrete, MockGymEnv
+
+        gym_env = MockGymEnv(
+            obs_space=MockDiscrete(4),
+            action_space=MockDiscrete(3),
+        )
+        env = import_adapter.GymnasiumEnvironment(
+            gym_env=gym_env,
+            answer_extractor=TagBasedExtractor(tag_name="action"),
+            num_tasks=1,
+        )
+        state, _ = env.reset()
+        result = env.step(state, Action(text="<action>999</action>"))
+        assert result.extracted_action == "999"
+        assert result.resolved_action is None
+        assert "extraction_metadata" in result.info
 
 
-class TestIterativeResolvedAction:
-    def test_resolved_action_is_submission(self):
-        """IterativeEnvironment sets resolved_action = submission."""
+class TestIterativeActionFields:
+    def test_all_fields_set(self):
         from unittest.mock import MagicMock
 
         from llenvs.adapters.iterative import IterativeEnvironment
 
-        # Build a mock inner environment
         inner_env = MagicMock()
         inner_env.spec = MagicMock()
         inner_env.spec.name = "test"
@@ -348,7 +432,6 @@ class TestIterativeResolvedAction:
         inner_env.available_tools = ()
         inner_env.prompts = {}
 
-        # Setup reset to return state with hidden that has expected_answer
         mock_hidden = MagicMock()
         mock_hidden.expected_answer = "42"
         mock_state = State(
@@ -378,21 +461,19 @@ class TestIterativeResolvedAction:
             solved_threshold=1.0,
         )
         state, _ = env.reset(options={"task_index": 0})
-        result = env.step(state, Action(text="My submission"))
+        action_text = "My submission"
+        result = env.step(state, Action(text=action_text))
 
-        # The submission is extracted from the action text
-        # It should be set as resolved_action
-        assert result.info["submission"] is not None
+        assert result.extracted_action == result.info["submission"]
         assert result.resolved_action == result.info["submission"]
 
 
-class TestVerifiersResolvedAction:
+class TestVerifiersActionFields:
     @pytest.fixture
     def import_adapter(self):
         return pytest.importorskip("llenvs.adapters.verifiers")
 
     def test_with_extractor(self, import_adapter):
-        """When extractor is configured, resolved_action is set."""
         from unittest.mock import MagicMock
 
         from llenvs.core.extraction import BoxedExtractor
@@ -409,10 +490,10 @@ class TestVerifiersResolvedAction:
         )
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="\\boxed{42}"))
+        assert result.extracted_action == "42"
         assert result.resolved_action == "42"
 
     def test_without_extractor(self, import_adapter):
-        """Without extractor, resolved_action is None."""
         from unittest.mock import MagicMock
 
         mod = import_adapter
@@ -427,6 +508,7 @@ class TestVerifiersResolvedAction:
         )
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="some response"))
+        assert result.extracted_action is None
         assert result.resolved_action is None
 
 
@@ -436,7 +518,7 @@ class TestVerifiersResolvedAction:
 
 
 class TestResolveActionText:
-    """Tests for TrajectoryRunner._resolve_action_text preferring resolved_action."""
+    """Tests for TrajectoryRunner._resolve_action_text priority."""
 
     def _make_runner(self):
         from unittest.mock import MagicMock
@@ -454,17 +536,30 @@ class TestResolveActionText:
         runner.log = None
         return runner
 
-    def test_prefers_resolved_action(self):
+    def test_prefers_extracted_action(self):
+        """extracted_action is highest priority (strips reasoning even on mapping failure)."""
         runner = self._make_runner()
         t = Transition(
             state=_make_state(0),
             action=Action(text="<think>long reasoning</think>The answer is 42"),
             next_state=_make_state(1),
             rewards=_empty_bundle(),
-            resolved_action="42",
-            info={"step": {"extracted_answer": "42"}},
+            extracted_action="42",
+            resolved_action="left",
         )
         assert runner._resolve_action_text(t) == "42"
+
+    def test_falls_back_to_resolved_action(self):
+        """When extracted is None, falls back to resolved_action."""
+        runner = self._make_runner()
+        t = Transition(
+            state=_make_state(0),
+            action=Action(text="<think>reasoning</think>answer"),
+            next_state=_make_state(1),
+            rewards=_empty_bundle(),
+            resolved_action="answer",
+        )
+        assert runner._resolve_action_text(t) == "answer"
 
     def test_falls_back_to_step_info(self):
         runner = self._make_runner()
@@ -473,7 +568,7 @@ class TestResolveActionText:
             action=Action(text="<think>reasoning</think>answer"),
             next_state=_make_state(1),
             rewards=_empty_bundle(),
-            # resolved_action is None (default)
+            # both extracted and resolved are None
             info={"step": {"extracted_answer": "answer"}},
         )
         assert runner._resolve_action_text(t) == "answer"
@@ -486,14 +581,14 @@ class TestResolveActionText:
             action=Action(text="<think>reasoning</think>42"),
             next_state=_make_state(1),
             rewards=_empty_bundle(),
+            extracted_action="42",
             resolved_action="42",
         )
-        # When include_reasoning_in_history=True, full text is returned
         assert runner._resolve_action_text(t) == "<think>reasoning</think>42"
 
 
 # ===========================================================================
-# Craftax invalid_action_text
+# Craftax invalid_action_text + action fields
 # ===========================================================================
 
 
@@ -562,14 +657,105 @@ class TestCraftaxInvalidActionText:
         assistant_msg = result.next_state.observation.messages[-2]
         assert assistant_msg["content"] == "raw model output"
 
-    def test_resolved_action_none_on_error(self, import_adapter):
+    def test_extraction_failure_fields(self, import_adapter):
+        """Extraction failure: both fields None."""
         env = self._make_env(import_adapter)
         state, _ = env.reset()
         result = env.step(state, Action(text="no tag here"))
+        assert result.extracted_action is None
         assert result.resolved_action is None
+        assert "extraction_metadata" in result.info
 
-    def test_resolved_action_set_on_valid(self, import_adapter):
+    def test_mapping_failure_fields(self, import_adapter):
+        """Mapping failure: extracted set, resolved None."""
+        env = self._make_env(import_adapter)
+        state, _ = env.reset()
+        result = env.step(state, Action(text="<action>999</action>"))
+        assert result.extracted_action == "999"
+        assert result.resolved_action is None
+        assert "extraction_metadata" in result.info
+
+    def test_success_all_fields(self, import_adapter):
+        """Success: both fields set, resolved uses format_action."""
         env = self._make_env(import_adapter)
         state, _ = env.reset()
         result = env.step(state, Action(text="<action>left</action>"))
-        assert result.resolved_action == "left"
+        assert result.extracted_action == "left"
+        # format_action on CraftaxActionMapper: index 5 = "do" in classic, but "left" maps to index
+        # which then gets formatted back via format_action
+        assert result.resolved_action is not None
+
+
+# ===========================================================================
+# format_action tests
+# ===========================================================================
+
+
+class TestAutoActionMapperFormatAction:
+    @pytest.fixture
+    def import_adapter(self):
+        return pytest.importorskip("llenvs.adapters.gymnasium")
+
+    def test_discrete_with_names(self, import_adapter):
+        import gymnasium.spaces as spaces
+
+        mapper = import_adapter.AutoActionMapper(
+            spaces.Discrete(3),
+            action_names={0: "left", 1: "right", 2: "up"},
+        )
+        assert mapper.format_action(0) == "left"
+        assert mapper.format_action(1) == "right"
+        assert mapper.format_action(2) == "up"
+
+    def test_discrete_without_names(self, import_adapter):
+        import gymnasium.spaces as spaces
+
+        mapper = import_adapter.AutoActionMapper(spaces.Discrete(5))
+        assert mapper.format_action(0) == "0"
+        assert mapper.format_action(4) == "4"
+
+    def test_box(self, import_adapter):
+        import gymnasium.spaces as spaces
+        import numpy as np
+
+        mapper = import_adapter.AutoActionMapper(spaces.Box(low=-1, high=1, shape=(2,)))
+        result = mapper.format_action(np.array([0.5, -0.3]))
+        assert "0.5" in result
+        assert "-0.3" in result
+
+    def test_multi_discrete(self, import_adapter):
+        import gymnasium.spaces as spaces
+        import numpy as np
+
+        mapper = import_adapter.AutoActionMapper(spaces.MultiDiscrete([3, 4]))
+        result = mapper.format_action(np.array([1, 2]))
+        assert result == "1, 2"
+
+    def test_multi_binary(self, import_adapter):
+        import gymnasium.spaces as spaces
+        import numpy as np
+
+        mapper = import_adapter.AutoActionMapper(spaces.MultiBinary(3))
+        result = mapper.format_action(np.array([1, 0, 1]))
+        assert result == "1, 0, 1"
+
+    def test_text(self, import_adapter):
+        import gymnasium.spaces as spaces
+
+        mapper = import_adapter.AutoActionMapper(spaces.Text(min_length=1, max_length=10))
+        assert mapper.format_action("hello") == "hello"
+
+
+class TestCraftaxActionMapperFormatAction:
+    @pytest.fixture
+    def import_adapter(self):
+        return pytest.importorskip("llenvs.adapters.craftax")
+
+    def test_known_action(self, import_adapter):
+        mapper = import_adapter.CraftaxActionMapper(is_classic=True)
+        assert mapper.format_action(0) == "noop"
+        assert mapper.format_action(5) == "do"
+
+    def test_unknown_index(self, import_adapter):
+        mapper = import_adapter.CraftaxActionMapper(is_classic=True)
+        assert mapper.format_action(999) == "999"

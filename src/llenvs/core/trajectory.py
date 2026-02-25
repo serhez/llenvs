@@ -33,6 +33,7 @@ class Transition[HiddenT]:
     action: Any
     next_state: State[HiddenT]
     rewards: SignalBundle
+    extracted_action: str | None = None
     resolved_action: str | None = None
     info: dict[str, Any] = field(default_factory=dict)
 
@@ -238,6 +239,7 @@ class Trajectory[HiddenT]:
                 action=t.action,
                 next_state=_strip_state(t.next_state),
                 rewards=t.rewards,
+                extracted_action=t.extracted_action,
                 resolved_action=t.resolved_action,
                 info=t.info,
             )

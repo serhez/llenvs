@@ -471,6 +471,7 @@ class HuggingFaceEnvironment:
             rewards=rewards,
             terminated=True,
             truncated=False,
+            extracted_action=extracted,
             resolved_action=extracted,
             info={
                 "extracted_answer": extracted,

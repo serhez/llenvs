@@ -273,6 +273,7 @@ class ReasoningGymEnvironment:
             rewards=rewards,
             terminated=True,  # Single-turn, always terminates
             truncated=False,
+            extracted_action=extracted,
             resolved_action=extracted,
             info={
                 "extracted_answer": extracted,

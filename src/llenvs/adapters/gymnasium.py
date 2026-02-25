@@ -103,6 +103,10 @@ class ActionMapper(Protocol):
         """Describe valid actions for the initial prompt."""
         ...
 
+    def format_action(self, action: Any) -> str:
+        """Format a gymnasium action value as a human-readable string."""
+        ...
+
 
 # =============================================================================
 # Auto Observation Mapper
@@ -432,6 +436,26 @@ class AutoActionMapper:
             return f"Enter {self._space.n} binary values (0 or 1)."
 
         return f"Action space: {type(self._space).__name__}"
+
+    def format_action(self, action: Any) -> str:
+        spaces = self._spaces
+
+        if isinstance(self._space, spaces.Discrete):
+            name = self._action_names.get(int(action))
+            return name if name is not None else str(int(action))
+
+        if isinstance(self._space, spaces.Text):
+            return str(action)
+
+        if isinstance(self._space, spaces.Box):
+            vals = np.asarray(action).flatten()
+            return ", ".join(f"{v:.4g}" for v in vals)
+
+        if isinstance(self._space, (spaces.MultiDiscrete, spaces.MultiBinary)):
+            vals = np.asarray(action).flatten()
+            return ", ".join(str(int(v)) for v in vals)
+
+        return str(action)
 
 
 # =============================================================================
@@ -934,6 +958,8 @@ class GymnasiumEnvironment:
         error_msg: str,
         *,
         assistant_content_override: str | None = None,
+        extracted_action: str | None = None,
+        extraction_metadata: dict[str, Any] | None = None,
     ) -> StepResult[GymnasiumHidden]:
         """Build a StepResult for an invalid/failed action (wasted turn).
 
@@ -943,6 +969,8 @@ class GymnasiumEnvironment:
             error_msg: Error description for the observation.
             assistant_content_override: If set, use this instead of
                 ``action.text`` as the assistant message content in history.
+            extracted_action: Extracted action text (None if extraction failed).
+            extraction_metadata: Metadata from the extraction step.
         """
         next_step = state.hidden.episode_step + 1
         meta_step = state.metadata.step + 1
@@ -1007,12 +1035,17 @@ class GymnasiumEnvironment:
 
         rewards = self.compute_rewards(state, action, next_state)
 
+        error_info: dict[str, Any] = {"error": error_msg}
+        if extraction_metadata is not None:
+            error_info["extraction_metadata"] = extraction_metadata
+
         return StepResult(
             next_state=next_state,
             rewards=rewards,
             terminated=False,
             truncated=truncated,
-            info={"error": error_msg},
+            extracted_action=extracted_action,
+            info=error_info,
         )
 
     def reset(
@@ -1127,6 +1160,7 @@ class GymnasiumEnvironment:
                 action,
                 "Could not extract action from response.",
                 assistant_content_override=self._invalid_action_text,
+                extraction_metadata=extraction_meta,
             )
             if self._state_tracker is not None:
                 self._state_tracker.track(result.next_state)
@@ -1141,6 +1175,8 @@ class GymnasiumEnvironment:
                 action,
                 str(e),
                 assistant_content_override=self._invalid_action_text,
+                extracted_action=extracted,
+                extraction_metadata=extraction_meta,
             )
             if self._state_tracker is not None:
                 self._state_tracker.track(result.next_state)
@@ -1219,12 +1255,14 @@ class GymnasiumEnvironment:
         if self._state_tracker is not None:
             self._state_tracker.track(next_state)
 
+        resolved_str = self._action_mapper.format_action(gym_action)
         return StepResult(
             next_state=next_state,
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
-            resolved_action=extracted,
+            extracted_action=extracted,
+            resolved_action=resolved_str,
             info={
                 "gym_reward": reward,
                 "gym_info": info,

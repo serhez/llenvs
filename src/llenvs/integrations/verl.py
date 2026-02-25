@@ -143,6 +143,7 @@ class LLEnvsAgentLoop:
                 action=action,
                 next_state=step_result.next_state,
                 rewards=step_result.rewards,
+                extracted_action=step_result.extracted_action,
                 resolved_action=step_result.resolved_action,
             )
             trajectory.add_transition(transition)

@@ -352,6 +352,8 @@ def serialize_step_result(result: StepResult) -> dict[str, Any]:
         "truncated": result.truncated,
         "info": result.info,
     }
+    if result.extracted_action is not None:
+        d["extracted_action"] = result.extracted_action
     if result.resolved_action is not None:
         d["resolved_action"] = result.resolved_action
     return d
@@ -363,6 +365,7 @@ def deserialize_step_result(data: dict[str, Any]) -> StepResult[OpaqueHidden]:
         rewards=deserialize_reward_bundle(data["rewards"]),
         terminated=data.get("terminated", False),
         truncated=data.get("truncated", False),
+        extracted_action=data.get("extracted_action"),
         resolved_action=data.get("resolved_action"),
         info=data.get("info", {}),
     )

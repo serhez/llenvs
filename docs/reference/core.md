@@ -113,7 +113,8 @@ class StepResult(Generic[HiddenT]):
     rewards: SignalBundle
     terminated: bool  # Episode ended naturally
     truncated: bool   # Episode cut off (max steps, etc.)
-    resolved_action: str | None  # Effective action after extraction (None = no extraction)
+    extracted_action: str | None   # After extractors/cleaners
+    resolved_action: str | None    # Env's native action as string (None if mapping failed)
     info: dict[str, Any]
 
     @property
@@ -121,7 +122,20 @@ class StepResult(Generic[HiddenT]):
         return self.terminated or self.truncated
 ```
 
-`resolved_action` is the effective action text after answer extraction — what the environment actually understood from the model's response. Set by extracting adapters (reasoning_gym, huggingface, gymnasium, craftax, gem, verifiers, iterative); `None` for non-extracting adapters (webshop, agentgym, dialogue, etc.) or when extraction fails. When `None`, consumers fall back to `action.text`.
+Action fields track the model's response through the extraction pipeline:
+
+| Field | Meaning | Example (FrozenLake) |
+|-------|---------|---------------------|
+| `extracted_action` | After extractors/cleaners | `"0"` |
+| `resolved_action` | Env's native action as string | `"left"` |
+
+The raw model generation is always available on `transition.action.text` (or the `Action` passed to `step()`).
+
+- **Extraction-only adapters** (reasoning_gym, huggingface, gem, verifiers, iterative): `extracted_action == resolved_action`.
+- **Extraction + mapping adapters** (gymnasium, craftax): `resolved_action` uses `ActionMapper.format_action()` and differs from `extracted_action` when the env maps to named actions.
+- **Non-extracting adapters** (dialogue, agentgym, lmrl, openenv, tau2): both `extracted_action` and `resolved_action` are `None`.
+- On extraction failure, `extracted_action` and `resolved_action` are both `None`.
+- On mapping failure (extraction succeeded but action invalid), `extracted_action` is set but `resolved_action` is `None`.
 
 ### EnvironmentSpec
 
@@ -304,7 +318,8 @@ class Transition(Generic[HiddenT]):
     action: Action
     next_state: State[HiddenT]
     rewards: SignalBundle
-    resolved_action: str | None  # Propagated from StepResult.resolved_action
+    extracted_action: str | None   # Propagated from StepResult
+    resolved_action: str | None    # Propagated from StepResult
     info: dict[str, Any]
 ```
 

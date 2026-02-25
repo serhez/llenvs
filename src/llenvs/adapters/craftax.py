@@ -142,6 +142,9 @@ class CraftaxActionMapper:
         entries = "\n".join(f"  {i}: {name}" for i, name in sorted(self._actions.items()))
         return f"Choose one action by name or number:\n{entries}"
 
+    def format_action(self, action: int) -> str:
+        return self._actions.get(action, str(action))
+
 
 # =============================================================================
 # Observation rendering
@@ -554,6 +557,8 @@ class CraftaxEnvironment:
         error_msg: str,
         *,
         assistant_content_override: str | None = None,
+        extracted_action: str | None = None,
+        extraction_metadata: dict[str, Any] | None = None,
     ) -> StepResult[CraftaxHidden]:
         """Build a StepResult for an invalid action (wasted turn).
 
@@ -563,6 +568,8 @@ class CraftaxEnvironment:
             error_msg: Error description for the observation.
             assistant_content_override: If set, use this instead of
                 ``action.text`` as the assistant message content in history.
+            extracted_action: Extracted action text (None if extraction failed).
+            extraction_metadata: Metadata from the extraction step.
         """
         next_step = state.hidden.episode_step + 1
         truncated = self._max_steps is not None and next_step >= self._max_steps
@@ -619,12 +626,17 @@ class CraftaxEnvironment:
 
         rewards = self.compute_rewards(state, action, next_state)
 
+        error_info: dict[str, Any] = {"error": error_msg}
+        if extraction_metadata is not None:
+            error_info["extraction_metadata"] = extraction_metadata
+
         return StepResult(
             next_state=next_state,
             rewards=rewards,
             terminated=False,
             truncated=truncated,
-            info={"error": error_msg},
+            extracted_action=extracted_action,
+            info=error_info,
         )
 
     def reset(
@@ -713,6 +725,7 @@ class CraftaxEnvironment:
                 action,
                 "Could not extract action from response.",
                 assistant_content_override=self._invalid_action_text,
+                extraction_metadata=extraction_meta,
             )
 
         # Map to Craftax action
@@ -724,6 +737,8 @@ class CraftaxEnvironment:
                 action,
                 str(e),
                 assistant_content_override=self._invalid_action_text,
+                extracted_action=extracted,
+                extraction_metadata=extraction_meta,
             )
 
         # Split RNG key
@@ -806,12 +821,14 @@ class CraftaxEnvironment:
 
         rewards = self.compute_rewards(state, action, next_state)
 
+        resolved_str = self._action_mapper.format_action(action_idx)
         return StepResult(
             next_state=next_state,
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
-            resolved_action=extracted,
+            extracted_action=extracted,
+            resolved_action=resolved_str,
             info={
                 "craftax_reward": float(reward),
                 "new_achievements": new_achievement_indices,

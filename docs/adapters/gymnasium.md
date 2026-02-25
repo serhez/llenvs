@@ -249,9 +249,13 @@ env = GymnasiumEnvironment(
 )
 ```
 
-### Resolved Action
+### Action Fields
 
-On successful steps, `StepResult.resolved_action` contains the extracted action text (e.g., `"left"`, `"2"`). On invalid action steps (extraction or mapping failure), it is `None`.
+On successful steps, both action fields are populated:
+- `extracted_action`: after answer extraction (e.g., `"0"`)
+- `resolved_action`: the gymnasium action formatted via `ActionMapper.format_action()` (e.g., `"left"`)
+
+The raw model generation is available on the `Action` object passed to `step()`. On extraction failure, both fields are `None`. On mapping failure (extraction succeeded but action invalid), `extracted_action` is set but `resolved_action` is `None`.
 
 ### Using AnswerExtractor
 
