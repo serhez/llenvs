@@ -407,6 +407,7 @@ class AnswerExtractor(Protocol):
 | `PatternAnswerExtractor` | `pattern_answer` | "the answer is X", "therefore X", "= X" | Natural language |
 | `CompositeExtractor` | - | Try multiple extractors in order | - |
 | `RawGenerationExtractor` | `raw` | Return full response | - |
+| `TailExtractor` | `tail` | Return last N characters | - |
 | `NativeExtractor` | - | Wraps a third-party extraction function | - |
 
 All extractors follow the **last match wins** convention when multiple matches exist.

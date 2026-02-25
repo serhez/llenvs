@@ -253,6 +253,34 @@ class RawGenerationExtractor:
         return content, {"found": True, "format": "raw", "is_full_response": True}
 
 
+class TailExtractor:
+    """Return the last N characters of the response.
+
+    Always succeeds. Useful as a final fallback in a CompositeExtractor
+    chain to constrain answer length when structured extractors fail.
+    """
+
+    def __init__(self, max_chars: int = 256, strip_whitespace: bool = True) -> None:
+        self.max_chars = max_chars
+        self.strip_whitespace = strip_whitespace
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Return the last max_chars characters of the response."""
+        content = response
+        if self.strip_whitespace:
+            content = content.strip()
+        truncated = len(content) > self.max_chars
+        if truncated:
+            content = content[-self.max_chars :]
+        return content, {
+            "found": True,
+            "format": "tail",
+            "truncated": truncated,
+            "max_chars": self.max_chars,
+            "original_length": len(response),
+        }
+
+
 @dataclass
 class BoxedExtractor:
     r"""Extract answers from LaTeX \boxed{...} format.

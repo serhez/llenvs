@@ -456,9 +456,7 @@ class TestSoftBudgetTransition:
 
     def test_soft_budget_ratio_stored(self):
         """soft_budget_ratio is stored on the processor."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         assert proc._soft_budget_ratio == 0.9
 
     def test_constructor_soft_budget_ratio(self):
@@ -469,9 +467,7 @@ class TestSoftBudgetTransition:
 
     def test_no_boost_before_soft_threshold(self):
         """Logits unchanged before soft threshold (ratio * budget)."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         logits = [1.0] * 200
         # At count=80, threshold=90 → no boost
         result = proc._apply_budget(True, 80, logits)
@@ -479,9 +475,7 @@ class TestSoftBudgetTransition:
 
     def test_boost_after_soft_threshold(self):
         """</think> logit is boosted between soft threshold and hard budget."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         logits = [1.0] * 200
         # At count=95, threshold=90, budget=100 → should boost </think>
         result = proc._apply_budget(True, 95, logits)
@@ -491,9 +485,7 @@ class TestSoftBudgetTransition:
 
     def test_boost_increases_linearly(self):
         """Boost grows linearly from threshold to budget."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         # Threshold = 90, budget = 100
         # At count=90: progress=0.0 → no boost
         logits_90 = [1.0] * 200
@@ -511,9 +503,7 @@ class TestSoftBudgetTransition:
 
     def test_hard_cutoff_still_works_with_soft(self):
         """At budget, hard cutoff still forces </think> even with soft ratio."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         logits = [1.0] * 200
         result = proc._apply_budget(True, 100, logits)
         assert result[101] == 0.0
@@ -521,18 +511,14 @@ class TestSoftBudgetTransition:
 
     def test_soft_budget_no_effect_when_not_thinking(self):
         """Soft budget has no effect when not in a thinking block."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         logits = [1.0] * 200
         result = proc._apply_budget(False, 95, logits)
         assert result[101] == 1.0  # unchanged
 
     def test_soft_budget_via_vllm_processor(self):
         """Soft budget works through the vllm_processor interface."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=10, soft_budget_ratio=0.8
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=10, soft_budget_ratio=0.8)
         # threshold=8, at count=9 (in soft zone)
         # <think>=100 then 9 tokens
         logits = [1.0] * 200
@@ -541,9 +527,7 @@ class TestSoftBudgetTransition:
 
     def test_max_boost_capped_at_5(self):
         """Maximum boost is approximately 5.0."""
-        proc = ThinkingBudgetProcessor.from_token_ids(
-            100, 101, budget=100, soft_budget_ratio=0.9
-        )
+        proc = ThinkingBudgetProcessor.from_token_ids(100, 101, budget=100, soft_budget_ratio=0.9)
         logits = [1.0] * 200
         # At count=99, progress = 9/10 = 0.9 → boost = 0.9 * 5.0 = 4.5
         proc._apply_budget(True, 99, logits)

@@ -313,7 +313,7 @@ environments:
       - type: numeric
 ```
 
-Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `raw`, `native`.
+Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `raw`, `tail`, `native`.
 
 The `native` type uses the adapter's built-in extraction (only supported by `reasoning_gym`).
 

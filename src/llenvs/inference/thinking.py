@@ -252,7 +252,9 @@ def make_v1_thinking_processor_class() -> type | None:
                         f"thinking_budget_soft_ratio must be a float, got {type(soft_ratio).__name__}"
                     )
                 if not (0 < soft_ratio < 1):
-                    raise ValueError("thinking_budget_soft_ratio must be between 0 and 1 (exclusive)")
+                    raise ValueError(
+                        "thinking_budget_soft_ratio must be between 0 and 1 (exclusive)"
+                    )
 
         def is_argmax_invariant(self) -> bool:
             return False

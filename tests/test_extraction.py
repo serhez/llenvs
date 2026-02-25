@@ -8,6 +8,7 @@ from llenvs.core.extraction import (
     MultipleChoiceExtractor,
     CompositeExtractor,
     RawGenerationExtractor,
+    TailExtractor,
     BoxedExtractor,
     NumericExtractor,
     LastLineExtractor,
@@ -347,6 +348,100 @@ class TestRawGenerationExtractor:
 
         assert answer == "No tags, just text"
         assert meta["extractor_type"] == "RawGenerationExtractor"
+
+
+class TestTailExtractor:
+    """Tests for TailExtractor."""
+
+    def test_short_response_no_truncation(self):
+        """Short response returned as-is without truncation."""
+        extractor = TailExtractor(max_chars=256)
+        answer, meta = extractor.extract("short answer")
+        assert answer == "short answer"
+        assert meta["found"] is True
+        assert meta["truncated"] is False
+
+    def test_long_response_truncated(self):
+        """Long response truncated to last N chars."""
+        extractor = TailExtractor(max_chars=10)
+        answer, meta = extractor.extract("a" * 100)
+        assert answer == "a" * 10
+        assert meta["truncated"] is True
+
+    def test_strip_whitespace_default(self):
+        """Default strips whitespace before truncating."""
+        extractor = TailExtractor(max_chars=256)
+        answer, meta = extractor.extract("  hello  ")
+        assert answer == "hello"
+        assert meta["truncated"] is False
+
+    def test_strip_whitespace_false(self):
+        """strip_whitespace=False preserves whitespace."""
+        extractor = TailExtractor(max_chars=256, strip_whitespace=False)
+        answer, _ = extractor.extract("  hello  ")
+        assert answer == "  hello  "
+
+    def test_empty_response(self):
+        """Empty response returns empty string (always succeeds)."""
+        extractor = TailExtractor(max_chars=256)
+        answer, meta = extractor.extract("")
+        assert answer == ""
+        assert meta["found"] is True
+        assert meta["truncated"] is False
+
+    def test_exact_boundary(self):
+        """Response length == max_chars is not truncated."""
+        extractor = TailExtractor(max_chars=5)
+        answer, meta = extractor.extract("abcde")
+        assert answer == "abcde"
+        assert meta["truncated"] is False
+
+    def test_one_over_boundary(self):
+        """Response one char over max_chars is truncated."""
+        extractor = TailExtractor(max_chars=5)
+        answer, meta = extractor.extract("abcdef")
+        assert answer == "bcdef"
+        assert meta["truncated"] is True
+
+    def test_metadata_correctness(self):
+        """Metadata contains truncated, max_chars, original_length."""
+        extractor = TailExtractor(max_chars=10)
+        _, meta = extractor.extract("a" * 50)
+        assert meta["truncated"] is True
+        assert meta["max_chars"] == 10
+        assert meta["original_length"] == 50
+        assert meta["format"] == "tail"
+
+    def test_original_length_is_raw(self):
+        """original_length reflects raw response before stripping."""
+        extractor = TailExtractor(max_chars=256)
+        _, meta = extractor.extract("  hi  ")
+        assert meta["original_length"] == 6  # includes whitespace
+
+    def test_in_composite_as_fallback(self):
+        """Works as bounded fallback in CompositeExtractor chain."""
+        extractor = CompositeExtractor(
+            extractors=[
+                TagBasedExtractor(),
+                TailExtractor(max_chars=20),
+            ]
+        )
+        long_text = "No tags here, just a long response text"
+        answer, meta = extractor.extract(long_text)
+        assert answer == long_text[-20:]
+        assert len(answer) == 20
+        assert meta["extractor_type"] == "TailExtractor"
+
+    def test_registry_roundtrip(self):
+        """Registry create with kwargs."""
+        from llenvs.core.registry import answer_extractor_registry
+
+        extractor = answer_extractor_registry.create("tail", max_chars=100)
+        assert isinstance(extractor, TailExtractor)
+        assert extractor.max_chars == 100
+        answer, meta = extractor.extract("x" * 200)
+        assert len(answer) == 100
+        assert meta["truncated"] is True
 
 
 # =========================================================================
