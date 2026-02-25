@@ -4,18 +4,18 @@ Handles serialization of evaluation results to JSON and other formats.
 """
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from llenvs.evaluation.runner import BatchResult, TrajectoryResult
 from llenvs.evaluation.metrics import (
-    MetricsBundle,
-    ContinuousStatistics,
     BinaryStatistics,
+    ContinuousStatistics,
+    MetricsBundle,
     compute_all_metrics,
 )
+from llenvs.evaluation.runner import BatchResult, TrajectoryResult
 
 
 @dataclass

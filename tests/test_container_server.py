@@ -5,18 +5,17 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from http.client import HTTPConnection
 from typing import Any
 
 import pytest
 
+from llenvs.container.server import EnvironmentServer
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import SignalBundle, Signal, RewardType
+from llenvs.core.reward import RewardType, SignalBundle
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import ToolDefinition, ToolParameter, ToolParameterType
-from llenvs.container.server import EnvironmentServer
-
 
 # ---------------------------------------------------------------------------
 # Mock environment
@@ -120,7 +119,7 @@ class MockEnvironment:
 def server_url():
     """Start a server in a thread, yield its URL, then shut down."""
     env = MockEnvironment(size=5)
-    srv = EnvironmentServer(env, host="127.0.0.1", port=0)
+    EnvironmentServer(env, host="127.0.0.1", port=0)
 
     # Use port 0 to get a free port — need to start manually
     from http.server import HTTPServer

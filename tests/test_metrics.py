@@ -1,25 +1,26 @@
 """Tests for metric computation."""
 
 import pytest
-from llenvs.core.state import State, StateMetadata, Observation, Action
+
+from llenvs.core.reward import RewardType, Signal, SignalBundle
+from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.trajectory import Trajectory, Transition
-from llenvs.core.reward import SignalBundle, Signal, RewardType
-from llenvs.evaluation.runner import TrajectoryResult, BatchResult
 from llenvs.evaluation.metrics import (
-    ContinuousStatistics,
     BinaryStatistics,
+    ContinuousStatistics,
     Metric,
     MetricsBundle,
-    compute_continuous_statistics,
-    compute_binary_statistics,
-    compute_action_reward,
-    compute_trajectory_reward,
-    compute_accuracy,
-    compute_format_compliance,
-    compute_all_metrics,
-    aggregate_continuous_metrics,
     aggregate_binary_metrics,
+    aggregate_continuous_metrics,
+    compute_accuracy,
+    compute_action_reward,
+    compute_all_metrics,
+    compute_binary_statistics,
+    compute_continuous_statistics,
+    compute_format_compliance,
+    compute_trajectory_reward,
 )
+from llenvs.evaluation.runner import BatchResult, TrajectoryResult
 
 
 def make_state(

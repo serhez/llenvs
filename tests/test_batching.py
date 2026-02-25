@@ -3,31 +3,26 @@
 from __future__ import annotations
 
 import asyncio
-import time
-from dataclasses import dataclass, field
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import SignalBundle
+from llenvs.core.segmentation import LineSegmenter, TokenSegmenter
+from llenvs.core.segmented_environment import SegmentedEnvironment
 from llenvs.core.state import (
-    Action,
     Observation,
     State,
     StateMetadata,
 )
 from llenvs.core.tools import ToolDefinition
-from llenvs.core.segmentation import LineSegmenter, TokenSegmenter
-from llenvs.core.segmented_environment import SegmentedEnvironment
 from llenvs.evaluation.continuation import (
     BoundaryContinuationStrategy,
     SegmentContext,
     TokenContinuationStrategy,
 )
 from llenvs.evaluation.runner import (
-    BatchResult,
     COMPLETE,
     ForceAction,
     MultiEvalEntry,
@@ -43,7 +38,6 @@ from llenvs.inference.protocol import (
     SamplingParams,
     StopReason,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

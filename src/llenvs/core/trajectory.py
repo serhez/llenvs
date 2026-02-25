@@ -7,18 +7,18 @@ Supports:
 - Querying states at any step
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
 import uuid
+from dataclasses import dataclass, field
+from typing import Any, TypeVar
 
-from llenvs.core.state import Action, State
 from llenvs.core.reward import SignalBundle
+from llenvs.core.state import State
 
 HiddenT = TypeVar("HiddenT")
 
 
 @dataclass(frozen=True)
-class Transition(Generic[HiddenT]):
+class Transition[HiddenT]:
     """A single state-action-reward transition.
 
     Attributes:
@@ -38,7 +38,7 @@ class Transition(Generic[HiddenT]):
 
 
 @dataclass(frozen=True)
-class Checkpoint(Generic[HiddenT]):
+class Checkpoint[HiddenT]:
     """A saved point in a trajectory for later branching.
 
     Attributes:
@@ -55,7 +55,7 @@ class Checkpoint(Generic[HiddenT]):
 
 
 @dataclass
-class Trajectory(Generic[HiddenT]):
+class Trajectory[HiddenT]:
     """A sequence of transitions with checkpointing support.
 
     Trajectories are mutable (transitions can be appended) but individual

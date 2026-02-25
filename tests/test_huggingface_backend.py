@@ -1,8 +1,8 @@
 """Tests for HuggingFace Transformers backend."""
 
+from unittest.mock import MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
-from typing import Any
 
 from llenvs.inference.protocol import (
     ChatMessage,
@@ -14,8 +14,8 @@ from llenvs.inference.protocol import (
 
 # Check if transformers/torch are available
 try:
-    import torch
-    import transformers
+    import torch  # noqa: F401
+    import transformers  # noqa: F401
 
     HAS_TRANSFORMERS = True
 except ImportError:
@@ -342,7 +342,6 @@ class TestHuggingFaceBackendIntegration:
         # so we mock the import to simulate it being missing
         with patch.dict("sys.modules", {"transformers": None, "torch": None}):
             # Clear the cached import
-            import importlib
             import sys
 
             # Remove from cache if present
@@ -705,7 +704,10 @@ class TestHuggingFaceThinkingBudget:
     def test_thinking_budget_preserves_existing_processors(self):
         """thinking_budget appends to existing logits_processor list."""
         backend = self._create_mock_backend()
-        existing_proc = lambda input_ids, scores: scores
+
+        def existing_proc(input_ids, scores):
+            return scores
+
         params = SamplingParams(
             max_tokens=100,
             extra={"thinking_budget": 512, "logits_processor": [existing_proc]},

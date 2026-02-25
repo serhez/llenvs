@@ -144,7 +144,6 @@ class AutoObservationMapper:
             )
 
     def map(self, obs: Any, info: dict[str, Any]) -> str:
-        spaces = self._spaces
         return self._map_space(self._space, obs)
 
     def _map_space(self, space: Any, obs: Any) -> str:

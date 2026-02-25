@@ -1,7 +1,8 @@
 """Tests for reward abstractions."""
 
 import pytest
-from llenvs.core.reward import Signal, SignalBundle, RewardType
+
+from llenvs.core.reward import RewardType, Signal, SignalBundle
 
 
 class TestRewardType:

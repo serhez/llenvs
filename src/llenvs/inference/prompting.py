@@ -35,7 +35,7 @@ class PromptTransformer(Protocol):
         """
         ...
 
-    def __rshift__(self, other: "PromptTransformer") -> "PromptPipeline":
+    def __rshift__(self, other: PromptTransformer) -> PromptPipeline:
         """Compose transformers with >> operator."""
         ...
 
@@ -56,7 +56,7 @@ class PromptPipeline:
             result = transformer.transform(result)
         return result
 
-    def __rshift__(self, other: PromptTransformer) -> "PromptPipeline":
+    def __rshift__(self, other: PromptTransformer) -> PromptPipeline:
         """Add a transformer to the pipeline."""
         return PromptPipeline(transformers=self.transformers + [other])
 
@@ -343,7 +343,7 @@ class PromptTemplateTransformer(BaseTransformer):
         template: The PromptTemplate to apply.
     """
 
-    template: "PromptTemplate"
+    template: PromptTemplate
 
     def transform(self, messages: list[ChatMessage]) -> list[ChatMessage]:
         """Apply template to the last user message."""

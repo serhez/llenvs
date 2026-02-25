@@ -210,7 +210,7 @@ class TestAgentGymEnvironment:
         env = self._make_env(client=client)
         state_0, _ = env.reset(options={"task_index": 0})
 
-        result = env.step(state_0, Action(text="go north"))
+        env.step(state_0, Action(text="go north"))
 
         with pytest.raises(NotImplementedError, match="pure_step=False"):
             env.step(state_0, Action(text="go north"))

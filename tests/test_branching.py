@@ -3,8 +3,7 @@
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, _StateContinuityTracker
-from llenvs.core.state import State, StateMetadata, Observation
-
+from llenvs.core.state import Observation, State, StateMetadata
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -130,8 +129,8 @@ class TestBranchingSerializationRoundTrip:
 
     def test_round_trip_true(self):
         from llenvs.container.serialization import (
-            serialize_env_spec,
             deserialize_env_spec,
+            serialize_env_spec,
         )
 
         spec = EnvironmentSpec(name="test", pure_step=True)
@@ -142,8 +141,8 @@ class TestBranchingSerializationRoundTrip:
 
     def test_round_trip_false(self):
         from llenvs.container.serialization import (
-            serialize_env_spec,
             deserialize_env_spec,
+            serialize_env_spec,
         )
 
         spec = EnvironmentSpec(name="test", pure_step=False)

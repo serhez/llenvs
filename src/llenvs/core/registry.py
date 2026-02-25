@@ -4,13 +4,13 @@ Provides a generic registry pattern for environments, extractors,
 backends, and other pluggable components.
 """
 
-from typing import Any, Callable, Generic, TypeVar
-from collections.abc import Mapping
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
 
-class Registry(Generic[T]):
+class Registry[T]:
     """A registry for named components with lazy loading support.
 
     Components can be registered either directly or via factory functions
@@ -277,17 +277,17 @@ def register_defaults() -> None:
     Called automatically on import, but can be called again to reset.
     """
     from llenvs.core.extraction import (
-        TagBasedExtractor,
-        RegexExtractor,
-        GSM8KExtractor,
-        MultipleChoiceExtractor,
-        RawGenerationExtractor,
-        TailExtractor,
         BoxedExtractor,
-        NumericExtractor,
-        LastLineExtractor,
         CodeBlockExtractor,
+        GSM8KExtractor,
+        LastLineExtractor,
+        MultipleChoiceExtractor,
+        NumericExtractor,
         PatternAnswerExtractor,
+        RawGenerationExtractor,
+        RegexExtractor,
+        TagBasedExtractor,
+        TailExtractor,
     )
 
     # Clear and re-register extractors

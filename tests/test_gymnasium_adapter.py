@@ -890,7 +890,7 @@ class TestGymnasiumEnvironment:
     def test_state_continuity_enforced(self, discrete_env):
         """Stepping from a stale state should raise."""
         state, _ = discrete_env.reset()
-        result = discrete_env.step(state, Action(text="1"))
+        discrete_env.step(state, Action(text="1"))
         # Try stepping from original state again — should fail
         with pytest.raises(NotImplementedError, match="stale"):
             discrete_env.step(state, Action(text="0"))
@@ -1120,7 +1120,7 @@ class TestGymnasiumAdapter:
         mock_env = MockGymEnv()
         mock_gymnasium.make = MagicMock(return_value=mock_env)
 
-        env = adapter.get_environment("CartPole-v1", num_tasks=5)
+        adapter.get_environment("CartPole-v1", num_tasks=5)
         mock_gymnasium.make.assert_called_once()
 
     def test_get_default_system_prompt(self, adapter):
@@ -1144,7 +1144,7 @@ class TestGymnasiumAdapter:
         mock_env = MockGymEnv()
         mock_gymnasium.make = MagicMock(return_value=mock_env)
 
-        env = adapter.get_environment(
+        adapter.get_environment(
             "CartPole-v1",
             use_ansi_render=True,
             num_tasks=1,
@@ -1686,7 +1686,7 @@ class TestPureStep:
         state_1 = result1.next_state
 
         # Step from state_1 to get state_2
-        result2 = pure_env.step(state_1, Action(text="left"))
+        pure_env.step(state_1, Action(text="left"))
 
         # Now step from the *original* state again — this would fail without pure_step
         result_from_stale = pure_env.step(state, Action(text="up"))

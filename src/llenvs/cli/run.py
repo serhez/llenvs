@@ -9,20 +9,19 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from llenvs.core.config import (
-    EvalConfig,
-    EnvironmentFactory,
     BackendFactory,
+    EnvironmentFactory,
+    EvalConfig,
     create_sampling_params,
 )
 from llenvs.evaluation.logging import LogConfig
-from llenvs.evaluation.runner import run_evaluation
 from llenvs.evaluation.results import (
     create_evaluation_result,
     print_summary,
 )
+from llenvs.evaluation.runner import run_evaluation
 
 
 def create_parser() -> argparse.ArgumentParser:

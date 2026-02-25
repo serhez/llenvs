@@ -489,7 +489,7 @@ class WebShopAdapter:
         Raises:
             ImportError: If webshop is not installed.
         """
-        gym, WebAgentTextEnv = self._get_webshop()
+        gym, _web_agent_text_env = self._get_webshop()
 
         # Parse observation mode from name if not explicitly provided
         if observation_mode is None:

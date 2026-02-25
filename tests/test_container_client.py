@@ -5,19 +5,15 @@ from __future__ import annotations
 import json
 import threading
 import time
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any
 
 import pytest
 
 from llenvs.container.client import ContainerEnvironment, ContainerEnvironmentError
 from llenvs.container.serialization import OpaqueHidden
 from llenvs.core.environment import EnvironmentSpec
-from llenvs.core.reward import SignalBundle, Signal, RewardType
-from llenvs.core.state import Action, Observation, State, StateMetadata
-from llenvs.core.tools import ToolDefinition, ToolParameter, ToolParameterType
-
+from llenvs.core.reward import SignalBundle
+from llenvs.core.state import Action, State
 
 # ---------------------------------------------------------------------------
 # Mock HTTP server

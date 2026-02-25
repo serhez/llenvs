@@ -8,13 +8,14 @@ with veRL's generation function.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from llenvs.core.environment import Environment
 from llenvs.core.state import Action
 from llenvs.core.trajectory import Trajectory, Transition
-from llenvs.integrations.scoring import Scorer
 from llenvs.integrations.dataset_provider import DatasetProvider
+from llenvs.integrations.scoring import Scorer
 from llenvs.integrations.token_mask import TrajectoryMasker
 
 

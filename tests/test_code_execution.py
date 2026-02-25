@@ -3,14 +3,14 @@
 import textwrap
 
 import pytest
+
 from llenvs.core.code_execution import (
     CodeExecutionResult,
     CodeExecutionReward,
     SubprocessCodeExecutor,
 )
-from llenvs.core.reward import RewardType, Signal
+from llenvs.core.reward import RewardType
 from llenvs.core.state import Action, Observation, State, StateMetadata
-
 
 # ---------------------------------------------------------------------------
 # CodeExecutionResult

@@ -5,10 +5,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.core.reward import Signal, RewardType
+from llenvs.core.reward import RewardType, Signal
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.inference.protocol import GenerationResult, SamplingParams, StopReason
-
 
 # ---------------------------------------------------------------------------
 # extract_judge_score
@@ -364,7 +363,7 @@ class TestJudgeReward:
 
     def test_custom_template_string(self):
         """Pass a literal template string instead of built-in name."""
-        from llenvs.core.judge import JudgeReward, JudgePromptTemplate
+        from llenvs.core.judge import JudgePromptTemplate, JudgeReward
 
         backend = self._make_backend(text="[[6]]")
         template = JudgePromptTemplate(
@@ -427,7 +426,7 @@ class TestJudgeReward:
 
     def test_system_prompt_in_messages(self):
         """Templates with system_prompt produce a system message."""
-        from llenvs.core.judge import JudgeReward, JudgePromptTemplate
+        from llenvs.core.judge import JudgePromptTemplate, JudgeReward
 
         backend = self._make_backend(text="[[7]]")
         template = JudgePromptTemplate(
@@ -447,7 +446,7 @@ class TestJudgeReward:
 
     def test_no_system_prompt(self):
         """Templates without system_prompt produce only user message."""
-        from llenvs.core.judge import JudgeReward, JudgePromptTemplate
+        from llenvs.core.judge import JudgePromptTemplate, JudgeReward
 
         backend = self._make_backend(text="[[7]]")
         template = JudgePromptTemplate(template="Rate: {response}")

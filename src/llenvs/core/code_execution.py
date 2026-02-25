@@ -13,13 +13,13 @@ from __future__ import annotations
 
 import subprocess
 import textwrap
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 from llenvs.core.extraction import CodeBlockExtractor
 from llenvs.core.reward import RewardType, Signal
 from llenvs.core.state import State
-
 
 # ---------------------------------------------------------------------------
 # Result

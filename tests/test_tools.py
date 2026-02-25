@@ -1,16 +1,17 @@
 """Tests for core tool types."""
 
-import pytest
 from typing import Any
 
+import pytest
+
 from llenvs.core.tools import (
+    SimpleToolExecutor,
+    ToolCall,
+    ToolDefinition,
     ToolParameter,
     ToolParameterType,
-    ToolDefinition,
-    ToolCall,
     ToolResult,
     ToolResultStatus,
-    SimpleToolExecutor,
     oai_tools_to_definitions,
 )
 
@@ -331,7 +332,7 @@ class TestFromCallable:
     def test_all_basic_types(self):
         """Test all basic type mappings."""
 
-        def typed(s: str, i: int, f: float, b: bool, l: list, d: dict) -> str:
+        def typed(s: str, i: int, f: float, b: bool, lst: list, d: dict) -> str:
             """All types."""
             return ""
 

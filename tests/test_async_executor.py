@@ -1,8 +1,6 @@
 """Tests for AsyncToolExecutor."""
 
 import asyncio
-import pytest
-from unittest.mock import MagicMock
 
 from llenvs.core.async_executor import AsyncToolExecutor
 from llenvs.core.tools import ToolCall, ToolResultStatus

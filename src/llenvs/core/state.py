@@ -8,7 +8,7 @@ reward computation (hidden).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
@@ -47,7 +47,7 @@ class StateMetadata:
 
 
 @dataclass(frozen=True)
-class State(Generic[HiddenT]):
+class State[HiddenT]:
     """Immutable state representing a point in an episode.
 
     The separation of observation and hidden state enables:

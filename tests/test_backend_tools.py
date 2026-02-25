@@ -3,10 +3,9 @@
 Tests mock OpenAI/Anthropic tool response parsing and generate_with_tools integration.
 """
 
-import json
-import pytest
 from unittest.mock import MagicMock, patch
-from typing import Any
+
+import pytest
 
 from llenvs.core.tools import ToolCall, ToolDefinition, ToolParameter, ToolParameterType
 from llenvs.inference.protocol import (
@@ -18,14 +17,14 @@ from llenvs.inference.protocol import (
 
 # Check if openai/anthropic are available
 try:
-    import openai
+    import openai  # noqa: F401
 
     HAS_OPENAI = True
 except ImportError:
     HAS_OPENAI = False
 
 try:
-    import anthropic
+    import anthropic  # noqa: F401
 
     HAS_ANTHROPIC = True
 except ImportError:
@@ -218,10 +217,10 @@ class TestOpenAIBackendTools:
         mock_response.model = "gpt-4o"
         mock_response.id = "chatcmpl-123"
 
-        with patch("openai.OpenAI") as MockOpenAI, patch("openai.AsyncOpenAI"):
+        with patch("openai.OpenAI") as mock_openai, patch("openai.AsyncOpenAI"):
             mock_client = MagicMock()
             mock_client.chat.completions.create.return_value = mock_response
-            MockOpenAI.return_value = mock_client
+            mock_openai.return_value = mock_client
 
             from llenvs.inference.backends.api import OpenAIBackend
 
@@ -256,10 +255,10 @@ class TestOpenAIBackendTools:
         mock_response.model = "gpt-4o"
         mock_response.id = "chatcmpl-456"
 
-        with patch("openai.OpenAI") as MockOpenAI, patch("openai.AsyncOpenAI"):
+        with patch("openai.OpenAI") as mock_openai, patch("openai.AsyncOpenAI"):
             mock_client = MagicMock()
             mock_client.chat.completions.create.return_value = mock_response
-            MockOpenAI.return_value = mock_client
+            mock_openai.return_value = mock_client
 
             from llenvs.inference.backends.api import OpenAIBackend
 
@@ -296,10 +295,10 @@ class TestAnthropicBackendTools:
         mock_response.model = "claude-sonnet-4-20250514"
         mock_response.id = "msg_123"
 
-        with patch("anthropic.Anthropic") as MockAnthropic:
+        with patch("anthropic.Anthropic") as mock_anthropic:
             mock_client = MagicMock()
             mock_client.messages.create.return_value = mock_response
-            MockAnthropic.return_value = mock_client
+            mock_anthropic.return_value = mock_client
 
             from llenvs.inference.backends.api import AnthropicBackend
 
@@ -332,10 +331,10 @@ class TestAnthropicBackendTools:
         mock_response.model = "claude-sonnet-4-20250514"
         mock_response.id = "msg_456"
 
-        with patch("anthropic.Anthropic") as MockAnthropic:
+        with patch("anthropic.Anthropic") as mock_anthropic:
             mock_client = MagicMock()
             mock_client.messages.create.return_value = mock_response
-            MockAnthropic.return_value = mock_client
+            mock_anthropic.return_value = mock_client
 
             from llenvs.inference.backends.api import AnthropicBackend
 

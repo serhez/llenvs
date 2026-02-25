@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -17,7 +15,6 @@ from llenvs.container.runtime import (
     _find_free_port,
     _wait_for_health,
 )
-
 
 # ---------------------------------------------------------------------------
 # _find_free_port

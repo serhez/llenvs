@@ -8,16 +8,14 @@ import signal
 import sys
 import threading
 import time
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import SignalBundle, Signal, RewardType
+from llenvs.core.reward import RewardType, SignalBundle
 from llenvs.core.state import Action, Observation, State, StateMetadata
-
 
 # ---------------------------------------------------------------------------
 # Mock environments
@@ -633,7 +631,7 @@ class TestBranchManager:
         assert isinstance(mgr._strategy, DirectStrategy)
 
     def test_create_with_action_replay_strategy(self):
-        from llenvs.core.branching import BranchManager, ActionReplayStrategy
+        from llenvs.core.branching import ActionReplayStrategy, BranchManager
 
         env = MutableEnv()
         mgr = BranchManager.create(env, strategy="action_replay", env_factory=MutableEnv)
@@ -738,7 +736,7 @@ class TestExports:
     """Verify that branching types are properly exported."""
 
     def test_core_exports(self):
-        from llenvs.core import BranchManager, BranchHandle, BranchingStrategy
+        from llenvs.core import BranchHandle, BranchingStrategy, BranchManager
 
         assert BranchManager is not None
         assert BranchHandle is not None
@@ -834,8 +832,9 @@ class _MutableCounterEnv:
 
 def _start_env_server(env, host="127.0.0.1", port=0):
     """Start an EnvironmentServer in a thread, return (url, http_server)."""
-    from http.server import HTTPServer
     from http.client import HTTPConnection
+    from http.server import HTTPServer
+
     from llenvs.container.server import EnvironmentHandler
 
     handler_class = type(

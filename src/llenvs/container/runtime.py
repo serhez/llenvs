@@ -10,13 +10,12 @@ from __future__ import annotations
 
 import atexit
 import http.client
-import json
 import logging
 import socket
 import subprocess
 import sys
 import time
-from typing import Any, Protocol
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 

@@ -1,19 +1,20 @@
 """Tests for prompt transformers and pipelines."""
 
 import pytest
-from llenvs.inference.protocol import ChatMessage
+
 from llenvs.inference.prompting import (
-    PromptPipeline,
-    SystemPromptInjector,
-    FewShotInjector,
-    ChainOfThoughtWrapper,
     AnswerFormatInjector,
-    MessageTrimmer,
-    RoleMapper,
+    ChainOfThoughtWrapper,
     ContentWrapper,
+    FewShotInjector,
+    MessageTrimmer,
+    PromptPipeline,
     PromptTemplateTransformer,
+    RoleMapper,
+    SystemPromptInjector,
     build_standard_pipeline,
 )
+from llenvs.inference.protocol import ChatMessage
 
 
 @pytest.fixture
@@ -294,7 +295,7 @@ class TestPromptPipeline:
         pipeline1 = SystemPromptInjector("A") >> FewShotInjector([("Q", "A")])
         pipeline2 = pipeline1 >> AnswerFormatInjector("xml_answer")
 
-        result = pipeline2.transform(user_message)
+        pipeline2.transform(user_message)
         # Original pipeline unchanged
         assert len(pipeline1.transformers) == 2
         # Extended pipeline has all three

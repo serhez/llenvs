@@ -4,20 +4,19 @@ Wraps single-step environments to enable per-step rewards through text segmentat
 Supports both post-hoc replay and generation-time stepping.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
-import copy
+from dataclasses import dataclass
+from typing import Any, TypeVar
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.environment import Environment, StepResult, EnvironmentSpec
+from llenvs.core.environment import Environment, EnvironmentSpec, StepResult
+from llenvs.core.reward import RewardFunction, SignalBundle
 from llenvs.core.segmentation import Segmenter
+from llenvs.core.state import Action, State, StateMetadata
 
 HiddenT = TypeVar("HiddenT")
 
 
 @dataclass(frozen=True)
-class SegmentedHidden(Generic[HiddenT]):
+class SegmentedHidden[HiddenT]:
     """Extended hidden state for segmented environments.
 
     Wraps the base environment's hidden state with segmentation tracking.
@@ -38,7 +37,7 @@ class SegmentedHidden(Generic[HiddenT]):
 
 
 @dataclass
-class SegmentedEnvironment(Generic[HiddenT]):
+class SegmentedEnvironment[HiddenT]:
     """Wrapper that segments single-step environments into multi-step.
 
     Takes a single-step environment and a segmenter, and exposes a multi-step

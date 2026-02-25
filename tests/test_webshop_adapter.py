@@ -464,7 +464,7 @@ class TestWebShopAdapter:
         adapter = WebShopAdapter()
 
         # Name with mode
-        env = adapter.get_environment(name="webshop:html")
+        adapter.get_environment(name="webshop:html")
 
         # Check that html mode was used
         call_kwargs = mock_gym.make.call_args[1]

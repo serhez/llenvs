@@ -1,24 +1,22 @@
 """Tests for text-based tool call parsing."""
 
 import logging
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.core.tools import ToolDefinition, ToolParameter, ToolParameterType
+from llenvs.core.environment import EnvironmentSpec
+from llenvs.core.reward import SignalBundle
+from llenvs.core.state import Observation, State, StateMetadata
 from llenvs.core.tool_parsing import (
     HermesToolCallParser,
-    ParsedToolResponse,
 )
-from llenvs.core.state import Observation, State, StateMetadata, Action
-from llenvs.core.environment import EnvironmentSpec
-from llenvs.core.reward import SignalBundle, RewardType
+from llenvs.core.tools import ToolDefinition, ToolParameter, ToolParameterType
 from llenvs.inference.protocol import (
+    BackendCapabilities,
     ChatMessage,
     GenerationResult,
-    SamplingParams,
     StopReason,
-    BackendCapabilities,
 )
 
 
@@ -280,7 +278,7 @@ class TestRunnerToolParsing:
             tool_call_parser=parser,
         )
 
-        result = runner.run_trajectory(task_index=0)
+        runner.run_trajectory(task_index=0)
 
         # Backend should have been called with generate_chat (not generate_with_tools)
         backend.generate_chat.assert_called()
@@ -314,7 +312,7 @@ class TestRunnerToolParsing:
             tool_call_parser=parser,
         )
 
-        result = runner.run_trajectory(task_index=0)
+        runner.run_trajectory(task_index=0)
 
         # Native path should be used
         backend.generate_with_tools.assert_called()
@@ -339,7 +337,7 @@ class TestRunnerToolParsing:
         )
 
         with caplog.at_level(logging.WARNING):
-            result = runner.run_trajectory(task_index=0)
+            runner.run_trajectory(task_index=0)
 
         assert any("tool_call_parser" in r.message for r in caplog.records)
 
@@ -425,7 +423,7 @@ class TestRunnerToolParsing:
             tool_call_parser=parser,
         )
 
-        result = runner.run_batch(task_indices=[0])
+        runner.run_batch(task_indices=[0])
 
         # Should use generate_chat_batch, not generate_with_tools_batch
         backend.generate_chat_batch.assert_called()

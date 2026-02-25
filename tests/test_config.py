@@ -1,14 +1,13 @@
 """Tests for configuration loading."""
 
-import pytest
 import tempfile
 from pathlib import Path
 
 from llenvs.core.config import (
-    EvalConfig,
     EnvironmentConfig,
-    ModelConfig,
+    EvalConfig,
     InferenceConfig,
+    ModelConfig,
     create_sampling_params,
 )
 
@@ -842,7 +841,7 @@ class TestIterativeConfig:
 
     def test_to_dict_with_iterative(self):
         """Test to_dict serializes iterative config."""
-        from llenvs.core.config import IterativeConfig, CodeExecutionConfig
+        from llenvs.core.config import CodeExecutionConfig, IterativeConfig
 
         config = EvalConfig(
             environments=[
@@ -949,9 +948,9 @@ class TestIterativeConfig:
     def test_factory_wraps_with_code_execution(self):
         """Test factory creates CodeExecutionReward when code_execution set."""
         from llenvs.core.config import (
+            CodeExecutionConfig,
             EnvironmentFactory,
             IterativeConfig,
-            CodeExecutionConfig,
         )
 
         config = EnvironmentConfig(

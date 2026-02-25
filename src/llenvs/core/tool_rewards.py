@@ -7,7 +7,7 @@ of tool usage by models.
 from dataclasses import dataclass, field
 from typing import Any
 
-from llenvs.core.reward import Signal, RewardType
+from llenvs.core.reward import RewardType, Signal
 from llenvs.core.state import State
 from llenvs.core.tools import ToolResultStatus
 

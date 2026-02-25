@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import sys
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol, runtime_checkable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
-from llenvs.core.environment import Environment
 from llenvs.core.state import Action, State
-
 
 # ---------------------------------------------------------------------------
 # Core types
@@ -315,7 +314,6 @@ class ProcessForkStrategy:
         return CheckpointHandle(checkpoint_id=cp_id, state=state)
 
     def create_branch(self, handle: CheckpointHandle) -> BranchHandle:
-        import os as _os
 
         data = self._checkpoints[handle.checkpoint_id]
 
@@ -332,8 +330,6 @@ class ProcessForkStrategy:
         )
 
     def release_checkpoint(self, handle: CheckpointHandle) -> None:
-        import os as _os
-        import signal as _signal
 
         data = self._checkpoints.pop(handle.checkpoint_id, None)
         if data is None:
@@ -369,9 +365,10 @@ class _ForkCheckpointData:
 
 def _start_threaded_server(env: Any, *, hidden_type: type | None = None) -> tuple[str, Any]:
     """Start an EnvironmentServer in a daemon thread, return (url, HTTPServer)."""
-    import threading
     import http.client
+    import threading
     from http.server import HTTPServer
+
     from llenvs.container.server import EnvironmentHandler
 
     handler_class = type(

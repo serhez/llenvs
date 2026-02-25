@@ -421,7 +421,7 @@ class ReasoningGymAdapter:
         """
         from llenvs.core.extraction import NativeExtractor
 
-        rg = self._get_reasoning_gym()
+        self._get_reasoning_gym()
         from reasoning_gym.utils import extract_answer as rg_extract
 
         def _extract(text: str) -> str | None:

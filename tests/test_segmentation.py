@@ -3,15 +3,14 @@
 import json
 
 import pytest
-from llenvs.core.state import State, StateMetadata, Observation, Action
-from llenvs.core.reward import Signal, SignalBundle, RewardType
+
 from llenvs.core.segmentation import (
+    CompositeSegmenter,
+    LineSegmenter,
+    LLMSegmenter,
+    PatternSegmenter,
     Segmenter,
     SentenceSegmenter,
-    LineSegmenter,
-    PatternSegmenter,
-    CompositeSegmenter,
-    LLMSegmenter,
     TokenSegmenter,
     default_segment_parser,
 )
@@ -19,6 +18,7 @@ from llenvs.core.segmented_environment import (
     SegmentedEnvironment,
     SegmentedHidden,
 )
+from llenvs.core.state import Action, State
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,

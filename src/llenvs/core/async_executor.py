@@ -5,8 +5,9 @@ using asyncio, improving performance when tools are I/O-bound.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from llenvs.core.tools import (
     ToolCall,
@@ -97,7 +98,7 @@ class AsyncToolExecutor:
                 tool_name=call.name,
                 output=result,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ToolResult.from_error(
                 call_id=call.id,
                 tool_name=call.name,

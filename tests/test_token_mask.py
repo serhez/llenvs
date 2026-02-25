@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
-from llenvs.core.reward import SignalBundle, Signal, RewardType
+from llenvs.core.reward import SignalBundle
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.tools import ToolCall, ToolResult, ToolResultStatus
 from llenvs.core.trajectory import Trajectory, Transition
@@ -16,7 +15,6 @@ from llenvs.integrations.token_mask import (
     TokenSpan,
     TrajectoryMasker,
 )
-
 
 # ---------------------------------------------------------------------------
 # Simple tokenizer mock

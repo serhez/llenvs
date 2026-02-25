@@ -135,8 +135,6 @@ def _make_env(
     if mock_frotz is None:
         mock_frotz = MockFrotzEnv()
 
-    original_init_game = env._init_game
-
     def mock_init_game(game_file: str) -> tuple[str, dict[str, Any]]:
         env._frotz_env = mock_frotz
         obs = mock_frotz.reset()

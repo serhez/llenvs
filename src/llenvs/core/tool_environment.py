@@ -5,7 +5,7 @@ concrete tool environments.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 from llenvs.core.state import Observation
 from llenvs.core.tools import (
@@ -20,7 +20,7 @@ HiddenT = TypeVar("HiddenT")
 
 
 @dataclass
-class BaseToolEnvironment(Generic[HiddenT]):
+class BaseToolEnvironment[HiddenT]:
     """Base implementation for tool-aware environments.
 
     Provides common tool execution logic that can be inherited by

@@ -8,7 +8,6 @@ import asyncio
 import json
 import logging
 import subprocess
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,7 +17,6 @@ from llenvs.core.tools import (
     ToolParameter,
     ToolParameterType,
     ToolResult,
-    ToolResultStatus,
 )
 
 logger = logging.getLogger(__name__)
@@ -197,7 +195,7 @@ class MCPToolExecutor:
                     raise MCPConnectionError("No response from server")
 
                 return json.loads(response_line.decode("utf-8"))
-            except asyncio.TimeoutError as e:
+            except TimeoutError as e:
                 raise MCPConnectionError(f"Request timed out after {self._config.timeout}s") from e
             except json.JSONDecodeError as e:
                 raise MCPConnectionError(f"Invalid JSON response: {e}") from e

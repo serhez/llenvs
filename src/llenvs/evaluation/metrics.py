@@ -11,10 +11,11 @@ Two statistics classes exist for different metric types:
 """
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any
 
-from llenvs.evaluation.runner import TrajectoryResult, BatchResult
+from llenvs.evaluation.runner import BatchResult, TrajectoryResult
 
 
 @dataclass(frozen=True)

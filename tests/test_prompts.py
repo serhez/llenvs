@@ -3,20 +3,19 @@
 import pytest
 
 from llenvs.inference.prompts import (
-    PromptFragment,
-    SystemPrompt,
-    PromptTemplate,
-    ModelProfile,
     FRAGMENT_REGISTRY,
+    PROFILE_REGISTRY,
     SYSTEM_PROMPT_REGISTRY,
     TEMPLATE_REGISTRY,
-    PROFILE_REGISTRY,
+    ModelProfile,
+    PromptFragment,
+    PromptTemplate,
+    SystemPrompt,
     compose_system_prompt,
-    resolve_system_prompt,
     detect_model_profile,
     resolve_prompt_config,
+    resolve_system_prompt,
 )
-
 
 # ============================================================================
 # PromptFragment
@@ -367,7 +366,7 @@ class TestResolvePromptConfig:
 
     def test_defaults_single_turn(self):
         """No config set -> library fallback for single-turn."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -383,7 +382,7 @@ class TestResolvePromptConfig:
 
     def test_eval_config_system_prompt(self):
         """system_prompt from eval config is resolved."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -398,7 +397,7 @@ class TestResolvePromptConfig:
 
     def test_env_config_overrides_eval_system_prompt(self):
         """Per-env system_prompt overrides eval-level."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -412,7 +411,7 @@ class TestResolvePromptConfig:
 
     def test_literal_system_prompt(self):
         """Literal string system prompt passed through."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -426,7 +425,7 @@ class TestResolvePromptConfig:
 
     def test_list_system_prompt(self):
         """List of fragments resolved and joined."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -442,7 +441,7 @@ class TestResolvePromptConfig:
 
     def test_eval_prompt_template(self):
         """prompt_template from eval config resolved."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -457,7 +456,7 @@ class TestResolvePromptConfig:
 
     def test_env_prompt_template_overrides_eval(self):
         """Per-env prompt_template overrides eval-level."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -472,7 +471,7 @@ class TestResolvePromptConfig:
 
     def test_model_profile_by_name(self):
         """model_profile resolved by name."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -487,7 +486,7 @@ class TestResolvePromptConfig:
 
     def test_model_profile_auto(self):
         """model_profile='auto' detects from model name."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -502,7 +501,7 @@ class TestResolvePromptConfig:
 
     def test_model_profile_auto_no_match(self):
         """model_profile='auto' with unknown model returns None."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -516,7 +515,7 @@ class TestResolvePromptConfig:
 
     def test_library_fallback_single_turn(self):
         """Single-turn env with no user/adapter prompt gets library fallback."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -534,7 +533,7 @@ class TestResolvePromptConfig:
 
     def test_no_library_fallback_multi_turn(self):
         """Multi-turn env with no user/adapter prompt gets None."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         eval_cfg = EvalConfig(
             environments=[],
@@ -551,7 +550,7 @@ class TestResolvePromptConfig:
 
     def test_adapter_default_system_prompt(self):
         """Adapter default system prompt used when no user config."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"
@@ -575,7 +574,7 @@ class TestResolvePromptConfig:
 
     def test_user_config_overrides_adapter_default(self):
         """User system_prompt overrides adapter default."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"
@@ -600,7 +599,7 @@ class TestResolvePromptConfig:
 
     def test_env_config_overrides_adapter_default(self):
         """Per-env system_prompt overrides adapter default."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"
@@ -624,7 +623,7 @@ class TestResolvePromptConfig:
 
     def test_adapter_default_overrides_library_fallback(self):
         """Adapter default takes priority over library fallback."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"
@@ -653,7 +652,7 @@ class TestResolvePromptConfig:
 
     def test_adapter_none_falls_to_library_fallback(self):
         """Adapter returning None for system prompt falls through to library fallback."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"
@@ -682,7 +681,7 @@ class TestResolvePromptConfig:
 
     def test_adapter_prompt_template_used(self):
         """Adapter prompt template used when no user config."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"
@@ -707,7 +706,7 @@ class TestResolvePromptConfig:
 
     def test_user_template_overrides_adapter(self):
         """User prompt_template overrides adapter default."""
-        from llenvs.core.config import EvalConfig, EnvironmentConfig, ModelConfig
+        from llenvs.core.config import EnvironmentConfig, EvalConfig, ModelConfig
 
         class MockAdapter:
             name = "mock"

@@ -4,11 +4,12 @@ Provides the data structures for defining tools, making tool calls,
 and handling tool results.
 """
 
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from typing import Any, Callable, Protocol
 import inspect
 import re
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Any, Protocol
 
 
 class ToolParameterType(Enum):
@@ -230,7 +231,7 @@ def _python_type_to_tool_type(annotation: Any) -> ToolParameterType:
             return ToolParameterType.OBJECT
         return ToolParameterType.STRING
 
-    _TYPE_MAP = {
+    type_map = {
         str: ToolParameterType.STRING,
         int: ToolParameterType.INTEGER,
         float: ToolParameterType.NUMBER,
@@ -238,7 +239,7 @@ def _python_type_to_tool_type(annotation: Any) -> ToolParameterType:
         list: ToolParameterType.ARRAY,
         dict: ToolParameterType.OBJECT,
     }
-    return _TYPE_MAP.get(annotation, ToolParameterType.STRING)
+    return type_map.get(annotation, ToolParameterType.STRING)
 
 
 def _parse_param_docs(docstring: str | None) -> dict[str, str]:

@@ -13,13 +13,14 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from llenvs.core.tool_parsing import ToolCallParser
+    from llenvs.core.tools import ToolDefinition
     from llenvs.evaluation.history import HistoryFn
     from llenvs.inference.prompts import ModelProfile, PromptTemplate
 
 from llenvs.core.environment import Environment, StepResult
 from llenvs.core.reward import RewardType
 from llenvs.core.segmented_environment import SegmentedEnvironment
-from llenvs.core.state import Action, Observation, State
+from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.trajectory import Trajectory, Transition
 from llenvs.evaluation.continuation import (
     _BUFFER_ONLY_RESULT,
@@ -211,8 +212,6 @@ class _ActiveSegmentedTrajectory:
 
 def _error_metadata(task_index: int) -> StateMetadata:
     """Create dummy metadata for error cases."""
-    from llenvs.core.state import StateMetadata
-
     return StateMetadata(
         step=0,
         episode_id=f"error_{task_index}",

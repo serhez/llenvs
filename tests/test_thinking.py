@@ -1,7 +1,8 @@
 """Tests for ThinkingBudgetProcessor."""
 
-import pytest
 from unittest.mock import MagicMock
+
+import pytest
 
 from llenvs.inference.thinking import ThinkingBudgetProcessor
 
@@ -114,7 +115,6 @@ class TestBudgetEnforcement:
 
     def _make_logits(self, vocab_size=200):
         """Create a simple list-based logits tensor mock."""
-        import array
 
         return [1.0] * vocab_size
 

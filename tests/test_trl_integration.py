@@ -8,10 +8,9 @@ from typing import Any
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.state import Action, Observation, State, StateMetadata
-from llenvs.integrations.trl import make_trl_reward_fn, make_trl_dataset
-
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Observation, State, StateMetadata
+from llenvs.integrations.trl import make_trl_dataset, make_trl_reward_fn
 
 # ---------------------------------------------------------------------------
 # Mock environment

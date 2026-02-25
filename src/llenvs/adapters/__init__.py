@@ -40,13 +40,6 @@ from llenvs.adapters.dialogue import (
     DialogueHidden,
     DialogueTask,
 )
-from llenvs.adapters.harbor import (
-    HarborAdapter,
-    HarborEnvironment,
-    HarborHidden,
-    HarborReward,
-    HarborToolEnvironment,
-)
 from llenvs.adapters.gem import (
     GEM_PYTHON_TOOL,
     GEM_SEARCH_TOOL,
@@ -71,6 +64,13 @@ from llenvs.adapters.gymnasium import (
     GymnasiumReward,
     ImageObservationMapper,
     MultimodalObservationMapper,
+)
+from llenvs.adapters.harbor import (
+    HarborAdapter,
+    HarborEnvironment,
+    HarborHidden,
+    HarborReward,
+    HarborToolEnvironment,
 )
 from llenvs.adapters.huggingface import (
     DATASET_PRESETS,
@@ -225,6 +225,8 @@ __all__ = [
     "AutoActionMapper",
     "FrozenLakeObservationMapper",
     "GridObservationMapper",
+    "ImageObservationMapper",
+    "MultimodalObservationMapper",
     "GYMNASIUM_PRESETS",
     # AlfWorld
     "AlfWorldEnvironment",

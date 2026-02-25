@@ -1,15 +1,16 @@
 """Tests for MCPToolExecutor."""
 
 import json
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
 
 from llenvs.core.mcp_executor import (
-    MCPToolExecutor,
-    MCPServerConfig,
     MCPConnectionError,
+    MCPServerConfig,
+    MCPToolExecutor,
 )
-from llenvs.core.tools import ToolCall, ToolParameterType, ToolResultStatus
+from llenvs.core.tools import ToolCall, ToolParameterType
 
 
 class TestMCPServerConfig:

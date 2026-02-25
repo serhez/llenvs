@@ -308,7 +308,7 @@ class EvalConfig:
         return d
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "EvalConfig":
+    def from_yaml(cls, path: str | Path) -> EvalConfig:
         """Load configuration from a YAML file.
 
         Args:
@@ -323,7 +323,7 @@ class EvalConfig:
         return cls.from_dict(data)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EvalConfig":
+    def from_dict(cls, data: dict[str, Any]) -> EvalConfig:
         """Create configuration from a dictionary.
 
         Args:
@@ -610,9 +610,9 @@ class EnvironmentFactory:
 
             return create_container_environment(config)
 
-        from llenvs.core.registry import environment_registry, answer_extractor_registry
-        from llenvs.core.extraction import CompositeExtractor, CleanedExtractor
         from llenvs.core.cleaning import resolve_cleaners
+        from llenvs.core.extraction import CleanedExtractor, CompositeExtractor
+        from llenvs.core.registry import answer_extractor_registry, environment_registry
 
         if config.answer_extractors is not None:
             # Build a CompositeExtractor from the chain

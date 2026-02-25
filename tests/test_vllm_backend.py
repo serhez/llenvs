@@ -1,7 +1,8 @@
 """Tests for vLLM backend (fully mocked, no GPU required)."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from llenvs.inference.protocol import (
     ChatMessage,
@@ -130,7 +131,10 @@ class TestVLLMThinkingBudget:
     def test_thinking_budget_preserves_existing_processors(self):
         """thinking_budget appends to existing logits_processors list."""
         backend = self._create_mock_backend()
-        existing_proc = lambda token_ids, logits: logits
+
+        def existing_proc(token_ids, logits):
+            return logits
+
         params = SamplingParams(
             max_tokens=100,
             extra={"thinking_budget": 512, "logits_processors": [existing_proc]},
@@ -197,9 +201,9 @@ class TestVLLMV1Detection:
         backend = VLLMBackend.__new__(VLLMBackend)
 
         # Create a real class with the specified module for type() detection
-        EngineClass = type("MockEngine", (), {})
-        EngineClass.__module__ = module_name
-        mock_engine = EngineClass()
+        engine_class = type("MockEngine", (), {})
+        engine_class.__module__ = module_name
+        mock_engine = engine_class()
 
         backend._model_path = "test-model"
         backend._tokenizer = MagicMock()

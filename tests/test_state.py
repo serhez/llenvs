@@ -1,7 +1,8 @@
 """Tests for core state abstractions."""
 
 import pytest
-from llenvs.core.state import State, StateMetadata, Observation, Action
+
+from llenvs.core.state import Action, Observation, State, StateMetadata
 
 
 class TestStateMetadata:

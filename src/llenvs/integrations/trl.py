@@ -7,11 +7,12 @@ around Scorer; rollout function drives multi-turn environments.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from llenvs.core.environment import Environment
-from llenvs.integrations.scoring import Scorer
 from llenvs.integrations.dataset_provider import DatasetProvider
+from llenvs.integrations.scoring import Scorer
 
 
 def make_trl_reward_fn(

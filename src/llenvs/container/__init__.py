@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from llenvs.core.config import EnvironmentConfig
 
 
-def create_container_environment(config: "EnvironmentConfig") -> "ContainerEnvironment":
+def create_container_environment(config: EnvironmentConfig) -> ContainerEnvironment:
     """Create a containerized environment from config.
 
     Starts a runtime (Docker or subprocess), waits for the server to be

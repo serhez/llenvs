@@ -207,7 +207,7 @@ class HuggingFaceBackend(ModelBackend):
         self._is_vlm = _is_vlm_model(model_config)
 
         if self._is_vlm:
-            from transformers import AutoProcessor, AutoModelForVision2Seq
+            from transformers import AutoModelForVision2Seq, AutoProcessor
 
             self._processor = AutoProcessor.from_pretrained(model_path)
             self._model = AutoModelForVision2Seq.from_pretrained(model_path, **load_kwargs)
@@ -350,7 +350,7 @@ class HuggingFaceBackend(ModelBackend):
         Returns:
             Tuple of TokenLogprob objects.
         """
-        import torch.nn.functional as F
+        import torch.nn.functional as F  # noqa: N812
 
         logprobs_list = []
 

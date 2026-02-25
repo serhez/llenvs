@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any
 from unittest.mock import MagicMock
 
-import pytest
-
-from llenvs.core.state import State, StateMetadata, Observation, Action
 from llenvs.core.environment import StepResult
-from llenvs.core.reward import SignalBundle, Signal, RewardType
+from llenvs.core.reward import RewardType, Signal, SignalBundle
 from llenvs.core.segmentation import (
     SentenceSegmenter,
-    LineSegmenter,
     TokenSegmenter,
 )
-from llenvs.core.segmented_environment import SegmentedEnvironment, SegmentedHidden
+from llenvs.core.segmented_environment import SegmentedEnvironment
+from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.evaluation.continuation import (
+    BoundaryContinuationStrategy,
+    TokenContinuationStrategy,
+)
+from llenvs.evaluation.runner import (
+    COMPLETE,
+    ForceAction,
+    SegmentedTrajectoryRunner,
+    TrajectoryResult,
+)
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
@@ -25,18 +30,6 @@ from llenvs.inference.protocol import (
     SamplingParams,
     StopReason,
 )
-from llenvs.evaluation.continuation import (
-    ContinuationStrategy,
-    TokenContinuationStrategy,
-    BoundaryContinuationStrategy,
-)
-from llenvs.evaluation.runner import (
-    COMPLETE,
-    ForceAction,
-    SegmentedTrajectoryRunner,
-    TrajectoryResult,
-)
-
 
 # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -712,7 +705,7 @@ class TestStepCallback:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0, step_callback=callback)
+        runner.run_trajectory(task_index=0, step_callback=callback)
 
         # The second generate_chat call should include the feedback as a user message
         assert len(backend.generate_chat_calls) >= 2
@@ -747,7 +740,7 @@ class TestStepCallback:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0, step_callback=callback_once)
+        runner.run_trajectory(task_index=0, step_callback=callback_once)
 
         # After feedback, the second call should NOT have the first chunk as
         # accumulated text in the assistant message (it's in message history instead)
@@ -788,7 +781,7 @@ class TestStepCallback:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0, step_callback=give_feedback)
+        runner.run_trajectory(task_index=0, step_callback=give_feedback)
 
         # The third call should have the full conversation:
         # user(question), assistant(part1), user(Feedback 1),
@@ -821,7 +814,7 @@ class TestStepCallback:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0)
+        runner.run_trajectory(task_index=0)
 
         # All calls after the first should have a single assistant message
         # with growing accumulated text (single assistant turn)
@@ -1080,7 +1073,7 @@ class TestPrefixReplay:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0, prefix="First step. Second step.")
+        runner.run_trajectory(task_index=0, prefix="First step. Second step.")
 
         # Only backend calls should be from the generation phase, not the prefix
         # The prefix has 2 segments; after that, generation makes at least 1 call
@@ -1173,7 +1166,7 @@ class TestPrefixReplay:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0, prefix="Let me think about this.")
+        runner.run_trajectory(task_index=0, prefix="Let me think about this.")
 
         # The first backend call should have the prefix as assistant accumulated text
         assert len(backend.generate_chat_calls) >= 1
@@ -1199,7 +1192,7 @@ class TestPrefixReplay:
         result1 = env.step(state, action1)
         state2 = result1.next_state
         action2 = Action(text="Second step.")
-        result2 = env.step(state2, action2)
+        env.step(state2, action2)
 
         # Use the state-action pairs as structured prefix
         prefix_pairs = [(state, action1), (state2, action2)]
@@ -1298,11 +1291,11 @@ class TestPrefixReplay:
                 is_terminal=True,
             ),
         )
-        prefix_pairs = [
+        [
             (terminal_state, Action(text="Some text.")),
         ]
 
-        runner = SegmentedTrajectoryRunner(
+        SegmentedTrajectoryRunner(
             environment=env,
             backend=backend,
             sampling_params=SamplingParams(),
@@ -1610,7 +1603,7 @@ class TestForceAction:
             backend=backend,
             sampling_params=SamplingParams(),
         )
-        result = runner.run_trajectory(task_index=0, step_callback=force_middle)
+        runner.run_trajectory(task_index=0, step_callback=force_middle)
 
         # After the forced action, the next backend call should include
         # both the generated text and the forced text in the accumulated assistant message

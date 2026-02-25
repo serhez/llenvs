@@ -1,23 +1,22 @@
 """Tests for math-verify reward function."""
 
-import pytest
 from typing import Any
-from unittest.mock import patch
 
-from llenvs.core.state import State, StateMetadata, Observation, Action
+import pytest
+
 from llenvs.core.reward import RewardType
+from llenvs.core.state import Action, Observation, State, StateMetadata
 
 try:
-    import math_verify
+    import math_verify  # noqa: F401
 
     HAS_MATH_VERIFY = True
 except ImportError:
     HAS_MATH_VERIFY = False
 
-from llenvs.core.math_verify import MathVerifyRewardFunction
-
 # Re-use the ReasoningGymHidden type for test states
 from llenvs.adapters.reasoning_gym import ReasoningGymHidden
+from llenvs.core.math_verify import MathVerifyRewardFunction
 
 
 def _make_state(expected_answer: str) -> State[ReasoningGymHidden]:

@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
-from llenvs.core.reward import Signal, RewardType
+from llenvs.core.reward import RewardType, Signal
 from llenvs.core.state import Action, State
 from llenvs.inference.protocol import ChatMessage, GenerationResult, SamplingParams
 

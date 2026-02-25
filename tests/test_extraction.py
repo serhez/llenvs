@@ -1,23 +1,22 @@
 """Tests for answer extraction."""
 
-import pytest
-from llenvs.core.extraction import (
-    TagBasedExtractor,
-    RegexExtractor,
-    GSM8KExtractor,
-    MultipleChoiceExtractor,
-    CompositeExtractor,
-    RawGenerationExtractor,
-    TailExtractor,
-    BoxedExtractor,
-    NumericExtractor,
-    LastLineExtractor,
-    CodeBlockExtractor,
-    PatternAnswerExtractor,
-    CleanedExtractor,
-    NativeExtractor,
-)
 from llenvs.core.cleaning import strip_special_tokens
+from llenvs.core.extraction import (
+    BoxedExtractor,
+    CleanedExtractor,
+    CodeBlockExtractor,
+    CompositeExtractor,
+    GSM8KExtractor,
+    LastLineExtractor,
+    MultipleChoiceExtractor,
+    NativeExtractor,
+    NumericExtractor,
+    PatternAnswerExtractor,
+    RawGenerationExtractor,
+    RegexExtractor,
+    TagBasedExtractor,
+    TailExtractor,
+)
 
 
 class TestTagBasedExtractor:

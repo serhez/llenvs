@@ -4,44 +4,36 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import SignalBundle
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import Observation, State, StateMetadata
 from llenvs.evaluation.logging import (
     LogConfig,
     _BatchEndEvent,
     _BatchStartEvent,
     _ConsoleTarget,
     _ErrorEvent,
-    _EvaluationLogger,
     _FileTarget,
     _StepEvent,
     _TrajectoryEndEvent,
     _WandbTarget,
 )
 from llenvs.evaluation.runner import (
-    BatchResult,
+    MultiEvalEntry,
     TrajectoryRunner,
     run_evaluation,
     run_multi_evaluation,
-    MultiEvalEntry,
 )
 from llenvs.inference.protocol import (
     BackendCapabilities,
-    ChatMessage,
     GenerationResult,
     ModelBackend,
-    SamplingParams,
     StopReason,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -583,7 +575,7 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        result = runner.run_batch([0, 1, 2])
+        runner.run_batch([0, 1, 2])
 
         files = list((tmp_path / "logs" / "mock_failing").glob("*.jsonl"))
         lines = files[0].read_text().strip().split("\n")
@@ -604,7 +596,7 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        result = runner.run_batch([0, 1, 2])
+        runner.run_batch([0, 1, 2])
 
         files = list((tmp_path / "logs" / "mock_step_fail").glob("*.jsonl"))
         lines = files[0].read_text().strip().split("\n")

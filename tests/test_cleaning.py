@@ -1,23 +1,23 @@
 """Tests for the cleaning layer."""
 
 import pytest
+
 from llenvs.core.cleaning import (
+    DEFAULT_POST_CLEANERS,
+    DEFAULT_PRE_CLEANERS,
+    POST_CLEANERS,
+    PRE_CLEANERS,
+    resolve_cleaners,
+    strip_latex_dollars,
     strip_special_tokens,
+    strip_surrounding_quotes,
     strip_thinking_tokens,
     strip_trailing_punctuation,
-    strip_surrounding_quotes,
-    strip_latex_dollars,
-    PRE_CLEANERS,
-    POST_CLEANERS,
-    DEFAULT_PRE_CLEANERS,
-    DEFAULT_POST_CLEANERS,
-    resolve_cleaners,
 )
 from llenvs.core.extraction import (
     CleanedExtractor,
-    TagBasedExtractor,
-    NumericExtractor,
     PatternAnswerExtractor,
+    TagBasedExtractor,
 )
 
 

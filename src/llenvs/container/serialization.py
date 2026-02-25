@@ -11,7 +11,7 @@ import dataclasses
 from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import SignalBundle, Signal, RewardType
+from llenvs.core.reward import RewardType, Signal, SignalBundle
 from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
 from llenvs.core.tools import (
     ToolCall,

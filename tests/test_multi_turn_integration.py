@@ -6,14 +6,11 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-import pytest
-
 from llenvs.core.environment import EnvironmentSpec, StepResult
-from llenvs.core.reward import SignalBundle, Signal, RewardType, RewardFunction
-from llenvs.core.state import Action, Observation, State, StateMetadata
-from llenvs.integrations.verl import LLEnvsAgentLoop
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.state import Observation, State, StateMetadata
 from llenvs.integrations.trl import make_trl_rollout_fn
-
+from llenvs.integrations.verl import LLEnvsAgentLoop
 
 # ---------------------------------------------------------------------------
 # Mock tokenizer
@@ -168,7 +165,7 @@ class TestLLEnvsAgentLoop:
             call_count += 1
             return f"step_{call_count}"
 
-        result = asyncio.run(loop.run(task_index=0, generate_fn=mock_generate_fn))
+        asyncio.run(loop.run(task_index=0, generate_fn=mock_generate_fn))
         assert call_count == 3
 
     def test_mask_correctness(self):

@@ -98,7 +98,7 @@ class GenerationResult:
 
     text: str | None = None
     finish_reason: StopReason = StopReason.UNKNOWN
-    tool_calls: tuple["ToolCall", ...] = ()
+    tool_calls: tuple[ToolCall, ...] = ()
     token_logprobs: tuple[TokenLogprob, ...] | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -114,7 +114,7 @@ class GenerationResult:
         """Check if this result contains tool calls."""
         return len(self.tool_calls) > 0
 
-    def to_agent_action(self) -> "Action":
+    def to_agent_action(self) -> Action:
         """Convert to Action for use with environments."""
         from llenvs.core.state import Action
 
@@ -137,10 +137,10 @@ class ChatMessage:
 
     role: str
     content: str | None = None
-    tool_calls: tuple["ToolCall", ...] = ()
+    tool_calls: tuple[ToolCall, ...] = ()
     tool_call_id: str | None = None
     name: str | None = None
-    images: tuple["ImageContent", ...] = ()
+    images: tuple[ImageContent, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for API calls (OpenAI format).
@@ -235,7 +235,7 @@ class ChatMessage:
         return result
 
     @classmethod
-    def tool_result(cls, result: "ToolResult") -> "ChatMessage":
+    def tool_result(cls, result: ToolResult) -> ChatMessage:
         """Create a tool result message from a ToolResult."""
         content = str(result.output) if result.is_success else (result.error or "Unknown error")
         return cls(
@@ -369,7 +369,7 @@ class ModelBackend(ABC):
     def generate_with_tools_batch(
         self,
         messages_batch: list[list[ChatMessage]],
-        tools: list["ToolDefinition"],
+        tools: list[ToolDefinition],
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> list[GenerationResult]:
@@ -456,7 +456,7 @@ class ModelBackend(ABC):
     def generate_with_tools(
         self,
         messages: list[ChatMessage],
-        tools: list["ToolDefinition"],
+        tools: list[ToolDefinition],
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:

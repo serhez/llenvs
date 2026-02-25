@@ -457,7 +457,7 @@ class AlfWorldEnvironment:
 
         # Unbatch results
         raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
-        done = dones[0] if isinstance(dones, (list, tuple)) else dones
+        dones[0] if isinstance(dones, (list, tuple)) else dones
         won = False
         admissible_commands: tuple[str, ...] = ()
 

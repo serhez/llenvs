@@ -7,7 +7,7 @@ others enforce sequential continuity and raise on stale states.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Generic, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from llenvs.core.reward import RewardFunction, SignalBundle
 from llenvs.core.state import Action, State
@@ -50,7 +50,7 @@ def format_action_error(
 
 
 @dataclass(frozen=True)
-class StepResult(Generic[HiddenT]):
+class StepResult[HiddenT]:
     """Result of taking a step in the environment.
 
     Attributes:
