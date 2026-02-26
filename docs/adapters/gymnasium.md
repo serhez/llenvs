@@ -14,6 +14,7 @@ pip install llenvs[gymnasium]
 
 ```python
 import gymnasium
+
 from llenvs.adapters import GymnasiumAdapter, GymnasiumEnvironment
 from llenvs.core import Action
 
@@ -30,12 +31,17 @@ gym_env = gymnasium.make("CartPole-v1")
 env = GymnasiumEnvironment(
     gym_env=gym_env,
     action_names={0: "left", 1: "right"},
-    observation_labels={0: "Cart Position", 1: "Cart Velocity", 2: "Pole Angle", 3: "Pole Angular Velocity"},
+    observation_labels={
+        0: "Cart Position",
+        1: "Cart Velocity",
+        2: "Pole Angle",
+        3: "Pole Angular Velocity",
+    },
     num_tasks=100,
 )
 
 state, _ = env.reset(seed=42)
-print(state.observation.prompt)   # Static task description (space descriptions)
+print(state.observation.prompt)  # Static task description (space descriptions)
 print(state.observation.state.text)  # Dynamic step-0 observation
 
 result = env.step(state, Action(text="left"))
@@ -136,8 +142,8 @@ from llenvs.adapters.gymnasium import GymnasiumEnvironment, ImageObservationMapp
 
 mapper = ImageObservationMapper(
     text_description="Current game frame:",
-    image_format="png",   # "png" (default) or "jpeg"
-    jpeg_quality=85,       # JPEG quality, only used for JPEG
+    image_format="png",  # "png" (default) or "jpeg"
+    jpeg_quality=85,  # JPEG quality, only used for JPEG
 )
 
 env = GymnasiumEnvironment(
@@ -210,8 +216,8 @@ env = GymnasiumEnvironment(
 )
 
 # LLM can respond with either:
-result = env.step(state, Action(text="left"))   # by name
-result = env.step(state, Action(text="0"))      # by number
+result = env.step(state, Action(text="left"))  # by name
+result = env.step(state, Action(text="0"))  # by number
 ```
 
 ### Invalid Actions
@@ -225,11 +231,11 @@ The error observation includes the expected action format and the current enviro
 Please provide a valid action.
 
 Expected action format:
-Choose one action by name or number:
-  0: left
-  1: down
-  2: right
-  3: up
+Choose one of the following actions:
+  left
+  down
+  right
+  up
 
 Current state:
 @ F F F
@@ -396,9 +402,9 @@ env = adapter.get_environment(
 
 ```python
 from llenvs.adapters import GymnasiumAdapter
-from llenvs.inference.backends import OpenAIBackend
 from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
+from llenvs.inference.backends import OpenAIBackend
 
 adapter = GymnasiumAdapter()
 env = adapter.get_environment(
@@ -435,6 +441,7 @@ print(info)
 
 # Pass pre-created gym env
 import gymnasium
+
 gym_env = gymnasium.make("LunarLander-v3")
 env = adapter.get_environment(
     "LunarLander-v3",
@@ -449,8 +456,8 @@ env = adapter.get_environment(
 Add format or other reward signals:
 
 ```python
-from llenvs.core.reward import FormatReward
 from llenvs.core.extraction import TagBasedExtractor
+from llenvs.core.reward import FormatReward
 
 extractor = TagBasedExtractor(tag_name="action")
 env = GymnasiumEnvironment(
@@ -488,16 +495,17 @@ When `pure_step=True`:
 This is ideal for simple, self-contained envs like FrozenLake, CartPole, and Taxi. Environments with external resources (network connections, file handles) are typically not picklable.
 
 ```python
-from llenvs.core.branching import BranchManager
 from llenvs.core import Action
+from llenvs.core.branching import BranchManager
 
 state, _ = env.reset(seed=42)
 result = env.step(state, Action(text="right"))
 state_1 = result.next_state
 
 with BranchManager.create(env) as mgr:  # auto-selects DirectStrategy
-    mgr.checkpoint("s1", state_1, actions=(Action(text="right"),),
-                   reset_options={"seed": 42, "task_index": 0})
+    mgr.checkpoint(
+        "s1", state_1, actions=(Action(text="right"),), reset_options={"seed": 42, "task_index": 0}
+    )
 
     # Try different continuations from the same state
     for action_text in ["left", "right", "up", "down"]:
@@ -515,8 +523,8 @@ class GymnasiumHidden:
     seed: int | None
     episode_step: int
     last_action: str | None
-    raw_observation: Any    # raw gymnasium observation
-    gym_reward: float       # cumulative episode reward
+    raw_observation: Any  # raw gymnasium observation
+    gym_reward: float  # cumulative episode reward
     gym_snapshot: bytes | None  # pickled gym env (only when pure_step=True)
 ```
 

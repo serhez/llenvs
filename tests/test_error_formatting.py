@@ -14,11 +14,11 @@ class TestFormatActionError:
 
     def test_with_action_hint(self):
         """Error with action format hint."""
-        hint = "Choose one action by name or number:\n  0: left\n  1: right"
+        hint = "Choose one of the following actions:\n  left\n  right"
         result = format_action_error(3, "Bad action.", action_hint=hint)
         assert "Expected action format:" in result
-        assert "0: left" in result
-        assert "1: right" in result
+        assert "left" in result
+        assert "right" in result
 
     def test_with_current_state(self):
         """Error with current environment state."""
@@ -30,14 +30,14 @@ class TestFormatActionError:
 
     def test_with_all_params(self):
         """Error with both action hint and current state."""
-        hint = "Choose one action by name or number:\n  0: left\n  1: down"
+        hint = "Choose one of the following actions:\n  left\n  down"
         state_text = "@ F F F\nF H F H"
         result = format_action_error(5, "Out of range.", action_hint=hint, current_state=state_text)
         # All sections present
         assert "[Step 5] Invalid action: Out of range." in result
         assert "Please provide a valid action." in result
         assert "Expected action format:" in result
-        assert "0: left" in result
+        assert "left" in result
         assert "Current state:" in result
         assert "@ F F F" in result
 

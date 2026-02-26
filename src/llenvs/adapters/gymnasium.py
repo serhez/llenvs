@@ -411,10 +411,8 @@ class AutoActionMapper:
 
         if isinstance(self._space, spaces.Discrete):
             if self._action_names:
-                entries = "\n".join(
-                    f"  {i}: {name}" for i, name in sorted(self._action_names.items())
-                )
-                return f"Choose one action by name or number:\n{entries}"
+                entries = "\n".join(f"  {name}" for _, name in sorted(self._action_names.items()))
+                return f"Choose one of the following actions:\n{entries}"
             return (
                 f"Enter an integer action in range "
                 f"[{self._space.start}, {self._space.start + self._space.n - 1}]."

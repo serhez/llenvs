@@ -139,8 +139,8 @@ class CraftaxActionMapper:
         )
 
     def describe(self) -> str:
-        entries = "\n".join(f"  {i}: {name}" for i, name in sorted(self._actions.items()))
-        return f"Choose one action by name or number:\n{entries}"
+        entries = "\n".join(f"  {name}" for _, name in sorted(self._actions.items()))
+        return f"Choose one of the following actions:\n{entries}"
 
     def format_action(self, action: int) -> str:
         return self._actions.get(action, str(action))
