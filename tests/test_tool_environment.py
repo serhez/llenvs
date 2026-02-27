@@ -511,3 +511,123 @@ class TestToolResultsToData:
         )
 
         assert result_obs.state is None
+
+
+class TestToolFormatting:
+    """Tests for tool formatting utilities."""
+
+    def test_format_tool_call_with_args(self):
+        """Test formatting a tool call with string and int args."""
+        from llenvs.core.tools import format_tool_call
+
+        tc = ToolCall(id="c1", name="search", arguments={"query": "red shoes", "limit": 10})
+        assert format_tool_call(tc) == "search(query='red shoes', limit=10)"
+
+    def test_format_tool_call_no_args(self):
+        """Test formatting a tool call with no arguments."""
+        from llenvs.core.tools import format_tool_call
+
+        tc = ToolCall(id="c1", name="get_weather", arguments={})
+        assert format_tool_call(tc) == "get_weather()"
+
+    def test_format_tool_result_success(self):
+        """Test formatting a successful tool result with string output."""
+        from llenvs.core.tools import format_tool_result
+
+        entry = {
+            "tool_name": "search",
+            "status": "SUCCESS",
+            "output": 'Found 3 products matching "red shoes"',
+            "error": None,
+        }
+        assert format_tool_result(entry) == 'search: Found 3 products matching "red shoes"'
+
+    def test_format_tool_result_success_dict_output(self):
+        """Test formatting a successful tool result with dict output."""
+        from llenvs.core.tools import format_tool_result
+
+        entry = {
+            "tool_name": "lookup",
+            "status": "SUCCESS",
+            "output": {"key": "value"},
+            "error": None,
+        }
+        assert format_tool_result(entry) == 'lookup: {"key": "value"}'
+
+    def test_format_tool_result_success_empty_output(self):
+        """Test formatting a successful tool result with empty output."""
+        from llenvs.core.tools import format_tool_result
+
+        entry = {
+            "tool_name": "noop",
+            "status": "SUCCESS",
+            "output": "",
+            "error": None,
+        }
+        assert format_tool_result(entry) == "noop: "
+
+    def test_format_tool_result_error(self):
+        """Test formatting an ERROR tool result."""
+        from llenvs.core.tools import format_tool_result
+
+        entry = {
+            "tool_name": "calculate",
+            "status": "ERROR",
+            "output": "",
+            "error": "division by zero",
+        }
+        assert format_tool_result(entry) == "calculate: ERROR: division by zero"
+
+    def test_format_tool_result_invalid_tool(self):
+        """Test formatting an INVALID_TOOL tool result."""
+        from llenvs.core.tools import format_tool_result
+
+        entry = {
+            "tool_name": "unknown",
+            "status": "INVALID_TOOL",
+            "output": "",
+            "error": "Tool 'unknown' not found",
+        }
+        assert format_tool_result(entry) == "unknown: INVALID_TOOL: Tool 'unknown' not found"
+
+    def test_format_tool_result_invalid_arguments(self):
+        """Test formatting an INVALID_ARGUMENTS tool result."""
+        from llenvs.core.tools import format_tool_result
+
+        entry = {
+            "tool_name": "add",
+            "status": "INVALID_ARGUMENTS",
+            "output": "",
+            "error": "Missing required argument: b",
+        }
+        assert format_tool_result(entry) == "add: INVALID_ARGUMENTS: Missing required argument: b"
+
+    def test_format_tool_result_data_multiple(self):
+        """Test formatting multiple tool results with - prefixes."""
+        from llenvs.core.tools import format_tool_result_data
+
+        entries = [
+            {
+                "tool_name": "search",
+                "status": "SUCCESS",
+                "output": 'Found 3 products matching "red shoes"',
+                "error": None,
+            },
+            {
+                "tool_name": "calculate",
+                "status": "ERROR",
+                "output": "",
+                "error": "division by zero",
+            },
+        ]
+        expected = (
+            '- search: Found 3 products matching "red shoes"\n'
+            "- calculate: ERROR: division by zero"
+        )
+        assert format_tool_result_data(entries) == expected
+
+    def test_format_tool_result_data_empty(self):
+        """Test formatting an empty list of tool results."""
+        from llenvs.core.tools import format_tool_result_data
+
+        assert format_tool_result_data([]) == ""

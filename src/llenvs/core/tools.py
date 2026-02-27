@@ -5,6 +5,7 @@ and handling tool results.
 """
 
 import inspect
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -379,6 +380,59 @@ class ToolResult:
     def is_error(self) -> bool:
         """Check if the tool execution failed."""
         return self.status != ToolResultStatus.SUCCESS
+
+
+def format_tool_call(tc: ToolCall) -> str:
+    """Format a tool call for display.
+
+    Args:
+        tc: The tool call to format.
+
+    Returns:
+        Canonical display string, e.g. ``search(query="red shoes", limit=10)``.
+    """
+    args = ", ".join(f"{k}={v!r}" for k, v in tc.arguments.items())
+    return f"{tc.name}({args})"
+
+
+def format_tool_result(entry: dict[str, Any]) -> str:
+    """Format a single serialized tool result dict for display.
+
+    Takes one element from the list in ``state.data["tool_results"]``
+    (as produced by ``_tool_results_to_data()``).
+
+    Args:
+        entry: Serialized tool result dict with keys
+            ``tool_name``, ``status``, ``output``, ``error``.
+
+    Returns:
+        Formatted string, e.g. ``search: Found 3 results``
+        or ``calculate: ERROR: division by zero``.
+    """
+    name = entry["tool_name"]
+    status = entry["status"]
+    if status == "SUCCESS":
+        output = entry.get("output", "")
+        if isinstance(output, dict):
+            return f"{name}: {json.dumps(output)}"
+        return f"{name}: {output}"
+    error = entry.get("error", "")
+    return f"{name}: {status}: {error}"
+
+
+def format_tool_result_data(result_entries: list[dict[str, Any]]) -> str:
+    """Format serialized tool result dicts for display.
+
+    Takes the list from ``state.data["tool_results"]``
+    (as produced by ``_tool_results_to_data()``).
+
+    Args:
+        result_entries: List of serialized tool result dicts.
+
+    Returns:
+        Newline-joined formatted results, each prefixed with ``- ``.
+    """
+    return "\n".join(f"- {format_tool_result(e)}" for e in result_entries)
 
 
 class ToolExecutor(Protocol):

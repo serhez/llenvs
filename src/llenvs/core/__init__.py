@@ -87,6 +87,9 @@ from llenvs.core.tools import (
     ToolParameterType,
     ToolResult,
     ToolResultStatus,
+    format_tool_call,
+    format_tool_result,
+    format_tool_result_data,
     oai_tools_to_definitions,
 )
 from llenvs.core.trajectory import Checkpoint, Trajectory, Transition
@@ -112,6 +115,9 @@ __all__ = [
     "ToolExecutor",
     "SimpleToolExecutor",
     "oai_tools_to_definitions",
+    "format_tool_call",
+    "format_tool_result",
+    "format_tool_result_data",
     "AsyncToolExecutor",
     "MCPToolExecutor",
     "MCPServerConfig",
