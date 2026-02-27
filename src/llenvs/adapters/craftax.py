@@ -665,7 +665,11 @@ class CraftaxEnvironment:
         task_desc = self._build_task_description()
         task_content = ObservationContent(text=task_desc)
         state_text = f"[Step 0]\n{obs_text}"
-        state_content = ObservationContent(text=state_text, images=images)
+        state_content = ObservationContent(
+            text=state_text,
+            images=images,
+            data={"episode_step": 0, "cumulative_reward": 0.0},
+        )
 
         # Legacy prompt = task description
         prompt = task_desc
@@ -786,7 +790,11 @@ class CraftaxEnvironment:
         )
 
         state_text = f"[Step {next_step}]\n{obs_text}"
-        state_content = ObservationContent(text=state_text, images=images)
+        state_content = ObservationContent(
+            text=state_text,
+            images=images,
+            data={"episode_step": next_step, "cumulative_reward": cumulative_reward},
+        )
 
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},

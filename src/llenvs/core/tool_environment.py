@@ -52,6 +52,31 @@ class BaseToolEnvironment[HiddenT]:
 
         return (ToolValidityReward(_weight=0.0), ToolEfficiencyReward(_weight=0.0))
 
+    @staticmethod
+    def _tool_results_to_data(
+        tool_results: tuple[ToolResult, ...],
+    ) -> dict[str, Any]:
+        """Convert tool results to a structured data dict.
+
+        Args:
+            tool_results: Tuple of ToolResult objects.
+
+        Returns:
+            Dict with a ``"tool_results"`` key containing serialized results.
+        """
+        return {
+            "tool_results": [
+                {
+                    "call_id": tr.call_id,
+                    "tool_name": tr.tool_name,
+                    "status": tr.status.name,
+                    "output": tr.output,
+                    "error": tr.error,
+                }
+                for tr in tool_results
+            ]
+        }
+
     @property
     def available_tools(self) -> tuple[ToolDefinition, ...]:
         """Get the tools available in this environment."""
@@ -169,6 +194,14 @@ class BaseToolEnvironment[HiddenT]:
                     "name": result.tool_name,
                     "content": str(result.output) if result.is_success else result.error,
                 }
+            )
+
+        # Auto-populate data from tool results when not already set
+        if state_content is not None and state_content.data is None and tool_results:
+            state_content = ObservationContent(
+                text=state_content.text,
+                images=state_content.images,
+                data=self._tool_results_to_data(tool_results),
             )
 
         return Observation(

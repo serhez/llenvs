@@ -1080,7 +1080,11 @@ class GymnasiumEnvironment:
         task_desc = self._build_task_description()
         task_content = ObservationContent(text=task_desc)
         state_text = f"[Step 0]\n{obs_text}"
-        state_content = ObservationContent(text=state_text, images=obs_images)
+        state_content = ObservationContent(
+            text=state_text,
+            images=obs_images,
+            data={"gym_info": info, "gym_reward": 0.0, "episode_step": 0},
+        )
 
         # Legacy prompt = task description (for backward compat)
         prompt = task_desc
@@ -1210,7 +1214,11 @@ class GymnasiumEnvironment:
         )
 
         state_text = f"[Step {next_step}]\n{obs_text}"
-        state_content = ObservationContent(text=state_text, images=obs_images)
+        state_content = ObservationContent(
+            text=state_text,
+            images=obs_images,
+            data={"gym_info": info, "gym_reward": reward, "episode_step": next_step},
+        )
 
         user_msg: dict[str, Any] = {"role": "user", "content": state_text}
         if obs_images:

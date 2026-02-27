@@ -848,6 +848,13 @@ class TestMolmoSpacesEnvironment:
         result = env.step(state, action)
         assert result.next_state.hidden.episode_step == 1
 
+        # MolmoSpaces populates data with tool_results, physics_steps, proprioception
+        obs_state = result.next_state.observation.state
+        assert obs_state is not None
+        assert obs_state.data is not None
+        assert "proprioception" in obs_state.data
+        assert "physics_steps" in obs_state.data
+
     def test_step_increments_physics_steps(self) -> None:
         env = self._make_env()
         state, _ = env.reset(options={"task_index": 0})

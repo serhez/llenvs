@@ -690,6 +690,14 @@ class TestGymnasiumEnvironment:
         assert result.next_state.metadata.step == 1
         assert result.next_state.hidden.episode_step == 1
 
+        # Gymnasium populates data with gym_info, gym_reward, episode_step
+        obs_state = result.next_state.observation.state
+        assert obs_state is not None
+        assert obs_state.data is not None
+        assert "gym_info" in obs_state.data
+        assert "gym_reward" in obs_state.data
+        assert "episode_step" in obs_state.data
+
     def test_step_valid_action_by_number(self, discrete_env):
         state, _ = discrete_env.reset()
         result = discrete_env.step(state, Action(text="1"))

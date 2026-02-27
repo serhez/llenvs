@@ -339,3 +339,175 @@ class TestBaseToolEnvironment:
 
         # Hidden state should have all calls
         assert len(result2.next_state.hidden.calls_made) == 2
+
+
+class TestToolResultsToData:
+    """Tests for _tool_results_to_data and auto-populate behavior."""
+
+    def test_tool_results_to_data_basic(self):
+        """Test that _tool_results_to_data serializes tool results."""
+        from llenvs.core.tools import ToolResult, ToolResultStatus
+
+        results = (
+            ToolResult(
+                call_id="c1",
+                tool_name="add",
+                output="8",
+                status=ToolResultStatus.SUCCESS,
+            ),
+            ToolResult(
+                call_id="c2",
+                tool_name="divide",
+                output=None,
+                error="Division by zero",
+                status=ToolResultStatus.ERROR,
+            ),
+        )
+
+        data = BaseToolEnvironment._tool_results_to_data(results)
+
+        assert "tool_results" in data
+        assert len(data["tool_results"]) == 2
+        assert data["tool_results"][0]["call_id"] == "c1"
+        assert data["tool_results"][0]["tool_name"] == "add"
+        assert data["tool_results"][0]["status"] == "SUCCESS"
+        assert data["tool_results"][0]["output"] == "8"
+        assert data["tool_results"][0]["error"] is None
+        assert data["tool_results"][1]["call_id"] == "c2"
+        assert data["tool_results"][1]["status"] == "ERROR"
+        assert data["tool_results"][1]["error"] == "Division by zero"
+
+    def test_tool_results_to_data_empty(self):
+        """Test with empty tool results tuple."""
+        data = BaseToolEnvironment._tool_results_to_data(())
+        assert data == {"tool_results": []}
+
+    def test_auto_populate_data_in_build_next_observation(self):
+        """Test that _build_next_observation auto-populates data from tool results."""
+        from llenvs.core.state import ObservationContent
+        from llenvs.core.tools import ToolResult, ToolResultStatus
+
+        env = CalculatorEnvironment()
+
+        obs = Observation(
+            prompt="test",
+            available_tools=env.available_tools,
+        )
+
+        action = Action(
+            tool_calls=(ToolCall(id="c1", name="add", arguments={"a": 1, "b": 2}),),
+        )
+
+        tool_results = (
+            ToolResult(
+                call_id="c1",
+                tool_name="add",
+                output="3",
+                status=ToolResultStatus.SUCCESS,
+            ),
+        )
+
+        # Pass state_content with data=None — auto-populate should fill it
+        result_obs = env._build_next_observation(
+            obs,
+            action,
+            tool_results,
+            state_content=ObservationContent(text="3"),
+        )
+
+        assert result_obs.state is not None
+        assert result_obs.state.data is not None
+        assert "tool_results" in result_obs.state.data
+        assert result_obs.state.data["tool_results"][0]["tool_name"] == "add"
+
+    def test_auto_populate_skipped_when_data_already_set(self):
+        """Test that auto-populate is skipped when data is already set."""
+        from llenvs.core.state import ObservationContent
+        from llenvs.core.tools import ToolResult, ToolResultStatus
+
+        env = CalculatorEnvironment()
+
+        obs = Observation(
+            prompt="test",
+            available_tools=env.available_tools,
+        )
+
+        action = Action(
+            tool_calls=(ToolCall(id="c1", name="add", arguments={"a": 1, "b": 2}),),
+        )
+
+        tool_results = (
+            ToolResult(
+                call_id="c1",
+                tool_name="add",
+                output="3",
+                status=ToolResultStatus.SUCCESS,
+            ),
+        )
+
+        custom_data = {"custom": True}
+        result_obs = env._build_next_observation(
+            obs,
+            action,
+            tool_results,
+            state_content=ObservationContent(text="3", data=custom_data),
+        )
+
+        assert result_obs.state is not None
+        assert result_obs.state.data == custom_data
+
+    def test_auto_populate_skipped_when_no_tool_results(self):
+        """Test that auto-populate is skipped when no tool results."""
+        from llenvs.core.state import ObservationContent
+
+        env = CalculatorEnvironment()
+
+        obs = Observation(
+            prompt="test",
+            available_tools=env.available_tools,
+        )
+
+        action = Action(text="thinking...")
+
+        result_obs = env._build_next_observation(
+            obs,
+            action,
+            (),
+            state_content=ObservationContent(text="state"),
+        )
+
+        assert result_obs.state is not None
+        assert result_obs.state.data is None
+
+    def test_auto_populate_skipped_when_state_content_none(self):
+        """Test that auto-populate is skipped when state_content is None."""
+        from llenvs.core.tools import ToolResult, ToolResultStatus
+
+        env = CalculatorEnvironment()
+
+        obs = Observation(
+            prompt="test",
+            available_tools=env.available_tools,
+        )
+
+        action = Action(
+            tool_calls=(ToolCall(id="c1", name="add", arguments={"a": 1, "b": 2}),),
+        )
+
+        tool_results = (
+            ToolResult(
+                call_id="c1",
+                tool_name="add",
+                output="3",
+                status=ToolResultStatus.SUCCESS,
+            ),
+        )
+
+        result_obs = env._build_next_observation(
+            obs,
+            action,
+            tool_results,
+            state_content=None,
+        )
+
+        assert result_obs.state is None

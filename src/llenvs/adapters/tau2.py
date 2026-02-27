@@ -557,7 +557,12 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
                 messages=tuple(obs_messages),
                 available_tools=self._tools,
                 task=state.observation.task,
-                state=ObservationContent(text=state_text) if state_text else None,
+                state=ObservationContent(
+                    text=state_text,
+                    data={"user_response": state_text} if state_text else None,
+                )
+                if state_text
+                else None,
             )
 
         next_hidden = Tau2Hidden(

@@ -433,6 +433,15 @@ class TestJerichoEnvironment:
         assert result.next_state.metadata.step == 1
         assert result.next_state.metadata.is_terminal is False
 
+        # Jericho populates data with game state
+        obs_state = result.next_state.observation.state
+        assert obs_state is not None
+        assert obs_state.data is not None
+        assert "valid_actions" in obs_state.data
+        assert "score" in obs_state.data
+        assert "max_score" in obs_state.data
+        assert "moves" in obs_state.data
+
     def test_step_score_update(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})
 

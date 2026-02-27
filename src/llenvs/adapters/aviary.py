@@ -201,7 +201,14 @@ def _aviary_messages_to_observation(
         content = getattr(msg, "content", "")
         if content:
             state_parts.append(str(content))
-    state_content = ObservationContent(text="\n".join(state_parts)) if state_parts else None
+    state_content = (
+        ObservationContent(
+            text="\n".join(state_parts),
+            data=BaseToolEnvironment._tool_results_to_data(tuple(tool_results)),
+        )
+        if state_parts
+        else None
+    )
 
     return (
         Observation(

@@ -621,6 +621,9 @@ class TestTau2Environment:
         assert next_obs.task is not None
         assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
         assert next_obs.state is not None  # state reflects tool results
+        assert next_obs.state.data is not None
+        assert "tool_results" in next_obs.state.data
+        assert next_obs.state.data["tool_results"][0]["tool_name"] == "get_user_details"
 
     def test_step_text_to_user(self):
         """Text-only action goes to user simulator."""
@@ -634,6 +637,11 @@ class TestTau2Environment:
         assert result.terminated is False
         # Should have new messages
         assert len(result.next_state.observation.messages) > 0
+
+        # Text path: state.data has user_response
+        obs_state = result.next_state.observation.state
+        if obs_state is not None and obs_state.data is not None:
+            assert "user_response" in obs_state.data
 
     def test_step_user_stop(self):
         """User sending ###STOP### terminates episode."""

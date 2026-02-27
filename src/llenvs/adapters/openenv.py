@@ -308,7 +308,10 @@ class OpenEnvEnvironment:
             prompt=state.observation.prompt,
             messages=tuple(messages),
             task=state.observation.task,
-            state=ObservationContent(text=obs_text),
+            state=ObservationContent(
+                text=obs_text,
+                data={"raw_observation": step_result.observation},
+            ),
         )
 
         # Get session info
@@ -564,7 +567,12 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
                 messages=tuple(messages),
                 available_tools=self._tools,
                 task=state.observation.task,
-                state=ObservationContent(text=obs_text) if obs_text else None,
+                state=ObservationContent(
+                    text=obs_text,
+                    data={"raw_observation": step_result.observation},
+                )
+                if obs_text
+                else None,
             )
 
         next_hidden = OpenEnvHidden(

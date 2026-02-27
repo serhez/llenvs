@@ -745,6 +745,12 @@ class TestAviaryEnvironment:
         assert result.next_state.hidden.aviary_reward == 1.0
         assert result.next_state.hidden.cumulative_reward == 1.0
 
+        # Aviary builds observations manually — data should have tool_results
+        obs_state = result.next_state.observation.state
+        if obs_state is not None:
+            assert obs_state.data is not None
+            assert "tool_results" in obs_state.data
+
     def test_step_rewards_computed(self):
         env = self._make_env()
         state, _ = env.reset(options={"task_index": 0})

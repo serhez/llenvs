@@ -904,11 +904,13 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
             state_text = "\n".join(
                 str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
             )
+            data = self._tool_results_to_data(tuple(tool_results))
+            data["physics_steps"] = total_physics_steps
             next_obs = self._build_next_observation(
                 current_obs=state.observation,
                 action=action,
                 tool_results=tuple(tool_results),
-                state_content=ObservationContent(text=state_text, images=images)
+                state_content=ObservationContent(text=state_text, images=images, data=data)
                 if state_text
                 else None,
             )
@@ -930,7 +932,10 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 available_tools=self._tools,
                 images=images,
                 task=state.observation.task,
-                state=ObservationContent(images=images),
+                state=ObservationContent(
+                    images=images,
+                    data={"physics_steps": total_physics_steps},
+                ),
             )
 
         # Add proprioception if enabled
@@ -940,8 +945,13 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
             # Append as a user message
             messages = list(next_obs.messages)
             messages.append({"role": "user", "content": f"[Step {next_step}]\n{proprio_text}"})
-            # Rebuild state with proprioception
+            # Rebuild state with proprioception — merge proprioception into data
             combined_state_text = "\n".join(state_parts)
+            existing_data = next_obs.state.data if next_obs.state is not None else {}
+            combined_data = {
+                **(existing_data or {}),
+                "proprioception": self._robot.get_proprioception(),
+            }
             next_obs = Observation(
                 prompt=next_obs.prompt,
                 messages=tuple(messages),
@@ -949,7 +959,9 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 available_tools=next_obs.available_tools,
                 images=next_obs.images,
                 task=next_obs.task,
-                state=ObservationContent(text=combined_state_text, images=images),
+                state=ObservationContent(
+                    text=combined_state_text, images=images, data=combined_data
+                ),
             )
 
         # Read current robot state

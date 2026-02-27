@@ -443,6 +443,13 @@ class TestCraftaxEnvironment:
         assert result.next_state.metadata.step == 1
         assert result.next_state.hidden.episode_step == 1
 
+        # Craftax populates data with episode_step and cumulative_reward
+        obs_state = result.next_state.observation.state
+        assert obs_state is not None
+        assert obs_state.data is not None
+        assert "episode_step" in obs_state.data
+        assert "cumulative_reward" in obs_state.data
+
     def test_step_by_name(self, env):
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="noop"))

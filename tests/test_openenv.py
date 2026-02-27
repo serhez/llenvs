@@ -411,6 +411,10 @@ class TestOpenEnvEnvironment:
         assert isinstance(result.next_state.observation.state, ObservationContent)
         assert result.next_state.observation.state.text == "You moved north. You see a forest."
 
+        # OpenEnv text path: data has raw_observation
+        assert result.next_state.observation.state.data is not None
+        assert "raw_observation" in result.next_state.observation.state.data
+
     def test_step_with_reward(self):
         client = MockSyncClient(
             observations=[{"text": "start"}, {"text": "end"}],
@@ -558,6 +562,12 @@ class TestOpenEnvToolEnvironment:
         # Should have tool results
         assert len(result.next_state.observation.tool_results) == 1
         assert result.next_state.observation.tool_results[0].is_success
+
+        # Tool path: state.data auto-populated with tool_results
+        obs_state = result.next_state.observation.state
+        if obs_state is not None:
+            assert obs_state.data is not None
+            assert "tool_results" in obs_state.data
 
     def test_step_text_only(self):
         env = self._make_env()

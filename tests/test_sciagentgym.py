@@ -492,6 +492,13 @@ class TestSciAgentGymEnvironment:
         assert "analyze_threshold" in result.next_state.hidden.tool_names_used
         assert len(result.next_state.observation.messages) > 0
 
+        # Structured data auto-populated from tool results
+        obs_state = result.next_state.observation.state
+        if obs_state is not None:
+            assert obs_state.data is not None
+            assert "tool_results" in obs_state.data
+            assert obs_state.data["tool_results"][0]["tool_name"] == "analyze_threshold"
+
     def test_step_text_only_terminates(self):
         env = self._make_env()
         state, _ = env.reset(options={"task_index": 0})

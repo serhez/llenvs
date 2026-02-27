@@ -39,6 +39,25 @@ class ObservationContent:
 
 Used by `Observation.task` and `Observation.state` to carry structured content. `text` defaults to empty string, allowing content that is primarily structured data (via `data`).
 
+The `data` field provides machine-readable structured state alongside the text representation. Tool environments auto-populate `data` with serialized tool results:
+
+```python
+# After a tool step, state.data contains:
+{
+    "tool_results": [
+        {
+            "call_id": "call_1",
+            "tool_name": "search",
+            "status": "SUCCESS",
+            "output": "Found 3 results...",
+            "error": None,
+        }
+    ]
+}
+```
+
+Non-tool adapters populate `data` with adapter-specific structured state (e.g., Jericho includes `valid_actions`, `score`, `max_score`, `moves`; Gymnasium includes `gym_info`, `gym_reward`, `episode_step`). Adapters can extend the auto-populated data with additional fields (e.g., MolmoSpaces adds `proprioception` and `physics_steps` alongside `tool_results`).
+
 ### Observation
 
 ```python

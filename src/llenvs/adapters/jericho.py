@@ -341,7 +341,15 @@ class JerichoEnvironment:
         observation = Observation(
             prompt=obs_prompt,
             task=ObservationContent(text=task_text),
-            state=ObservationContent(text=obs_prompt),
+            state=ObservationContent(
+                text=obs_prompt,
+                data={
+                    "valid_actions": list(valid_actions),
+                    "score": init_info["score"],
+                    "max_score": init_info["max_score"],
+                    "moves": init_info["moves"],
+                },
+            ),
         )
 
         metadata = StateMetadata(
@@ -425,7 +433,15 @@ class JerichoEnvironment:
             prompt=state.observation.prompt,
             messages=new_messages,
             task=state.observation.task,
-            state=ObservationContent(text=obs_prompt),
+            state=ObservationContent(
+                text=obs_prompt,
+                data={
+                    "valid_actions": list(valid_actions),
+                    "score": current_score,
+                    "max_score": max_score,
+                    "moves": moves,
+                },
+            ),
         )
 
         new_metadata = StateMetadata(
