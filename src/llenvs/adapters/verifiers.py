@@ -535,10 +535,14 @@ class VerifiersToolEnvironment(BaseToolEnvironment[VerifiersToolHidden]):
 
         # Build next observation with tool results
         if tool_results or action.tool_calls:
+            state_text = "\n".join(
+                str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
+            )
             next_observation = self._build_next_observation(
                 state.observation,
                 action,
                 tool_results,
+                state_content=ObservationContent(text=state_text) if state_text else None,
             )
         else:
             # Text-only — add assistant message to history

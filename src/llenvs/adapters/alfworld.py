@@ -406,11 +406,26 @@ class AlfWorldEnvironment:
             admissible_commands=admissible_commands,
         )
 
+        # Task = objective (static); State = room description + commands (dynamic)
+        task_text = ""
+        if objective:
+            prefix = self._prompts["objective_prefix"]
+            task_text = prefix.format(objective=objective)
+
+        state_parts = [raw_obs]
+        if self._include_admissible_commands and admissible_commands:
+            commands_prefix = self._prompts["admissible_commands_prefix"]
+            state_parts.append("")
+            state_parts.append(commands_prefix)
+            for cmd in admissible_commands:
+                state_parts.append(f"  - {cmd}")
+        state_text = "\n".join(state_parts)
+
         observation = Observation(
             prompt=obs_prompt,
             images=images,
-            task=ObservationContent(text=obs_prompt),
-            state=ObservationContent(text=obs_prompt, images=images),
+            task=ObservationContent(text=task_text),
+            state=ObservationContent(text=state_text, images=images),
         )
 
         metadata = StateMetadata(
@@ -511,12 +526,21 @@ class AlfWorldEnvironment:
             {"role": "assistant", "content": action.text or ""},
             user_msg,
         )
+        state_parts = [obs_text]
+        if self._include_admissible_commands and admissible_commands:
+            commands_prefix = self._prompts["admissible_commands_prefix"]
+            state_parts.append("")
+            state_parts.append(commands_prefix)
+            for cmd in admissible_commands:
+                state_parts.append(f"  - {cmd}")
+        state_text = "\n".join(state_parts)
+
         new_observation = Observation(
             prompt=state.observation.prompt,
             messages=new_messages,
             images=images,
             task=state.observation.task,
-            state=ObservationContent(text=obs_prompt, images=images),
+            state=ObservationContent(text=state_text, images=images),
         )
 
         new_metadata = StateMetadata(

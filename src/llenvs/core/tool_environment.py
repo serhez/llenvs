@@ -7,7 +7,7 @@ concrete tool environments.
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from llenvs.core.state import Observation
+from llenvs.core.state import Observation, ObservationContent
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -134,6 +134,7 @@ class BaseToolEnvironment[HiddenT]:
         current_obs: Observation,
         action: Any,
         tool_results: tuple[ToolResult, ...],
+        state_content: ObservationContent | None = None,
     ) -> Observation:
         """Build the next observation including tool results.
 
@@ -176,4 +177,5 @@ class BaseToolEnvironment[HiddenT]:
             tool_results=tool_results,
             available_tools=self._tools,
             task=current_obs.task,
+            state=state_content,
         )

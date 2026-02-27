@@ -86,12 +86,14 @@ class ObservationContent:
     """Structured content for task descriptions or state observations.
 
     Attributes:
-        text: Text content.
+        text: Text content (empty string for primarily-structured content).
         images: Optional image content.
+        data: Optional structured data (tool results, game state, etc.).
     """
 
-    text: str
+    text: str = ""
     images: tuple[ImageContent, ...] = ()
+    data: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -371,12 +371,14 @@ class TestAlfWorldEnvironment:
         assert info["task_index"] == 0
         assert info["task_type"] == "pick_and_place_simple"
 
-        # Structured observation: task and state set on reset
+        # Structured observation: task = objective, state = room + commands
         obs = state.observation
         assert isinstance(obs.task, ObservationContent)
-        assert obs.task.text == obs.prompt
+        assert "put a clean mug on desk 1" in obs.task.text  # task is objective
+        assert obs.task.text != obs.state.text  # task ≠ state
         assert isinstance(obs.state, ObservationContent)
-        assert obs.state.text == obs.prompt
+        assert "room" in obs.state.text or "desk" in obs.state.text  # state is room desc
+        assert "Admissible commands:" in obs.state.text  # state includes commands
         assert obs.state.images == ()  # text mode: no images in state
 
     def test_reset_default_task_index(self, env: AlfWorldEnvironment):
@@ -407,7 +409,8 @@ class TestAlfWorldEnvironment:
         # Structured observation: task carried forward, state updated
         next_obs = result.next_state.observation
         assert next_obs.task is not None
-        assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
+        assert next_obs.task == state.observation.task  # task unchanged across steps
+        assert "put a clean mug on desk 1" in next_obs.task.text
         assert next_obs.state is not None
         assert "desk 1" in next_obs.state.text  # state reflects step observation
         assert next_obs.state.images == ()  # text mode

@@ -195,6 +195,14 @@ def _aviary_messages_to_observation(
                 msg_dict["content"] = str(content)
             new_messages.append(msg_dict)
 
+    # Derive state from latest response content
+    state_parts: list[str] = []
+    for msg in messages:
+        content = getattr(msg, "content", "")
+        if content:
+            state_parts.append(str(content))
+    state_content = ObservationContent(text="\n".join(state_parts)) if state_parts else None
+
     return (
         Observation(
             prompt=prompt,
@@ -202,6 +210,7 @@ def _aviary_messages_to_observation(
             tool_results=tuple(tool_results),
             available_tools=available_tools,
             task=task,
+            state=state_content,
         ),
         tuple(tool_results),
     )

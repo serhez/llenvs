@@ -804,11 +804,14 @@ class TestJerichoFullEpisode:
         assert state.metadata.step == 0
         assert state.hidden.score == 0
 
-        # task and state are set on reset
+        # task = synthetic description, state = game text
         assert isinstance(state.observation.task, ObservationContent)
-        assert state.observation.task.text == state.observation.prompt
+        assert "zork1" in state.observation.task.text.lower()
+        assert "interactive fiction" in state.observation.task.text.lower()
         assert isinstance(state.observation.state, ObservationContent)
         assert state.observation.state.text == state.observation.prompt
+        # task and state are distinct
+        assert state.observation.task.text != state.observation.state.text
         reset_task = state.observation.task
 
         # Explore and earn points

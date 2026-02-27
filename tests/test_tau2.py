@@ -616,11 +616,11 @@ class TestTau2Environment:
         assert result.next_state.hidden.episode_step == 1
         assert len(result.next_state.observation.messages) > 0
 
-        # Structured observation: task carried forward on step (tool env, no state)
+        # Structured observation: task carried forward, state has tool results
         next_obs = result.next_state.observation
         assert next_obs.task is not None
         assert next_obs.task.text == state.observation.prompt  # task stays as initial prompt
-        assert next_obs.state is None  # tool adapters don't set state
+        assert next_obs.state is not None  # state reflects tool results
 
     def test_step_text_to_user(self):
         """Text-only action goes to user simulator."""

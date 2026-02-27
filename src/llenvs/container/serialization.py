@@ -12,7 +12,14 @@ from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -241,17 +248,46 @@ def deserialize_reward_bundle(data: dict[str, Any]) -> SignalBundle:
 # ---------------------------------------------------------------------------
 
 
+def _serialize_observation_content(content: ObservationContent) -> dict[str, Any]:
+    """Serialize an ObservationContent to a JSON-compatible dict."""
+    d: dict[str, Any] = {"text": content.text}
+    if content.images:
+        d["images"] = [{"data": img.data, "media_type": img.media_type} for img in content.images]
+    if content.data is not None:
+        d["data"] = content.data
+    return d
+
+
+def _deserialize_observation_content(data: dict[str, Any]) -> ObservationContent:
+    """Deserialize a dict to an ObservationContent."""
+    return ObservationContent(
+        text=data.get("text", ""),
+        images=tuple(
+            ImageContent(data=img["data"], media_type=img.get("media_type", "image/png"))
+            for img in data.get("images", ())
+        ),
+        data=data.get("data"),
+    )
+
+
 def serialize_observation(obs: Observation) -> dict[str, Any]:
-    return {
+    d: dict[str, Any] = {
         "prompt": obs.prompt,
         "messages": [dict(m) for m in obs.messages],
         "tool_results": [serialize_tool_result(tr) for tr in obs.tool_results],
         "available_tools": [serialize_tool_definition(td) for td in obs.available_tools],
         "images": [{"data": img.data, "media_type": img.media_type} for img in obs.images],
     }
+    if obs.task is not None:
+        d["task"] = _serialize_observation_content(obs.task)
+    if obs.state is not None:
+        d["state"] = _serialize_observation_content(obs.state)
+    return d
 
 
 def deserialize_observation(data: dict[str, Any]) -> Observation:
+    task = _deserialize_observation_content(data["task"]) if "task" in data else None
+    state = _deserialize_observation_content(data["state"]) if "state" in data else None
     return Observation(
         prompt=data["prompt"],
         messages=tuple(data.get("messages", ())),
@@ -263,6 +299,8 @@ def deserialize_observation(data: dict[str, Any]) -> Observation:
             ImageContent(data=img["data"], media_type=img.get("media_type", "image/png"))
             for img in data.get("images", ())
         ),
+        task=task,
+        state=state,
     )
 
 

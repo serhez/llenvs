@@ -509,10 +509,14 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
 
         # Build next observation
         if tool_results:
+            state_text = "\n".join(
+                str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
+            )
             next_obs = self._build_next_observation(
                 current_obs=state.observation,
                 action=action,
                 tool_results=tuple(tool_results),
+                state_content=ObservationContent(text=state_text) if state_text else None,
             )
         else:
             # Text-based step: build observation from messages
@@ -540,11 +544,20 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
                 if user_msgs:
                     obs_messages.append(user_msgs[-1])
 
+            # Derive state from latest user message or agent text
+            state_text = ""
+            user_msgs = [m for m in obs_messages if m.get("role") == "user"]
+            if user_msgs:
+                state_text = str(user_msgs[-1].get("content", ""))
+            elif action.text:
+                state_text = action.text
+
             next_obs = Observation(
                 prompt=state.observation.prompt,
                 messages=tuple(obs_messages),
                 available_tools=self._tools,
                 task=state.observation.task,
+                state=ObservationContent(text=state_text) if state_text else None,
             )
 
         next_hidden = Tau2Hidden(

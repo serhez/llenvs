@@ -313,7 +313,7 @@ environments:
       - type: numeric
 ```
 
-Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `raw`, `tail`, `native`.
+Each entry has a `type` (registry name) and optional `config` (kwargs passed to the extractor constructor). Available types: `tag_based`, `regex`, `gsm8k`, `multiple_choice`, `boxed`, `numeric`, `last_line`, `code_block`, `pattern_answer`, `raw`, `native`.
 
 The `native` type uses the adapter's built-in extraction (only supported by `reasoning_gym`).
 
@@ -354,6 +354,28 @@ Semantics:
 Available pre-cleaners: `strip_special_tokens`, `strip_thinking_tokens`
 
 Available post-cleaners: `strip_trailing_punctuation`, `strip_surrounding_quotes`, `strip_latex_dollars`
+
+### Parameterized Cleaners
+
+Cleaners that take arguments are specified as dicts with `type` and optional `config`. They can be used in both `pre_cleaners` and `post_cleaners`:
+
+```yaml
+environments:
+  - name: math_task
+    post_cleaners:
+      - strip_trailing_punctuation
+      - type: truncate_tail
+        config:
+          max_chars: 512
+```
+
+Available parameterized cleaners:
+
+| Name | Config | Default | Description |
+|------|--------|---------|-------------|
+| `truncate_tail` | `max_chars` | 256 | Keep only the last N characters (strips whitespace first) |
+
+Parameterized cleaners can be mixed freely with simple string cleaner names.
 
 ## Prompt Pipeline Configuration
 

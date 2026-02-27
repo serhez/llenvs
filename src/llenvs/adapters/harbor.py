@@ -741,10 +741,14 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
                     reward_value = 0.0
 
         # Build next observation via BaseToolEnvironment helper
+        state_text = "\n".join(
+            str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
+        )
         next_obs = self._build_next_observation(
             current_obs=state.observation,
             action=action,
             tool_results=tuple(tool_results),
+            state_content=ObservationContent(text=state_text) if state_text else None,
         )
 
         # Build action text for trajectory tracking

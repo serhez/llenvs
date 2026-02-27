@@ -419,10 +419,14 @@ class SciAgentGymEnvironment(BaseToolEnvironment[SciAgentGymHidden]):
             truncated = True
 
         # Build next observation
+        state_text = "\n".join(
+            str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
+        )
         next_obs = self._build_next_observation(
             current_obs=state.observation,
             action=action,
             tool_results=tuple(tool_results),
+            state_content=ObservationContent(text=state_text) if state_text else None,
         )
 
         next_hidden = SciAgentGymHidden(

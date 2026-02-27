@@ -320,6 +320,12 @@ class JerichoEnvironment:
         # Build observation
         obs_prompt = self._build_observation_prompt(raw_obs, valid_actions)
 
+        # Task = synthetic description (static); State = game text (dynamic)
+        task_text = (
+            f"You are playing {game_name}, a classic interactive fiction game. "
+            f"Use text commands to explore, interact with objects, and solve puzzles."
+        )
+
         hidden = JerichoHidden(
             task_index=task_index,
             game_name=game_name,
@@ -334,7 +340,7 @@ class JerichoEnvironment:
 
         observation = Observation(
             prompt=obs_prompt,
-            task=ObservationContent(text=obs_prompt),
+            task=ObservationContent(text=task_text),
             state=ObservationContent(text=obs_prompt),
         )
 

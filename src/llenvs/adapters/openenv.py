@@ -545,10 +545,14 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
 
         # Build next observation
         if tool_results or action.tool_calls:
+            state_text = "\n".join(
+                str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
+            )
             next_observation = self._build_next_observation(
                 state.observation,
                 action,
                 tool_results,
+                state_content=ObservationContent(text=state_text) if state_text else None,
             )
         else:
             messages = list(state.observation.messages)
@@ -560,6 +564,7 @@ class OpenEnvToolEnvironment(BaseToolEnvironment[OpenEnvHidden]):
                 messages=tuple(messages),
                 available_tools=self._tools,
                 task=state.observation.task,
+                state=ObservationContent(text=obs_text) if obs_text else None,
             )
 
         next_hidden = OpenEnvHidden(

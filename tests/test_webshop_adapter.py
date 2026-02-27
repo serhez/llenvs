@@ -516,11 +516,13 @@ class TestWebShopMultiStepEpisode:
         assert "red wireless headphone" in info["instruction"].lower()
         assert state.metadata.step == 0
 
-        # task and state are set on reset
+        # task = static instruction, state = dynamic step content
         assert isinstance(state.observation.task, ObservationContent)
-        assert state.observation.task.text == state.observation.prompt
+        assert "red wireless headphone" in state.observation.task.text.lower()
         assert isinstance(state.observation.state, ObservationContent)
-        assert state.observation.state.text == state.observation.prompt
+        assert "[Step 0]" in state.observation.state.text
+        # task and state are distinct
+        assert state.observation.task.text != state.observation.state.text
         reset_task = state.observation.task
 
         # Step 1: Search
@@ -529,11 +531,11 @@ class TestWebShopMultiStepEpisode:
         assert not result1.terminated
         assert result1.next_state.metadata.step == 1
 
-        # task carried forward, state updated
+        # task carried forward, state updated with step content
         assert result1.next_state.observation.task is reset_task
         assert isinstance(result1.next_state.observation.state, ObservationContent)
-        step1_obs = result1.next_state.observation.messages[-1]["content"]
-        assert result1.next_state.observation.state.text == step1_obs
+        assert "[Step 1]" in result1.next_state.observation.state.text
+        assert "Search results" in result1.next_state.observation.state.text
 
         # Step 2: Click on product
         action2 = Action(text="click[Product 1 - Red Headphones $45]")
@@ -543,8 +545,7 @@ class TestWebShopMultiStepEpisode:
 
         # task still the same object, state updated to new obs
         assert result2.next_state.observation.task is reset_task
-        step2_obs = result2.next_state.observation.messages[-1]["content"]
-        assert result2.next_state.observation.state.text == step2_obs
+        assert "[Step 2]" in result2.next_state.observation.state.text
 
         # Step 3: Buy
         action3 = Action(text="click[Buy Now]")

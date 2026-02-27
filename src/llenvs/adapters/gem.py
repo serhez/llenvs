@@ -998,7 +998,15 @@ class GemToolEnvironment(BaseToolEnvironment["GemToolHidden"]):
             terminated = terminated or self._check_terminal_tools(action.tool_calls)
 
         # Build next observation
-        next_obs = self._build_next_observation(state.observation, action, tool_results)
+        state_text = "\n".join(
+            str(r.output) if r.is_success else str(r.error) for r in tool_results
+        )
+        next_obs = self._build_next_observation(
+            state.observation,
+            action,
+            tool_results,
+            state_content=ObservationContent(text=state_text) if state_text else None,
+        )
 
         next_hidden = GemToolHidden(
             env_id=state.hidden.env_id,

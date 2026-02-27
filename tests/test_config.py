@@ -583,6 +583,66 @@ class TestExtractorsChainConfig:
             "strip_surrounding_quotes",
         ]
 
+    def test_parameterized_cleaners_in_config(self):
+        """EnvironmentConfig accepts mixed list[str | dict] for cleaners."""
+        config = EnvironmentConfig(
+            name="test",
+            pre_cleaners=["strip_special_tokens"],
+            post_cleaners=[
+                "strip_trailing_punctuation",
+                {"type": "truncate_tail", "config": {"max_chars": 512}},
+            ],
+        )
+        assert len(config.post_cleaners) == 2
+        assert config.post_cleaners[0] == "strip_trailing_punctuation"
+        assert config.post_cleaners[1] == {"type": "truncate_tail", "config": {"max_chars": 512}}
+
+    def test_from_dict_parameterized_cleaners(self):
+        """from_dict parses parameterized cleaner specs."""
+        data = {
+            "environments": [
+                {
+                    "name": "test",
+                    "post_cleaners": [
+                        "strip_trailing_punctuation",
+                        {"type": "truncate_tail", "config": {"max_chars": 100}},
+                    ],
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(data)
+        env = config.environments[0]
+        assert len(env.post_cleaners) == 2
+        assert env.post_cleaners[1] == {"type": "truncate_tail", "config": {"max_chars": 100}}
+
+    def test_to_dict_roundtrip_parameterized_cleaners(self):
+        """to_dict roundtrips parameterized cleaner specs."""
+        original = {
+            "environments": [
+                {
+                    "name": "test",
+                    "pre_cleaners": [
+                        {"type": "truncate_tail", "config": {"max_chars": 200}},
+                    ],
+                    "post_cleaners": [
+                        "strip_trailing_punctuation",
+                        {"type": "truncate_tail", "config": {"max_chars": 512}},
+                    ],
+                }
+            ],
+            "model": {"model": "test-model"},
+        }
+        config = EvalConfig.from_dict(original)
+        result = config.to_dict()
+        assert (
+            result["environments"][0]["pre_cleaners"] == original["environments"][0]["pre_cleaners"]
+        )
+        assert (
+            result["environments"][0]["post_cleaners"]
+            == original["environments"][0]["post_cleaners"]
+        )
+
     def test_roundtrip_with_answer_extractors(self):
         """Test roundtrip with answer_extractors chain."""
         original = {

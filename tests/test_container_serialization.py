@@ -35,7 +35,14 @@ from llenvs.container.serialization import (
 )
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.state import (
+    Action,
+    ImageContent,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
 from llenvs.core.tools import (
     ToolCall,
     ToolDefinition,
@@ -343,6 +350,77 @@ class TestObservationSerialization:
         data = serialize_observation(obs)
         result = deserialize_observation(data)
         assert result.available_tools == (td,)
+
+    def test_with_task_and_state(self):
+        obs = Observation(
+            prompt="Solve it",
+            task=ObservationContent(text="Task description"),
+            state=ObservationContent(text="Current state"),
+        )
+        data = serialize_observation(obs)
+        result = deserialize_observation(data)
+        assert result.task is not None
+        assert result.task.text == "Task description"
+        assert result.state is not None
+        assert result.state.text == "Current state"
+
+    def test_task_none_state_none(self):
+        obs = Observation(prompt="p")
+        data = serialize_observation(obs)
+        result = deserialize_observation(data)
+        assert result.task is None
+        assert result.state is None
+
+    def test_task_with_images(self):
+        img = ImageContent(data="abc123", media_type="image/jpeg")
+        obs = Observation(
+            prompt="p",
+            task=ObservationContent(text="task", images=(img,)),
+        )
+        data = serialize_observation(obs)
+        result = deserialize_observation(data)
+        assert result.task is not None
+        assert len(result.task.images) == 1
+        assert result.task.images[0].data == "abc123"
+        assert result.task.images[0].media_type == "image/jpeg"
+
+    def test_state_with_data(self):
+        obs = Observation(
+            prompt="p",
+            state=ObservationContent(text="state", data={"score": 42, "items": ["a", "b"]}),
+        )
+        data = serialize_observation(obs)
+        result = deserialize_observation(data)
+        assert result.state is not None
+        assert result.state.data == {"score": 42, "items": ["a", "b"]}
+
+    def test_task_and_state_full_round_trip(self):
+        import json
+
+        img = ImageContent(data="base64data", media_type="image/png")
+        obs = Observation(
+            prompt="prompt",
+            task=ObservationContent(text="task text", images=(img,), data={"key": "val"}),
+            state=ObservationContent(text="state text", data={"step": 3}),
+        )
+        data = serialize_observation(obs)
+        json_str = json.dumps(data)
+        restored = deserialize_observation(json.loads(json_str))
+        assert restored.task.text == "task text"
+        assert restored.task.images[0].data == "base64data"
+        assert restored.task.data == {"key": "val"}
+        assert restored.state.text == "state text"
+        assert restored.state.data == {"step": 3}
+
+    def test_observation_content_empty_text(self):
+        obs = Observation(
+            prompt="p",
+            state=ObservationContent(data={"structured": True}),
+        )
+        data = serialize_observation(obs)
+        result = deserialize_observation(data)
+        assert result.state.text == ""
+        assert result.state.data == {"structured": True}
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,7 @@ Each cleaner is a simple str -> str function.
 
 import re
 from collections.abc import Callable
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Pre-cleaners (raw response -> cleaned response)
@@ -89,6 +90,28 @@ def strip_latex_dollars(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Parameterized cleaner factories
+# ---------------------------------------------------------------------------
+
+
+def truncate_tail(max_chars: int = 256) -> Callable[[str], str]:
+    """Create a cleaner that keeps only the last N characters."""
+
+    def _truncate(text: str) -> str:
+        text = text.strip()
+        if len(text) > max_chars:
+            return text[-max_chars:]
+        return text
+
+    return _truncate
+
+
+CLEANER_FACTORIES: dict[str, Callable[..., Callable[[str], str]]] = {
+    "truncate_tail": truncate_tail,
+}
+
+
+# ---------------------------------------------------------------------------
 # Registries and defaults
 # ---------------------------------------------------------------------------
 
@@ -108,13 +131,16 @@ DEFAULT_POST_CLEANERS: list[str] = ["strip_trailing_punctuation"]
 
 
 def resolve_cleaners(
-    names: list[str] | None,
+    names: list[str | dict[str, Any]] | None,
     kind: str,
 ) -> list[Callable[[str], str]]:
     """Resolve cleaner names to functions.
 
     Args:
-        names: List of cleaner names, or None for defaults, or [] to disable.
+        names: List of cleaner specs, or None for defaults, or [] to disable.
+            Each entry is either a string name (looked up in the pre/post registry)
+            or a dict ``{"type": "name", "config": {...}}`` (looked up in
+            ``CLEANER_FACTORIES`` and called with the config kwargs).
         kind: "pre" or "post".
 
     Returns:
@@ -123,10 +149,11 @@ def resolve_cleaners(
     Raises:
         ValueError: If kind is not "pre" or "post".
         KeyError: If a cleaner name is not found in the registry.
+        TypeError: If an entry is not a str or dict.
     """
     if kind == "pre":
         registry = PRE_CLEANERS
-        defaults = DEFAULT_PRE_CLEANERS
+        defaults: list[str | dict[str, Any]] = DEFAULT_PRE_CLEANERS
     elif kind == "post":
         registry = POST_CLEANERS
         defaults = DEFAULT_POST_CLEANERS
@@ -137,10 +164,22 @@ def resolve_cleaners(
         names = defaults
 
     result = []
-    for name in names:
-        if name not in registry:
-            raise KeyError(
-                f"Unknown {kind}-cleaner: {name!r}. Available: {sorted(registry.keys())}"
-            )
-        result.append(registry[name])
+    for entry in names:
+        if isinstance(entry, str):
+            if entry not in registry:
+                raise KeyError(
+                    f"Unknown {kind}-cleaner: {entry!r}. Available: {sorted(registry.keys())}"
+                )
+            result.append(registry[entry])
+        elif isinstance(entry, dict):
+            factory_name = entry["type"]
+            config = entry.get("config", {})
+            if factory_name not in CLEANER_FACTORIES:
+                raise KeyError(
+                    f"Unknown parameterized cleaner: {factory_name!r}. "
+                    f"Available: {sorted(CLEANER_FACTORIES.keys())}"
+                )
+            result.append(CLEANER_FACTORIES[factory_name](**config))
+        else:
+            raise TypeError(f"Cleaner entry must be str or dict, got {type(entry).__name__}")
     return result

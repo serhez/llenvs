@@ -506,10 +506,14 @@ class MAREEnvironment(BaseToolEnvironment[MAREHidden]):
             truncated = True
 
         # Build next observation
+        state_text = "\n".join(
+            str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
+        )
         next_obs = self._build_next_observation(
             current_obs=state.observation,
             action=action,
             tool_results=tuple(tool_results),
+            state_content=ObservationContent(text=state_text) if state_text else None,
         )
 
         # Add notifications as system messages
@@ -517,12 +521,22 @@ class MAREEnvironment(BaseToolEnvironment[MAREHidden]):
             messages = list(next_obs.messages)
             for notif in notifications:
                 messages.append({"role": "system", "content": f"[Notification] {notif}"})
+            # Append notification text to state
+            notif_text = "\n".join(f"[Notification] {n}" for n in notifications)
+            existing_state = next_obs.state
+            if existing_state is not None:
+                combined_text = (
+                    existing_state.text + "\n" + notif_text if existing_state.text else notif_text
+                )
+            else:
+                combined_text = notif_text
             next_obs = Observation(
                 prompt=next_obs.prompt,
                 messages=tuple(messages),
                 tool_results=next_obs.tool_results,
                 available_tools=next_obs.available_tools,
                 task=next_obs.task,
+                state=ObservationContent(text=combined_text),
             )
 
         next_hidden = MAREHidden(

@@ -355,3 +355,143 @@ class TestCleanerRegistries:
             assert name in PRE_CLEANERS
         for name in DEFAULT_POST_CLEANERS:
             assert name in POST_CLEANERS
+
+
+class TestTruncateTail:
+    """Tests for truncate_tail cleaner factory."""
+
+    def test_short_text_no_truncation(self):
+        """Short text returned unchanged."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail(max_chars=256)
+        assert fn("short") == "short"
+
+    def test_long_text_truncated(self):
+        """Long text truncated to last N chars."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail(max_chars=10)
+        assert fn("a" * 100) == "a" * 10
+
+    def test_strips_whitespace_before_truncating(self):
+        """Whitespace stripped before length check."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail(max_chars=256)
+        assert fn("  hello  ") == "hello"
+
+    def test_exact_boundary_no_truncation(self):
+        """len == max_chars -> no truncation."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail(max_chars=5)
+        assert fn("abcde") == "abcde"
+
+    def test_one_over_boundary_truncated(self):
+        """len == max_chars + 1 -> truncation."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail(max_chars=5)
+        assert fn("abcdef") == "bcdef"
+
+    def test_default_max_chars_is_256(self):
+        """Default max_chars is 256."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail()
+        text = "x" * 300
+        assert fn(text) == "x" * 256
+
+    def test_empty_string(self):
+        """Empty string returns empty string."""
+        from llenvs.core.cleaning import truncate_tail
+
+        fn = truncate_tail(max_chars=256)
+        assert fn("") == ""
+
+
+class TestResolveCleanersParameterized:
+    """Tests for resolve_cleaners with mixed str | dict entries."""
+
+    def test_dict_spec_resolves(self):
+        """Dict spec with type and config resolves correctly."""
+        fns = resolve_cleaners(
+            [{"type": "truncate_tail", "config": {"max_chars": 100}}],
+            "post",
+        )
+        assert len(fns) == 1
+        # Should truncate to 100 chars
+        assert fns[0]("x" * 200) == "x" * 100
+
+    def test_mixed_str_and_dict(self):
+        """Mixed list of str and dict entries works."""
+        fns = resolve_cleaners(
+            [
+                "strip_trailing_punctuation",
+                {"type": "truncate_tail", "config": {"max_chars": 50}},
+            ],
+            "post",
+        )
+        assert len(fns) == 2
+        assert fns[0] is strip_trailing_punctuation
+        assert fns[1]("x" * 100) == "x" * 50
+
+    def test_dict_without_config_uses_defaults(self):
+        """Dict without 'config' key uses factory defaults."""
+        fns = resolve_cleaners([{"type": "truncate_tail"}], "post")
+        assert len(fns) == 1
+        # Default is 256
+        assert fns[0]("x" * 300) == "x" * 256
+
+    def test_unknown_parameterized_cleaner_raises(self):
+        """Unknown parameterized cleaner name raises KeyError."""
+        with pytest.raises(KeyError):
+            resolve_cleaners([{"type": "nonexistent_factory"}], "post")
+
+    def test_works_in_pre_position(self):
+        """Parameterized cleaners work as pre-cleaners."""
+        fns = resolve_cleaners(
+            [{"type": "truncate_tail", "config": {"max_chars": 20}}],
+            "pre",
+        )
+        assert len(fns) == 1
+        assert len(fns[0]("x" * 50)) == 20
+
+    def test_invalid_entry_type_raises(self):
+        """Non-str, non-dict entry raises TypeError."""
+        with pytest.raises(TypeError):
+            resolve_cleaners([42], "post")
+
+
+class TestCleanedExtractorWithTruncateTail:
+    """Integration tests: truncate_tail as pre/post-cleaner with CleanedExtractor."""
+
+    def test_post_cleaner_truncates_extracted_answer(self):
+        """Post-cleaner truncates an extracted answer."""
+        from llenvs.core.cleaning import truncate_tail
+
+        inner = TagBasedExtractor()
+        extractor = CleanedExtractor(
+            inner=inner,
+            pre_cleaners=[],
+            post_cleaners=[truncate_tail(max_chars=5)],
+        )
+        answer, meta = extractor.extract("<answer>abcdefghij</answer>")
+        assert answer == "fghij"
+        assert len(answer) == 5
+
+    def test_pre_cleaner_truncates_raw_response(self):
+        """Pre-cleaner truncates raw response before extraction."""
+        from llenvs.core.cleaning import truncate_tail
+
+        inner = TagBasedExtractor()
+        # Response has tag at the end — truncation keeps the tail
+        response = "x" * 1000 + "<answer>42</answer>"
+        extractor = CleanedExtractor(
+            inner=inner,
+            pre_cleaners=[truncate_tail(max_chars=50)],
+            post_cleaners=[],
+        )
+        answer, meta = extractor.extract(response)
+        assert answer == "42"

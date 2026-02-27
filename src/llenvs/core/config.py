@@ -53,8 +53,8 @@ class EnvironmentConfig:
     answer_extractor: str = "tag_based"
     answer_extractor_config: dict[str, Any] = field(default_factory=dict)
     answer_extractors: list[dict[str, Any]] | None = None
-    pre_cleaners: list[str] | None = None
-    post_cleaners: list[str] | None = None
+    pre_cleaners: list[str | dict[str, Any]] | None = None
+    post_cleaners: list[str | dict[str, Any]] | None = None
     prompt_template: str | None = None
     system_prompt: str | list[str] | None = None
     prompts: dict[str, str] | None = None

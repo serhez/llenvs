@@ -27,6 +27,18 @@ class StateMetadata:
     info: dict[str, Any]   # Additional metadata
 ```
 
+### ObservationContent
+
+```python
+@dataclass(frozen=True)
+class ObservationContent:
+    text: str = ""                                       # Text content (empty for structured-only)
+    images: tuple[ImageContent, ...] = ()                # Optional image content
+    data: dict[str, Any] | None = None                   # Optional structured data
+```
+
+Used by `Observation.task` and `Observation.state` to carry structured content. `text` defaults to empty string, allowing content that is primarily structured data (via `data`).
+
 ### Observation
 
 ```python
@@ -36,9 +48,21 @@ class Observation:
     messages: tuple[dict[str, Any], ...] = ()            # Chat history (including tool calls/results)
     tool_results: tuple[ToolResult, ...] = ()            # Results from most recent tool calls
     available_tools: tuple[ToolDefinition, ...] = ()     # Tools the model can call
+    images: tuple[ImageContent, ...] = ()                # Image content
+    task: ObservationContent | None = None               # Static task description
+    state: ObservationContent | None = None              # Dynamic state observation
 ```
 
 All environments use `Observation`. Text-only environments return observations with `tool_results=()` and `available_tools=()`. Tool-enabled environments populate these fields.
+
+**Task vs State**: The `task` field holds the static task description (same every turn — objective, instruction, question). The `state` field holds the dynamic observation that changes each turn (room description, tool results, game text). At reset, `task` is set to the task description and `state` reflects the initial observation. On subsequent steps, `task` is carried forward unchanged while `state` is updated.
+
+| Field | Content | When set | Changes across steps |
+|-------|---------|----------|---------------------|
+| `task` | Static task description (objective, instruction) | `reset()` | No — carried forward |
+| `state` | Dynamic observation (room text, tool results, game state) | `reset()` and `step()` | Yes — updated each step |
+
+Not all adapters set these fields. When `None`, the adapter does not distinguish task from state (use `prompt` and `messages` directly).
 
 ### Action
 
@@ -422,7 +446,6 @@ class AnswerExtractor(Protocol):
 | `PatternAnswerExtractor` | `pattern_answer` | "the answer is X", "therefore X", "= X" | Natural language |
 | `CompositeExtractor` | - | Try multiple extractors in order | - |
 | `RawGenerationExtractor` | `raw` | Return full response | - |
-| `TailExtractor` | `tail` | Return last N characters | - |
 | `NativeExtractor` | - | Wraps a third-party extraction function | - |
 
 All extractors follow the **last match wins** convention when multiple matches exist.
@@ -481,6 +504,26 @@ answer, meta = extractor.extract("<answer>42.</answer><|endoftext|>")
 | `strip_trailing_punctuation` | Yes | Remove trailing `.` or `,` (preserves decimal numbers) |
 | `strip_surrounding_quotes` | No | Remove matched surrounding `"..."` or `'...'` |
 | `strip_latex_dollars` | No | Remove surrounding `$...$` or `$$...$$` |
+
+**Parameterized cleaners** (usable in both pre and post positions):
+
+| Name | Config | Description |
+|------|--------|-------------|
+| `truncate_tail` | `max_chars` (default: 256) | Keep only the last N characters (strips whitespace first) |
+
+Parameterized cleaners are specified as dicts with `type` and optional `config`:
+
+```python
+from llenvs.core.cleaning import resolve_cleaners
+
+cleaners = resolve_cleaners(
+    [
+        "strip_trailing_punctuation",                        # Simple name
+        {"type": "truncate_tail", "config": {"max_chars": 512}},  # Parameterized
+    ],
+    "post",
+)
+```
 
 When using YAML configuration, the cleaning layer is applied automatically by `EnvironmentFactory`. See [Configuration](config.md) for details.
 

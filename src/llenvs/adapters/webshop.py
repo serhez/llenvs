@@ -277,6 +277,18 @@ class WebShopEnvironment:
         # Build observation
         obs_prompt = self._build_observation_prompt(raw_obs, instruction, 0)
 
+        # Task = static instruction + action hint; State = dynamic step content
+        task_parts = []
+        prefix = self._prompts["instruction_prefix"]
+        task_parts.append(prefix.format(instruction=instruction))
+        hint = self._prompts.get("action_hint", "")
+        if hint:
+            task_parts.append(hint)
+        task_text = "\n".join(task_parts)
+
+        step_fmt = self._prompts["step_format"]
+        state_text = f"{step_fmt.format(step=0)}\n{raw_obs}"
+
         hidden = WebShopHidden(
             instruction=instruction,
             session_id=str(session),
@@ -288,8 +300,8 @@ class WebShopEnvironment:
 
         observation = Observation(
             prompt=obs_prompt,
-            task=ObservationContent(text=obs_prompt),
-            state=ObservationContent(text=obs_prompt),
+            task=ObservationContent(text=task_text),
+            state=ObservationContent(text=state_text),
         )
 
         metadata = StateMetadata(
@@ -352,6 +364,9 @@ class WebShopEnvironment:
             available_actions=available,
         )
 
+        step_fmt = self._prompts["step_format"]
+        state_text = f"{step_fmt.format(step=next_step)}\n{raw_obs}"
+
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},
             {"role": "user", "content": obs_prompt},
@@ -360,7 +375,7 @@ class WebShopEnvironment:
             prompt=state.observation.prompt,
             messages=new_messages,
             task=state.observation.task,
-            state=ObservationContent(text=obs_prompt),
+            state=ObservationContent(text=state_text),
         )
 
         new_metadata = StateMetadata(
