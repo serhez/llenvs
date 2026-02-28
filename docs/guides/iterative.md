@@ -208,13 +208,15 @@ Override any prompt template:
 env = IterativeEnvironment(
     tasks=tasks,
     prompts={
-        "initial": "{task}\n\nYou have {turns_remaining} tries. Say DONE when finished.",
-        "feedback": "Turn {turn}/{max_turns}: {feedback}\n{history_section}{turns_remaining} left.",
+        "initial": "{task}\n\nSay DONE when finished.",
+        "feedback": "Previous feedback: {feedback}\n{history_section}Please revise.",
     },
 )
 ```
 
 Available templates: `"initial"`, `"feedback"`, `"history_entry"`.
+
+Turn/step counters are not embedded by the environment — use `TurnInfoConfig` on the runner instead. See the [Evaluation guide](evaluation.md#turn-info).
 
 ## Code Execution
 

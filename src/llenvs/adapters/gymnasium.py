@@ -995,7 +995,6 @@ class GymnasiumEnvironment:
             current_state_text = None
 
         error_text = format_action_error(
-            next_step,
             error_msg,
             current_state=current_state_text,
             action_hint=self._action_mapper.describe(),
@@ -1079,7 +1078,7 @@ class GymnasiumEnvironment:
         # Build structured observation components
         task_desc = self._build_task_description()
         task_content = ObservationContent(text=task_desc)
-        state_text = f"[Step 0]\n{obs_text}"
+        state_text = obs_text
         state_content = ObservationContent(
             text=state_text,
             images=obs_images,
@@ -1213,7 +1212,7 @@ class GymnasiumEnvironment:
             gym_snapshot=gym_snapshot,
         )
 
-        state_text = f"[Step {next_step}]\n{obs_text}"
+        state_text = obs_text
         state_content = ObservationContent(
             text=state_text,
             images=obs_images,

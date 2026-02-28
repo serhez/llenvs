@@ -178,7 +178,7 @@ class TestStructuredMessageBuilding:
         runner = self._make_runner()
 
         task = ObservationContent(text="Solve the puzzle.")
-        state_content = ObservationContent(text="[Step 0]\nYou see a door.")
+        state_content = ObservationContent(text="You see a door.")
         initial_state = _make_state(
             prompt="Solve the puzzle.",
             task=task,
@@ -191,15 +191,15 @@ class TestStructuredMessageBuilding:
         assert len(messages) == 1
         assert messages[0].role == "user"
         assert "Solve the puzzle." in messages[0].content
-        assert "Step 0" in messages[0].content
+        assert "You see a door." in messages[0].content
 
     def test_structured_mode_with_transitions(self):
         """Structured mode reconstructs history from trajectory transitions."""
         runner = self._make_runner()
 
         task = ObservationContent(text="Navigate the maze.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nRoom 2")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Room 2")
 
         s0 = _make_state(prompt="Navigate the maze.", task=task, state=state0)
         s1 = _make_state(prompt="Navigate the maze.", task=task, state=state1, step=1)
@@ -221,14 +221,14 @@ class TestStructuredMessageBuilding:
         assert messages[1].role == "assistant"
         assert messages[1].content == "go north"
         assert messages[2].role == "user"
-        assert "Step 1" in messages[2].content
+        assert "Room 2" in messages[2].content
 
     def test_structured_mode_with_system_prompt(self):
         """System prompt is included in structured mode."""
         runner = self._make_runner(system_prompt="You are helpful.")
 
         task = ObservationContent(text="Task here.")
-        state_content = ObservationContent(text="[Step 0]\nObs.")
+        state_content = ObservationContent(text="Obs.")
         initial_state = _make_state(prompt="Task here.", task=task, state=state_content)
         trajectory = Trajectory.create(initial_state)
 
@@ -267,7 +267,7 @@ class TestStructuredMessageBuilding:
         runner = self._make_runner()
 
         task = ObservationContent(text="Explore the dungeon.")
-        state0 = ObservationContent(text="[Step 0]\nYou are in a dark room.")
+        state0 = ObservationContent(text="You are in a dark room.")
 
         initial_state = _make_state(prompt="Explore the dungeon.", task=task, state=state0)
         trajectory = Trajectory.create(initial_state)
@@ -277,7 +277,7 @@ class TestStructuredMessageBuilding:
         assert len(messages) == 1
         assert messages[0].role == "user"
         assert "Explore the dungeon." in messages[0].content
-        assert "Step 0" in messages[0].content
+        assert "You are in a dark room." in messages[0].content
 
 
 # =============================================================================
@@ -310,9 +310,9 @@ class TestHistoryFnIntegration:
     def _build_trajectory_with_transitions(self):
         """Build a trajectory with 2 transitions for testing."""
         task = ObservationContent(text="Navigate the maze.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nRoom 2")
-        state2 = ObservationContent(text="[Step 2]\nRoom 3")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Room 2")
+        state2 = ObservationContent(text="Room 3")
 
         s0 = _make_state(prompt="Navigate the maze.", task=task, state=state0)
         s1 = _make_state(prompt="Navigate the maze.", task=task, state=state1, step=1)
@@ -350,11 +350,11 @@ class TestHistoryFnIntegration:
         assert messages[1].role == "assistant"
         assert messages[1].content == "go north"
         assert messages[2].role == "user"
-        assert "Step 1" in messages[2].content
+        assert "Room 2" in messages[2].content
         assert messages[3].role == "assistant"
         assert messages[3].content == "go east"
         assert messages[4].role == "user"
-        assert "Step 2" in messages[4].content
+        assert "Room 3" in messages[4].content
 
     def test_no_history_fn(self):
         """no_history drops all prior turns, showing only task + current state."""
@@ -366,7 +366,7 @@ class TestHistoryFnIntegration:
         assert len(messages) == 1
         assert messages[0].role == "user"
         assert "Navigate the maze." in messages[0].content
-        assert "Step 2" in messages[0].content
+        assert "Room 3" in messages[0].content
 
     def test_custom_history_fn(self):
         """Custom history_fn controls which entries appear."""
@@ -392,7 +392,7 @@ class TestHistoryFnIntegration:
         assert messages[1].role == "assistant"
         assert messages[1].content == "go east"
         assert messages[2].role == "user"
-        assert "Step 2" in messages[2].content
+        assert "Room 3" in messages[2].content
 
     def test_no_history_with_system_prompt(self):
         """no_history + system prompt yields system + task+current coalesced."""
@@ -405,7 +405,7 @@ class TestHistoryFnIntegration:
         assert messages[0].content == "Be helpful."
         assert messages[1].role == "user"
         assert "Navigate the maze." in messages[1].content
-        assert "Step 2" in messages[1].content
+        assert "Room 3" in messages[1].content
 
     def test_history_fn_not_used_in_legacy_mode(self):
         """history_fn is ignored when task is None (legacy mode)."""
@@ -444,8 +444,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=False)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -472,8 +472,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=True)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -499,8 +499,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=False)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -526,8 +526,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=False)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -553,8 +553,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=False)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -581,8 +581,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=False)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -610,8 +610,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=True)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -637,8 +637,8 @@ class TestIncludeReasoningInHistory:
         runner = self._make_runner(include_reasoning_in_history=False)
 
         task = ObservationContent(text="Solve it.")
-        state0 = ObservationContent(text="[Step 0]\nStart")
-        state1 = ObservationContent(text="[Step 1]\nNext")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Next")
 
         s0 = _make_state(prompt="Solve it.", task=task, state=state0)
         s1 = _make_state(prompt="Solve it.", task=task, state=state1, step=1)
@@ -658,3 +658,217 @@ class TestIncludeReasoningInHistory:
         assistant_msgs = [m for m in messages if m.role == "assistant"]
         assert len(assistant_msgs) == 1
         assert assistant_msgs[0].content == "42"
+
+
+# =============================================================================
+# TurnInfoConfig injection tests
+# =============================================================================
+
+
+class TestTurnInfoInjection:
+    """Tests for TurnInfoConfig injection in structured message building."""
+
+    def _make_runner(self, turn_info=None, system_prompt=None, max_steps=10):
+        from unittest.mock import MagicMock
+
+        from llenvs.evaluation.runner import TrajectoryRunner
+        from llenvs.inference.protocol import SamplingParams
+
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = max_steps
+        mock_backend = MagicMock()
+
+        return TrajectoryRunner(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+            system_prompt=system_prompt,
+            turn_info=turn_info,
+        )
+
+    def test_turn_info_disabled_by_default(self):
+        """No turn info when turn_info is None (default)."""
+        runner = self._make_runner(turn_info=None)
+
+        task = ObservationContent(text="Solve the puzzle.")
+        state_content = ObservationContent(text="You see a door.")
+        initial_state = _make_state(prompt="Solve the puzzle.", task=task, state=state_content)
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+        content = messages[0].content
+        assert "[Turn" not in content
+        assert "maximum of" not in content
+
+    def test_turn_info_true_shorthand(self):
+        """turn_info=True enables default TurnInfoConfig."""
+        runner = self._make_runner(turn_info=True)
+
+        task = ObservationContent(text="Solve the puzzle.")
+        state_content = ObservationContent(text="You see a door.")
+        initial_state = _make_state(prompt="Solve the puzzle.", task=task, state=state_content)
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+        # Task + state coalesced into one user message
+        assert len(messages) == 1
+        content = messages[0].content
+        # Task suffix should appear
+        assert "maximum of 10 turns" in content
+        # State prefix should appear
+        assert "[Turn 1/10]" in content
+
+    def test_turn_info_custom_config(self):
+        """Custom TurnInfoConfig formats are used."""
+        from llenvs.evaluation.runner import TurnInfoConfig
+
+        tic = TurnInfoConfig(
+            task_suffix="\n\n(Max {max_steps} steps)",
+            state_prefix="Step {turn}: ",
+        )
+        runner = self._make_runner(turn_info=tic, max_steps=5)
+
+        task = ObservationContent(text="Navigate.")
+        state_content = ObservationContent(text="Room 1")
+        initial_state = _make_state(prompt="Navigate.", task=task, state=state_content)
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+        content = messages[0].content
+        assert "(Max 5 steps)" in content
+        assert "Step 1: Room 1" in content
+
+    def test_task_suffix_with_max_steps(self):
+        """Task suffix uses max_steps when available."""
+        runner = self._make_runner(turn_info=True, max_steps=20)
+
+        task = ObservationContent(text="Task.")
+        state_content = ObservationContent(text="Obs.")
+        initial_state = _make_state(prompt="Task.", task=task, state=state_content)
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+        content = messages[0].content
+        assert "maximum of 20 turns" in content
+
+    def test_task_suffix_without_max_steps(self):
+        """Task suffix uses no_max variant when max_steps is None."""
+        runner = self._make_runner(turn_info=True, max_steps=None)
+
+        task = ObservationContent(text="Task.")
+        state_content = ObservationContent(text="Obs.")
+        initial_state = _make_state(prompt="Task.", task=task, state=state_content)
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+        content = messages[0].content
+        # Default task_suffix_no_max is empty, so no suffix
+        assert "maximum of" not in content
+        # But state prefix should still appear (no_max variant)
+        assert "[Turn 1]" in content
+
+    def test_state_prefix_step_numbering(self):
+        """State prefix uses 1-indexed turn number from metadata.step."""
+        runner = self._make_runner(turn_info=True, max_steps=10)
+
+        task = ObservationContent(text="Navigate.")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Room 2")
+
+        s0 = _make_state(prompt="Navigate.", task=task, state=state0)
+        s1 = _make_state(prompt="Navigate.", task=task, state=state1, step=1)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0,
+                action=Action(text="go north"),
+                next_state=s1,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        # Current state (step=1) should show Turn 2/10
+        user_msgs = [m for m in messages if m.role == "user"]
+        last_user = user_msgs[-1].content
+        assert "[Turn 2/10]" in last_user
+
+    def test_state_prefix_no_max_steps(self):
+        """State prefix uses no_max variant when spec.max_steps is None."""
+        runner = self._make_runner(turn_info=True, max_steps=None)
+
+        task = ObservationContent(text="Navigate.")
+        state_content = ObservationContent(text="Obs.")
+        state = _make_state(prompt="Navigate.", task=task, state=state_content, step=2)
+        trajectory = Trajectory.create(state)
+
+        messages = runner._build_messages(state, trajectory=trajectory)
+        content = messages[0].content
+        assert "[Turn 3]" in content
+        assert "[Turn 3/" not in content
+
+    def test_turn_info_history_unaffected(self):
+        """History entries are NOT modified by turn info."""
+        runner = self._make_runner(turn_info=True, max_steps=10)
+
+        task = ObservationContent(text="Navigate.")
+        state0 = ObservationContent(text="Start")
+        state1 = ObservationContent(text="Room 2")
+        state2 = ObservationContent(text="Room 3")
+
+        s0 = _make_state(prompt="Navigate.", task=task, state=state0)
+        s1 = _make_state(prompt="Navigate.", task=task, state=state1, step=1)
+        s2 = _make_state(prompt="Navigate.", task=task, state=state2, step=2)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0,
+                action=Action(text="go north"),
+                next_state=s1,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+        trajectory.add_transition(
+            Transition(
+                state=s1,
+                action=Action(text="go east"),
+                next_state=s2,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        messages = runner._build_messages(s2, trajectory=trajectory)
+        # History user messages (intermediate) should NOT have turn prefix
+        # Messages: task(user) + go_north(assistant) + room2(user) + go_east(assistant) + room3(user)
+        assert len(messages) == 5
+        # The intermediate history observation at messages[2] should be raw
+        assert messages[2].content == "Room 2"
+        # Only the current state (last user) gets the prefix
+        assert "[Turn 3/10]" in messages[4].content
+
+    def test_turn_info_false_disables(self):
+        """turn_info=False is equivalent to None (disabled)."""
+        runner = self._make_runner(turn_info=False)
+
+        task = ObservationContent(text="Task.")
+        state_content = ObservationContent(text="Obs.")
+        initial_state = _make_state(prompt="Task.", task=task, state=state_content)
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+        content = messages[0].content
+        assert "[Turn" not in content
+
+    def test_turn_info_legacy_mode_no_effect(self):
+        """Turn info has no effect in legacy mode (no task field)."""
+        runner = self._make_runner(turn_info=True)
+
+        state = _make_state(prompt="What is 2+2?")
+        trajectory = Trajectory.create(state)
+
+        messages = runner._build_messages(state, trajectory=trajectory)
+        assert len(messages) == 1
+        assert messages[0].content == "What is 2+2?"
+        assert "[Turn" not in messages[0].content

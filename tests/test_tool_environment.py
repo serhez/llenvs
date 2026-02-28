@@ -621,8 +621,7 @@ class TestToolFormatting:
             },
         ]
         expected = (
-            '- search: Found 3 products matching "red shoes"\n'
-            "- calculate: ERROR: division by zero"
+            '- search: Found 3 products matching "red shoes"\n- calculate: ERROR: division by zero'
         )
         assert format_tool_result_data(entries) == expected
 

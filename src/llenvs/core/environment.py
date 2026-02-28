@@ -16,7 +16,6 @@ HiddenT = TypeVar("HiddenT")
 
 
 def format_action_error(
-    step: int,
     error_msg: str,
     *,
     current_state: str | None = None,
@@ -28,7 +27,6 @@ def format_action_error(
     expected action format, and current environment state.
 
     Args:
-        step: The step number.
         error_msg: The error description.
         current_state: Rendered current environment state.
         action_hint: Description of valid action format.
@@ -36,7 +34,7 @@ def format_action_error(
     Returns:
         Formatted error observation string.
     """
-    parts = [f"[Step {step}] Invalid action: {error_msg}"]
+    parts = [f"Invalid action: {error_msg}"]
     parts.append("Please provide a valid action.")
     if action_hint is not None:
         parts.append("")

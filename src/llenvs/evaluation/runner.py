@@ -50,6 +50,34 @@ from llenvs.inference.protocol import (
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class TurnInfoConfig:
+    """Configuration for injecting turn/step info into structured messages.
+
+    When enabled on a ``TrajectoryRunner``, the runner prepends turn counters
+    to state observations and appends turn-limit info to task descriptions.
+
+    Placeholders available in format strings:
+        ``{max_steps}``: Maximum steps declared by the environment spec.
+        ``{turn}``: Current turn number (1-indexed).
+        ``{turns_remaining}``: ``max_steps - turn``.
+
+    Two sets of templates are provided — one for environments that declare
+    ``max_steps`` and one for those that don't.
+
+    Attributes:
+        task_suffix: Appended to the task description when ``max_steps`` is known.
+        state_prefix: Prepended to each state observation when ``max_steps`` is known.
+        task_suffix_no_max: Appended to the task description when ``max_steps`` is None.
+        state_prefix_no_max: Prepended to each state observation when ``max_steps`` is None.
+    """
+
+    task_suffix: str = "\n\nYou have a maximum of {max_steps} turns to complete this task."
+    state_prefix: str = "[Turn {turn}/{max_steps}]\n"
+    task_suffix_no_max: str = ""
+    state_prefix_no_max: str = "[Turn {turn}]\n"
+
+
 def _truncate_image_history(
     messages: list[ChatMessage],
     max_images: int,
@@ -377,6 +405,7 @@ class TrajectoryRunner:
     prompt_template: PromptTemplate | None = None
     model_profile: ModelProfile | None = None
     tool_call_parser: ToolCallParser | None = None
+    turn_info: TurnInfoConfig | bool | None = None
     log: LogConfig | None = None
     max_image_history: int | None = None
     history_fn: HistoryFn | None = None
@@ -460,11 +489,29 @@ class TrajectoryRunner:
         obs = state.observation
         task = obs.task
 
-        # Task description
+        # Resolve turn info config
+        tic = self._resolve_turn_info()
+        max_steps = self.environment.spec.max_steps if tic else None
+
+        # Task description (with optional turn info suffix)
+        task_text = task.text
+        if tic is not None:
+            if max_steps is not None:
+                suffix = tic.task_suffix.format(
+                    max_steps=max_steps,
+                    turn=state.metadata.step + 1,
+                    turns_remaining=max_steps - (state.metadata.step + 1),
+                )
+            else:
+                suffix = tic.task_suffix_no_max.format(
+                    turn=state.metadata.step + 1,
+                )
+            task_text = task_text + suffix
+
         messages.append(
             ChatMessage(
                 role="user",
-                content=task.text,
+                content=task_text,
                 images=task.images,
             )
         )
@@ -502,17 +549,40 @@ class TrajectoryRunner:
         fn = self.history_fn if self.history_fn is not None else full_history
         messages.extend(fn(history_entries))
 
-        # Always add current state observation
+        # Always add current state observation (with optional turn info prefix)
         if obs.state is not None:
+            state_text = obs.state.text
+            if tic is not None:
+                turn = state.metadata.step + 1
+                if max_steps is not None:
+                    prefix = tic.state_prefix.format(
+                        max_steps=max_steps,
+                        turn=turn,
+                        turns_remaining=max_steps - turn,
+                    )
+                else:
+                    prefix = tic.state_prefix_no_max.format(
+                        turn=turn,
+                    )
+                state_text = prefix + state_text
+
             messages.append(
                 ChatMessage(
                     role="user",
-                    content=obs.state.text,
+                    content=state_text,
                     images=obs.state.images,
                 )
             )
 
         return messages
+
+    def _resolve_turn_info(self) -> TurnInfoConfig | None:
+        """Resolve turn_info field to a TurnInfoConfig or None."""
+        if self.turn_info is True:
+            return TurnInfoConfig()
+        if isinstance(self.turn_info, TurnInfoConfig):
+            return self.turn_info
+        return None
 
     def _resolve_action_text(self, transition: Transition[Any]) -> str:
         """Get the action text for a transition, respecting reasoning stripping.
@@ -1418,6 +1488,7 @@ def run_evaluation(
     log: LogConfig | None = None,
     history_fn: HistoryFn | None = None,
     include_reasoning_in_history: bool = False,
+    turn_info: TurnInfoConfig | bool | None = None,
 ) -> BatchResult:
     """Convenience function to run an evaluation.
 
@@ -1439,6 +1510,8 @@ def run_evaluation(
         history_fn: Optional history function for structured message building.
         include_reasoning_in_history: Whether to include full model reasoning
             in prior actions (default False strips to extracted action).
+        turn_info: Turn info injection config. ``True`` for defaults,
+            ``TurnInfoConfig(...)`` for custom, ``None``/``False`` to disable.
 
     Returns:
         BatchResult with evaluation results.
@@ -1457,6 +1530,7 @@ def run_evaluation(
         prompt_template=prompt_template,
         model_profile=model_profile,
         tool_call_parser=tool_call_parser,
+        turn_info=turn_info,
         log=log,
         history_fn=history_fn,
         include_reasoning_in_history=include_reasoning_in_history,

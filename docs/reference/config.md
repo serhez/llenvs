@@ -283,7 +283,6 @@ environments:
     adapter: webshop
     prompts:
       instruction_prefix: "Your goal: {instruction}"
-      step_format: "Turn {step}:"
       action_hint: "Navigate using search[keywords] or click[element]."
 ```
 
@@ -292,7 +291,6 @@ WebShop prompt components:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `instruction_prefix` | `Instruction: {instruction}` | Template prepended to each observation |
-| `step_format` | `[Step {step}]` | Step counter format |
 | `action_hint` | `Actions: search[keywords] or click[element]` | Available actions hint |
 
 ## Extraction Configuration

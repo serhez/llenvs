@@ -227,7 +227,7 @@ Invalid actions (extraction failure or mapping error) waste a turn: the step cou
 The error observation includes the expected action format and the current environment state, giving the model enough context to recover:
 
 ```
-[Step 3] Invalid action: Could not extract action from response.
+Invalid action: Could not extract action from response.
 Please provide a valid action.
 
 Expected action format:
@@ -334,7 +334,6 @@ adapter = GymnasiumAdapter()
 env = adapter.get_environment("frozen_lake", num_tasks=100)
 state, _ = env.reset()
 print(state.observation.state.text)
-# [Step 0]
 # @ F F F
 # F H F H
 # F F F H
@@ -533,7 +532,7 @@ class GymnasiumHidden:
 Gymnasium observations use structured `task`/`state` fields on `Observation`:
 
 - **`observation.task`** (`ObservationContent`): Static task description — environment name, observation space description, action space description. Set once in `reset()`, carried forward unchanged.
-- **`observation.state`** (`ObservationContent`): Dynamic per-step observation — `"[Step N]\n{rendered_obs}"`. Updated each step.
+- **`observation.state`** (`ObservationContent`): Dynamic per-step observation — the rendered observation text. Updated each step.
 - **`observation.prompt`**: Contains the task description text (for legacy runner compatibility).
 - **`observation.messages`**: Starts empty at reset, then accumulates assistant/user message pairs during steps (for legacy runner compatibility).
 

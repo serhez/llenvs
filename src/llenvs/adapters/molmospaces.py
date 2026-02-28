@@ -944,7 +944,7 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
             state_parts.append(proprio_text)
             # Append as a user message
             messages = list(next_obs.messages)
-            messages.append({"role": "user", "content": f"[Step {next_step}]\n{proprio_text}"})
+            messages.append({"role": "user", "content": proprio_text})
             # Rebuild state with proprioception — merge proprioception into data
             combined_state_text = "\n".join(state_parts)
             existing_data = next_obs.state.data if next_obs.state is not None else {}

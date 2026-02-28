@@ -588,7 +588,6 @@ class CraftaxEnvironment:
         )
 
         error_text = format_action_error(
-            next_step,
             error_msg,
             current_state=state.hidden.last_obs_text or None,
             action_hint=self._action_mapper.describe(),
@@ -664,7 +663,7 @@ class CraftaxEnvironment:
         # Build structured observation components
         task_desc = self._build_task_description()
         task_content = ObservationContent(text=task_desc)
-        state_text = f"[Step 0]\n{obs_text}"
+        state_text = obs_text
         state_content = ObservationContent(
             text=state_text,
             images=images,
@@ -789,7 +788,7 @@ class CraftaxEnvironment:
             last_obs_text=obs_text,
         )
 
-        state_text = f"[Step {next_step}]\n{obs_text}"
+        state_text = obs_text
         state_content = ObservationContent(
             text=state_text,
             images=images,

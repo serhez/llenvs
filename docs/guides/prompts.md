@@ -292,7 +292,6 @@ Multi-step environments (like WebShop) use internal prompt templates to build ob
 | Name | Default | Description |
 |------|---------|-------------|
 | `instruction_prefix` | `Instruction: {instruction}` | Prefixed to each observation with the shopping goal |
-| `step_format` | `[Step {step}]` | Step counter |
 | `action_hint` | `Actions: search[keywords] or click[element]` | Available actions hint |
 
 ### Overriding via YAML

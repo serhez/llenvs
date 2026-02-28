@@ -274,9 +274,9 @@ class TestIterativeEnvironmentStandalone:
         r1 = env.step(state, Action(text="first"))
         r2 = env.step(r1.next_state, Action(text="second"))
 
-        # Without history, observation should not mention Turn 1 submission
+        # Without history, observation should not mention prior submissions
         obs_text = r2.next_state.observation.prompt
-        assert "first" not in obs_text.lower() or "Turn 1" not in obs_text
+        assert "first" not in obs_text.lower()
 
     def test_messages_appended(self):
         env = self._make_env()

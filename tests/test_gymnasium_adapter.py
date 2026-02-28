@@ -653,10 +653,9 @@ class TestGymnasiumEnvironment:
 
     def test_reset_initial_observation_in_state(self, discrete_env):
         state, _ = discrete_env.reset()
-        # Step 0 observation is in obs.state, not prompt or messages
-        assert "Step 0" not in state.observation.prompt
+        # Observation is in obs.state, not prompt or messages
         assert len(state.observation.messages) == 0
-        assert "Step 0" in state.observation.state.text
+        assert state.observation.state.text  # non-empty
 
     def test_reset_hidden_state(self, discrete_env, import_adapter):
         state, _ = discrete_env.reset(seed=42)
@@ -679,7 +678,7 @@ class TestGymnasiumEnvironment:
         state, _ = discrete_env.reset()
         # Messages are empty at reset — step-0 observation is in obs.state
         assert len(state.observation.messages) == 0
-        assert "Step 0" in state.observation.state.text
+        assert state.observation.state.text  # non-empty
 
     # --- Step ---
 
@@ -1557,10 +1556,10 @@ class TestPromptSeparation:
         assert "Step 0" not in state.observation.prompt
         assert "State:" not in state.observation.prompt
 
-    def test_step_0_in_state(self, env):
+    def test_state_set_on_reset(self, env):
         state, _ = env.reset()
         assert len(state.observation.messages) == 0
-        assert "Step 0" in state.observation.state.text
+        assert state.observation.state.text  # non-empty
 
     def test_prompt_stable_across_steps(self, env):
         state, _ = env.reset()
@@ -1601,15 +1600,16 @@ class TestStructuredObservation:
         state, _ = env.reset()
         obs = state.observation
         assert obs.state is not None
-        assert "Step 0" in obs.state.text
+        assert obs.state.text  # non-empty
 
     def test_state_updates_on_step(self, env):
         state, _ = env.reset()
+        reset_text = state.observation.state.text
         result = env.step(state, Action(text="1"))
         next_obs = result.next_state.observation
         assert next_obs.state is not None
-        assert "Step 1" in next_obs.state.text
-        assert "Step 0" not in next_obs.state.text
+        assert next_obs.state.text  # non-empty
+        assert next_obs.state.text != reset_text  # state changed
 
     def test_task_stable_across_steps(self, env):
         state, _ = env.reset()

@@ -150,6 +150,50 @@ class FormatReward:
         )
 
 
+@dataclass
+class StepPenalty:
+    """Per-step penalty that incentivizes efficient solutions.
+
+    Emits a fixed negative reward on every step. When used alongside
+    an OUTCOME reward for correctness, this creates pressure to solve
+    tasks in fewer turns rather than exhausting the step budget.
+
+    Attributes:
+        penalty: Penalty per step (positive value, applied as negative reward).
+        _name: Name of this reward function.
+        _reward_type: Type of reward (STEP by default).
+        _weight: Weight for the reward signal.
+    """
+
+    penalty: float = 0.1
+    _name: str = "step_penalty"
+    _reward_type: RewardType = RewardType.STEP
+    _weight: float = 1.0
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def reward_type(self) -> RewardType:
+        return self._reward_type
+
+    def compute(
+        self,
+        state: State[Any],
+        action: Any,
+        next_state: State[Any],
+    ) -> Signal:
+        """Compute step penalty (negative reward each step)."""
+        return Signal(
+            name=self._name,
+            reward_type=self._reward_type,
+            reward=-self.penalty,
+            metadata={"step": next_state.metadata.step},
+            weight=self._weight,
+        )
+
+
 class RewardFunction(Protocol[HiddenT]):
     """Protocol for computing evaluation signals.
 

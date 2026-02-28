@@ -179,3 +179,5 @@ result = run_evaluation(
 ```
 
 History control only takes effect in structured message building mode (when the environment sets `task`/`state` on its `Observation`). In legacy mode, the parameters are ignored.
+
+Turn/step counters are injected separately via `TurnInfoConfig` on the runner. History entries are not modified by turn info — only the task description and current state observation are affected. See the [Evaluation guide](evaluation.md#turn-info) for details.

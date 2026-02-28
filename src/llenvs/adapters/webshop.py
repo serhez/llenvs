@@ -75,7 +75,6 @@ class WebShopReward:
 
 DEFAULT_WEBSHOP_PROMPTS: dict[str, str] = {
     "instruction_prefix": "Instruction: {instruction}",
-    "step_format": "[Step {step}]",
     "action_hint": "Actions: search[keywords] or click[element]",
 }
 
@@ -220,8 +219,6 @@ class WebShopEnvironment:
             parts.append(prefix.format(instruction=instruction))
             parts.append("")
 
-        step_fmt = self._prompts["step_format"]
-        parts.append(step_fmt.format(step=step))
         parts.append(raw_obs)
 
         hint = self._prompts.get("action_hint", "")
@@ -286,8 +283,7 @@ class WebShopEnvironment:
             task_parts.append(hint)
         task_text = "\n".join(task_parts)
 
-        step_fmt = self._prompts["step_format"]
-        state_text = f"{step_fmt.format(step=0)}\n{raw_obs}"
+        state_text = raw_obs
 
         hidden = WebShopHidden(
             instruction=instruction,
@@ -364,8 +360,7 @@ class WebShopEnvironment:
             available_actions=available,
         )
 
-        step_fmt = self._prompts["step_format"]
-        state_text = f"{step_fmt.format(step=next_step)}\n{raw_obs}"
+        state_text = raw_obs
 
         new_messages = tuple(state.observation.messages) + (
             {"role": "assistant", "content": action.text or ""},

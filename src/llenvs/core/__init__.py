@@ -52,7 +52,7 @@ from llenvs.core.registry import (
     backend_registry,
     environment_registry,
 )
-from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle, StepPenalty
 from llenvs.core.segmentation import (
     CompositeSegmenter,
     LineSegmenter,
@@ -136,6 +136,7 @@ __all__ = [
     "SignalBundle",
     "RewardType",
     "RewardFunction",
+    "StepPenalty",
     # Trajectory
     "Trajectory",
     "Transition",

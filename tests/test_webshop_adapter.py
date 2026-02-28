@@ -333,17 +333,17 @@ class TestWebShopEnvironment:
         assert "Instruction:" in state.observation.prompt
         assert "red wireless headphone" in state.observation.prompt.lower()
 
-    def test_observation_step_number(self, mock_webshop_env):
-        """Test observation includes step number."""
+    def test_observation_no_step_number(self, mock_webshop_env):
+        """Test observation does not embed step numbers (handled by runner)."""
         env = WebShopEnvironment(webshop_env=mock_webshop_env)
         state, _ = env.reset()
 
-        assert "[Step 0]" in state.observation.prompt
+        assert "[Step 0]" not in state.observation.prompt
 
         action = Action(text="search[test]")
         result = env.step(state, action)
 
-        assert "[Step 1]" in result.next_state.observation.messages[-1]["content"]
+        assert "[Step 1]" not in result.next_state.observation.messages[-1]["content"]
 
     def test_action_format_hint(self, mock_webshop_env):
         """Test observation includes action format hint."""
@@ -520,7 +520,7 @@ class TestWebShopMultiStepEpisode:
         assert isinstance(state.observation.task, ObservationContent)
         assert "red wireless headphone" in state.observation.task.text.lower()
         assert isinstance(state.observation.state, ObservationContent)
-        assert "[Step 0]" in state.observation.state.text
+        assert "[Step 0]" not in state.observation.state.text
         # task and state are distinct
         assert state.observation.task.text != state.observation.state.text
         reset_task = state.observation.task
@@ -534,7 +534,7 @@ class TestWebShopMultiStepEpisode:
         # task carried forward, state updated with step content
         assert result1.next_state.observation.task is reset_task
         assert isinstance(result1.next_state.observation.state, ObservationContent)
-        assert "[Step 1]" in result1.next_state.observation.state.text
+        assert "[Step 1]" not in result1.next_state.observation.state.text
         assert "Search results" in result1.next_state.observation.state.text
 
         # Step 2: Click on product
@@ -545,7 +545,7 @@ class TestWebShopMultiStepEpisode:
 
         # task still the same object, state updated to new obs
         assert result2.next_state.observation.task is reset_task
-        assert "[Step 2]" in result2.next_state.observation.state.text
+        assert "[Step 2]" not in result2.next_state.observation.state.text
 
         # Step 3: Buy
         action3 = Action(text="click[Buy Now]")
@@ -585,7 +585,6 @@ class TestWebShopPrompts:
         prompts = env.prompts
 
         assert "instruction_prefix" in prompts
-        assert "step_format" in prompts
         assert "action_hint" in prompts
 
     def test_default_prompts_match_constants(self, mock_webshop_env):
@@ -614,7 +613,7 @@ class TestWebShopPrompts:
         assert prompts["action_hint"] == "Navigate using search[q] or click[e]."
         # Defaults preserved
         assert prompts["instruction_prefix"] == DEFAULT_WEBSHOP_PROMPTS["instruction_prefix"]
-        assert prompts["step_format"] == DEFAULT_WEBSHOP_PROMPTS["step_format"]
+        assert "step_format" not in prompts
 
     def test_custom_instruction_prefix(self, mock_webshop_env):
         """Test custom instruction prefix appears in observation."""
@@ -628,17 +627,6 @@ class TestWebShopPrompts:
         assert "Your goal:" in state.observation.prompt
         # Default "Instruction:" should NOT appear
         assert not state.observation.prompt.startswith("Instruction:")
-
-    def test_custom_step_format(self, mock_webshop_env):
-        """Test custom step format appears in observation."""
-        custom = {"step_format": "Step #{step}:"}
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            prompts=custom,
-        )
-        state, _ = env.reset(options={"task_index": 0})
-
-        assert "Step #0:" in state.observation.prompt
 
     def test_custom_action_hint(self, mock_webshop_env):
         """Test custom action hint appears in observation."""

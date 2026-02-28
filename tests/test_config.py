@@ -679,11 +679,11 @@ class TestPromptsConfig:
         """Test prompts field with a dict."""
         config = EnvironmentConfig(
             name="webshop",
-            prompts={"action_hint": "Custom hint.", "step_format": "Turn {step}:"},
+            prompts={"action_hint": "Custom hint.", "instruction_prefix": "Goal: {instruction}"},
         )
         assert config.prompts is not None
         assert config.prompts["action_hint"] == "Custom hint."
-        assert config.prompts["step_format"] == "Turn {step}:"
+        assert config.prompts["instruction_prefix"] == "Goal: {instruction}"
 
     def test_from_dict_with_prompts(self):
         """Test EvalConfig.from_dict() parses prompts."""
@@ -749,7 +749,7 @@ class TestPromptsConfig:
                     "name": "webshop",
                     "prompts": {
                         "action_hint": "Custom hint.",
-                        "step_format": "Turn {step}:",
+                        "instruction_prefix": "Goal: {instruction}",
                     },
                 }
             ],

@@ -113,19 +113,16 @@ def _default_history_formatter(
 _DEFAULT_PROMPTS: dict[str, str] = {
     "initial": (
         "{task}\n\n"
-        "You have {turns_remaining} turn(s) to solve this task.\n"
-        "When you are satisfied with your solution, write SUBMIT at the start of your response."
+        "When you are satisfied with your solution, "
+        "write SUBMIT at the start of your response."
     ),
     "feedback": (
-        "## Feedback on your previous submission (Turn {turn}/{max_turns})\n\n"
+        "## Feedback on your previous submission\n\n"
         "{feedback}\n\n"
         "{history_section}"
-        "You have {turns_remaining} turn(s) remaining.\n"
         "Revise your solution or write SUBMIT to finalize."
     ),
-    "history_entry": (
-        "### Turn {turn}\n**Submission:**\n{submission}\n\n**Feedback:**\n{feedback}"
-    ),
+    "history_entry": ("**Submission:**\n{submission}\n\n**Feedback:**\n{feedback}"),
 }
 
 
@@ -236,7 +233,6 @@ class IterativeEnvironment:
         # Format initial prompt
         initial_text = self._prompts["initial"].format(
             task=task_prompt,
-            turns_remaining=self._max_turns,
         )
 
         hidden = IterativeHidden(
@@ -431,11 +427,8 @@ class IterativeEnvironment:
                 )
 
         return self._prompts["feedback"].format(
-            turn=hidden.turn,
-            max_turns=hidden.max_turns,
             feedback=feedback_str,
             history_section=history_section,
-            turns_remaining=hidden.max_turns - hidden.turn,
         )
 
     def _build_messages(

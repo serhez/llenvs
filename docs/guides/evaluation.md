@@ -374,6 +374,56 @@ The message build order is: system prompt → observation → prompt template �
 
 For multi-turn environments with structured observations, you can also control how much conversation history the model sees. See the [History Control guide](history-control.md).
 
+## Turn Info
+
+Multi-turn environments have a maximum step count (`EnvironmentSpec.max_steps`) but the model doesn't see it by default. `TurnInfoConfig` provides an opt-in mechanism to inject turn counters and limits into the structured messages the runner builds.
+
+```python
+from llenvs.evaluation import TrajectoryRunner, TurnInfoConfig
+
+# Enable with defaults
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    turn_info=True,  # shorthand for TurnInfoConfig()
+)
+```
+
+With `turn_info=True` (default config), the runner:
+- Appends `"\n\nYou have a maximum of {max_steps} turns to complete this task."` to the task description
+- Prepends `"[Turn {turn}/{max_steps}]\n"` to each state observation
+
+Turn numbers are 1-indexed. When the environment doesn't declare `max_steps`, the `_no_max` variants are used instead (empty task suffix, `"[Turn {turn}]\n"` state prefix).
+
+Custom formatting:
+
+```python
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    turn_info=TurnInfoConfig(
+        task_suffix="\n\n({max_steps} steps available)",
+        state_prefix="Step {turn}: ",
+        task_suffix_no_max="",
+        state_prefix_no_max="Step {turn}: ",
+    ),
+)
+```
+
+Available placeholders: `{max_steps}`, `{turn}` (1-indexed), `{turns_remaining}`.
+
+Turn info only applies in structured mode (when `obs.task`/`obs.state` are set). Legacy mode is unaffected. History entries are not modified — only the task description and the current state observation receive injections.
+
+The `run_evaluation()` convenience function also accepts `turn_info`:
+
+```python
+result = run_evaluation(
+    environment=env,
+    backend=backend,
+    turn_info=True,
+)
+```
+
 ## Convenience Function
 
 ```python
@@ -404,6 +454,33 @@ for result in batch_result.trajectory_results:
     if "error" in result.metadata:
         print(f"Task {result.metadata['task_index']} failed: {result.metadata['error']}")
 ```
+
+## Built-in Reward Functions
+
+### StepPenalty
+
+`StepPenalty` emits a small negative reward on every step, incentivizing agents to solve tasks in fewer turns:
+
+```python
+from llenvs.core import StepPenalty
+
+# Add as extra_rewards on any environment
+env = SomeEnvironment(
+    ...,
+    extra_rewards=(StepPenalty(penalty=0.1),),
+)
+```
+
+The `penalty` parameter is a positive float (default `0.1`) that gets negated in the signal. Combined with an OUTCOME reward for correctness, this creates pressure to be efficient without sacrificing accuracy.
+
+Configuration options:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `penalty` | `0.1` | Per-step penalty (positive value, applied as negative reward) |
+| `_name` | `"step_penalty"` | Signal name |
+| `_reward_type` | `RewardType.STEP` | Signal type |
+| `_weight` | `1.0` | Weight for aggregation |
 
 ## Custom Reward Analysis
 
