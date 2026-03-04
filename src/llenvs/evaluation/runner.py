@@ -1226,14 +1226,18 @@ class TrajectoryRunner:
         Returns:
             Trajectory containing all transitions from the rollout.
         """
+        env_max = self.environment.spec.max_steps or 100
+
         if max_steps is None:
-            max_steps = self.environment.spec.max_steps or 100
+            max_steps = env_max
+
+        loop_max = max(0, min(max_steps, env_max - state.metadata.step))
 
         trajectory: Trajectory[Any] = Trajectory.create(state)
         current_state = state
 
-        for _ in range(max_steps):
-            if current_state.metadata.is_terminal:
+        for _ in range(loop_max):
+            if current_state.metadata.is_terminal or current_state.metadata.step >= env_max:
                 break
 
             messages = self._build_messages(current_state, trajectory=trajectory)
@@ -1279,14 +1283,18 @@ class TrajectoryRunner:
         Returns:
             Trajectory containing all transitions from the rollout.
         """
+        env_max = self.environment.spec.max_steps or 100
+
         if max_steps is None:
-            max_steps = self.environment.spec.max_steps or 100
+            max_steps = env_max
+
+        loop_max = max(0, min(max_steps, env_max - state.metadata.step))
 
         trajectory: Trajectory[Any] = Trajectory.create(state)
         current_state = state
 
-        for step_i in range(max_steps):
-            if current_state.metadata.is_terminal:
+        for step_i in range(loop_max):
+            if current_state.metadata.is_terminal or current_state.metadata.step >= env_max:
                 break
 
             if step_i == 0:
@@ -1414,8 +1422,15 @@ class TrajectoryRunner:
             forced_actions: If set, use these for the first step of each
                 rollout instead of generating from the backend.
         """
+        env_max = self.environment.spec.max_steps or 100
+
         if max_steps is None:
-            max_steps = self.environment.spec.max_steps or 100
+            max_steps = env_max
+
+        if not states:
+            loop_max = 0
+        else:
+            loop_max = max(max(0, min(max_steps, env_max - s.metadata.step)) for s in states)
 
         # Build active rollout state
         active: list[_ActiveTrajectory] = []
@@ -1433,10 +1448,10 @@ class TrajectoryRunner:
 
         # Mark already-terminal states as done
         for t in active:
-            if t.state.metadata.is_terminal:
+            if t.state.metadata.is_terminal or t.state.metadata.step >= env_max:
                 t.done = True
 
-        for step_i in range(max_steps):
+        for step_i in range(loop_max):
             remaining = [t for t in active if not t.done]
             if not remaining:
                 break
@@ -1460,7 +1475,7 @@ class TrajectoryRunner:
                     )
                     t.state = step_result.next_state
                     t.step_count += 1
-                    if step_result.done:
+                    if step_result.done or t.state.metadata.step >= env_max:
                         t.done = True
             else:
                 # Generate actions via batched inference
@@ -1489,7 +1504,7 @@ class TrajectoryRunner:
                     )
                     t.state = step_result.next_state
                     t.step_count += 1
-                    if step_result.done:
+                    if step_result.done or t.state.metadata.step >= env_max:
                         t.done = True
 
         # Return trajectories in original order
