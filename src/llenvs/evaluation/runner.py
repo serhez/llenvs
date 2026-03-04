@@ -1186,6 +1186,319 @@ class TrajectoryRunner:
 
         return _aggregate_results([r for r in result_slots if r is not None])
 
+    # -----------------------------------------------------------------
+    # Run-from-state API
+    # -----------------------------------------------------------------
+
+    def build_messages(
+        self,
+        state: State[Any],
+        trajectory: Trajectory[Any] | None = None,
+    ) -> list[ChatMessage]:
+        """Build chat messages from a state.
+
+        Public wrapper for the internal ``_build_messages`` pipeline.
+        Applies structured/legacy mode selection, prompt template,
+        model profile transformers, prompt pipeline, image truncation,
+        and message coalescing.
+
+        Args:
+            state: Current environment state.
+            trajectory: Optional trajectory for structured message building.
+
+        Returns:
+            List of ChatMessages for the backend.
+        """
+        return self._build_messages(state, trajectory=trajectory)
+
+    def run_from_state(
+        self,
+        state: State[Any],
+        max_steps: int | None = None,
+    ) -> Trajectory[Any]:
+        """Run a single rollout from an arbitrary state.
+
+        Args:
+            state: Starting state (may be mid-trajectory).
+            max_steps: Maximum new steps to take. Defaults to the
+                environment spec's ``max_steps``.
+
+        Returns:
+            Trajectory containing all transitions from the rollout.
+        """
+        if max_steps is None:
+            max_steps = self.environment.spec.max_steps or 100
+
+        trajectory: Trajectory[Any] = Trajectory.create(state)
+        current_state = state
+
+        for _ in range(max_steps):
+            if current_state.metadata.is_terminal:
+                break
+
+            messages = self._build_messages(current_state, trajectory=trajectory)
+            gen_result = self.backend.generate_chat(messages, self.sampling_params)
+            action = gen_result.to_agent_action()
+            step_result = self.environment.step(current_state, action)
+
+            trajectory.add_transition(
+                Transition(
+                    state=current_state,
+                    action=action,
+                    next_state=step_result.next_state,
+                    rewards=step_result.rewards,
+                    extracted_action=step_result.extracted_action,
+                    resolved_action=step_result.resolved_action,
+                    info={
+                        "step": step_result.info,
+                    },
+                )
+            )
+            current_state = step_result.next_state
+
+        return trajectory
+
+    def run_from_state_action(
+        self,
+        state: State[Any],
+        action: Action,
+        max_steps: int | None = None,
+    ) -> Trajectory[Any]:
+        """Run a single rollout with a forced first action.
+
+        The first step uses the given ``action`` instead of generating
+        one from the backend. Subsequent steps (if the episode continues)
+        use normal generation.
+
+        Args:
+            state: Starting state.
+            action: Action to force for the first step.
+            max_steps: Maximum new steps to take. Defaults to the
+                environment spec's ``max_steps``.
+
+        Returns:
+            Trajectory containing all transitions from the rollout.
+        """
+        if max_steps is None:
+            max_steps = self.environment.spec.max_steps or 100
+
+        trajectory: Trajectory[Any] = Trajectory.create(state)
+        current_state = state
+
+        for step_i in range(max_steps):
+            if current_state.metadata.is_terminal:
+                break
+
+            if step_i == 0:
+                step_action = action
+            else:
+                messages = self._build_messages(current_state, trajectory=trajectory)
+                gen_result = self.backend.generate_chat(messages, self.sampling_params)
+                step_action = gen_result.to_agent_action()
+
+            step_result = self.environment.step(current_state, step_action)
+
+            trajectory.add_transition(
+                Transition(
+                    state=current_state,
+                    action=step_action,
+                    next_state=step_result.next_state,
+                    rewards=step_result.rewards,
+                    extracted_action=step_result.extracted_action,
+                    resolved_action=step_result.resolved_action,
+                    info={
+                        "step": step_result.info,
+                    },
+                )
+            )
+            current_state = step_result.next_state
+
+        return trajectory
+
+    def run_batch_from_states(
+        self,
+        states: Sequence[State[Any]],
+        max_steps: int | None = None,
+        batch_size: int | None = None,
+    ) -> list[Trajectory[Any]]:
+        """Run batched rollouts from arbitrary states.
+
+        Uses lockstep batched generation: all active rollouts advance
+        one step together per iteration.
+
+        Args:
+            states: Starting states for each rollout.
+            max_steps: Maximum new steps per rollout. Defaults to the
+                environment spec's ``max_steps``.
+            batch_size: If set, processes states in chunks of this size.
+
+        Returns:
+            List of Trajectory objects, one per input state, in order.
+        """
+        if not states:
+            return []
+
+        if batch_size is not None and batch_size < len(states):
+            results: list[Trajectory[Any]] = []
+            for start in range(0, len(states), batch_size):
+                chunk = states[start : start + batch_size]
+                results.extend(
+                    self._run_batch_from_states_inner(chunk, max_steps=max_steps)
+                )
+            return results
+
+        return self._run_batch_from_states_inner(states, max_steps=max_steps)
+
+    def run_batch_from_state_actions(
+        self,
+        states: Sequence[State[Any]],
+        actions: Sequence[Action],
+        max_steps: int | None = None,
+        batch_size: int | None = None,
+    ) -> list[Trajectory[Any]]:
+        """Run batched rollouts with forced first actions.
+
+        The first step of each rollout uses the corresponding action from
+        ``actions`` instead of generating from the backend. Subsequent
+        steps use normal generation.
+
+        Args:
+            states: Starting states for each rollout.
+            actions: Actions to force for the first step of each rollout.
+            max_steps: Maximum new steps per rollout. Defaults to the
+                environment spec's ``max_steps``.
+            batch_size: If set, processes states in chunks of this size.
+
+        Returns:
+            List of Trajectory objects, one per input state, in order.
+
+        Raises:
+            ValueError: If ``states`` and ``actions`` have different lengths.
+        """
+        if len(states) != len(actions):
+            raise ValueError(
+                f"states and actions must have the same length, "
+                f"got {len(states)} and {len(actions)}"
+            )
+
+        if not states:
+            return []
+
+        if batch_size is not None and batch_size < len(states):
+            results: list[Trajectory[Any]] = []
+            for start in range(0, len(states), batch_size):
+                s_chunk = states[start : start + batch_size]
+                a_chunk = actions[start : start + batch_size]
+                results.extend(
+                    self._run_batch_from_states_inner(
+                        s_chunk, forced_actions=a_chunk, max_steps=max_steps
+                    )
+                )
+            return results
+
+        return self._run_batch_from_states_inner(
+            states, forced_actions=actions, max_steps=max_steps
+        )
+
+    def _run_batch_from_states_inner(
+        self,
+        states: Sequence[State[Any]],
+        max_steps: int | None = None,
+        forced_actions: Sequence[Action] | None = None,
+    ) -> list[Trajectory[Any]]:
+        """Core lockstep batch loop for run-from-state methods.
+
+        Args:
+            states: Starting states for each rollout.
+            max_steps: Maximum new steps per rollout.
+            forced_actions: If set, use these for the first step of each
+                rollout instead of generating from the backend.
+        """
+        if max_steps is None:
+            max_steps = self.environment.spec.max_steps or 100
+
+        # Build active rollout state
+        active: list[_ActiveTrajectory] = []
+        for pos, state in enumerate(states):
+            trajectory: Trajectory[Any] = Trajectory.create(state)
+            active.append(
+                _ActiveTrajectory(
+                    position=pos,
+                    task_index=0,
+                    state=state,
+                    reset_info={},
+                    trajectory=trajectory,
+                )
+            )
+
+        # Mark already-terminal states as done
+        for t in active:
+            if t.state.metadata.is_terminal:
+                t.done = True
+
+        for step_i in range(max_steps):
+            remaining = [t for t in active if not t.done]
+            if not remaining:
+                break
+
+            # First step with forced actions: skip generation
+            if step_i == 0 and forced_actions is not None:
+                for t in remaining:
+                    forced = forced_actions[t.position]
+                    step_result = self.environment.step(t.state, forced)
+
+                    t.trajectory.add_transition(
+                        Transition(
+                            state=t.state,
+                            action=forced,
+                            next_state=step_result.next_state,
+                            rewards=step_result.rewards,
+                            extracted_action=step_result.extracted_action,
+                            resolved_action=step_result.resolved_action,
+                            info={"step": step_result.info},
+                        )
+                    )
+                    t.state = step_result.next_state
+                    t.step_count += 1
+                    if step_result.done:
+                        t.done = True
+            else:
+                # Generate actions via batched inference
+                messages_batch = [
+                    self._build_messages(t.state, trajectory=t.trajectory)
+                    for t in remaining
+                ]
+                gen_results = self.backend.generate_chat_batch(
+                    messages_batch, self.sampling_params
+                )
+
+                for t, gen_result in zip(remaining, gen_results):
+                    action = gen_result.to_agent_action()
+                    step_result = self.environment.step(t.state, action)
+
+                    t.trajectory.add_transition(
+                        Transition(
+                            state=t.state,
+                            action=action,
+                            next_state=step_result.next_state,
+                            rewards=step_result.rewards,
+                            extracted_action=step_result.extracted_action,
+                            resolved_action=step_result.resolved_action,
+                            info={"step": step_result.info},
+                        )
+                    )
+                    t.state = step_result.next_state
+                    t.step_count += 1
+                    if step_result.done:
+                        t.done = True
+
+        # Return trajectories in original order
+        result_slots: list[Trajectory[Any] | None] = [None] * len(states)
+        for t in active:
+            result_slots[t.position] = t.trajectory
+
+        return [r for r in result_slots if r is not None]
+
 
 @dataclass(frozen=True)
 class MultiEvalEntry:
