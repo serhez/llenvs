@@ -333,7 +333,59 @@ inference:
     thinking_budget: 512
 ```
 
-When the budget is reached, all logits are masked to `-inf` except the `</think>` token, forcing the model to close the thinking block and continue with its answer. Each `<think>` block gets an independent budget — if the model opens a second thinking block, the counter resets.
+When the budget is reached, the processor forces the model to close the thinking block and continue with its answer. By default, the budget is **shared** across all `<think>` blocks — if the model opens multiple thinking blocks, their token counts accumulate toward the same limit.
+
+#### Per-Block Budget
+
+To give each `<think>` block its own independent budget (counter resets on each new block), set `thinking_budget_per_block`:
+
+```python
+params = SamplingParams(
+    max_tokens=4096,
+    extra={
+        "thinking_budget": 512,
+        "thinking_budget_per_block": True,
+    },
+)
+```
+
+```yaml
+inference:
+  max_tokens: 4096
+  extra:
+    thinking_budget: 512
+    thinking_budget_per_block: true
+```
+
+#### Early Stopping Text
+
+When the budget is hit, the processor forces a natural-language suffix before `</think>` to help the model transition cleanly from reasoning to answering. By default this is `DEFAULT_EARLY_STOPPING_TEXT` (`"\n\nI need to give my answer now.\n</think>\n\n"`), which is encoded into token IDs and forced one token at a time.
+
+To customize the suffix:
+
+```python
+params = SamplingParams(
+    max_tokens=4096,
+    extra={
+        "thinking_budget": 512,
+        "thinking_early_stopping_text": "\n\nLet me answer directly.\n</think>\n\n",
+    },
+)
+```
+
+To disable early stopping text and force bare `</think>` instead:
+
+```python
+params = SamplingParams(
+    max_tokens=4096,
+    extra={
+        "thinking_budget": 512,
+        "thinking_early_stopping_text": None,
+    },
+)
+```
+
+The suffix should end with `</think>` so the model naturally transitions out of the thinking block.
 
 #### Soft Budget Transition
 
@@ -364,8 +416,8 @@ The feature is opt-in — omitting `thinking_budget_soft_ratio` preserves the ha
 Requirements:
 - The tokenizer must have `<think>` and `</think>` as single dedicated tokens
 - Works with both vLLM (`logits_processors`) and HuggingFace (`logits_processor`) backends
-- The processor is stateless and safe for batched generation
-- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set `thinking_budget` and `thinking_budget_soft_ratio` in `extra`
+- The vLLM processor is stateful (O(1) per token); the HuggingFace processor derives state from the full token history for batch safety
+- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set `thinking_budget`, `thinking_budget_soft_ratio`, `thinking_early_stopping_text`, and `thinking_budget_per_block` in `extra`
 
 ## Batch Generation
 

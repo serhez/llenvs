@@ -102,6 +102,31 @@ class TestStripThinkingTokens:
         result = strip_thinking_tokens("the answer is 42<think>reasoning</think>")
         assert result == "the answer is 42"
 
+    def test_orphan_end_think_with_content_before(self):
+        """Orphan </think> when <think> was in the prompt (not in generated text)."""
+        result = strip_thinking_tokens("reasoning here</think>\n0.7")
+        assert result == "\n0.7"
+
+    def test_orphan_end_think_at_start(self):
+        """Orphan </think> at the very start of text."""
+        result = strip_thinking_tokens("</think>answer")
+        assert result == "answer"
+
+    def test_orphan_end_think_multiline(self):
+        """Orphan </think> with multiline reasoning content before it."""
+        result = strip_thinking_tokens("line1\nline2\nline3</think>\n42")
+        assert result == "\n42"
+
+    def test_orphan_end_think_only(self):
+        """Text is just </think> — everything stripped."""
+        result = strip_thinking_tokens("</think>")
+        assert result == ""
+
+    def test_no_orphan_when_think_present(self):
+        """Normal closed block is not treated as orphan."""
+        result = strip_thinking_tokens("<think>reasoning</think>answer")
+        assert result == "answer"
+
 
 class TestStripTrailingPunctuation:
     """Tests for strip_trailing_punctuation post-cleaner."""

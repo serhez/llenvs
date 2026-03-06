@@ -252,6 +252,9 @@ class VLLMBackend(ModelBackend):
             extra = dict(params.extra)
             thinking_budget = extra.pop("thinking_budget", None)
             soft_ratio = extra.pop("thinking_budget_soft_ratio", None)
+            _absent = object()
+            early_stopping_text = extra.pop("thinking_early_stopping_text", _absent)
+            per_block = extra.pop("thinking_budget_per_block", None)
             kwargs.update(extra)
 
             if thinking_budget is not None:
@@ -265,14 +268,24 @@ class VLLMBackend(ModelBackend):
                     extra_args["thinking_budget"] = int(thinking_budget)
                     if soft_ratio is not None:
                         extra_args["thinking_budget_soft_ratio"] = float(soft_ratio)
+                    if early_stopping_text is not _absent:
+                        extra_args["thinking_early_stopping_text"] = early_stopping_text
+                    if per_block is not None:
+                        extra_args["thinking_budget_per_block"] = bool(per_block)
                     kwargs["extra_args"] = extra_args
                 else:
                     from llenvs.inference.thinking import ThinkingBudgetProcessor
 
+                    proc_kwargs: dict[str, Any] = {
+                        "soft_budget_ratio": float(soft_ratio) if soft_ratio is not None else None,
+                        "per_block": bool(per_block) if per_block is not None else False,
+                    }
+                    if early_stopping_text is not _absent:
+                        proc_kwargs["early_stopping_text"] = early_stopping_text
                     processor = ThinkingBudgetProcessor(
                         self._tokenizer,
                         int(thinking_budget),
-                        soft_budget_ratio=float(soft_ratio) if soft_ratio is not None else None,
+                        **proc_kwargs,
                     )
                     processors = kwargs.get("logits_processors", [])
                     kwargs["logits_processors"] = list(processors) + [processor.vllm_processor]

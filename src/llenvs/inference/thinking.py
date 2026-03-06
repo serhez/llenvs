@@ -1,27 +1,52 @@
 """Thinking budget logits processor for models with <think>...</think> blocks.
 
-Provides a stateless logits processor that caps the number of tokens a model
-can generate inside ``<think>...</think>`` reasoning blocks. When the budget
-is exhausted, all logits are masked to ``-inf`` except the ``</think>`` token,
-forcing the model to close the thinking block.
+Provides a logits processor that caps the number of tokens a model can generate
+inside ``<think>...</think>`` reasoning blocks. When the budget is exhausted,
+the processor forces a sequence of early-stopping tokens (by default a
+natural-language suffix from ``DEFAULT_EARLY_STOPPING_TEXT``) which transitions
+the model from reasoning to answering.
+
+The ``vllm_processor`` path is stateful (O(1) per token) since processor
+instances are per-request in vLLM. The ``hf_processor`` path remains stateless
+(scans full history) for batch safety in HuggingFace.
 """
 
 from typing import Any
 
+DEFAULT_EARLY_STOPPING_TEXT = "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n"
+
+_UNSET = object()
+
 
 class ThinkingBudgetProcessor:
-    """Stateless logits processor that caps thinking tokens.
+    """Logits processor that caps thinking tokens.
 
     Works with any model whose tokenizer contains ``<think>`` and ``</think>``
-    as single tokens (e.g. Qwen3). The processor is fully stateless — it
-    derives thinking state by scanning the full token history on each call,
-    making it safe for shared-processor batching in both vLLM and HuggingFace.
+    as single tokens (e.g. Qwen3).
+
+    The ``vllm_processor`` method is stateful — it tracks thinking state
+    incrementally for O(1) per-token cost. The ``hf_processor`` method is
+    stateless — it scans the full token history each call for batch safety.
+
+    When the thinking budget is exhausted, the processor forces a sequence
+    of early-stopping tokens. By default this is ``DEFAULT_EARLY_STOPPING_TEXT``
+    (a natural-language suffix ending with ``</think>``). Pass
+    ``early_stopping_text=None`` to force bare ``</think>`` instead.
 
     Args:
         tokenizer: A tokenizer with ``get_vocab()``, ``convert_tokens_to_ids()``,
             or ``encode()`` methods.
-        budget: Maximum number of tokens allowed inside each ``<think>`` block.
-            Once reached, the model is forced to emit ``</think>``.
+        budget: Maximum number of thinking tokens allowed. By default (shared
+            mode), this is cumulative across all ``<think>`` blocks. With
+            ``per_block=True``, each block gets its own independent budget.
+        soft_budget_ratio: If set, begin boosting ``</think>`` logit at
+            ``ratio * budget`` tokens.
+        early_stopping_text: Text to force when budget is exhausted. Encoded
+            at init time. Defaults to ``DEFAULT_EARLY_STOPPING_TEXT``. Pass
+            ``None`` explicitly to force bare ``</think>`` instead.
+        per_block: If ``True``, each ``<think>`` block gets its own independent
+            budget (counter resets on each ``<think>``). If ``False`` (default),
+            the budget is shared across all thinking blocks.
     """
 
     def __init__(
@@ -29,11 +54,30 @@ class ThinkingBudgetProcessor:
         tokenizer: Any,
         budget: int,
         soft_budget_ratio: float | None = None,
+        early_stopping_text: str | None = _UNSET,
+        per_block: bool = False,
     ) -> None:
         self._budget = budget
         self._soft_budget_ratio = soft_budget_ratio
+        self._per_block = per_block
         self._think_id = self._resolve_token(tokenizer, "<think>")
         self._end_think_id = self._resolve_token(tokenizer, "</think>")
+
+        # Early stopping — default to DEFAULT_EARLY_STOPPING_TEXT
+        if early_stopping_text is _UNSET:
+            early_stopping_text = DEFAULT_EARLY_STOPPING_TEXT
+        if early_stopping_text is not None:
+            self._early_stopping_tokens = self._resolve_early_stopping_tokens(
+                tokenizer, early_stopping_text
+            )
+        else:
+            self._early_stopping_tokens = None
+
+        # Stateful tracking for vllm_processor
+        self._in_thinking = False
+        self._count = 0
+        self._forcing_index = 0
+        self._processed_count = 0
 
     @classmethod
     def from_token_ids(
@@ -42,6 +86,8 @@ class ThinkingBudgetProcessor:
         end_think_id: int,
         budget: int,
         soft_budget_ratio: float | None = None,
+        early_stopping_tokens: list[int] | None = None,
+        per_block: bool = False,
     ) -> "ThinkingBudgetProcessor":
         """Create a processor with pre-resolved token IDs.
 
@@ -54,12 +100,23 @@ class ThinkingBudgetProcessor:
             budget: Maximum tokens allowed inside each thinking block.
             soft_budget_ratio: If set, begin boosting ``</think>`` logit
                 at ``ratio * budget`` tokens (linear ramp to max ~5.0).
+            early_stopping_tokens: Pre-encoded token IDs to force when budget
+                is exhausted. ``None`` forces bare ``</think>``.
+            per_block: If ``True``, each ``<think>`` block gets its own
+                independent budget. If ``False`` (default), the budget is
+                shared across all thinking blocks.
         """
         instance = cls.__new__(cls)
         instance._budget = budget
         instance._soft_budget_ratio = soft_budget_ratio
+        instance._per_block = per_block
         instance._think_id = think_id
         instance._end_think_id = end_think_id
+        instance._early_stopping_tokens = early_stopping_tokens
+        instance._in_thinking = False
+        instance._count = 0
+        instance._forcing_index = 0
+        instance._processed_count = 0
         return instance
 
     @staticmethod
@@ -98,24 +155,56 @@ class ThinkingBudgetProcessor:
             f"The tokenizer must have {token} as a dedicated token."
         )
 
+    @staticmethod
+    def _resolve_early_stopping_tokens(tokenizer: Any, text: str) -> list[int]:
+        """Encode early stopping text into token IDs.
+
+        Args:
+            tokenizer: A tokenizer with an ``encode()`` method.
+            text: The early stopping text to encode.
+
+        Returns:
+            List of token IDs.
+        """
+        return tokenizer.encode(text, add_special_tokens=False)
+
+    def _update_thinking(self, token_id: int) -> None:
+        """Update stateful thinking tracking with a single new token.
+
+        Used by ``vllm_processor`` for O(1) per-token cost.
+        """
+        if token_id == self._think_id:
+            self._in_thinking = True
+            if self._per_block:
+                self._count = 0
+            self._forcing_index = 0
+        elif token_id == self._end_think_id:
+            self._in_thinking = False
+            if self._per_block:
+                self._count = 0
+        elif self._in_thinking:
+            self._count += 1
+
     def _count_thinking(self, token_ids: list[int] | tuple[int, ...]) -> tuple[bool, int]:
         """Derive thinking state from the full token history.
 
         Returns:
             A tuple of (in_thinking, count) where *in_thinking* is whether the
             last open ``<think>`` has not been closed, and *count* is the number
-            of tokens since that ``<think>`` (excluding the ``<think>`` token
-            itself).
+            of thinking tokens. In shared mode (default), this is cumulative
+            across all blocks; in per-block mode, it resets on each ``<think>``.
         """
         in_thinking = False
         count = 0
         for tid in token_ids:
             if tid == self._think_id:
                 in_thinking = True
-                count = 0
+                if self._per_block:
+                    count = 0
             elif tid == self._end_think_id:
                 in_thinking = False
-                count = 0
+                if self._per_block:
+                    count = 0
             elif in_thinking:
                 count += 1
         return in_thinking, count
@@ -135,15 +224,23 @@ class ThinkingBudgetProcessor:
         if not in_thinking:
             return logits
 
-        # Hard cutoff — force </think>
+        # Hard cutoff — force early stopping sequence or bare </think>
         if count >= self._budget:
+            if self._early_stopping_tokens is not None and self._forcing_index < len(
+                self._early_stopping_tokens
+            ):
+                forced_id = self._early_stopping_tokens[self._forcing_index]
+                self._forcing_index += 1
+            else:
+                forced_id = self._end_think_id
+
             if hasattr(logits, "fill_"):
                 logits.fill_(float("-inf"))
-                logits[self._end_think_id] = 0.0
+                logits[forced_id] = 0.0
             else:
                 for i in range(len(logits)):
                     logits[i] = float("-inf")
-                logits[self._end_think_id] = 0.0
+                logits[forced_id] = 0.0
             return logits
 
         # Soft transition — boost </think> logit
@@ -161,16 +258,20 @@ class ThinkingBudgetProcessor:
     def vllm_processor(self, token_ids: list[int], logits: Any) -> Any:
         """vLLM logits processor signature: ``(list[int], Tensor) -> Tensor``.
 
-        Safe to share across sequences in a batch — each call receives the
-        token history for a single sequence.
+        Uses stateful tracking for O(1) per-token cost. Processes only
+        new tokens since the last call. Each processor instance is
+        per-request in vLLM, so statefulness is safe.
         """
-        in_thinking, count = self._count_thinking(token_ids)
-        return self._apply_budget(in_thinking, count, logits)
+        for i in range(self._processed_count, len(token_ids)):
+            self._update_thinking(token_ids[i])
+        self._processed_count = len(token_ids)
+        return self._apply_budget(self._in_thinking, self._count, logits)
 
     def hf_processor(self, input_ids: Any, scores: Any) -> Any:
         """HuggingFace logits processor signature: ``(Tensor[batch, seq], Tensor[batch, vocab]) -> Tensor``.
 
         Iterates batch elements independently, applying the budget to each.
+        Stateless — derives all state from token history for batch safety.
         """
         for i in range(len(input_ids)):
             seq = input_ids[i]
@@ -178,8 +279,32 @@ class ThinkingBudgetProcessor:
             if hasattr(seq, "tolist"):
                 seq = seq.tolist()
             in_thinking, count = self._count_thinking(seq)
+
+            # Derive forcing_index from tail of sequence for early stopping
+            if in_thinking and count >= self._budget and self._early_stopping_tokens is not None:
+                self._forcing_index = self._derive_forcing_index(seq)
+
             self._apply_budget(in_thinking, count, scores[i])
         return scores
+
+    def _derive_forcing_index(self, token_ids: list[int] | tuple[int, ...]) -> int:
+        """Derive how many early stopping tokens have already been emitted.
+
+        Checks how many tokens at the tail of ``token_ids`` match a prefix
+        of ``_early_stopping_tokens``. O(k) where k = len(early_stopping_tokens).
+        """
+        es = self._early_stopping_tokens
+        if not es:
+            return 0
+
+        # Check the longest prefix of es that matches the tail of token_ids
+        max_match = min(len(es), len(token_ids))
+        for length in range(max_match, 0, -1):
+            tail = token_ids[-length:]
+            prefix = es[:length]
+            if list(tail) == list(prefix):
+                return length
+        return 0
 
 
 def make_v1_thinking_processor_class() -> type | None:
@@ -211,6 +336,7 @@ def make_v1_thinking_processor_class() -> type | None:
             self._available = False
             self._think_id = -1
             self._end_think_id = -1
+            self._tokenizer = None
 
             try:
                 model_config = vllm_config.model_config
@@ -232,6 +358,7 @@ def make_v1_thinking_processor_class() -> type | None:
 
                 self._think_id = ThinkingBudgetProcessor._resolve_token(tokenizer, "<think>")
                 self._end_think_id = ThinkingBudgetProcessor._resolve_token(tokenizer, "</think>")
+                self._tokenizer = tokenizer
                 self._available = True
             except Exception:
                 # Model doesn't have <think>/<think> tokens — that's fine,
@@ -240,7 +367,7 @@ def make_v1_thinking_processor_class() -> type | None:
 
         @classmethod
         def validate_params(cls, params: Any) -> None:
-            """Validate extra_args for thinking_budget and soft_ratio types."""
+            """Validate extra_args for thinking_budget, soft_ratio, and early_stopping types."""
             extra = getattr(params, "extra_args", None) or {}
             budget = extra.get("thinking_budget")
             if budget is not None and not isinstance(budget, int):
@@ -255,6 +382,16 @@ def make_v1_thinking_processor_class() -> type | None:
                     raise ValueError(
                         "thinking_budget_soft_ratio must be between 0 and 1 (exclusive)"
                     )
+            early_stopping = extra.get("thinking_early_stopping_text")
+            if early_stopping is not None and not isinstance(early_stopping, str):
+                raise ValueError(
+                    f"thinking_early_stopping_text must be a string, got {type(early_stopping).__name__}"
+                )
+            per_block = extra.get("thinking_budget_per_block")
+            if per_block is not None and not isinstance(per_block, bool):
+                raise ValueError(
+                    f"thinking_budget_per_block must be a bool, got {type(per_block).__name__}"
+                )
 
         def is_argmax_invariant(self) -> bool:
             return False
@@ -273,11 +410,26 @@ def make_v1_thinking_processor_class() -> type | None:
                 )
 
             soft_ratio = extra.get("thinking_budget_soft_ratio")
+            per_block = extra.get("thinking_budget_per_block", False)
+
+            # Resolve early stopping tokens — default to DEFAULT_EARLY_STOPPING_TEXT
+            _absent = object()
+            early_stopping_text = extra.get("thinking_early_stopping_text", _absent)
+            if early_stopping_text is _absent:
+                early_stopping_text = DEFAULT_EARLY_STOPPING_TEXT
+            early_stopping_tokens = None
+            if early_stopping_text is not None:
+                early_stopping_tokens = ThinkingBudgetProcessor._resolve_early_stopping_tokens(
+                    self._tokenizer, early_stopping_text
+                )
+
             proc = ThinkingBudgetProcessor.from_token_ids(
                 self._think_id,
                 self._end_think_id,
                 int(budget),
                 soft_budget_ratio=float(soft_ratio) if soft_ratio is not None else None,
+                early_stopping_tokens=early_stopping_tokens,
+                per_block=bool(per_block),
             )
             return proc.vllm_processor
 

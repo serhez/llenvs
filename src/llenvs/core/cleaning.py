@@ -23,17 +23,25 @@ def strip_special_tokens(text: str) -> str:
 
 _THINKING_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 _UNCLOSED_THINKING_PATTERN = re.compile(r"<think>.*$", re.DOTALL)
+_ORPHAN_END_THINK_PATTERN = re.compile(r"^.*?</think>", re.DOTALL)
 
 
 def strip_thinking_tokens(text: str) -> str:
     """Remove <think>...</think> reasoning blocks from text.
 
-    Handles both closed blocks and unclosed blocks (from MAX_TOKENS truncation).
+    Handles three cases:
+    - Closed blocks: ``<think>...</think>``
+    - Unclosed blocks (MAX_TOKENS truncation): ``<think>...`` at end
+    - Orphan ``</think>`` (when ``<think>`` was in the prompt, not the
+      generated text): everything up to and including ``</think>``
     """
     # First remove closed blocks
     text = _THINKING_BLOCK_PATTERN.sub("", text)
     # Then remove any remaining unclosed block
     text = _UNCLOSED_THINKING_PATTERN.sub("", text)
+    # Handle orphan </think> when <think> was in the prompt
+    if "</think>" in text and "<think>" not in text:
+        text = _ORPHAN_END_THINK_PATTERN.sub("", text)
     return text
 
 
