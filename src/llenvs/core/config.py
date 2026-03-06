@@ -95,6 +95,14 @@ class InferenceConfig:
         stop_sequences: Stop sequences.
         extra: Backend-specific parameters passed through to the underlying
             inference library (e.g., repetition_penalty for HuggingFace).
+        thinking_budget: Maximum thinking tokens. None = no budget.
+        thinking_budget_per_block: Per-block budgets (reset on each ``<think>``).
+        thinking_budget_soft_ratio: Begin boosting ``</think>`` at this ratio.
+        thinking_budget_suffix: Text forced when budget exhausted. None = bare
+            ``</think>``. Pass ``DEFAULT_EARLY_STOPPING_SUFFIX`` to enable.
+        second_elicitation_suffix: Suffix for follow-up on truncated outputs.
+            None = disabled. When set, enables second elicitation.
+        second_elicitation_max_tokens: Token budget for the follow-up call.
     """
 
     temperature: float = 0.0
@@ -103,6 +111,14 @@ class InferenceConfig:
     top_k: int = 0
     stop_sequences: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
+    # Thinking budget
+    thinking_budget: int | None = None
+    thinking_budget_per_block: bool = False
+    thinking_budget_soft_ratio: float | None = None
+    thinking_budget_suffix: str | None = None
+    # Second elicitation
+    second_elicitation_suffix: str | None = None
+    second_elicitation_max_tokens: int = 256
 
 
 @dataclass
@@ -449,6 +465,14 @@ class EvalConfig:
             top_k=inference_data.get("top_k", 0),
             stop_sequences=inference_data.get("stop_sequences", []),
             extra=inference_data.get("extra", {}),
+            thinking_budget=inference_data.get("thinking_budget"),
+            thinking_budget_per_block=inference_data.get("thinking_budget_per_block", False),
+            thinking_budget_soft_ratio=inference_data.get("thinking_budget_soft_ratio"),
+            thinking_budget_suffix=inference_data.get("thinking_budget_suffix"),
+            second_elicitation_suffix=inference_data.get("second_elicitation_suffix"),
+            second_elicitation_max_tokens=inference_data.get(
+                "second_elicitation_max_tokens", 256
+            ),
         )
 
         return cls(
@@ -569,6 +593,12 @@ class EvalConfig:
                 "top_k": self.inference.top_k,
                 "stop_sequences": self.inference.stop_sequences,
                 "extra": self.inference.extra,
+                "thinking_budget": self.inference.thinking_budget,
+                "thinking_budget_per_block": self.inference.thinking_budget_per_block,
+                "thinking_budget_soft_ratio": self.inference.thinking_budget_soft_ratio,
+                "thinking_budget_suffix": self.inference.thinking_budget_suffix,
+                "second_elicitation_suffix": self.inference.second_elicitation_suffix,
+                "second_elicitation_max_tokens": self.inference.second_elicitation_max_tokens,
             },
             "system_prompt": self.system_prompt,
             "model_profile": self.model_profile,
@@ -800,11 +830,31 @@ def create_sampling_params(config: InferenceConfig) -> Any:
     """
     from llenvs.inference.protocol import SamplingParams
 
+    extra = dict(config.extra)
+
+    # Thinking budget
+    if config.thinking_budget is not None:
+        extra["thinking_budget"] = config.thinking_budget
+    if config.thinking_budget_per_block:
+        extra["thinking_budget_per_block"] = True
+    if config.thinking_budget_soft_ratio is not None:
+        extra["thinking_budget_soft_ratio"] = config.thinking_budget_soft_ratio
+    if config.thinking_budget_suffix is not None:
+        extra["thinking_early_stopping_text"] = config.thinking_budget_suffix
+    else:
+        extra["thinking_early_stopping_text"] = None
+
+    # Second elicitation
+    if config.second_elicitation_suffix is not None:
+        extra["second_elicitation"] = True
+        extra["second_elicitation_suffix"] = config.second_elicitation_suffix
+        extra["second_elicitation_max_tokens"] = config.second_elicitation_max_tokens
+
     return SamplingParams(
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         top_p=config.top_p,
         top_k=config.top_k,
         stop_sequences=tuple(config.stop_sequences),
-        extra=config.extra,
+        extra=extra,
     )

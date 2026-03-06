@@ -3,7 +3,7 @@
 Provides a logits processor that caps the number of tokens a model can generate
 inside ``<think>...</think>`` reasoning blocks. When the budget is exhausted,
 the processor forces a sequence of early-stopping tokens (by default a
-natural-language suffix from ``DEFAULT_EARLY_STOPPING_TEXT``) which transitions
+natural-language suffix from ``DEFAULT_EARLY_STOPPING_SUFFIX``) which transitions
 the model from reasoning to answering.
 
 The ``vllm_processor`` path is stateful (O(1) per token) since processor
@@ -13,7 +13,7 @@ instances are per-request in vLLM. The ``hf_processor`` path remains stateless
 
 from typing import Any
 
-DEFAULT_EARLY_STOPPING_TEXT = "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n"
+DEFAULT_EARLY_STOPPING_SUFFIX = "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n"
 
 _UNSET = object()
 
@@ -29,7 +29,7 @@ class ThinkingBudgetProcessor:
     stateless — it scans the full token history each call for batch safety.
 
     When the thinking budget is exhausted, the processor forces a sequence
-    of early-stopping tokens. By default this is ``DEFAULT_EARLY_STOPPING_TEXT``
+    of early-stopping tokens. By default this is ``DEFAULT_EARLY_STOPPING_SUFFIX``
     (a natural-language suffix ending with ``</think>``). Pass
     ``early_stopping_text=None`` to force bare ``</think>`` instead.
 
@@ -42,7 +42,7 @@ class ThinkingBudgetProcessor:
         soft_budget_ratio: If set, begin boosting ``</think>`` logit at
             ``ratio * budget`` tokens.
         early_stopping_text: Text to force when budget is exhausted. Encoded
-            at init time. Defaults to ``DEFAULT_EARLY_STOPPING_TEXT``. Pass
+            at init time. Defaults to ``DEFAULT_EARLY_STOPPING_SUFFIX``. Pass
             ``None`` explicitly to force bare ``</think>`` instead.
         per_block: If ``True``, each ``<think>`` block gets its own independent
             budget (counter resets on each ``<think>``). If ``False`` (default),
@@ -63,9 +63,9 @@ class ThinkingBudgetProcessor:
         self._think_id = self._resolve_token(tokenizer, "<think>")
         self._end_think_id = self._resolve_token(tokenizer, "</think>")
 
-        # Early stopping — default to DEFAULT_EARLY_STOPPING_TEXT
+        # Early stopping — default to DEFAULT_EARLY_STOPPING_SUFFIX
         if early_stopping_text is _UNSET:
-            early_stopping_text = DEFAULT_EARLY_STOPPING_TEXT
+            early_stopping_text = DEFAULT_EARLY_STOPPING_SUFFIX
         if early_stopping_text is not None:
             self._early_stopping_tokens = self._resolve_early_stopping_tokens(
                 tokenizer, early_stopping_text
@@ -412,11 +412,11 @@ def make_v1_thinking_processor_class() -> type | None:
             soft_ratio = extra.get("thinking_budget_soft_ratio")
             per_block = extra.get("thinking_budget_per_block", False)
 
-            # Resolve early stopping tokens — default to DEFAULT_EARLY_STOPPING_TEXT
+            # Resolve early stopping tokens — default to DEFAULT_EARLY_STOPPING_SUFFIX
             _absent = object()
             early_stopping_text = extra.get("thinking_early_stopping_text", _absent)
             if early_stopping_text is _absent:
-                early_stopping_text = DEFAULT_EARLY_STOPPING_TEXT
+                early_stopping_text = DEFAULT_EARLY_STOPPING_SUFFIX
             early_stopping_tokens = None
             if early_stopping_text is not None:
                 early_stopping_tokens = ThinkingBudgetProcessor._resolve_early_stopping_tokens(

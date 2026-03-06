@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ from llenvs.inference.protocol import (
     GenerationResult,
     ModelBackend,
     SamplingParams,
+    StopReason,
 )
 
 logger = logging.getLogger(__name__)
@@ -693,6 +694,68 @@ class TrajectoryRunner:
 
         return messages
 
+    def _resolve_elicitation_suffix(self) -> str:
+        """Resolve the suffix for second elicitation."""
+        suffix = self.sampling_params.extra.get("second_elicitation_suffix")
+        if suffix is None:
+            from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_SUFFIX
+
+            return DEFAULT_EARLY_STOPPING_SUFFIX
+        return suffix
+
+    def _build_elicitation_messages(
+        self,
+        messages: list[ChatMessage],
+        first_result: GenerationResult,
+        suffix: str,
+    ) -> list[ChatMessage]:
+        """Build continuation messages for second elicitation."""
+        continued = list(messages)
+        continued.append(ChatMessage(role="assistant", content=(first_result.text or "") + suffix))
+        continued.append(ChatMessage(role="user", content="Please provide your final answer."))
+        return continued
+
+    def _elicitation_params(self) -> SamplingParams:
+        """Create sampling params for the second elicitation call."""
+        budget = self.sampling_params.extra.get("second_elicitation_max_tokens", 256)
+        clean_extra = {
+            k: v
+            for k, v in self.sampling_params.extra.items()
+            if not k.startswith("second_elicitation")
+        }
+        return replace(self.sampling_params, max_tokens=budget, extra=clean_extra)
+
+    def _merge_elicitation(
+        self,
+        first: GenerationResult,
+        second: GenerationResult,
+        suffix: str,
+    ) -> GenerationResult:
+        """Merge first and second elicitation results."""
+        merged_text = (first.text or "") + suffix + (second.text or "")
+        merged_meta = {**first.metadata, **second.metadata, "second_elicitation": True}
+        return GenerationResult(
+            text=merged_text,
+            finish_reason=second.finish_reason,
+            tool_calls=second.tool_calls,
+            token_logprobs=None,
+            prompt_tokens=first.prompt_tokens + second.prompt_tokens,
+            completion_tokens=first.completion_tokens + second.completion_tokens,
+            metadata=merged_meta,
+        )
+
+    def _second_elicitation(
+        self,
+        messages: list[ChatMessage],
+        first_result: GenerationResult,
+    ) -> GenerationResult:
+        """Perform a follow-up generation to rescue a truncated output."""
+        suffix = self._resolve_elicitation_suffix()
+        continued = self._build_elicitation_messages(messages, first_result, suffix)
+        params = self._elicitation_params()
+        second = self.backend.generate_chat(continued, params)
+        return self._merge_elicitation(first_result, second, suffix)
+
     def _generate_action(
         self,
         state: State[Any],
@@ -728,6 +791,11 @@ class TrajectoryRunner:
                     type(self.backend).__name__,
                 )
             result = self.backend.generate_chat(messages, self.sampling_params)
+
+        if result.finish_reason == StopReason.MAX_TOKENS and self.sampling_params.extra.get(
+            "second_elicitation"
+        ):
+            result = self._second_elicitation(messages, result)
 
         return result.to_agent_action(), result
 
@@ -1099,6 +1167,26 @@ class TrajectoryRunner:
                     self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
                 gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
 
+            # Second elicitation for truncated outputs in batch
+            if self.sampling_params.extra.get("second_elicitation"):
+                needs_elicitation = [
+                    (i, gen)
+                    for i, gen in enumerate(gen_results)
+                    if gen.finish_reason == StopReason.MAX_TOKENS
+                ]
+                if needs_elicitation:
+                    suffix = self._resolve_elicitation_suffix()
+                    elicitation_msgs = [
+                        self._build_elicitation_messages(messages_batch[i], gen, suffix)
+                        for i, gen in needs_elicitation
+                    ]
+                    elicitation_params = self._elicitation_params()
+                    elicitation_results = self.backend.generate_chat_batch(
+                        elicitation_msgs, elicitation_params
+                    )
+                    for (i, first), second in zip(needs_elicitation, elicitation_results):
+                        gen_results[i] = self._merge_elicitation(first, second, suffix)
+
             for t, gen_result in zip(remaining, gen_results):
                 try:
                     action = gen_result.to_agent_action()
@@ -1350,9 +1438,7 @@ class TrajectoryRunner:
             results: list[Trajectory[Any]] = []
             for start in range(0, len(states), batch_size):
                 chunk = states[start : start + batch_size]
-                results.extend(
-                    self._run_batch_from_states_inner(chunk, max_steps=max_steps)
-                )
+                results.extend(self._run_batch_from_states_inner(chunk, max_steps=max_steps))
             return results
 
         return self._run_batch_from_states_inner(states, max_steps=max_steps)
@@ -1480,12 +1566,9 @@ class TrajectoryRunner:
             else:
                 # Generate actions via batched inference
                 messages_batch = [
-                    self._build_messages(t.state, trajectory=t.trajectory)
-                    for t in remaining
+                    self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
                 ]
-                gen_results = self.backend.generate_chat_batch(
-                    messages_batch, self.sampling_params
-                )
+                gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
 
                 for t, gen_result in zip(remaining, gen_results):
                     action = gen_result.to_agent_action()

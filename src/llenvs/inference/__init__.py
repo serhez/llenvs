@@ -36,6 +36,7 @@ from llenvs.inference.protocol import (
     StopReason,
     TokenLogprob,
 )
+from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_SUFFIX
 
 __all__ = [
     # Protocol
@@ -71,4 +72,6 @@ __all__ = [
     "SYSTEM_PROMPT_REGISTRY",
     "TEMPLATE_REGISTRY",
     "PROFILE_REGISTRY",
+    # Thinking
+    "DEFAULT_EARLY_STOPPING_SUFFIX",
 ]

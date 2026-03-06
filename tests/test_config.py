@@ -363,7 +363,7 @@ class TestCreateSamplingParams:
         assert params.max_tokens == 2048
         assert params.top_p == 1.0
         assert params.top_k == 0
-        assert params.extra == {}
+        assert params.extra == {"thinking_early_stopping_text": None}
 
     def test_extra_params(self):
         """Test extra params are passed through."""
@@ -377,7 +377,8 @@ class TestCreateSamplingParams:
         params = create_sampling_params(inference_config)
 
         assert params.temperature == 0.7
-        assert params.extra == {"repetition_penalty": 1.2, "num_beams": 4}
+        assert params.extra["repetition_penalty"] == 1.2
+        assert params.extra["num_beams"] == 4
 
 
 class TestExtractorsChainConfig:

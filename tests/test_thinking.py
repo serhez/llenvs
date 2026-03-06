@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_TEXT, ThinkingBudgetProcessor
+from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_SUFFIX, ThinkingBudgetProcessor
 
 
 def _make_tokenizer(vocab=None):
@@ -644,13 +644,13 @@ class TestEarlyStoppingText:
         assert proc._early_stopping_tokens == [50, 51, 101]
 
     def test_default_early_stopping_text_applied(self):
-        """Constructor uses DEFAULT_EARLY_STOPPING_TEXT when not specified."""
+        """Constructor uses DEFAULT_EARLY_STOPPING_SUFFIX when not specified."""
         tok = _make_tokenizer()
         tok.encode.return_value = [50, 51, 52, 101]
         proc = ThinkingBudgetProcessor(tok, budget=5)
-        # encode was called with DEFAULT_EARLY_STOPPING_TEXT
+        # encode was called with DEFAULT_EARLY_STOPPING_SUFFIX
         assert proc._early_stopping_tokens == [50, 51, 52, 101]
-        tok.encode.assert_called_with(DEFAULT_EARLY_STOPPING_TEXT, add_special_tokens=False)
+        tok.encode.assert_called_with(DEFAULT_EARLY_STOPPING_SUFFIX, add_special_tokens=False)
 
     def test_none_early_stopping_text_disables(self):
         """Passing early_stopping_text=None disables early stopping."""
@@ -675,8 +675,8 @@ class TestEarlyStoppingText:
         assert proc._in_thinking is True
 
     def test_default_early_stopping_text_constant(self):
-        """DEFAULT_EARLY_STOPPING_TEXT is defined and contains </think>."""
-        assert "</think>" in DEFAULT_EARLY_STOPPING_TEXT
+        """DEFAULT_EARLY_STOPPING_SUFFIX is defined and contains </think>."""
+        assert "</think>" in DEFAULT_EARLY_STOPPING_SUFFIX
 
 
 class TestStatefulVLLMProcessor:

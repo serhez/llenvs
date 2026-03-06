@@ -317,20 +317,21 @@ The kwargs are spread into every `apply_chat_template()` call — both `generate
 
 ### Thinking Budget
 
-For models that produce `<think>...</think>` reasoning blocks (e.g., Qwen3 with `enable_thinking=True`), you can cap the number of tokens generated inside each thinking block using `thinking_budget` in `SamplingParams.extra`:
+For models that produce `<think>...</think>` reasoning blocks (e.g., Qwen3 with `enable_thinking=True`), you can cap the number of tokens generated inside each thinking block using `thinking_budget` on `InferenceConfig`:
 
 ```python
-params = SamplingParams(
+from llenvs.core.config import InferenceConfig
+
+config = InferenceConfig(
     max_tokens=4096,
-    extra={"thinking_budget": 512},
+    thinking_budget=512,
 )
 ```
 
 ```yaml
 inference:
   max_tokens: 4096
-  extra:
-    thinking_budget: 512
+  thinking_budget: 512
 ```
 
 When the budget is reached, the processor forces the model to close the thinking block and continue with its answer. By default, the budget is **shared** across all `<think>` blocks — if the model opens multiple thinking blocks, their token counts accumulate toward the same limit.
@@ -340,49 +341,60 @@ When the budget is reached, the processor forces the model to close the thinking
 To give each `<think>` block its own independent budget (counter resets on each new block), set `thinking_budget_per_block`:
 
 ```python
-params = SamplingParams(
+config = InferenceConfig(
     max_tokens=4096,
-    extra={
-        "thinking_budget": 512,
-        "thinking_budget_per_block": True,
-    },
+    thinking_budget=512,
+    thinking_budget_per_block=True,
 )
 ```
 
 ```yaml
 inference:
   max_tokens: 4096
-  extra:
-    thinking_budget: 512
-    thinking_budget_per_block: true
+  thinking_budget: 512
+  thinking_budget_per_block: true
 ```
 
 #### Early Stopping Text
 
-When the budget is hit, the processor forces a natural-language suffix before `</think>` to help the model transition cleanly from reasoning to answering. By default this is `DEFAULT_EARLY_STOPPING_TEXT` (`"\n\nI need to give my answer now.\n</think>\n\n"`), which is encoded into token IDs and forced one token at a time.
-
-To customize the suffix:
+When the budget is hit, the processor forces a natural-language suffix before `</think>` to help the model transition cleanly from reasoning to answering. This is controlled via `thinking_budget_suffix`. By default it is `None` (bare `</think>`). Pass `DEFAULT_EARLY_STOPPING_SUFFIX` to enable the built-in natural-language transition text.
 
 ```python
-params = SamplingParams(
+from llenvs.core.config import InferenceConfig
+from llenvs.inference import DEFAULT_EARLY_STOPPING_SUFFIX
+
+# Default: bare </think> (no suffix)
+config = InferenceConfig(
     max_tokens=4096,
-    extra={
-        "thinking_budget": 512,
-        "thinking_early_stopping_text": "\n\nLet me answer directly.\n</think>\n\n",
-    },
+    thinking_budget=512,
+)
+
+# Enable natural-language transition suffix
+config = InferenceConfig(
+    max_tokens=4096,
+    thinking_budget=512,
+    thinking_budget_suffix=DEFAULT_EARLY_STOPPING_SUFFIX,
+)
+
+# Custom suffix
+config = InferenceConfig(
+    max_tokens=4096,
+    thinking_budget=512,
+    thinking_budget_suffix="\n\nLet me answer directly.\n</think>\n\n",
 )
 ```
 
-To disable early stopping text and force bare `</think>` instead:
+```yaml
+# Default: bare </think> (no suffix)
+inference:
+  max_tokens: 4096
+  thinking_budget: 512
 
-```python
-params = SamplingParams(
-    max_tokens=4096,
-    extra={
-        "thinking_budget": 512,
-        "thinking_early_stopping_text": None,
-    },
-)
+# Custom suffix
+inference:
+  max_tokens: 4096
+  thinking_budget: 512
+  thinking_budget_suffix: "\n\nLet me answer directly.\n</think>\n\n"
 ```
 
 The suffix should end with `</think>` so the model naturally transitions out of the thinking block.
@@ -392,21 +404,18 @@ The suffix should end with `</think>` so the model naturally transitions out of 
 The hard cutoff can cause reasoning to leak into the response when the model is mid-thought. To mitigate this, set `thinking_budget_soft_ratio` to begin boosting the `</think>` logit before the hard cutoff:
 
 ```python
-params = SamplingParams(
+config = InferenceConfig(
     max_tokens=4096,
-    extra={
-        "thinking_budget": 512,
-        "thinking_budget_soft_ratio": 0.9,
-    },
+    thinking_budget=512,
+    thinking_budget_soft_ratio=0.9,
 )
 ```
 
 ```yaml
 inference:
   max_tokens: 4096
-  extra:
-    thinking_budget: 512
-    thinking_budget_soft_ratio: 0.9
+  thinking_budget: 512
+  thinking_budget_soft_ratio: 0.9
 ```
 
 With `soft_ratio=0.9` and `budget=512`, the `</think>` logit boost begins at token 460 (90% of 512) and ramps linearly up to a max boost of ~5.0 at token 511. At token 512 the hard cutoff forces `</think>` as before. This gives the model a chance to close its thinking block naturally before being forced.
@@ -417,7 +426,68 @@ Requirements:
 - The tokenizer must have `<think>` and `</think>` as single dedicated tokens
 - Works with both vLLM (`logits_processors`) and HuggingFace (`logits_processor`) backends
 - The vLLM processor is stateful (O(1) per token); the HuggingFace processor derives state from the full token history for batch safety
-- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set `thinking_budget`, `thinking_budget_soft_ratio`, `thinking_early_stopping_text`, and `thinking_budget_per_block` in `extra`
+- **vLLM V1 support**: On vLLM's V1 engine (default since 0.8), the thinking budget processor is registered as an `AdapterLogitsProcessor` at engine init, and per-request budgets are passed via `SamplingParams.extra_args`. On V0, per-request `logits_processors` callables are used instead. Both paths are transparent — just set the `thinking_budget*` fields on `InferenceConfig`
+
+## Second Elicitation
+
+When a generation hits the `max_tokens` limit, the output is abruptly truncated — often mid-thought for reasoning models, never producing an answer. Second elicitation performs a follow-up generation with the truncated output in context, using a smaller token budget, to coax a final answer.
+
+Disabled by default. When enabled, it only triggers for generations with `finish_reason == MAX_TOKENS`.
+
+### Configuration
+
+```python
+from llenvs.core.config import InferenceConfig
+from llenvs.inference import DEFAULT_EARLY_STOPPING_SUFFIX
+
+config = InferenceConfig(
+    max_tokens=2048,
+    second_elicitation_suffix=DEFAULT_EARLY_STOPPING_SUFFIX,  # enables the feature
+    second_elicitation_max_tokens=256,                         # budget for the follow-up call
+)
+```
+
+```yaml
+inference:
+  max_tokens: 2048
+  second_elicitation_suffix: "\n\nPlease answer now.\n"  # any non-null value enables the feature
+  second_elicitation_max_tokens: 256
+```
+
+When a generation is truncated (`MAX_TOKENS`), the runner:
+
+1. Appends the truncated output + suffix as an assistant message
+2. Appends `"Please provide your final answer."` as a user message
+3. Calls the backend with `second_elicitation_max_tokens` as the token budget
+4. Merges the two results: concatenated text, summed token counts, second call's finish reason
+
+The merged result's metadata includes `"second_elicitation": True`.
+
+### Custom Suffix
+
+The suffix you set on `second_elicitation_suffix` is appended to the truncated output in the follow-up call. `DEFAULT_EARLY_STOPPING_SUFFIX` provides a natural-language transition that helps the model shift from reasoning to answering. To customize:
+
+```python
+config = InferenceConfig(
+    second_elicitation_suffix="\n\nI need to give my final answer now.\n",
+)
+```
+
+### `max_model_len` Sizing
+
+For vLLM, your `max_model_len` must accommodate the full sequence: `prompt + max_tokens + suffix + second_elicitation_max_tokens`. The runner does not auto-adjust `max_model_len` — set it via `ModelConfig.params`:
+
+```yaml
+model:
+  backend: vllm
+  model: Qwen/Qwen3-8B
+  params:
+    max_model_len: 8192  # Enough for prompt + first gen + elicitation
+```
+
+### Interaction with Thinking Budget
+
+Second elicitation and thinking budget are complementary. Thinking budget caps reasoning *within* a generation; second elicitation rescues the *output* when the overall token limit is hit. Both can be enabled simultaneously.
 
 ## Batch Generation
 
