@@ -101,16 +101,16 @@ class TestVLLMThinkingBudget:
         backend._has_v1_thinking_processor = has_v1_thinking_processor
         return backend
 
-    def test_thinking_budget_popped_from_extra(self):
-        """thinking_budget is removed from extra and not forwarded to vLLM."""
+    def test_thinking_budget_not_forwarded_to_vllm(self):
+        """thinking_budget field is not forwarded to vLLM SamplingParams."""
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512, "some_other": "value"},
+            thinking_budget=512,
+            extra={"some_other": "value"},
         )
         backend._to_vllm_params(params)
 
-        # Check that VLLMSamplingParams was called without thinking_budget
         call_kwargs = backend._VLLMSamplingParams.call_args[1]
         assert "thinking_budget" not in call_kwargs
         assert call_kwargs["some_other"] == "value"
@@ -120,7 +120,7 @@ class TestVLLMThinkingBudget:
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512},
+            thinking_budget=512,
         )
         backend._to_vllm_params(params)
 
@@ -137,7 +137,8 @@ class TestVLLMThinkingBudget:
 
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512, "logits_processors": [existing_proc]},
+            thinking_budget=512,
+            extra={"logits_processors": [existing_proc]},
         )
         backend._to_vllm_params(params)
 
@@ -150,7 +151,7 @@ class TestVLLMThinkingBudget:
         backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=True)
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512},
+            thinking_budget=512,
         )
         backend._to_vllm_params(params)
 
@@ -163,7 +164,7 @@ class TestVLLMThinkingBudget:
         backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=False)
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512},
+            thinking_budget=512,
         )
         with pytest.raises(ValueError, match="V1"):
             backend._to_vllm_params(params)
@@ -173,7 +174,8 @@ class TestVLLMThinkingBudget:
         backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=True)
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 256, "extra_args": {"some_key": "value"}},
+            thinking_budget=256,
+            extra={"extra_args": {"some_key": "value"}},
         )
         backend._to_vllm_params(params)
 
@@ -249,16 +251,14 @@ class TestVLLMSoftBudgetRatio:
         backend._has_v1_thinking_processor = has_v1_thinking_processor
         return backend
 
-    def test_soft_ratio_popped_from_extra(self):
-        """thinking_budget_soft_ratio is removed from extra."""
+    def test_soft_ratio_not_forwarded_to_vllm(self):
+        """thinking_budget_soft_ratio is not forwarded directly to vLLM."""
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={
-                "thinking_budget": 512,
-                "thinking_budget_soft_ratio": 0.9,
-                "some_other": "value",
-            },
+            thinking_budget=512,
+            thinking_budget_soft_ratio=0.9,
+            extra={"some_other": "value"},
         )
         backend._to_vllm_params(params)
 
@@ -271,7 +271,8 @@ class TestVLLMSoftBudgetRatio:
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512, "thinking_budget_soft_ratio": 0.9},
+            thinking_budget=512,
+            thinking_budget_soft_ratio=0.9,
         )
         backend._to_vllm_params(params)
 
@@ -285,10 +286,8 @@ class TestVLLMSoftBudgetRatio:
         backend = self._create_mock_backend(is_v1=True, has_v1_thinking_processor=True)
         params = SamplingParams(
             max_tokens=100,
-            extra={
-                "thinking_budget": 512,
-                "thinking_budget_soft_ratio": 0.9,
-            },
+            thinking_budget=512,
+            thinking_budget_soft_ratio=0.9,
         )
         backend._to_vllm_params(params)
 
@@ -297,14 +296,13 @@ class TestVLLMSoftBudgetRatio:
         assert call_kwargs["extra_args"]["thinking_budget_soft_ratio"] == 0.9
 
     def test_soft_ratio_alone_without_budget_ignored(self):
-        """soft_ratio without thinking_budget is just passed through as extra."""
+        """soft_ratio without thinking_budget does not create a processor."""
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget_soft_ratio": 0.9},
+            thinking_budget_soft_ratio=0.9,
         )
         backend._to_vllm_params(params)
 
         call_kwargs = backend._VLLMSamplingParams.call_args[1]
-        # Without thinking_budget, soft_ratio stays in extra (popped but not used)
         assert "logits_processors" not in call_kwargs

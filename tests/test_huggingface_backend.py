@@ -679,12 +679,13 @@ class TestHuggingFaceThinkingBudget:
         backend._processor = None
         return backend
 
-    def test_thinking_budget_popped_from_extra(self):
-        """thinking_budget is removed from extra and not passed to generate()."""
+    def test_thinking_budget_not_forwarded_to_generate(self):
+        """thinking_budget field is not forwarded directly to generate()."""
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512, "some_other": "value"},
+            thinking_budget=512,
+            extra={"some_other": "value"},
         )
         kwargs = backend._to_generate_kwargs(params)
         assert "thinking_budget" not in kwargs
@@ -695,7 +696,7 @@ class TestHuggingFaceThinkingBudget:
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512},
+            thinking_budget=512,
         )
         kwargs = backend._to_generate_kwargs(params)
         assert "logits_processor" in kwargs
@@ -710,7 +711,8 @@ class TestHuggingFaceThinkingBudget:
 
         params = SamplingParams(
             max_tokens=100,
-            extra={"thinking_budget": 512, "logits_processor": [existing_proc]},
+            thinking_budget=512,
+            extra={"logits_processor": [existing_proc]},
         )
         kwargs = backend._to_generate_kwargs(params)
         assert len(kwargs["logits_processor"]) == 2

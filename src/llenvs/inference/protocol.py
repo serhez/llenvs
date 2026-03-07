@@ -64,6 +64,14 @@ class SamplingParams:
         n: Number of completions to generate.
         logprobs: Whether to return log probabilities.
         num_logprobs: Number of top logprobs to return per token.
+        thinking_budget: Maximum thinking tokens. None = no budget.
+        thinking_budget_per_block: Per-block budgets (reset on each ``<think>``).
+        thinking_budget_soft_ratio: Begin boosting ``</think>`` at this ratio.
+        thinking_budget_suffix: Text forced when budget exhausted. None = bare
+            ``</think>``.
+        second_elicitation_suffix: Suffix for follow-up on truncated outputs.
+            None = disabled.
+        second_elicitation_max_tokens: Token budget for the follow-up call.
         extra: Backend-specific parameters passed through to the underlying
             inference library. For HuggingFace: repetition_penalty, do_sample,
             num_beams, etc. For vLLM: best_of, use_beam_search, etc.
@@ -79,6 +87,14 @@ class SamplingParams:
     n: int = 1
     logprobs: bool = False
     num_logprobs: int = 5
+    # Thinking budget
+    thinking_budget: int | None = None
+    thinking_budget_per_block: bool = False
+    thinking_budget_soft_ratio: float | None = None
+    thinking_budget_suffix: str | None = None
+    # Second elicitation
+    second_elicitation_suffix: str | None = None
+    second_elicitation_max_tokens: int = 256
     extra: dict[str, Any] = field(default_factory=dict)
 
 

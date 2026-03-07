@@ -316,30 +316,21 @@ class HuggingFaceBackend(ModelBackend):
 
         # Merge backend-specific extra params (these take precedence)
         if params.extra:
-            extra = dict(params.extra)
-            thinking_budget = extra.pop("thinking_budget", None)
-            soft_ratio = extra.pop("thinking_budget_soft_ratio", None)
-            _absent = object()
-            early_stopping_text = extra.pop("thinking_early_stopping_text", _absent)
-            per_block = extra.pop("thinking_budget_per_block", None)
-            kwargs.update(extra)
+            kwargs.update(params.extra)
 
-            if thinking_budget is not None:
-                from llenvs.inference.thinking import ThinkingBudgetProcessor
+        # Thinking budget
+        if params.thinking_budget is not None:
+            from llenvs.inference.thinking import ThinkingBudgetProcessor
 
-                proc_kwargs: dict[str, Any] = {
-                    "soft_budget_ratio": float(soft_ratio) if soft_ratio is not None else None,
-                    "per_block": bool(per_block) if per_block is not None else False,
-                }
-                if early_stopping_text is not _absent:
-                    proc_kwargs["early_stopping_text"] = early_stopping_text
-                processor = ThinkingBudgetProcessor(
-                    self._tokenizer,
-                    int(thinking_budget),
-                    **proc_kwargs,
-                )
-                processors = kwargs.get("logits_processor", [])
-                kwargs["logits_processor"] = list(processors) + [processor.hf_processor]
+            processor = ThinkingBudgetProcessor(
+                self._tokenizer,
+                params.thinking_budget,
+                soft_budget_ratio=params.thinking_budget_soft_ratio,
+                early_stopping_text=params.thinking_budget_suffix,
+                per_block=params.thinking_budget_per_block,
+            )
+            processors = kwargs.get("logits_processor", [])
+            kwargs["logits_processor"] = list(processors) + [processor.hf_processor]
 
         return kwargs
 

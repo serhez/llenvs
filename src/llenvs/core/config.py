@@ -830,31 +830,17 @@ def create_sampling_params(config: InferenceConfig) -> Any:
     """
     from llenvs.inference.protocol import SamplingParams
 
-    extra = dict(config.extra)
-
-    # Thinking budget
-    if config.thinking_budget is not None:
-        extra["thinking_budget"] = config.thinking_budget
-    if config.thinking_budget_per_block:
-        extra["thinking_budget_per_block"] = True
-    if config.thinking_budget_soft_ratio is not None:
-        extra["thinking_budget_soft_ratio"] = config.thinking_budget_soft_ratio
-    if config.thinking_budget_suffix is not None:
-        extra["thinking_early_stopping_text"] = config.thinking_budget_suffix
-    else:
-        extra["thinking_early_stopping_text"] = None
-
-    # Second elicitation
-    if config.second_elicitation_suffix is not None:
-        extra["second_elicitation"] = True
-        extra["second_elicitation_suffix"] = config.second_elicitation_suffix
-        extra["second_elicitation_max_tokens"] = config.second_elicitation_max_tokens
-
     return SamplingParams(
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         top_p=config.top_p,
         top_k=config.top_k,
         stop_sequences=tuple(config.stop_sequences),
-        extra=extra,
+        thinking_budget=config.thinking_budget,
+        thinking_budget_per_block=config.thinking_budget_per_block,
+        thinking_budget_soft_ratio=config.thinking_budget_soft_ratio,
+        thinking_budget_suffix=config.thinking_budget_suffix,
+        second_elicitation_suffix=config.second_elicitation_suffix,
+        second_elicitation_max_tokens=config.second_elicitation_max_tokens,
+        extra=dict(config.extra),
     )

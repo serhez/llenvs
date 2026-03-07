@@ -696,12 +696,7 @@ class TrajectoryRunner:
 
     def _resolve_elicitation_suffix(self) -> str:
         """Resolve the suffix for second elicitation."""
-        suffix = self.sampling_params.extra.get("second_elicitation_suffix")
-        if suffix is None:
-            from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_SUFFIX
-
-            return DEFAULT_EARLY_STOPPING_SUFFIX
-        return suffix
+        return self.sampling_params.second_elicitation_suffix or ""
 
     def _build_elicitation_messages(
         self,
@@ -717,13 +712,11 @@ class TrajectoryRunner:
 
     def _elicitation_params(self) -> SamplingParams:
         """Create sampling params for the second elicitation call."""
-        budget = self.sampling_params.extra.get("second_elicitation_max_tokens", 256)
-        clean_extra = {
-            k: v
-            for k, v in self.sampling_params.extra.items()
-            if not k.startswith("second_elicitation")
-        }
-        return replace(self.sampling_params, max_tokens=budget, extra=clean_extra)
+        return replace(
+            self.sampling_params,
+            max_tokens=self.sampling_params.second_elicitation_max_tokens,
+            second_elicitation_suffix=None,
+        )
 
     def _merge_elicitation(
         self,
@@ -792,9 +785,7 @@ class TrajectoryRunner:
                 )
             result = self.backend.generate_chat(messages, self.sampling_params)
 
-        if result.finish_reason == StopReason.MAX_TOKENS and self.sampling_params.extra.get(
-            "second_elicitation"
-        ):
+        if result.finish_reason == StopReason.MAX_TOKENS and self.sampling_params.second_elicitation_suffix is not None:
             result = self._second_elicitation(messages, result)
 
         return result.to_agent_action(), result
@@ -1168,7 +1159,7 @@ class TrajectoryRunner:
                 gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
 
             # Second elicitation for truncated outputs in batch
-            if self.sampling_params.extra.get("second_elicitation"):
+            if self.sampling_params.second_elicitation_suffix is not None:
                 needs_elicitation = [
                     (i, gen)
                     for i, gen in enumerate(gen_results)

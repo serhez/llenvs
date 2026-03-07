@@ -363,7 +363,7 @@ class TestCreateSamplingParams:
         assert params.max_tokens == 2048
         assert params.top_p == 1.0
         assert params.top_k == 0
-        assert params.extra == {"thinking_early_stopping_text": None}
+        assert params.extra == {}
 
     def test_extra_params(self):
         """Test extra params are passed through."""
@@ -377,8 +377,7 @@ class TestCreateSamplingParams:
         params = create_sampling_params(inference_config)
 
         assert params.temperature == 0.7
-        assert params.extra["repetition_penalty"] == 1.2
-        assert params.extra["num_beams"] == 4
+        assert params.extra == {"repetition_penalty": 1.2, "num_beams": 4}
 
 
 class TestExtractorsChainConfig:
@@ -772,11 +771,13 @@ class TestInferenceConfigExtra:
             "inference": {
                 "temperature": 0.7,
                 "max_tokens": 1024,
-                "extra": {"thinking_budget": 512, "repetition_penalty": 1.2},
+                "extra": {"repetition_penalty": 1.2},
+                "thinking_budget": 512,
             },
         }
         config = EvalConfig.from_dict(data)
-        assert config.inference.extra == {"thinking_budget": 512, "repetition_penalty": 1.2}
+        assert config.inference.extra == {"repetition_penalty": 1.2}
+        assert config.inference.thinking_budget == 512
 
     def test_from_dict_extra_default_empty(self):
         """from_dict defaults extra to empty dict."""
@@ -793,10 +794,35 @@ class TestInferenceConfigExtra:
         config = EvalConfig(
             environments=[EnvironmentConfig(name="test")],
             model=ModelConfig(),
-            inference=InferenceConfig(extra={"thinking_budget": 256}),
+            inference=InferenceConfig(extra={"repetition_penalty": 1.2}),
         )
         data = config.to_dict()
-        assert data["inference"]["extra"] == {"thinking_budget": 256}
+        assert data["inference"]["extra"] == {"repetition_penalty": 1.2}
+
+    def test_to_dict_serializes_thinking_budget(self):
+        """to_dict includes thinking_budget as top-level field."""
+        config = EvalConfig(
+            environments=[EnvironmentConfig(name="test")],
+            model=ModelConfig(),
+            inference=InferenceConfig(thinking_budget=256),
+        )
+        data = config.to_dict()
+        assert data["inference"]["thinking_budget"] == 256
+
+    def test_roundtrip_with_thinking_budget(self):
+        """Roundtrip preserves thinking_budget."""
+        original = {
+            "environments": [{"name": "test"}],
+            "model": {"model": "test-model"},
+            "inference": {
+                "temperature": 0.7,
+                "thinking_budget": 512,
+            },
+        }
+        config = EvalConfig.from_dict(original)
+        assert config.inference.thinking_budget == 512
+        result = config.to_dict()
+        assert result["inference"]["thinking_budget"] == 512
 
     def test_roundtrip_with_extra(self):
         """Roundtrip preserves inference.extra."""
@@ -805,12 +831,12 @@ class TestInferenceConfigExtra:
             "model": {"model": "test-model"},
             "inference": {
                 "temperature": 0.7,
-                "extra": {"thinking_budget": 512},
+                "extra": {"repetition_penalty": 1.2},
             },
         }
         config = EvalConfig.from_dict(original)
         result = config.to_dict()
-        assert result["inference"]["extra"] == {"thinking_budget": 512}
+        assert result["inference"]["extra"] == {"repetition_penalty": 1.2}
 
 
 class TestIterativeConfig:

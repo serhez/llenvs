@@ -72,7 +72,7 @@ class TestConfigFields:
 
         cfg = InferenceConfig()
         sp = create_sampling_params(cfg)
-        assert "second_elicitation" not in sp.extra
+        assert sp.second_elicitation_suffix is None
 
     def test_create_sampling_params_enabled(self) -> None:
         from llenvs.core.config import InferenceConfig, create_sampling_params
@@ -82,9 +82,8 @@ class TestConfigFields:
             second_elicitation_max_tokens=128,
         )
         sp = create_sampling_params(cfg)
-        assert sp.extra["second_elicitation"] is True
-        assert sp.extra["second_elicitation_max_tokens"] == 128
-        assert sp.extra["second_elicitation_suffix"] == "Wrap up."
+        assert sp.second_elicitation_suffix == "Wrap up."
+        assert sp.second_elicitation_max_tokens == 128
 
     def test_create_sampling_params_preserves_existing_extra(self) -> None:
         from llenvs.core.config import InferenceConfig, create_sampling_params
@@ -95,7 +94,7 @@ class TestConfigFields:
         )
         sp = create_sampling_params(cfg)
         assert sp.extra["some_key"] == 42
-        assert sp.extra["second_elicitation"] is True
+        assert sp.second_elicitation_suffix == "Go."
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +121,7 @@ class TestSecondElicitation:
 
     def test_no_elicitation_on_stop_sequence(self) -> None:
         """Enabled but finish_reason=STOP_SEQUENCE → no second call."""
-        params = SamplingParams(extra={"second_elicitation": True})
+        params = SamplingParams(second_elicitation_suffix="wrap up")
         runner = _make_runner(sampling_params=params)
         first = _gen_result(finish_reason=StopReason.STOP_SEQUENCE)
         runner.backend.generate_chat.return_value = first
@@ -138,7 +137,7 @@ class TestSecondElicitation:
 
     def test_no_elicitation_on_end_of_text(self) -> None:
         """Enabled but finish_reason=END_OF_TEXT → no second call."""
-        params = SamplingParams(extra={"second_elicitation": True})
+        params = SamplingParams(second_elicitation_suffix="wrap up")
         runner = _make_runner(sampling_params=params)
         first = _gen_result(finish_reason=StopReason.END_OF_TEXT)
         runner.backend.generate_chat.return_value = first
@@ -154,10 +153,8 @@ class TestSecondElicitation:
     def test_elicitation_on_max_tokens(self) -> None:
         """Enabled + MAX_TOKENS → second call, texts concatenated."""
         params = SamplingParams(
-            extra={
-                "second_elicitation": True,
-                "second_elicitation_max_tokens": 128,
-            }
+            second_elicitation_suffix="\nAnswer:",
+            second_elicitation_max_tokens=128,
         )
         runner = _make_runner(sampling_params=params)
 
@@ -186,12 +183,7 @@ class TestSecondElicitation:
     def test_custom_suffix(self) -> None:
         """Custom suffix used in continuation messages."""
         custom_suffix = "\n\nPlease answer now.\n"
-        params = SamplingParams(
-            extra={
-                "second_elicitation": True,
-                "second_elicitation_suffix": custom_suffix,
-            }
-        )
+        params = SamplingParams(second_elicitation_suffix=custom_suffix)
         runner = _make_runner(sampling_params=params)
 
         first = _gen_result(text="thinking...")
@@ -217,39 +209,12 @@ class TestSecondElicitation:
         # Check merged text
         assert result.text == "thinking..." + custom_suffix + "42"
 
-    def test_default_suffix(self) -> None:
-        """DEFAULT_EARLY_STOPPING_SUFFIX used when suffix is None."""
-        from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_SUFFIX
-
-        params = SamplingParams(extra={"second_elicitation": True})
-        runner = _make_runner(sampling_params=params)
-
-        first = _gen_result(text="thinking...")
-        second = _gen_result(text="42", finish_reason=StopReason.END_OF_TEXT)
-        runner.backend.generate_chat.side_effect = [first, second]
-
-        action, result = runner._generate_action(
-            MagicMock(
-                observation=MagicMock(available_tools=[]),
-                metadata=MagicMock(is_terminal=False),
-            )
-        )
-        # Check the assistant message contains default suffix
-        second_call_msgs = runner.backend.generate_chat.call_args_list[1][0][0]
-        assistant_msg = second_call_msgs[-2]
-        assert DEFAULT_EARLY_STOPPING_SUFFIX in assistant_msg.content
-
-        # Merged text
-        assert result.text == "thinking..." + DEFAULT_EARLY_STOPPING_SUFFIX + "42"
-
     def test_custom_max_tokens(self) -> None:
         """Second call uses configured budget."""
         params = SamplingParams(
             max_tokens=4096,
-            extra={
-                "second_elicitation": True,
-                "second_elicitation_max_tokens": 64,
-            },
+            second_elicitation_suffix="wrap up",
+            second_elicitation_max_tokens=64,
         )
         runner = _make_runner(sampling_params=params)
 
@@ -266,12 +231,12 @@ class TestSecondElicitation:
         # Check that the second call used max_tokens=64
         second_call_params = runner.backend.generate_chat.call_args_list[1][0][1]
         assert second_call_params.max_tokens == 64
-        # And that second_elicitation keys are stripped (no recursion)
-        assert "second_elicitation" not in second_call_params.extra
+        # And that second_elicitation is disabled (no recursion)
+        assert second_call_params.second_elicitation_suffix is None
 
     def test_merged_metadata(self) -> None:
         """Combined result has second_elicitation: True in metadata."""
-        params = SamplingParams(extra={"second_elicitation": True})
+        params = SamplingParams(second_elicitation_suffix="wrap up")
         runner = _make_runner(sampling_params=params)
 
         first = _gen_result(text="a", metadata={"model": "test"})
@@ -302,10 +267,8 @@ class TestBatchSecondElicitation:
     def test_batch_mixed(self) -> None:
         """Batch with some MAX_TOKENS and some STOP → only truncated ones get second call."""
         params = SamplingParams(
-            extra={
-                "second_elicitation": True,
-                "second_elicitation_max_tokens": 64,
-            }
+            second_elicitation_suffix="wrap up",
+            second_elicitation_max_tokens=64,
         )
         runner = _make_runner(sampling_params=params)
 
@@ -371,7 +334,7 @@ class TestBatchSecondElicitation:
 
     def test_batch_no_truncation(self) -> None:
         """Batch where nothing is truncated → no elicitation calls."""
-        params = SamplingParams(extra={"second_elicitation": True})
+        params = SamplingParams(second_elicitation_suffix="wrap up")
         _make_runner(sampling_params=params)
 
         gen_results = [
@@ -384,23 +347,18 @@ class TestBatchSecondElicitation:
         ]
         assert len(needs) == 0
 
-    def test_elicitation_params_strip_keys(self) -> None:
-        """Elicitation params strip all second_elicitation keys."""
+    def test_elicitation_params_disable_recursion(self) -> None:
+        """Elicitation params disable second_elicitation to prevent recursion."""
         params = SamplingParams(
             max_tokens=4096,
             temperature=0.5,
-            extra={
-                "second_elicitation": True,
-                "second_elicitation_max_tokens": 128,
-                "second_elicitation_suffix": "wrap up",
-                "thinking_budget": 512,
-            },
+            second_elicitation_suffix="wrap up",
+            second_elicitation_max_tokens=128,
+            thinking_budget=512,
         )
         runner = _make_runner(sampling_params=params)
         ep = runner._elicitation_params()
         assert ep.max_tokens == 128
         assert ep.temperature == 0.5
-        assert "second_elicitation" not in ep.extra
-        assert "second_elicitation_max_tokens" not in ep.extra
-        assert "second_elicitation_suffix" not in ep.extra
-        assert ep.extra["thinking_budget"] == 512
+        assert ep.second_elicitation_suffix is None
+        assert ep.thinking_budget == 512
