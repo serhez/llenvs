@@ -428,6 +428,40 @@ class TestRunBatchFromStates:
         assert trajs[0].total_reward == 1.0  # task 0: target=5, guess=5
         assert trajs[1].total_reward == 0.0  # task 1: target=3, guess=5
 
+    def test_progress_callback_reports_completion(self):
+        """Progress callback reports non-decreasing completion counts."""
+        env = _FakeEnvironment(tasks=[5, 5, 5])
+        runner = _make_runner(env=env, backend=_FakeBackend("5"))
+        states = [env.reset(options={"task_index": i})[0] for i in range(3)]
+
+        reports: list[tuple[int, int]] = []
+        trajs = runner.run_batch_from_states(
+            states,
+            progress_callback=lambda c, t: reports.append((c, t)),
+        )
+
+        assert len(trajs) == 3
+        assert reports
+        assert reports[-1] == (3, 3)
+        assert [c for c, _ in reports] == sorted(c for c, _ in reports)
+
+    def test_progress_callback_batch_size_uses_global_offsets(self):
+        """Chunked run_batch_from_states reports global offsets."""
+        env = _FakeEnvironment(tasks=[5, 5, 5, 5])
+        runner = _make_runner(env=env, backend=_FakeBackend("5"))
+        states = [env.reset(options={"task_index": i})[0] for i in range(4)]
+
+        reports: list[tuple[int, int]] = []
+        trajs = runner.run_batch_from_states(
+            states,
+            batch_size=2,
+            progress_callback=lambda c, t: reports.append((c, t)),
+        )
+
+        assert len(trajs) == 4
+        assert reports[-1] == (4, 4)
+        assert all(total == 4 for _, total in reports)
+
 
 # ===========================================================================
 # run_batch_from_state_actions
@@ -477,3 +511,40 @@ class TestRunBatchFromStateActions:
         trajs = runner.run_batch_from_state_actions(states, actions, batch_size=2)
         assert len(trajs) == 3
         assert all(t.total_reward == 1.0 for t in trajs)
+
+    def test_progress_callback_reports_completion(self):
+        """Forced-action batch runner reports progress."""
+        env = _FakeEnvironment(tasks=[3, 7])
+        runner = _make_runner(env=env, backend=_FakeBackend("99"))
+        states = [env.reset(options={"task_index": i})[0] for i in range(2)]
+        actions = [Action(text="3"), Action(text="7")]
+
+        reports: list[tuple[int, int]] = []
+        trajs = runner.run_batch_from_state_actions(
+            states,
+            actions,
+            progress_callback=lambda c, t: reports.append((c, t)),
+        )
+
+        assert len(trajs) == 2
+        assert reports
+        assert reports[-1] == (2, 2)
+
+    def test_progress_callback_batch_size_uses_global_offsets(self):
+        """Chunked forced-action batch runner reports global offsets."""
+        env = _FakeEnvironment(tasks=[3, 7, 1])
+        runner = _make_runner(env=env, backend=_FakeBackend("99"))
+        states = [env.reset(options={"task_index": i})[0] for i in range(3)]
+        actions = [Action(text="3"), Action(text="7"), Action(text="1")]
+
+        reports: list[tuple[int, int]] = []
+        trajs = runner.run_batch_from_state_actions(
+            states,
+            actions,
+            batch_size=2,
+            progress_callback=lambda c, t: reports.append((c, t)),
+        )
+
+        assert len(trajs) == 3
+        assert reports[-1] == (3, 3)
+        assert all(total == 3 for _, total in reports)

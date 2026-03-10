@@ -293,20 +293,63 @@ def _run_in_chunks(
     for start in range(0, total, batch_size):
         chunk = task_indices[start : start + batch_size]
 
-        sub_cb: Callable[[int, int], None] | None = None
+        chunk_progress_callback: Callable[[int, int], None] | None = None
         if progress_callback:
             _offset = start
 
-            def sub_cb(done: int, chunk_total: int, _s: int = _offset) -> None:
+            def _chunk_progress_callback(
+                done: int,
+                chunk_total: int,
+                _s: int = _offset,
+            ) -> None:
+                del chunk_total
                 progress_callback(_s + done, total)
 
-        chunk_result = run_fn(chunk, sub_cb)
+            chunk_progress_callback = _chunk_progress_callback
+
+        chunk_result = run_fn(chunk, chunk_progress_callback)
         all_results.extend(chunk_result.trajectory_results)
 
     if progress_callback:
         progress_callback(total, total)
 
     return _aggregate_results(all_results)
+
+
+def _run_in_sequence_chunks(
+    items: Sequence[Any],
+    *,
+    batch_size: int,
+    progress_callback: Callable[[int, int], None] | None,
+    run_chunk: Callable[[Sequence[Any], Callable[[int, int], None] | None], list[Any]],
+) -> list[Any]:
+    """Run chunked sequence workloads while preserving global progress offsets."""
+    results: list[Any] = []
+    total = len(items)
+
+    for start in range(0, total, batch_size):
+        chunk = items[start : start + batch_size]
+
+        chunk_progress_callback: Callable[[int, int], None] | None = None
+        if progress_callback:
+            _offset = start
+
+            def _chunk_progress_callback(
+                done: int,
+                chunk_total: int,
+                _s: int = _offset,
+            ) -> None:
+                del chunk_total
+                progress_callback(_s + done, total)
+
+            chunk_progress_callback = _chunk_progress_callback
+
+        results.extend(run_chunk(chunk, chunk_progress_callback))
+
+    if progress_callback:
+        progress_callback(total, total)
+
+    return results
 
 
 def _finalize_trajectory(t: _ActiveTrajectory | _ActiveSegmentedTrajectory) -> TrajectoryResult:
@@ -1407,6 +1450,7 @@ class TrajectoryRunner:
         states: Sequence[State[Any]],
         max_steps: int | None = None,
         batch_size: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[Trajectory[Any]]:
         """Run batched rollouts from arbitrary states.
 
@@ -1418,6 +1462,7 @@ class TrajectoryRunner:
             max_steps: Maximum new steps per rollout. Defaults to the
                 environment spec's ``max_steps``.
             batch_size: If set, processes states in chunks of this size.
+            progress_callback: Optional callback(completed, total).
 
         Returns:
             List of Trajectory objects, one per input state, in order.
@@ -1426,13 +1471,22 @@ class TrajectoryRunner:
             return []
 
         if batch_size is not None and batch_size < len(states):
-            results: list[Trajectory[Any]] = []
-            for start in range(0, len(states), batch_size):
-                chunk = states[start : start + batch_size]
-                results.extend(self._run_batch_from_states_inner(chunk, max_steps=max_steps))
-            return results
+            return _run_in_sequence_chunks(
+                states,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                run_chunk=lambda chunk, cb: self._run_batch_from_states_inner(
+                    chunk,
+                    max_steps=max_steps,
+                    progress_callback=cb,
+                ),
+            )
 
-        return self._run_batch_from_states_inner(states, max_steps=max_steps)
+        return self._run_batch_from_states_inner(
+            states,
+            max_steps=max_steps,
+            progress_callback=progress_callback,
+        )
 
     def run_batch_from_state_actions(
         self,
@@ -1440,6 +1494,7 @@ class TrajectoryRunner:
         actions: Sequence[Action],
         max_steps: int | None = None,
         batch_size: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[Trajectory[Any]]:
         """Run batched rollouts with forced first actions.
 
@@ -1453,6 +1508,7 @@ class TrajectoryRunner:
             max_steps: Maximum new steps per rollout. Defaults to the
                 environment spec's ``max_steps``.
             batch_size: If set, processes states in chunks of this size.
+            progress_callback: Optional callback(completed, total).
 
         Returns:
             List of Trajectory objects, one per input state, in order.
@@ -1470,19 +1526,24 @@ class TrajectoryRunner:
             return []
 
         if batch_size is not None and batch_size < len(states):
-            results: list[Trajectory[Any]] = []
-            for start in range(0, len(states), batch_size):
-                s_chunk = states[start : start + batch_size]
-                a_chunk = actions[start : start + batch_size]
-                results.extend(
-                    self._run_batch_from_states_inner(
-                        s_chunk, forced_actions=a_chunk, max_steps=max_steps
-                    )
-                )
-            return results
+            indexed = list(zip(states, actions, strict=False))
+            return _run_in_sequence_chunks(
+                indexed,
+                batch_size=batch_size,
+                progress_callback=progress_callback,
+                run_chunk=lambda chunk, cb: self._run_batch_from_states_inner(
+                    [state for state, _action in chunk],
+                    forced_actions=[action for _state, action in chunk],
+                    max_steps=max_steps,
+                    progress_callback=cb,
+                ),
+            )
 
         return self._run_batch_from_states_inner(
-            states, forced_actions=actions, max_steps=max_steps
+            states,
+            forced_actions=actions,
+            max_steps=max_steps,
+            progress_callback=progress_callback,
         )
 
     def _run_batch_from_states_inner(
@@ -1490,6 +1551,7 @@ class TrajectoryRunner:
         states: Sequence[State[Any]],
         max_steps: int | None = None,
         forced_actions: Sequence[Action] | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[Trajectory[Any]]:
         """Core lockstep batch loop for run-from-state methods.
 
@@ -1528,6 +1590,10 @@ class TrajectoryRunner:
             if t.state.metadata.is_terminal or t.state.metadata.step >= env_max:
                 t.done = True
 
+        total = len(states)
+        if progress_callback and active:
+            progress_callback(sum(1 for t in active if t.done), total)
+
         for step_i in range(loop_max):
             remaining = [t for t in active if not t.done]
             if not remaining:
@@ -1554,7 +1620,8 @@ class TrajectoryRunner:
                     t.step_count += 1
                     if step_result.done or t.state.metadata.step >= env_max:
                         t.done = True
-            else:
+
+            if step_i != 0 or forced_actions is None:
                 # Generate actions via batched inference
                 messages_batch = [
                     self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
@@ -1581,10 +1648,16 @@ class TrajectoryRunner:
                     if step_result.done or t.state.metadata.step >= env_max:
                         t.done = True
 
+            if progress_callback:
+                progress_callback(sum(1 for t in active if t.done), total)
+
         # Return trajectories in original order
         result_slots: list[Trajectory[Any] | None] = [None] * len(states)
         for t in active:
             result_slots[t.position] = t.trajectory
+
+        if progress_callback:
+            progress_callback(total, total)
 
         return [r for r in result_slots if r is not None]
 

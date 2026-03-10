@@ -72,7 +72,7 @@ result = run_evaluation(
 batch_size: 32  # Top-level in EvalConfig YAML
 ```
 
-When `batch_size` is set, `run_batch()` chunks the task list and processes each chunk independently, aggregating results at the end. Progress callbacks report global offsets across chunks.
+When `batch_size` is set, `run_batch()` chunks the task list and processes each chunk independently, aggregating results at the end. Progress callbacks report global offsets across chunks. The same global-offset behavior applies to `run_batch_from_states()` and `run_batch_from_state_actions()`.
 
 When `batch_size` is `None` (default), all tasks run in a single lockstep batch.
 

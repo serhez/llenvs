@@ -91,6 +91,8 @@ batch_result = runner.run_batch(
 )
 ```
 
+The same `progress_callback(completed, total)` pattern is also available on `run_batch_from_states()` and `run_batch_from_state_actions()`, which is useful for Monte-Carlo rollout code that starts from arbitrary states instead of resetting tasks from scratch.
+
 For cross-environment batching (interleaving trajectories from multiple environments into a single lockstep loop), see `run_multi_evaluation()` in the [Parallelization guide](parallelization.md#cross-environment-batching).
 
 See the [Parallelization guide](parallelization.md) for architecture details, `max_concurrency` tuning, and performance tips.
