@@ -116,37 +116,31 @@ MOCK_GAME_FILES = (
 
 def _make_env(
     game_files: tuple[str, ...] = MOCK_GAME_FILES,
-    mock_gym: MockAlfWorldGymEnv | None = None,
     **kwargs: Any,
 ) -> AlfWorldEnvironment:
-    """Create an AlfWorldEnvironment with mocked _init_game."""
+    """Create an AlfWorldEnvironment with mocked _init_game.
+
+    Each call to _init_game creates a fresh MockAlfWorldGymEnv,
+    supporting pure-step replay.
+    """
     env = AlfWorldEnvironment(game_files=game_files, config={}, **kwargs)
 
-    if mock_gym is None:
-        mock_gym = MockAlfWorldGymEnv()
-
     # Patch _init_game to use our mock instead of real textworld
-    def mock_init_game(game_file: str) -> tuple[str, dict[str, Any], tuple]:
-        env._gym_env = mock_gym
-        obs_list, infos = mock_gym.reset()
+    def mock_init_game(game_file: str) -> tuple[Any, str, dict[str, Any], tuple]:
+        fresh = MockAlfWorldGymEnv(game_file)
+        obs_list, infos = fresh.reset()
         raw_obs = obs_list[0]
         info = {k: v[0] for k, v in infos.items()}
-        return raw_obs, info, ()
+        return fresh, raw_obs, info, ()
 
     env._init_game = mock_init_game  # type: ignore[assignment]
     return env
 
 
 @pytest.fixture
-def mock_gym() -> MockAlfWorldGymEnv:
-    """Create a mock AlfWorld gym environment."""
-    return MockAlfWorldGymEnv()
-
-
-@pytest.fixture
-def env(mock_gym: MockAlfWorldGymEnv) -> AlfWorldEnvironment:
+def env() -> AlfWorldEnvironment:
     """Create a test AlfWorld environment."""
-    return _make_env(mock_gym=mock_gym)
+    return _make_env()
 
 
 # ---------------------------------------------------------------------------
@@ -331,7 +325,7 @@ class TestAlfWorldEnvironment:
         assert env.spec.name == "alfworld"
         assert env.spec.adapter == "alfworld"
         assert env.spec.is_multi_turn is True
-        assert env.spec.pure_step is False
+        assert env.spec.pure_step is True
         assert env.spec.supports_task_index is True
         assert env.spec.supports_len is True
         assert env.spec.supports_seed is False
@@ -348,9 +342,9 @@ class TestAlfWorldEnvironment:
         assert len(rfs) == 1
         assert rfs[0].name == "task_completion"
 
-    def test_reward_functions_with_extra(self, mock_gym: MockAlfWorldGymEnv):
+    def test_reward_functions_with_extra(self):
         extra = MagicMock()
-        env = _make_env(mock_gym=mock_gym, extra_rewards=(extra,))
+        env = _make_env(extra_rewards=(extra,))
         rfs = env.reward_functions
         assert len(rfs) == 2
         assert rfs[1] is extra
@@ -456,8 +450,8 @@ class TestAlfWorldEnvironment:
         assert signal is not None
         assert signal.reward == 1.0
 
-    def test_truncation(self, mock_gym: MockAlfWorldGymEnv):
-        env = _make_env(mock_gym=mock_gym, max_steps=2)
+    def test_truncation(self):
+        env = _make_env(max_steps=2)
         state, _ = env.reset(options={"task_index": 0})
 
         # Step 1
@@ -470,29 +464,33 @@ class TestAlfWorldEnvironment:
         assert result.terminated is False
         assert result.next_state.metadata.is_terminal is True
 
-    def test_won_at_max_steps_not_truncated(self, mock_gym: MockAlfWorldGymEnv):
+    def test_won_at_max_steps_not_truncated(self):
         """If the agent wins on the last possible step, terminated=True, truncated=False."""
-        env = _make_env(mock_gym=mock_gym, max_steps=1)
+        env = _make_env(max_steps=1)
         state, _ = env.reset(options={"task_index": 0})
 
         result = env.step(state, Action(text="put mug 1 in/on desk 1"))
         assert result.terminated is True
         assert result.truncated is False
 
-    def test_state_continuity_rejects_stale_state(self, env: AlfWorldEnvironment):
+    def test_pure_step_allows_reuse_of_state(self, env: AlfWorldEnvironment):
+        """Same state can be stepped multiple times with different actions."""
         state, _ = env.reset(options={"task_index": 0})
-        env.step(state, Action(text="go to desk 1"))
+        result_a = env.step(state, Action(text="go to desk 1"))
+        result_b = env.step(state, Action(text="go to shelf 1"))
 
-        with pytest.raises(NotImplementedError, match="pure_step=False"):
-            env.step(state, Action(text="go to shelf 1"))
+        assert result_a.next_state.hidden.last_action == "go to desk 1"
+        assert result_b.next_state.hidden.last_action == "go to shelf 1"
+        assert "desk 1" in result_a.next_state.observation.messages[-1]["content"]
+        assert "shelf 1" in result_b.next_state.observation.messages[-1]["content"]
 
     def test_objective_in_observation(self, env: AlfWorldEnvironment):
         state, _ = env.reset(options={"task_index": 0})
         assert "Objective:" in state.observation.prompt
         assert "put a clean mug on desk 1" in state.observation.prompt
 
-    def test_objective_not_in_observation(self, mock_gym: MockAlfWorldGymEnv):
-        env = _make_env(mock_gym=mock_gym, include_objective_in_obs=False)
+    def test_objective_not_in_observation(self):
+        env = _make_env(include_objective_in_obs=False)
         state, _ = env.reset(options={"task_index": 0})
         assert "Objective:" not in state.observation.prompt
 
@@ -501,14 +499,14 @@ class TestAlfWorldEnvironment:
         assert "Admissible commands:" in state.observation.prompt
         assert "go to desk 1" in state.observation.prompt
 
-    def test_admissible_commands_not_in_observation(self, mock_gym: MockAlfWorldGymEnv):
-        env = _make_env(mock_gym=mock_gym, include_admissible_commands=False)
+    def test_admissible_commands_not_in_observation(self):
+        env = _make_env(include_admissible_commands=False)
         state, _ = env.reset(options={"task_index": 0})
         assert "Admissible commands:" not in state.observation.prompt
 
-    def test_admissible_commands_always_in_hidden(self, mock_gym: MockAlfWorldGymEnv):
+    def test_admissible_commands_always_in_hidden(self):
         """Admissible commands are stored in hidden state regardless of obs setting."""
-        env = _make_env(mock_gym=mock_gym, include_admissible_commands=False)
+        env = _make_env(include_admissible_commands=False)
         state, _ = env.reset(options={"task_index": 0})
         assert len(state.hidden.admissible_commands) > 0
 
@@ -531,19 +529,18 @@ class TestAlfWorldEnvironment:
     def test_spec_metadata(self, env: AlfWorldEnvironment):
         assert env.spec.metadata["num_games"] == len(MOCK_GAME_FILES)
 
-    def test_close(self, env: AlfWorldEnvironment, mock_gym: MockAlfWorldGymEnv):
+    def test_close(self, env: AlfWorldEnvironment):
         env.reset(options={"task_index": 0})
         env.close()
-        assert mock_gym._closed is True
-        assert env._gym_env is None
+        assert env._env_id_cache == {}
 
     def test_close_when_no_env(self, env: AlfWorldEnvironment):
         """close() is safe to call even before reset."""
         env.close()  # Should not raise
 
-    def test_different_task_indices(self, mock_gym: MockAlfWorldGymEnv):
+    def test_different_task_indices(self):
         """Resetting with different task indices selects different game files."""
-        env = _make_env(mock_gym=mock_gym)
+        env = _make_env()
         state0, _ = env.reset(options={"task_index": 0})
         assert state0.hidden.game_file == MOCK_GAME_FILES[0]
 
@@ -636,26 +633,26 @@ class TestAlfWorldPrompts:
         assert p1 == p2
         assert p1 is not p2
 
-    def test_custom_objective_prefix(self, mock_gym: MockAlfWorldGymEnv):
+    def test_custom_objective_prefix(self):
         custom = {"objective_prefix": "Goal: {objective}"}
-        env = _make_env(mock_gym=mock_gym, prompts=custom)
+        env = _make_env(prompts=custom)
         state, _ = env.reset(options={"task_index": 0})
 
         assert "Goal:" in state.observation.prompt
         assert "Objective:" not in state.observation.prompt
 
-    def test_custom_admissible_commands_prefix(self, mock_gym: MockAlfWorldGymEnv):
+    def test_custom_admissible_commands_prefix(self):
         custom = {"admissible_commands_prefix": "Available actions:"}
-        env = _make_env(mock_gym=mock_gym, prompts=custom)
+        env = _make_env(prompts=custom)
         state, _ = env.reset(options={"task_index": 0})
 
         assert "Available actions:" in state.observation.prompt
         assert "Admissible commands:" not in state.observation.prompt
 
-    def test_custom_prompts_merge(self, mock_gym: MockAlfWorldGymEnv):
+    def test_custom_prompts_merge(self):
         """Custom prompts only override specified keys."""
         custom = {"objective_prefix": "Task: {objective}"}
-        env = _make_env(mock_gym=mock_gym, prompts=custom)
+        env = _make_env(prompts=custom)
         prompts = env.prompts
 
         assert prompts["objective_prefix"] == "Task: {objective}"
@@ -872,8 +869,8 @@ class TestAlfWorldFullEpisode:
         assert result.terminated is True
         assert result.rewards.by_name("task_completion").reward == 1.0
 
-    def test_failed_task_truncation(self, mock_gym: MockAlfWorldGymEnv):
-        env = _make_env(mock_gym=mock_gym, max_steps=3)
+    def test_failed_task_truncation(self):
+        env = _make_env(max_steps=3)
         state, _ = env.reset(options={"task_index": 0})
 
         # Wander around without completing task
@@ -891,6 +888,152 @@ class TestAlfWorldFullEpisode:
         result = env.step(state, Action(text="go to desk 1"))
         signal = result.rewards.by_name("task_completion")
         assert signal.reward == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Pure-step tests
+# ---------------------------------------------------------------------------
+
+
+class TestAlfWorldPureStep:
+    """Tests for pure_step=True replay-based stepping."""
+
+    def test_branching_from_same_state(self):
+        """Stepping the same state with different actions produces different results."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        # First branch: go to shelf
+        result_a = env.step(state, Action(text="go to shelf 1"))
+        # Second branch: go to desk
+        result_b = env.step(state, Action(text="go to desk 1"))
+
+        assert result_a.next_state.hidden.last_action == "go to shelf 1"
+        assert result_b.next_state.hidden.last_action == "go to desk 1"
+        # Different observations
+        msg_a = result_a.next_state.observation.messages[-1]["content"]
+        msg_b = result_b.next_state.observation.messages[-1]["content"]
+        assert "shelf 1" in msg_a
+        assert "desk 1" in msg_b
+        assert msg_a != msg_b
+
+    def test_replay_matches_sequential(self):
+        """Building state via replay produces the same result as sequential stepping."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Sequential: step through actions one at a time
+        actions = ["go to shelf 1", "take mug 1 from shelf 1", "go to desk 1"]
+        sequential_state = state
+        for act_text in actions:
+            result = env.step(sequential_state, Action(text=act_text))
+            sequential_state = result.next_state
+
+        # Replay: step from initial state, building up trajectory
+        replay_state = state
+        for act_text in actions:
+            result = env.step(replay_state, Action(text=act_text))
+            replay_state = result.next_state
+
+        # Should produce identical hidden state
+        assert sequential_state.hidden.episode_step == replay_state.hidden.episode_step
+        assert sequential_state.hidden.last_action == replay_state.hidden.last_action
+        assert sequential_state.hidden.trajectory == replay_state.hidden.trajectory
+        assert (
+            sequential_state.hidden.admissible_commands == replay_state.hidden.admissible_commands
+        )
+
+    def test_trajectory_accumulation(self):
+        """Hidden trajectory grows correctly across steps."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert state.hidden.trajectory == ()
+
+        result = env.step(state, Action(text="go to shelf 1"))
+        state = result.next_state
+        assert state.hidden.trajectory == ("go to shelf 1",)
+
+        result = env.step(state, Action(text="take mug 1 from shelf 1"))
+        state = result.next_state
+        assert state.hidden.trajectory == ("go to shelf 1", "take mug 1 from shelf 1")
+
+        result = env.step(state, Action(text="go to desk 1"))
+        state = result.next_state
+        assert state.hidden.trajectory == (
+            "go to shelf 1",
+            "take mug 1 from shelf 1",
+            "go to desk 1",
+        )
+
+    def test_truncation_survives_replay(self):
+        """Truncation applies correctly when replaying near max_steps."""
+        env = _make_env(max_steps=3)
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Step to penultimate
+        result = env.step(state, Action(text="go to shelf 1"))
+        state = result.next_state
+        assert result.truncated is False
+
+        result = env.step(state, Action(text="go to desk 1"))
+        state = result.next_state
+        assert result.truncated is False
+
+        # Third step should truncate
+        result = env.step(state, Action(text="look"))
+        assert result.truncated is True
+        assert result.terminated is False
+        assert result.next_state.metadata.is_terminal is True
+
+    def test_terminal_survives_replay(self):
+        """Winning via replay produces terminated=True."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Full winning sequence
+        actions = [
+            "go to shelf 1",
+            "take mug 1 from shelf 1",
+            "go to sinkbasin 1",
+            "clean mug 1 with sinkbasin 1",
+            "go to desk 1",
+            "put mug 1 in/on desk 1",
+        ]
+
+        for act_text in actions:
+            result = env.step(state, Action(text=act_text))
+            state = result.next_state
+
+        assert result.terminated is True
+        assert result.next_state.metadata.is_terminal is True
+        assert result.info["won"] is True
+        assert result.rewards.by_name("task_completion").reward == 1.0
+
+    def test_branch_after_multiple_steps(self):
+        """Branching works from a state reached after several steps."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Build up some trajectory
+        result = env.step(state, Action(text="go to shelf 1"))
+        state = result.next_state
+        result = env.step(state, Action(text="take mug 1 from shelf 1"))
+        state = result.next_state
+
+        # Branch from here
+        result_a = env.step(state, Action(text="go to desk 1"))
+        result_b = env.step(state, Action(text="go to sinkbasin 1"))
+
+        assert result_a.next_state.hidden.last_action == "go to desk 1"
+        assert result_b.next_state.hidden.last_action == "go to sinkbasin 1"
+        assert result_a.next_state.hidden.trajectory != result_b.next_state.hidden.trajectory
+
+    def test_initial_state_trajectory_empty(self):
+        """Reset produces state with empty trajectory."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.hidden.trajectory == ()
 
 
 # ---------------------------------------------------------------------------
@@ -980,18 +1123,14 @@ class MockThorGymEnv:
 
 def _make_visual_env(
     game_files: tuple[str, ...] = MOCK_GAME_FILES,
-    mock_gym: MockThorGymEnv | None = None,
     **kwargs: Any,
 ) -> AlfWorldEnvironment:
     """Create an AlfWorldEnvironment with visual=True and mocked THOR env."""
     env = AlfWorldEnvironment(game_files=game_files, config={}, visual=True, **kwargs)
 
-    if mock_gym is None:
-        mock_gym = MockThorGymEnv()
-
-    def mock_init_game(game_file: str) -> tuple[str, dict[str, Any], tuple]:
-        env._gym_env = mock_gym
-        obs_list, infos = mock_gym.reset()
+    def mock_init_game(game_file: str) -> tuple[Any, str, dict[str, Any], tuple]:
+        fresh = MockThorGymEnv()
+        obs_list, infos = fresh.reset()
         obs_dict = obs_list[0]
         info = {k: v[0] for k, v in infos.items()}
 
@@ -1000,7 +1139,7 @@ def _make_visual_env(
         images: tuple[ImageContent, ...] = ()
         if frame is not None:
             images = (env._frame_to_image(frame),)
-        return raw_text, info, images
+        return fresh, raw_text, info, images
 
     env._init_game = mock_init_game  # type: ignore[assignment]
     return env
@@ -1104,15 +1243,13 @@ class TestAlfWorldVisualMode:
         env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={}, visual=True)
 
         # Mock that returns dict without "rgb" key
-        mock_gym = MagicMock()
-        mock_gym.reset.return_value = (
-            [{"text": "You are in a room.\n\nYour task is to: test"}],
-            {"won": [False], "admissible_commands": [["look"]]},
-        )
-
         def mock_init_game(game_file):
-            env._gym_env = mock_gym
-            obs_list, infos = mock_gym.reset()
+            fresh = MagicMock()
+            fresh.reset.return_value = (
+                [{"text": "You are in a room.\n\nYour task is to: test"}],
+                {"won": [False], "admissible_commands": [["look"]]},
+            )
+            obs_list, infos = fresh.reset()
             obs_dict = obs_list[0]
             info = {k: v[0] for k, v in infos.items()}
             raw_text = obs_dict.get("text", str(obs_dict))
@@ -1120,7 +1257,7 @@ class TestAlfWorldVisualMode:
             images: tuple[ImageContent, ...] = ()
             if frame is not None:
                 images = (env._frame_to_image(frame),)
-            return raw_text, info, images
+            return fresh, raw_text, info, images
 
         env._init_game = mock_init_game  # type: ignore[assignment]
         state, _ = env.reset(options={"task_index": 0})

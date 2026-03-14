@@ -170,6 +170,7 @@ class AlfWorldHidden:
     episode_step: int                      # current step count
     last_action: str | None                # last action taken
     admissible_commands: tuple[str, ...]   # valid commands at this step
+    trajectory: tuple[str, ...] = ()       # actions taken to reach this state
 ```
 
 ## Using with TrajectoryRunner
@@ -229,9 +230,30 @@ env = adapter.get_environment(visual=True)
 
 Images flow through the full multimodal pipeline (see [Multimodal Observations](../guides/multimodal.md)).
 
+## Pure Step (Replay-Based)
+
+AlfWorld uses `pure_step=True` — stepping is stateless and supports branching. Each `step()` call creates a fresh TextWorld environment, replays the action trajectory stored in the hidden state, and applies the new action. This enables:
+
+- **Branching**: Step the same state with different actions to explore multiple paths
+- **Replay**: Any saved state can be stepped at any time, in any order
+- **Compatibility**: Works with `DirectStrategy` for branching workflows
+
+```python
+state, _ = env.reset(options={"task_index": 0})
+
+# Branch from the same state
+result_a = env.step(state, Action(text="go to shelf 1"))
+result_b = env.step(state, Action(text="go to desk 1"))
+
+# Both succeed — different observations, different trajectories
+print(result_a.next_state.hidden.trajectory)  # ("go to shelf 1",)
+print(result_b.next_state.hidden.trajectory)  # ("go to desk 1",)
+```
+
+The `trajectory` field on `AlfWorldHidden` stores the complete action history needed for replay. Observations use demangled entity names via AlfWorld's `AlfredDemangler` wrapper for readable text.
+
 ## Limitations
 
-- Non-pure (`pure_step=False`) — cannot branch with `DirectStrategy`; use `ActionReplay` or `ProcessFork` strategies
 - No seed support — AlfWorld games are deterministic per game file
 - Requires AlfWorld data download (`alfworld-download`) before use
 - Visual mode requires `ai2thor` with GPU/OpenGL support

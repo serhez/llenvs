@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
 from llenvs.core.state import (
     Action,
@@ -87,6 +87,7 @@ class AlfWorldHidden:
         episode_step: Current step within the episode.
         last_action: The last action taken.
         admissible_commands: Currently valid commands.
+        trajectory: Sequence of actions taken to reach this state.
     """
 
     task_index: int
@@ -96,6 +97,7 @@ class AlfWorldHidden:
     episode_step: int
     last_action: str | None
     admissible_commands: tuple[str, ...]
+    trajectory: tuple[str, ...] = ()
 
 
 @dataclass
@@ -201,11 +203,9 @@ class AlfWorldEnvironment:
         self._prompts = {**DEFAULT_ALFWORLD_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
-        self._state_tracker = _StateContinuityTracker()
 
-        # Current gym env instance (re-created per task)
-        self._gym_env: Any = None
-        self._current_objective: str = ""
+        # Cache registered env_ids to avoid TextWorld registry leak
+        self._env_id_cache: dict[str, str] = {}
 
     def __len__(self) -> int:
         return len(self._game_files)
@@ -266,7 +266,7 @@ class AlfWorldEnvironment:
             supports_task_index=True,
             supports_len=True,
             supports_seed=False,
-            pure_step=False,
+            pure_step=True,
             metadata=metadata,
         )
 
@@ -277,33 +277,41 @@ class AlfWorldEnvironment:
         """Get reward functions used by this environment."""
         return self._native_rewards + self._extra_rewards
 
-    def _init_game(self, game_file: str) -> tuple[str, dict[str, Any], tuple[ImageContent, ...]]:
-        """Initialize a single game via textworld.gym.
+    def _init_game(
+        self, game_file: str
+    ) -> tuple[Any, str, dict[str, Any], tuple[ImageContent, ...]]:
+        """Create a fresh game environment instance.
+
+        Registers the game file on first encounter (cached), then creates
+        a new gym env and resets it. Caller is responsible for closing
+        the returned gym env.
 
         Args:
             game_file: Path to the game file.
 
         Returns:
-            Tuple of (initial_observation_text, info_dict, images).
+            Tuple of (gym_env, initial_observation_text, info_dict, images).
         """
         import textworld.gym
 
-        request_infos = textworld.EnvInfos(
-            won=True,
-            admissible_commands=True,
-        )
+        if game_file not in self._env_id_cache:
+            from alfworld.agents.environment.alfred_tw_env import AlfredDemangler, AlfredInfos
 
-        env_id = textworld.gym.register_games(
-            [game_file],
-            request_infos=request_infos,
-            max_episode_steps=self._max_steps,
-        )
+            request_infos = textworld.EnvInfos(
+                won=True,
+                admissible_commands=True,
+            )
 
-        if self._gym_env is not None:
-            self._gym_env.close()
+            env_id = textworld.gym.register_games(
+                [game_file],
+                request_infos=request_infos,
+                max_episode_steps=self._max_steps,
+                wrappers=[AlfredDemangler(shuffle=False), AlfredInfos],
+            )
+            self._env_id_cache[game_file] = env_id
 
-        self._gym_env = textworld.gym.make(env_id)
-        obs, infos = self._gym_env.reset()
+        gym_env = textworld.gym.make(self._env_id_cache[game_file])
+        obs, infos = gym_env.reset()
 
         # textworld returns batched results (lists)
         raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
@@ -322,7 +330,7 @@ class AlfWorldEnvironment:
         elif isinstance(raw_obs, dict):
             raw_obs = raw_obs.get("text", str(raw_obs))
 
-        return raw_obs, info, images
+        return gym_env, raw_obs, info, images
 
     def _build_observation_prompt(
         self,
@@ -383,11 +391,11 @@ class AlfWorldEnvironment:
         game_file = self._game_files[task_index]
 
         # Initialize the game
-        raw_obs, init_info, images = self._init_game(game_file)
+        gym_env, raw_obs, init_info, images = self._init_game(game_file)
+        gym_env.close()
 
         # Extract objective and task type
         objective = _extract_objective(raw_obs)
-        self._current_objective = objective
         task_type = _extract_task_type(game_file)
 
         # Extract admissible commands
@@ -404,6 +412,7 @@ class AlfWorldEnvironment:
             episode_step=0,
             last_action=None,
             admissible_commands=admissible_commands,
+            trajectory=(),
         )
 
         # Task = objective (static); State = room description + commands (dynamic)
@@ -442,7 +451,6 @@ class AlfWorldEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
-        self._state_tracker.track(state)
 
         return state, {
             "task_index": task_index,
@@ -465,14 +473,17 @@ class AlfWorldEnvironment:
         Returns:
             StepResult containing next state, rewards, and done flags.
         """
-        self._state_tracker.validate(state, "AlfWorldEnvironment")
+        # Create fresh env and replay trajectory to reach current state
+        gym_env, _, _, _ = self._init_game(state.hidden.game_file)
+        for cmd in state.hidden.trajectory:
+            gym_env.step([cmd])
 
-        # Step AlfWorld environment
-        obs, scores, dones, infos = self._gym_env.step([action.text])
+        # Apply new action
+        obs, scores, dones, infos = gym_env.step([action.text])
+        gym_env.close()
 
         # Unbatch results
         raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
-        dones[0] if isinstance(dones, (list, tuple)) else dones
         won = False
         admissible_commands: tuple[str, ...] = ()
 
@@ -514,6 +525,7 @@ class AlfWorldEnvironment:
             episode_step=next_step,
             last_action=action.text,
             admissible_commands=admissible_commands,
+            trajectory=(*state.hidden.trajectory, action.text),
         )
 
         user_msg: dict[str, Any] = {"role": "user", "content": obs_prompt}
@@ -562,7 +574,6 @@ class AlfWorldEnvironment:
 
         # Compute rewards
         rewards = self.compute_rewards(state, action, next_state)
-        self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,
@@ -592,10 +603,8 @@ class AlfWorldEnvironment:
         return SignalBundle(signals=tuple(signals))
 
     def close(self) -> None:
-        """Close the underlying gym environment."""
-        if self._gym_env is not None:
-            self._gym_env.close()
-            self._gym_env = None
+        """Clean up cached registrations."""
+        self._env_id_cache.clear()
 
 
 class AlfWorldAdapter:
@@ -718,8 +727,7 @@ class AlfWorldAdapter:
         resolved_config["env"]["train_eval"] = split
 
         # Load AlfWorld environment to get game files
-        tw_env = getattr(alfworld_env_mod, "AlfredTWEnv")(resolved_config)
-        tw_env.init()
+        tw_env = getattr(alfworld_env_mod, "AlfredTWEnv")(resolved_config, train_eval=split)
         game_files = tuple(tw_env.game_files)
 
         # Filter by task types if specified
