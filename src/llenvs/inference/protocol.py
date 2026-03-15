@@ -45,6 +45,48 @@ class TokenLogprob:
 
 
 @dataclass(frozen=True)
+class TokenScore:
+    """Full scoring information for a single token position.
+
+    Used by ``score_chat`` to return the complete log-probability
+    distribution over the vocabulary at each token position.
+
+    Attributes:
+        token: The actual token string at this position.
+        token_id: Token ID in vocabulary.
+        logprob: Log-probability of the actual token.
+        log_probs_all: Full log-probability vector over the vocabulary.
+            Shape ``(vocab_size,)`` — a torch.Tensor or numpy array where
+            ``log_probs_all[v] = log π(v | context)``. ``None`` if the
+            backend only provides the sampled token's logprob.
+    """
+
+    token: str
+    token_id: int
+    logprob: float
+    log_probs_all: Any = None
+
+
+@dataclass(frozen=True)
+class ScoringResult:
+    """Result of scoring a token sequence under a model's distribution.
+
+    Returned by ``score_chat`` — contains per-token full scoring info
+    for the continuation tokens.
+
+    Attributes:
+        token_scores: Per-token scoring information for the continuation.
+        prompt_tokens: Number of tokens in the prompt context.
+        scored_tokens: Number of continuation tokens scored
+            (equals ``len(token_scores)``).
+    """
+
+    token_scores: tuple[TokenScore, ...]
+    prompt_tokens: int = 0
+    scored_tokens: int = 0
+
+
+@dataclass(frozen=True)
 class SamplingParams:
     """Parameters controlling text generation.
 
@@ -284,6 +326,7 @@ class BackendCapabilities:
     supports_chat: bool = True
     supports_function_calling: bool = False
     supports_vision: bool = False
+    supports_full_scoring: bool = False
     max_batch_size: int | None = None
     max_context_length: int | None = None
     max_concurrency: int | None = None
@@ -468,6 +511,115 @@ class ModelBackend(ABC):
         if not self.capabilities.supports_prefix_continuation:
             raise NotImplementedError("This backend does not support prefix continuation")
         raise NotImplementedError("Subclass must implement continue_from_prefix")
+
+    def generate_chat_with_prefix(
+        self,
+        messages: list[ChatMessage],
+        assistant_prefix: str,
+        params: SamplingParams,
+    ) -> GenerationResult:
+        """Generate a continuation starting from a partial assistant response.
+
+        Applies the chat template with ``add_generation_prompt=True``,
+        appends *assistant_prefix*, and generates the rest. The returned
+        ``GenerationResult.text`` contains only the newly generated content
+        (excluding the prefix).
+
+        Args:
+            messages: Chat context (system + user + assistant history).
+            assistant_prefix: Partial assistant response to continue from.
+            params: Sampling parameters.
+
+        Returns:
+            ``GenerationResult`` with the continuation text only.
+
+        Raises:
+            NotImplementedError: If the backend does not support prefix
+                continuation.
+        """
+        if not self.capabilities.supports_prefix_continuation:
+            raise NotImplementedError(
+                "This backend does not support prefix continuation"
+            )
+        raise NotImplementedError(
+            "Subclass must implement generate_chat_with_prefix"
+        )
+
+    def generate_chat_with_prefix_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        assistant_prefixes: list[str],
+        params: SamplingParams,
+    ) -> list[GenerationResult]:
+        """Batched version of ``generate_chat_with_prefix``.
+
+        The default implementation calls ``generate_chat_with_prefix``
+        sequentially. Backends should override for efficient batching.
+
+        Args:
+            messages_batch: List of chat contexts.
+            assistant_prefixes: Corresponding partial assistant responses.
+            params: Sampling parameters.
+
+        Returns:
+            List of ``GenerationResult`` objects, one per input pair.
+        """
+        return [
+            self.generate_chat_with_prefix(msgs, prefix, params)
+            for msgs, prefix in zip(messages_batch, assistant_prefixes)
+        ]
+
+    def score_chat(
+        self,
+        messages: list[ChatMessage],
+        continuation: str,
+    ) -> ScoringResult:
+        """Score continuation tokens given chat messages as context.
+
+        Applies the chat template, appends *continuation*, runs a forward
+        pass, and returns full log-probability distributions for each
+        continuation token.
+
+        Args:
+            messages: Chat context (system + user + assistant history).
+            continuation: Text whose tokens will be scored under the
+                model's distribution conditioned on *messages*.
+
+        Returns:
+            A ``ScoringResult`` with per-token ``TokenScore`` entries
+            containing full vocabulary log-probabilities.
+
+        Raises:
+            NotImplementedError: If the backend does not support full
+                scoring (``capabilities.supports_full_scoring is False``).
+        """
+        if not self.capabilities.supports_full_scoring:
+            raise NotImplementedError(
+                "This backend does not support full scoring"
+            )
+        raise NotImplementedError("Subclass must implement score_chat")
+
+    def score_chat_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        continuations: list[str],
+    ) -> list[ScoringResult]:
+        """Batched version of ``score_chat``.
+
+        The default implementation calls ``score_chat`` sequentially.
+        Backends should override for efficient batched scoring.
+
+        Args:
+            messages_batch: List of chat contexts.
+            continuations: Corresponding continuations to score.
+
+        Returns:
+            List of ``ScoringResult`` objects, one per input pair.
+        """
+        return [
+            self.score_chat(msgs, cont)
+            for msgs, cont in zip(messages_batch, continuations)
+        ]
 
     def generate_with_tools(
         self,

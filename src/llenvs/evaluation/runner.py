@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -454,6 +455,8 @@ class TrajectoryRunner:
     max_image_history: int | None = None
     history_fn: HistoryFn | None = None
     include_reasoning_in_history: bool = False
+    env_factory: Callable[[], Environment[Any]] | None = None
+    restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
 
     def _build_messages(
         self,
@@ -828,7 +831,10 @@ class TrajectoryRunner:
                 )
             result = self.backend.generate_chat(messages, self.sampling_params)
 
-        if result.finish_reason == StopReason.MAX_TOKENS and self.sampling_params.second_elicitation_suffix is not None:
+        if (
+            result.finish_reason == StopReason.MAX_TOKENS
+            and self.sampling_params.second_elicitation_suffix is not None
+        ):
             result = self._second_elicitation(messages, result)
 
         return result.to_agent_action(), result
@@ -1546,6 +1552,169 @@ class TrajectoryRunner:
             progress_callback=progress_callback,
         )
 
+    def _run_batch_from_states_multi_instance(
+        self,
+        states: Sequence[State[Any]],
+        max_steps: int | None = None,
+        forced_actions: Sequence[Action] | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> list[Trajectory[Any]]:
+        """Lockstep batch loop using per-rollout environment instances.
+
+        Each rollout gets its own environment instance (via ``env_factory``)
+        restored to the target state (via ``restore_fn``). LLM generation is
+        batched across all rollouts; environment steps run in parallel via
+        ThreadPoolExecutor (I/O-bound container operations).
+
+        Args:
+            states: Starting states for each rollout.
+            max_steps: Maximum new steps per rollout.
+            forced_actions: If set, use these for the first step of each
+                rollout instead of generating from the backend.
+            progress_callback: Optional callback(completed, total).
+        """
+        assert self.env_factory is not None
+        assert self.restore_fn is not None
+
+        env_max = self.environment.spec.max_steps or 100
+
+        if max_steps is None:
+            max_steps = env_max
+
+        if not states:
+            return []
+
+        loop_max = max(max(0, min(max_steps, env_max - s.metadata.step)) for s in states)
+        total = len(states)
+
+        # Create and restore environment instances
+        envs: list[Environment[Any]] = []
+        active: list[_ActiveTrajectory] = []
+        try:
+            # Create env instances
+            for _i in range(total):
+                envs.append(self.env_factory())
+
+            # Restore each env to the target state in parallel (I/O-bound)
+            restored_states: list[State[Any]] = []
+            with ThreadPoolExecutor() as executor:
+                futures = [
+                    executor.submit(self.restore_fn, env, state) for env, state in zip(envs, states)
+                ]
+                for f in futures:
+                    restored_states.append(f.result())
+
+            # Build active trajectories
+            for pos, restored in enumerate(restored_states):
+                trajectory: Trajectory[Any] = Trajectory.create(restored)
+                active.append(
+                    _ActiveTrajectory(
+                        position=pos,
+                        task_index=0,
+                        state=restored,
+                        reset_info={},
+                        trajectory=trajectory,
+                    )
+                )
+
+            # Mark already-terminal states as done
+            for t in active:
+                if t.state.metadata.is_terminal or t.state.metadata.step >= env_max:
+                    t.done = True
+
+            if progress_callback:
+                progress_callback(sum(1 for t in active if t.done), total)
+
+            # Lockstep loop
+            for step_i in range(loop_max):
+                remaining = [t for t in active if not t.done]
+                if not remaining:
+                    break
+
+                # First step with forced actions: skip generation
+                if step_i == 0 and forced_actions is not None:
+                    with ThreadPoolExecutor() as executor:
+                        step_futures = {
+                            t.position: executor.submit(
+                                envs[t.position].step,
+                                t.state,
+                                forced_actions[t.position],
+                            )
+                            for t in remaining
+                        }
+                        for t in remaining:
+                            step_result = step_futures[t.position].result()
+                            t.trajectory.add_transition(
+                                Transition(
+                                    state=t.state,
+                                    action=forced_actions[t.position],
+                                    next_state=step_result.next_state,
+                                    rewards=step_result.rewards,
+                                    extracted_action=step_result.extracted_action,
+                                    resolved_action=step_result.resolved_action,
+                                    info={"step": step_result.info},
+                                )
+                            )
+                            t.state = step_result.next_state
+                            t.step_count += 1
+                            if step_result.done or t.state.metadata.step >= env_max:
+                                t.done = True
+
+                if step_i != 0 or forced_actions is None:
+                    # Generate actions via batched inference
+                    messages_batch = [
+                        self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+                    ]
+                    gen_results = self.backend.generate_chat_batch(
+                        messages_batch, self.sampling_params
+                    )
+
+                    # Execute steps per-env in parallel
+                    actions_for_step = [gen_result.to_agent_action() for gen_result in gen_results]
+                    with ThreadPoolExecutor() as executor:
+                        step_futures_gen = {
+                            t.position: executor.submit(envs[t.position].step, t.state, action)
+                            for t, action in zip(remaining, actions_for_step)
+                        }
+                        for t, action in zip(remaining, actions_for_step):
+                            step_result = step_futures_gen[t.position].result()
+                            t.trajectory.add_transition(
+                                Transition(
+                                    state=t.state,
+                                    action=action,
+                                    next_state=step_result.next_state,
+                                    rewards=step_result.rewards,
+                                    extracted_action=step_result.extracted_action,
+                                    resolved_action=step_result.resolved_action,
+                                    info={"step": step_result.info},
+                                )
+                            )
+                            t.state = step_result.next_state
+                            t.step_count += 1
+                            if step_result.done or t.state.metadata.step >= env_max:
+                                t.done = True
+
+                if progress_callback:
+                    progress_callback(sum(1 for t in active if t.done), total)
+
+            # Return trajectories in original order
+            result_slots: list[Trajectory[Any] | None] = [None] * total
+            for t in active:
+                result_slots[t.position] = t.trajectory
+
+            if progress_callback:
+                progress_callback(total, total)
+
+            return [r for r in result_slots if r is not None]
+
+        finally:
+            # Ensure all env instances are closed
+            for env in envs:
+                try:
+                    env.close()
+                except Exception:
+                    pass
+
     def _run_batch_from_states_inner(
         self,
         states: Sequence[State[Any]],
@@ -1561,6 +1730,15 @@ class TrajectoryRunner:
             forced_actions: If set, use these for the first step of each
                 rollout instead of generating from the backend.
         """
+        # Dispatch to multi-instance path for non-pure environments with factory
+        if self.env_factory is not None and not self.environment.spec.pure_step:
+            return self._run_batch_from_states_multi_instance(
+                states,
+                max_steps=max_steps,
+                forced_actions=forced_actions,
+                progress_callback=progress_callback,
+            )
+
         env_max = self.environment.spec.max_steps or 100
 
         if max_steps is None:

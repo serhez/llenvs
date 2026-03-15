@@ -1124,3 +1124,201 @@ class TestHarborFullEpisode:
         assert result.info["tool_results"][0].is_success
         # Verify the write was sent via exec
         assert len(mock_env._exec_history) > 0
+
+
+# ── Restore / replay validation tests ───────────────────────────
+
+
+class TestHarborRestore:
+    """Tests for harbor_restore() utility."""
+
+    def test_harbor_restore_replays_trajectory(self):
+        """harbor_restore calls reset + step for each command in the trajectory."""
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        exec_results = [
+            MockExecResult(stdout="file1.txt"),
+            MockExecResult(stdout="hello world"),
+            MockExecResult(stdout="done"),
+        ]
+        mock_env = MockHarborEnvironment(exec_results=exec_results)
+        env = _make_env(harbor_env=mock_env)
+
+        # Build a state with trajectory to replay
+        target_hidden = HarborHidden(
+            task_index=0,
+            task_name="task_00",
+            instruction="Task 0 instruction",
+            episode_step=3,
+            last_action="cat result.txt",
+            trajectory=("ls", "cat hello.txt", "cat result.txt"),
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=target_hidden,
+            metadata=MagicMock(step=3, is_terminal=False),
+        )
+
+        restored = harbor_restore(env, target_state)
+
+        # Should have executed all 3 commands from trajectory
+        assert len(mock_env._exec_history) == 3
+        assert mock_env._exec_history == ["ls", "cat hello.txt", "cat result.txt"]
+        # Restored state should be at step 3
+        assert restored.hidden.episode_step == 3
+
+    def test_harbor_restore_task_name_mismatch(self):
+        """harbor_restore raises ValueError on task name drift."""
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        env = _make_env()
+
+        target_hidden = HarborHidden(
+            task_index=0,
+            task_name="wrong_task_name",
+            instruction="Task instruction",
+            episode_step=0,
+            trajectory=(),
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=target_hidden,
+            metadata=MagicMock(step=0, is_terminal=False),
+        )
+
+        with pytest.raises(ValueError, match="Task name mismatch"):
+            harbor_restore(env, target_state)
+
+    def test_harbor_restore_empty_trajectory(self):
+        """harbor_restore with empty trajectory just resets."""
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        env = _make_env()
+
+        target_hidden = HarborHidden(
+            task_index=0,
+            task_name="task_00",
+            instruction="Task 0 instruction",
+            episode_step=0,
+            trajectory=(),
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=target_hidden,
+            metadata=MagicMock(step=0, is_terminal=False),
+        )
+
+        restored = harbor_restore(env, target_state)
+        assert restored.hidden.episode_step == 0
+        assert restored.hidden.trajectory == ()
+
+
+class TestValidateReplayConsistency:
+    """Tests for validate_replay_consistency() utility."""
+
+    def test_consistent_replays(self):
+        """Deterministic env produces consistent=True."""
+        from llenvs.adapters.harbor import validate_replay_consistency
+
+        def env_factory():
+            # Each factory call returns an env with deterministic outputs
+            mock_env = MockHarborEnvironment(
+                exec_results=[
+                    MockExecResult(stdout="ok"),  # trajectory command
+                    MockExecResult(stdout="abc123"),  # probe 1
+                    MockExecResult(stdout="def456"),  # probe 2
+                ]
+            )
+            return _make_env(harbor_env=mock_env)
+
+        result = validate_replay_consistency(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo ok",),
+            probe_commands=("probe1", "probe2"),
+            num_trials=3,
+        )
+
+        assert result["consistent"] is True
+        assert result["matches_reference"] is None
+        assert len(result["probe_outputs"]) == 3
+        assert result["divergence_details"] == []
+
+    def test_divergent_replays(self):
+        """Non-deterministic env produces consistent=False."""
+        from llenvs.adapters.harbor import validate_replay_consistency
+
+        call_count = [0]
+
+        def env_factory():
+            call_count[0] += 1
+            # Vary output between trials
+            probe_output = f"hash_{call_count[0]}"
+            mock_env = MockHarborEnvironment(
+                exec_results=[
+                    MockExecResult(stdout="ok"),
+                    MockExecResult(stdout=probe_output),
+                ]
+            )
+            return _make_env(harbor_env=mock_env)
+
+        result = validate_replay_consistency(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo ok",),
+            probe_commands=("probe1",),
+            num_trials=3,
+        )
+
+        assert result["consistent"] is False
+        assert len(result["divergence_details"]) > 0
+
+    def test_with_reference_probes_match(self):
+        """Reference probes that match produce matches_reference=True."""
+        from llenvs.adapters.harbor import validate_replay_consistency
+
+        def env_factory():
+            mock_env = MockHarborEnvironment(
+                exec_results=[
+                    MockExecResult(stdout="ok"),
+                    MockExecResult(stdout="expected_hash"),
+                ]
+            )
+            return _make_env(harbor_env=mock_env)
+
+        result = validate_replay_consistency(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo ok",),
+            probe_commands=("probe1",),
+            reference_probes={"probe1": "expected_hash"},
+            num_trials=2,
+        )
+
+        assert result["consistent"] is True
+        assert result["matches_reference"] is True
+
+    def test_with_reference_probes_mismatch(self):
+        """Reference probes that don't match produce matches_reference=False."""
+        from llenvs.adapters.harbor import validate_replay_consistency
+
+        def env_factory():
+            mock_env = MockHarborEnvironment(
+                exec_results=[
+                    MockExecResult(stdout="ok"),
+                    MockExecResult(stdout="actual_hash"),
+                ]
+            )
+            return _make_env(harbor_env=mock_env)
+
+        result = validate_replay_consistency(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo ok",),
+            probe_commands=("probe1",),
+            reference_probes={"probe1": "different_hash"},
+            num_trials=1,
+        )
+
+        assert result["matches_reference"] is False
+        assert any("Reference mismatch" in d for d in result["divergence_details"])

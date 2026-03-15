@@ -33,8 +33,10 @@ from llenvs.inference.protocol import (
     GenerationResult,
     ModelBackend,
     SamplingParams,
+    ScoringResult,
     StopReason,
     TokenLogprob,
+    TokenScore,
 )
 from llenvs.inference.thinking import DEFAULT_EARLY_STOPPING_SUFFIX
 
@@ -45,8 +47,10 @@ __all__ = [
     "SamplingParams",
     "GenerationResult",
     "ChatMessage",
+    "ScoringResult",
     "StopReason",
     "TokenLogprob",
+    "TokenScore",
     # Prompting
     "PromptTransformer",
     "PromptPipeline",

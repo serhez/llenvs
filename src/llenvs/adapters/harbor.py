@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import shlex
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -1003,3 +1004,138 @@ class HarborAdapter:
             "version": version,
             "description": f"Harbor containerized environment ({dataset_name})",
         }
+
+
+# ── Restore / replay utilities ──────────────────────────────────
+
+
+def harbor_restore(
+    env: HarborEnvironment,
+    state: State[HarborHidden],
+) -> State[HarborHidden]:
+    """Restore a Harbor env to a saved state by replaying the trajectory prefix.
+
+    Resets to the original task via ``task_index``, then replays each command
+    from ``state.hidden.trajectory``. Validates task name to guard against
+    index drift across dataset versions.
+
+    Args:
+        env: A fresh ``HarborEnvironment`` instance (new container).
+        state: The target state whose ``hidden.trajectory`` is replayed.
+
+    Returns:
+        The restored state after replaying all commands.
+
+    Raises:
+        ValueError: If the task name at the given index doesn't match
+            the expected task name from the saved state.
+    """
+    current, info = env.reset(options={"task_index": state.hidden.task_index})
+
+    # Validate task identity
+    if state.hidden.task_name and info.get("task_name"):
+        if state.hidden.task_name != info["task_name"]:
+            raise ValueError(
+                f"Task name mismatch: expected {state.hidden.task_name!r}, "
+                f"got {info['task_name']!r} at index {state.hidden.task_index}. "
+                f"Dataset version may have changed."
+            )
+
+    for cmd in state.hidden.trajectory:
+        result = env.step(current, Action(text=cmd))
+        current = result.next_state
+
+    return current
+
+
+def validate_replay_consistency(
+    env_factory: Callable[[], HarborEnvironment],
+    task_index: int,
+    trajectory: tuple[str, ...],
+    probe_commands: tuple[str, ...] = (
+        "find /app /home /etc -type f 2>/dev/null | sort | md5sum",
+        "dpkg -l 2>/dev/null | awk '{print $2, $3}' | md5sum",
+    ),
+    reference_probes: dict[str, str] | None = None,
+    num_trials: int = 3,
+) -> dict[str, Any]:
+    """Test whether replaying a trajectory produces consistent container state.
+
+    Two validation modes:
+
+    1. **Self-consistency** (``reference_probes=None``): checks that multiple
+       replays produce the same state as each other.
+    2. **Live-vs-restored** (``reference_probes`` provided): checks that
+       restored state matches probe outputs captured from the live env
+       during original data collection.
+
+    Args:
+        env_factory: Creates a fresh ``HarborEnvironment`` instance.
+        task_index: Task index to reset to.
+        trajectory: Commands to replay.
+        probe_commands: Commands to run after replay to fingerprint state.
+        reference_probes: Optional mapping of probe command → expected stdout
+            from the live container. Enables live-vs-restored comparison.
+        num_trials: Number of independent replay trials.
+
+    Returns:
+        Dict with keys:
+            ``consistent`` (bool): All trials match each other.
+            ``matches_reference`` (bool | None): Whether probes match stored
+                live probes (None if ``reference_probes`` not provided).
+            ``probe_outputs`` (list[dict[str, str]]): Probe results per trial.
+            ``divergence_details`` (list[str]): Description of any differences.
+    """
+    trial_outputs: list[dict[str, str]] = []
+
+    for _trial in range(num_trials):
+        env = env_factory()
+        try:
+            # Reset and replay
+            current, _info = env.reset(options={"task_index": task_index})
+            for cmd in trajectory:
+                result = env.step(current, Action(text=cmd))
+                current = result.next_state
+
+            # Run probe commands
+            probes: dict[str, str] = {}
+            for probe_cmd in probe_commands:
+                probe_result = env.step(current, Action(text=probe_cmd))
+                obs = probe_result.next_state.observation
+                probes[probe_cmd] = obs.state.text if obs.state else ""
+                current = probe_result.next_state
+
+            trial_outputs.append(probes)
+        finally:
+            env.close()
+
+    # Self-consistency: all trials must match the first
+    divergence_details: list[str] = []
+    consistent = True
+    if trial_outputs:
+        baseline = trial_outputs[0]
+        for i, trial in enumerate(trial_outputs[1:], 1):
+            for cmd in probe_commands:
+                if trial.get(cmd) != baseline.get(cmd):
+                    consistent = False
+                    divergence_details.append(f"Trial {i} diverges from trial 0 on probe: {cmd!r}")
+
+    # Live-vs-restored comparison
+    matches_reference: bool | None = None
+    if reference_probes is not None and trial_outputs:
+        matches_reference = True
+        baseline = trial_outputs[0]
+        for cmd, expected in reference_probes.items():
+            actual = baseline.get(cmd, "")
+            if actual != expected:
+                matches_reference = False
+                divergence_details.append(
+                    f"Reference mismatch on probe {cmd!r}: expected {expected!r}, got {actual!r}"
+                )
+
+    return {
+        "consistent": consistent,
+        "matches_reference": matches_reference,
+        "probe_outputs": trial_outputs,
+        "divergence_details": divergence_details,
+    }

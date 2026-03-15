@@ -21,8 +21,10 @@ from llenvs.inference.protocol import (
     GenerationResult,
     ModelBackend,
     SamplingParams,
+    ScoringResult,
     StopReason,
     TokenLogprob,
+    TokenScore,
 )
 
 # Known VLM model types (checked against model_config.hf_config.model_type)
@@ -209,6 +211,7 @@ class VLLMBackend(ModelBackend):
             supports_chat=True,
             supports_function_calling=False,
             supports_vision=self._is_vlm,
+            supports_full_scoring=True,
             max_batch_size=None,  # Limited by GPU memory
             max_context_length=self._max_context_length,
         )
@@ -540,3 +543,235 @@ class VLLMBackend(ModelBackend):
             )
 
         return results
+
+    # --- Chat prefix continuation ---
+
+    def generate_chat_with_prefix(
+        self,
+        messages: list[ChatMessage],
+        assistant_prefix: str,
+        params: SamplingParams,
+    ) -> GenerationResult:
+        """Generate a continuation from a partial assistant response.
+
+        Applies the chat template, appends *assistant_prefix*, then
+        delegates to ``generate()`` which treats the full string as a
+        prompt and returns only newly generated text.
+        """
+        prompt = self._tokenizer.apply_chat_template(
+            [m.to_dict() for m in messages],
+            tokenize=False,
+            add_generation_prompt=True,
+            **self._chat_template_kwargs,
+        )
+        full_prefix = prompt + assistant_prefix
+        results = self.continue_from_prefix(full_prefix, params, num_continuations=1)
+        return results[0]
+
+    def generate_chat_with_prefix_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        assistant_prefixes: list[str],
+        params: SamplingParams,
+    ) -> list[GenerationResult]:
+        """Batched chat prefix continuation via a single vLLM generate call."""
+        if not messages_batch:
+            return []
+
+        prefixes = [
+            self._tokenizer.apply_chat_template(
+                [m.to_dict() for m in msgs],
+                tokenize=False,
+                add_generation_prompt=True,
+                **self._chat_template_kwargs,
+            )
+            + prefix
+            for msgs, prefix in zip(messages_batch, assistant_prefixes)
+        ]
+
+        vllm_params = self._to_vllm_params(params)
+        outputs = self._llm.generate(prefixes, vllm_params, use_tqdm=False)
+
+        results = []
+        for output in outputs:
+            completion = output.outputs[0]
+            token_logprobs = self._extract_logprobs(completion)
+            results.append(
+                GenerationResult(
+                    text=completion.text,
+                    finish_reason=_convert_stop_reason(completion.finish_reason),
+                    token_logprobs=token_logprobs,
+                    prompt_tokens=len(output.prompt_token_ids),
+                    completion_tokens=len(completion.token_ids),
+                    metadata={"is_continuation": True},
+                )
+            )
+
+        return results
+
+    # --- Full-vocabulary scoring ---
+
+    def _ensure_scoring_model(self) -> Any:
+        """Lazily load a HuggingFace model for full-vocabulary scoring.
+
+        The vLLM engine's internal model cannot be used directly for raw
+        forward passes because its attention layers require vLLM-specific
+        execution context (paged attention metadata, KV cache management).
+        Instead, we load a standard HuggingFace ``AutoModelForCausalLM``
+        from the same model path. The model is cached after first load.
+
+        Returns:
+            A HuggingFace ``PreTrainedModel`` in eval mode.
+
+        Raises:
+            ImportError: If ``transformers`` is not installed.
+            RuntimeError: If the model cannot be loaded.
+        """
+        if hasattr(self, "_scoring_model"):
+            return self._scoring_model
+
+        import logging
+
+        import torch
+
+        try:
+            from transformers import AutoModelForCausalLM
+        except ImportError as e:
+            raise ImportError(
+                "HuggingFace transformers is required for full-vocabulary scoring. "
+                "Install with: pip install transformers"
+            ) from e
+
+        logger = logging.getLogger(__name__)
+
+        # Match the dtype used by the vLLM engine
+        model_config = self._llm.llm_engine.model_config
+        dtype = getattr(model_config, "dtype", torch.float16)
+
+        logger.info(
+            "Loading HuggingFace model for full-vocabulary scoring: %s (dtype=%s). "
+            "This model is loaded separately from the vLLM engine and uses "
+            "additional memory.",
+            self._model_path,
+            dtype,
+        )
+
+        try:
+            self._scoring_model = AutoModelForCausalLM.from_pretrained(
+                self._model_path,
+                torch_dtype=dtype,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+            )
+            logger.info("Scoring model loaded on GPU")
+        except Exception:
+            logger.warning(
+                "Could not load scoring model on GPU (likely insufficient memory). "
+                "Loading on CPU — scoring will be significantly slower. "
+                "To use GPU, lower gpu_memory_utilization on the vLLM backend."
+            )
+            self._scoring_model = AutoModelForCausalLM.from_pretrained(
+                self._model_path,
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=True,
+            )
+            logger.info("Scoring model loaded on CPU")
+
+        self._scoring_model.eval()
+        return self._scoring_model
+
+    def score_chat(
+        self,
+        messages: list[ChatMessage],
+        continuation: str,
+    ) -> ScoringResult:
+        """Score continuation tokens with full-vocabulary log-probabilities.
+
+        Loads a HuggingFace model (lazily, on first call) from the same
+        model path as the vLLM engine, runs a single forward pass over
+        the chat-templated prompt concatenated with the continuation, and
+        returns per-token full log-probability distributions.
+
+        Args:
+            messages: Chat context.
+            continuation: Text whose tokens are scored.
+
+        Returns:
+            ``ScoringResult`` with per-token ``TokenScore`` entries.
+        """
+        import torch
+
+        if not continuation:
+            return ScoringResult(token_scores=(), prompt_tokens=0, scored_tokens=0)
+
+        model = self._ensure_scoring_model()
+
+        # Apply chat template
+        prompt_text = self._tokenizer.apply_chat_template(
+            [m.to_dict() for m in messages],
+            tokenize=False,
+            add_generation_prompt=True,
+            **self._chat_template_kwargs,
+        )
+
+        # Tokenize prompt and full text
+        full_text = prompt_text + continuation
+        prompt_ids = self._tokenizer.encode(prompt_text)
+        full_ids = self._tokenizer.encode(full_text)
+        prompt_len = len(prompt_ids)
+
+        if len(full_ids) <= prompt_len:
+            return ScoringResult(
+                token_scores=(), prompt_tokens=prompt_len, scored_tokens=0
+            )
+
+        # Forward pass
+        device = next(model.parameters()).device
+        input_tensor = torch.tensor([full_ids], device=device)
+
+        with torch.no_grad():
+            logits = model(input_tensor).logits  # (1, seq_len, vocab_size)
+
+        # Logit at position t predicts token at t+1.
+        # Continuation tokens occupy positions [prompt_len, total_len-1].
+        # Their predicting logits are at positions [prompt_len-1, total_len-2].
+        total_len = len(full_ids)
+        cont_logits = logits[0, prompt_len - 1 : total_len - 1, :]
+        # Use float32 for numerical stability in log_softmax
+        log_probs = torch.nn.functional.log_softmax(
+            cont_logits.float(), dim=-1
+        ).cpu()
+
+        # Build TokenScore tuples
+        cont_ids = full_ids[prompt_len:]
+        token_scores = tuple(
+            TokenScore(
+                token=self._tokenizer.decode([tid]),
+                token_id=tid,
+                logprob=log_probs[i, tid].item(),
+                log_probs_all=log_probs[i],
+            )
+            for i, tid in enumerate(cont_ids)
+        )
+
+        return ScoringResult(
+            token_scores=token_scores,
+            prompt_tokens=prompt_len,
+            scored_tokens=len(token_scores),
+        )
+
+    def score_chat_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        continuations: list[str],
+    ) -> list[ScoringResult]:
+        """Batched scoring via sequential forward passes.
+
+        Each (messages, continuation) pair is scored independently.
+        The self-distillation method controls its own sub-batching,
+        so sequential processing here is acceptable.
+        """
+        return [
+            self.score_chat(msgs, cont)
+            for msgs, cont in zip(messages_batch, continuations)
+        ]

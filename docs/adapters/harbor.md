@@ -190,9 +190,77 @@ Harbor's registry provides access to multiple datasets. Common ones include:
 
 Use `adapter.list_environments()` to query the registry for all available datasets.
 
+## Monte Carlo Rollouts
+
+Harbor environments have `pure_step=False` — container state is mutable and cannot be cheaply reset to a prior state. For MC rollouts (Q-value estimation, value function estimation), use the multi-instance runner with `harbor_restore`:
+
+```python
+from llenvs.adapters.harbor import HarborAdapter, harbor_restore
+
+adapter = HarborAdapter()
+env = adapter.get_environment("terminal-bench@2.0", max_steps=30)
+
+def env_factory():
+    return adapter.get_environment("terminal-bench@2.0", max_steps=30)
+
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=sampling_params,
+    env_factory=env_factory,
+    restore_fn=harbor_restore,
+)
+
+# MC rollouts from a saved state
+trajectories = runner.run_batch_from_states(
+    [saved_state] * num_rollouts,
+    batch_size=4,  # max concurrent containers
+)
+```
+
+### `harbor_restore()`
+
+Restores a Harbor environment to a saved state by replaying the trajectory prefix. Resets to the original task via `task_index`, then replays each command from `state.hidden.trajectory`. Validates task name to guard against index drift across dataset versions.
+
+### Replay Validation
+
+Not all Harbor tasks produce consistent state on replay — network-dependent commands, non-deterministic outputs, or time-sensitive operations can cause divergence. Use `validate_replay_consistency()` to identify replay-safe tasks:
+
+```python
+from llenvs.adapters.harbor import validate_replay_consistency
+
+result = validate_replay_consistency(
+    env_factory=env_factory,
+    task_index=0,
+    trajectory=("apt-get update", "pip install pandas"),
+    probe_commands=(
+        "find /app /home /etc -type f 2>/dev/null | sort | md5sum",
+        "dpkg -l 2>/dev/null | awk '{print $2, $3}' | md5sum",
+    ),
+    reference_probes=stored_live_probes,  # from data collection
+    num_trials=3,
+)
+```
+
+Two validation modes:
+
+1. **Self-consistency** (`reference_probes=None`): multiple replays produce the same state as each other.
+2. **Live-vs-restored** (`reference_probes` provided): restored state matches probe outputs captured from the live container during data collection. This is the stronger check.
+
+Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `probe_outputs` (per-trial), and `divergence_details`.
+
+### Independent-Exec Semantics
+
+Harbor's `exec()` runs `docker compose exec main bash -c <cmd>` — each step gets a fresh shell. Shell-local state (`cd`, `export`, variables) doesn't persist across steps. This differs from persistent shell models. Results should be described as operating under "independent-exec semantics."
+
+Since both trajectory collection and MC evaluation use the same adapter, results are internally consistent.
+
+See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
+
 ## Limitations
 
 - **No seed support** — Harbor tasks are deterministic (fixed Dockerfiles/test scripts).
 - **Docker required** — Container runtime must be available.
 - **Network-dependent** — Registry queries and image pulls require network access.
 - **Binary rewards** — Native verifiers produce pass/fail only; use `extra_rewards` for finer-grained scoring (e.g., `JudgeReward`).
+- **Text-mode replay only** — `harbor_restore` supports text mode; tool-mode replay requires storing full `Action` objects (deferred).
