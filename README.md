@@ -5,8 +5,8 @@
 LLEnvs wraps evaluation benchmarks — reasoning tasks, math datasets, multi-turn games, tool-using agents, e-commerce simulations — in a unified `Environment` protocol inspired by Gymnasium. Every benchmark becomes a stateless MDP with typed observations, actions, and multi-signal rewards, so you can run evaluations, build RL training loops, or do fine-grained reasoning analysis with the same interface.
 
 ```python
-from llenvs.core.registry import environment_registry
 from llenvs.core import Action
+from llenvs.core.registry import environment_registry
 
 env = environment_registry.get(name="leg_counting", adapter="reasoning_gym", size=100, seed=42)
 state, _ = env.reset(options={"task_index": 0})
@@ -67,7 +67,12 @@ env = environment_registry.get(name="alfworld:eval_out_of_distribution", adapter
 Run models locally or through APIs — same evaluation code either way:
 
 ```python
-from llenvs.inference.backends import OpenAIBackend, VLLMBackend, HuggingFaceBackend, AnthropicBackend
+from llenvs.inference.backends import (
+    AnthropicBackend,
+    HuggingFaceBackend,
+    OpenAIBackend,
+    VLLMBackend,
+)
 
 backend = VLLMBackend(model_path="meta-llama/Llama-3.1-8B-Instruct")
 backend = HuggingFaceBackend(model_path="meta-llama/Llama-3.1-8B-Instruct")
@@ -103,14 +108,14 @@ Or use YAML configuration with the CLI:
 ```yaml
 # config.yaml
 environments:
-  - name: leg_counting
-    adapter: reasoning_gym
-    size: 100
-    answer_extractor: tag_based
+    - name: leg_counting
+      adapter: reasoning_gym
+      size: 100
+      answer_extractor: tag_based
 
 model:
-  backend: openai
-  model: gpt-4o
+    backend: openai
+    model: gpt-4o
 
 system_prompt: general_reasoning
 output_dir: ./results
@@ -144,7 +149,7 @@ Tool definitions can be auto-generated from Python functions via `ToolDefinition
 Run environments in isolated Docker containers or subprocesses:
 
 ```python
-from llenvs.container import create_container_environment, ContainerConfig
+from llenvs.container import ContainerConfig, create_container_environment
 
 config = ContainerConfig(runtime="docker", image="llenvs-env:latest", port=8080)
 env = create_container_environment(env_config, container_config=config)
@@ -164,7 +169,7 @@ python -m llenvs.container --config '{"name": "leg_counting", "adapter": "reason
 Use environments directly in RL training pipelines:
 
 ```python
-from llenvs import Scorer, DatasetProvider
+from llenvs import DatasetProvider, Scorer
 
 # Score model responses against any environment
 scorer = Scorer(env)
@@ -203,39 +208,17 @@ Built-in segmenters: `SentenceSegmenter`, `LineSegmenter`, `NumberedStepSegmente
 ## Installation
 
 ```bash
-pip install llenvs[openai,reasoning-gym]   # API + reasoning tasks
-pip install llenvs[vllm,huggingface]       # Local inference + HF datasets
-pip install llenvs[alfworld]               # AlfWorld household tasks
-pip install llenvs[jericho]               # Jericho interactive fiction
-pip install llenvs[agentgym]               # AgentGym environments
-pip install llenvs[verifiers]              # Verifiers environments
-pip install llenvs[openenv]                # OpenEnv environments
-pip install llenvs[aviary]                # Aviary tool-calling environments
-pip install craftax                        # Craftax survival benchmark (requires JAX)
-pip install llenvs[trl]                    # TRL integration
-pip install llenvs[all]                    # Everything
+pip install llenvs[openai,reasoning-gym] # API + reasoning tasks
+pip install llenvs[vllm,huggingface]     # Local inference + HF datasets
+pip install llenvs[alfworld]             # AlfWorld household tasks
+pip install llenvs[jericho]              # Jericho interactive fiction
+pip install llenvs[agentgym]             # AgentGym environments
+pip install llenvs[verifiers]            # Verifiers environments
+pip install llenvs[openenv]              # OpenEnv environments
+pip install llenvs[aviary]               # Aviary tool-calling environments
+pip install craftax                      # Craftax survival benchmark (requires JAX)
+pip install llenvs[trl]                  # TRL integration
+pip install llenvs[all]                  # Everything
 ```
 
-See the [full documentation](docs/README.md) for detailed guides on environments, prompts, tools, containers, segmentation, evaluation, RL training, backends, and configuration.
-
-## Documentation
-
-Install dev dependencies:
-
-```bash
-uv pip install -e ".[dev]"
-```
-
-Serve locally with live reload:
-
-```bash
-uv run mkdocs serve
-```
-
-Then open `http://127.0.0.1:8000`.
-
-Build a static site into `site/`:
-
-```bash
-uv run mkdocs build
-```
+See the [full documentation](https://sergiohg.com/llenvs/) for detailed guides on environments, prompts, tools, containers, segmentation, evaluation, RL training, backends, and configuration.
