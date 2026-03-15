@@ -714,6 +714,23 @@ class AlfWorldAdapter:
 
         return resolved_config
 
+    def _get_textworld_env_class(self, alfworld_env_mod: Any) -> Any:
+        """Resolve the upstream text-only ALFWorld environment class."""
+        get_environment = getattr(alfworld_env_mod, "get_environment", None)
+        if callable(get_environment):
+            return get_environment("AlfredTWEnv")
+
+        try:
+            from alfworld.agents.environment.alfred_tw_env import AlfredTWEnv
+
+            return AlfredTWEnv
+        except ImportError as e:
+            raise ImportError(
+                "Could not resolve ALFWorld text environment class. Expected "
+                "alfworld.agents.environment.get_environment('AlfredTWEnv') "
+                "or alfworld.agents.environment.alfred_tw_env.AlfredTWEnv."
+            ) from e
+
     def list_environments(self) -> list[str]:
         """List available environment variants.
 
@@ -795,8 +812,9 @@ class AlfWorldAdapter:
         resolved_config.setdefault("env", {})
         resolved_config["env"]["train_eval"] = split
 
-        # Load AlfWorld environment to get game files
-        tw_env = getattr(alfworld_env_mod, "AlfredTWEnv")(resolved_config, train_eval=split)
+        # Load ALFWorld text environment to get game files
+        tw_env_cls = self._get_textworld_env_class(alfworld_env_mod)
+        tw_env = tw_env_cls(resolved_config, train_eval=split)
         game_files = tuple(tw_env.game_files)
 
         # Filter by task types if specified

@@ -116,10 +116,6 @@ env = adapter.get_environment(config={"dataset": {"num_eval_games": 100}})
 env = adapter.get_environment(config_path="/path/to/config.yaml")
 ```
 
-When no config is provided, the adapter builds a default ALFWorld config from packaged
-ALFWorld paths (`ALFWORLD_DATA`, `ALFRED_PDDL_PATH`, `ALFRED_TWL2_PATH`) instead of
-calling a runtime config loader.
-
 Use `name=` or `split=` to choose the split. The adapter always applies the resolved
 split after loading config overrides.
 
@@ -128,11 +124,11 @@ split after loading config overrides.
 ```python
 env = adapter.get_environment(
     name="alfworld:eval_out_of_distribution",
-    max_steps=50,                          # default: 50
-    include_admissible_commands=True,       # default: True
-    include_objective_in_obs=True,          # default: True
-    task_types=[1, 2, 3],                  # filter task types (None = all)
-    prompts={                              # override prompt templates
+    max_steps=50,  # default: 50
+    include_admissible_commands=True,  # default: True
+    include_objective_in_obs=True,  # default: True
+    task_types=[1, 2, 3],  # filter task types (None = all)
+    prompts={  # override prompt templates
         "objective_prefix": "Goal: {objective}",
         "admissible_commands_prefix": "Valid actions:",
     },
@@ -156,8 +152,6 @@ print(signal.reward)  # 1.0 if won
 Add extra reward signals:
 
 ```python
-from llenvs.core.reward import FormatReward
-
 env = AlfWorldEnvironment(
     game_files=game_files,
     config=config,
@@ -170,23 +164,23 @@ env = AlfWorldEnvironment(
 ```python
 @dataclass(frozen=True)
 class AlfWorldHidden:
-    task_index: int                        # index into game_files
-    task_type: str                         # e.g., "pick_and_place_simple"
-    objective: str                         # extracted task objective
-    game_file: str                         # path to current game file
-    episode_step: int                      # current step count
-    last_action: str | None                # last action taken
-    admissible_commands: tuple[str, ...]   # valid commands at this step
-    trajectory: tuple[str, ...] = ()       # actions taken to reach this state
+    task_index: int  # index into game_files
+    task_type: str  # e.g., "pick_and_place_simple"
+    objective: str  # extracted task objective
+    game_file: str  # path to current game file
+    episode_step: int  # current step count
+    last_action: str | None  # last action taken
+    admissible_commands: tuple[str, ...]  # valid commands at this step
+    trajectory: tuple[str, ...] = ()  # actions taken to reach this state
 ```
 
 ## Using with TrajectoryRunner
 
 ```python
 from llenvs.adapters import AlfWorldAdapter
-from llenvs.inference.backends import OpenAIBackend
 from llenvs.evaluation import TrajectoryRunner
 from llenvs.inference import SamplingParams
+from llenvs.inference.backends import OpenAIBackend
 
 adapter = AlfWorldAdapter()
 env = adapter.get_environment(
@@ -218,7 +212,7 @@ env = adapter.get_environment(
 
 state, info = env.reset(options={"task_index": 0})
 print(len(state.observation.images))  # 1 (ImageContent with RGB frame)
-print(state.observation.prompt)        # Text observation still present
+print(state.observation.prompt)  # Text observation still present
 ```
 
 Visual mode requires:
