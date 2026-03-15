@@ -1,5 +1,6 @@
 """Tests for the AlfWorld adapter."""
 
+from copy import deepcopy
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -135,6 +136,21 @@ def _make_env(
 
     env._init_game = mock_init_game  # type: ignore[assignment]
     return env
+
+
+def _make_mock_alfworld() -> tuple[MagicMock, MagicMock, MagicMock]:
+    """Create mocked AlfWorld modules for adapter tests."""
+    mock_alfworld = MagicMock()
+    mock_alfworld.ALFWORLD_DATA = "/mock/alfworld-data"
+    mock_alfworld.ALFRED_PDDL_PATH = "/mock/pkg/alfred.pddl"
+    mock_alfworld.ALFRED_TWL2_PATH = "/mock/pkg/alfred.twl2"
+
+    mock_env_mod = MagicMock()
+    mock_tw_env = MagicMock()
+    mock_tw_env.game_files = list(MOCK_GAME_FILES)
+    mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+
+    return mock_alfworld, mock_env_mod, mock_tw_env
 
 
 @pytest.fixture
@@ -689,6 +705,10 @@ class TestTaskTypes:
 class TestAlfWorldAdapter:
     """Tests for AlfWorldAdapter."""
 
+    @staticmethod
+    def _resolved_config(mock_env_mod: MagicMock) -> dict[str, Any]:
+        return mock_env_mod.AlfredTWEnv.call_args.args[0]
+
     def test_adapter_name(self):
         adapter = AlfWorldAdapter()
         assert adapter.name == "alfworld"
@@ -735,61 +755,89 @@ class TestAlfWorldAdapter:
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_get_environment_parses_split_from_name(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
         env = adapter.get_environment(name="alfworld:train", max_steps=30)
+        resolved_config = self._resolved_config(mock_env_mod)
 
         assert isinstance(env, AlfWorldEnvironment)
         assert env.spec.max_steps == 30
+        assert resolved_config["env"]["train_eval"] == "train"
+        assert mock_env_mod.AlfredTWEnv.call_args.kwargs["train_eval"] == "train"
+        assert resolved_config["dataset"]["data_path"] == "/mock/alfworld-data/json_2.1.1/train"
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_get_environment_default_name(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
         env = adapter.get_environment()
+        resolved_config = self._resolved_config(mock_env_mod)
 
         assert isinstance(env, AlfWorldEnvironment)
         assert len(env) == len(MOCK_GAME_FILES)
+        assert resolved_config["env"]["train_eval"] == "eval_out_of_distribution"
+        assert resolved_config["env"]["task_types"] == [1, 2, 3, 4, 5, 6]
+        assert resolved_config["logic"]["domain"] == "/mock/pkg/alfred.pddl"
+        assert resolved_config["logic"]["grammar"] == "/mock/pkg/alfred.twl2"
+        assert (
+            resolved_config["dataset"]["eval_ood_data_path"]
+            == "/mock/alfworld-data/json_2.1.1/valid_unseen"
+        )
+        assert mock_env_mod.AlfredTWEnv.call_args.kwargs["train_eval"] == "eval_out_of_distribution"
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_get_environment_with_config_dict(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
-        custom_config = {"env": {"some_key": "some_val"}}
+        custom_config = {
+            "dataset": {"num_eval_games": 7},
+            "env": {"some_key": "some_val"},
+        }
+        original_config = deepcopy(custom_config)
         env = adapter.get_environment(config=custom_config)
+        resolved_config = self._resolved_config(mock_env_mod)
 
         assert isinstance(env, AlfWorldEnvironment)
-        # The config should have been used (not getconfig)
-        mock_alfworld.getconfig.assert_not_called()
+        assert resolved_config["dataset"]["num_eval_games"] == 7
+        assert resolved_config["dataset"]["data_path"] == "/mock/alfworld-data/json_2.1.1/train"
+        assert resolved_config["env"]["some_key"] == "some_val"
+        assert resolved_config["env"]["task_types"] == [1, 2, 3, 4, 5, 6]
+        assert resolved_config["env"]["train_eval"] == "eval_out_of_distribution"
+        assert custom_config == original_config
+
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_get_environment_config_path_overrides_config(self, mock_get, tmp_path):
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        config_path = tmp_path / "alfworld.yaml"
+        config_path.write_text(
+            "dataset:\n  num_eval_games: 11\nenv:\n  goal_desc_human_anns_prob: 0.25\n",
+            encoding="ascii",
+        )
+
+        adapter = AlfWorldAdapter()
+        env = adapter.get_environment(
+            config={"dataset": {"num_eval_games": 7}, "env": {"task_types": [1]}},
+            config_path=str(config_path),
+        )
+        resolved_config = self._resolved_config(mock_env_mod)
+
+        assert isinstance(env, AlfWorldEnvironment)
+        assert resolved_config["dataset"]["num_eval_games"] == 11
+        assert resolved_config["env"]["task_types"] == [1]
+        assert resolved_config["env"]["goal_desc_human_anns_prob"] == 0.25
+        assert resolved_config["env"]["train_eval"] == "eval_out_of_distribution"
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_get_environment_filters_task_types(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
@@ -801,12 +849,7 @@ class TestAlfWorldAdapter:
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_get_environment_invalid_task_type(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
@@ -815,12 +858,7 @@ class TestAlfWorldAdapter:
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_get_environment_multiple_task_types(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
@@ -1269,12 +1307,7 @@ class TestAlfWorldAdapterVisual:
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_adapter_passes_visual_flag(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()
@@ -1284,12 +1317,7 @@ class TestAlfWorldAdapterVisual:
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_adapter_default_not_visual(self, mock_get):
-        mock_alfworld = MagicMock()
-        mock_alfworld.getconfig.return_value = {}
-        mock_env_mod = MagicMock()
-        mock_tw_env = MagicMock()
-        mock_tw_env.game_files = list(MOCK_GAME_FILES)
-        mock_env_mod.AlfredTWEnv.return_value = mock_tw_env
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
         mock_get.return_value = (mock_alfworld, mock_env_mod)
 
         adapter = AlfWorldAdapter()

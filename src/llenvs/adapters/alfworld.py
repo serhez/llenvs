@@ -9,6 +9,7 @@ Reference: https://github.com/alfworld/alfworld
 
 import re
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -473,13 +474,15 @@ class AlfWorldEnvironment:
         Returns:
             StepResult containing next state, rewards, and done flags.
         """
+        action_text = action.text or ""
+
         # Create fresh env and replay trajectory to reach current state
         gym_env, _, _, _ = self._init_game(state.hidden.game_file)
         for cmd in state.hidden.trajectory:
             gym_env.step([cmd])
 
         # Apply new action
-        obs, scores, dones, infos = gym_env.step([action.text])
+        obs, scores, dones, infos = gym_env.step([action_text])
         gym_env.close()
 
         # Unbatch results
@@ -523,9 +526,9 @@ class AlfWorldEnvironment:
             objective=state.hidden.objective,
             game_file=state.hidden.game_file,
             episode_step=next_step,
-            last_action=action.text,
+            last_action=action_text,
             admissible_commands=admissible_commands,
-            trajectory=(*state.hidden.trajectory, action.text),
+            trajectory=(*state.hidden.trajectory, action_text),
         )
 
         user_msg: dict[str, Any] = {"role": "user", "content": obs_prompt}
@@ -535,7 +538,7 @@ class AlfWorldEnvironment:
             ]
 
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action.text or ""},
+            {"role": "assistant", "content": action_text},
             user_msg,
         )
         state_parts = [obs_text]
@@ -562,7 +565,7 @@ class AlfWorldEnvironment:
             info={
                 **state.metadata.info,
                 "won": won,
-                "last_action": action.text,
+                "last_action": action_text,
             },
         )
 
@@ -582,7 +585,7 @@ class AlfWorldEnvironment:
             truncated=truncated,
             info={
                 "won": won,
-                "action": action.text,
+                "action": action_text,
                 "admissible_commands": admissible_commands,
             },
         )
@@ -639,6 +642,77 @@ class AlfWorldAdapter:
                 "Install with: pip install alfworld\n"
                 "See: https://github.com/alfworld/alfworld"
             ) from e
+
+    def _build_default_config(self, alfworld_mod: Any) -> dict[str, Any]:
+        """Build a default ALFWorld config from packaged constants."""
+        data_root = str(alfworld_mod.ALFWORLD_DATA).rstrip("/")
+        dataset_root = f"{data_root}/json_2.1.1"
+
+        return {
+            "dataset": {
+                "data_path": f"{dataset_root}/train",
+                "eval_id_data_path": f"{dataset_root}/valid_seen",
+                "eval_ood_data_path": f"{dataset_root}/valid_unseen",
+                "num_train_games": -1,
+                "num_eval_games": -1,
+            },
+            "logic": {
+                "domain": str(alfworld_mod.ALFRED_PDDL_PATH),
+                "grammar": str(alfworld_mod.ALFRED_TWL2_PATH),
+            },
+            "env": {
+                "type": "AlfredTWEnv",
+                "domain_randomization": False,
+                "task_types": list(ALFWORLD_TASK_TYPES.keys()),
+                "expert_type": "handcoded",
+                "goal_desc_human_anns_prob": 0.0,
+            },
+            "general": {
+                "training_method": "dagger",
+            },
+            "dagger": {
+                "training": {
+                    "max_nb_steps_per_episode": 50,
+                }
+            },
+            "rl": {
+                "training": {
+                    "max_nb_steps_per_episode": 50,
+                }
+            },
+        }
+
+    def _merge_config(self, base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+        """Recursively merge override values into a config dict copy."""
+        merged = deepcopy(base)
+        for key, value in overrides.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = self._merge_config(merged[key], value)
+            else:
+                merged[key] = deepcopy(value)
+        return merged
+
+    def _resolve_config(
+        self,
+        alfworld_mod: Any,
+        *,
+        config: dict[str, Any] | None,
+        config_path: str | None,
+    ) -> dict[str, Any]:
+        """Resolve adapter config with stable defaults and overrides."""
+        resolved_config = self._build_default_config(alfworld_mod)
+
+        if config is not None:
+            resolved_config = self._merge_config(resolved_config, config)
+
+        if config_path is not None:
+            import yaml
+
+            with open(config_path) as f:
+                file_config = yaml.safe_load(f) or {}
+            resolved_config = self._merge_config(resolved_config, file_config)
+
+        return resolved_config
 
     def list_environments(self) -> list[str]:
         """List available environment variants.
@@ -711,16 +785,11 @@ class AlfWorldAdapter:
         if split not in valid_splits:
             raise ValueError(f"Invalid split: {split!r}. Must be one of: {valid_splits}")
 
-        # Resolve config
-        if config_path is not None:
-            import yaml
-
-            with open(config_path) as f:
-                resolved_config = yaml.safe_load(f)
-        elif config is not None:
-            resolved_config = dict(config)
-        else:
-            resolved_config = alfworld_mod.getconfig()
+        resolved_config = self._resolve_config(
+            alfworld_mod,
+            config=config,
+            config_path=config_path,
+        )
 
         # Set the split
         resolved_config.setdefault("env", {})

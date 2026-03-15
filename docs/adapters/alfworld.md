@@ -103,18 +103,25 @@ env = adapter.get_environment("alfworld:eval_out_of_distribution")  # default
 
 ### Config
 
-Config resolution priority: `config_path` > `config` dict > AlfWorld default.
+Config resolution priority: packaged adapter defaults < `config` dict < `config_path`.
 
 ```python
-# Use AlfWorld's default config
+# Use llenvs' packaged ALFWorld defaults
 env = adapter.get_environment()
 
-# Custom config dict
-env = adapter.get_environment(config={"env": {"train_eval": "train"}})
+# Override parts of the default config
+env = adapter.get_environment(config={"dataset": {"num_eval_games": 100}})
 
 # Config from YAML file
 env = adapter.get_environment(config_path="/path/to/config.yaml")
 ```
+
+When no config is provided, the adapter builds a default ALFWorld config from packaged
+ALFWorld paths (`ALFWORLD_DATA`, `ALFRED_PDDL_PATH`, `ALFRED_TWL2_PATH`) instead of
+calling a runtime config loader.
+
+Use `name=` or `split=` to choose the split. The adapter always applies the resolved
+split after loading config overrides.
 
 ### Parameters
 
