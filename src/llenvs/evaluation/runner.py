@@ -51,6 +51,20 @@ from llenvs.inference.protocol import (
 logger = logging.getLogger(__name__)
 
 
+def _raise_with_context(kind: str, task_index: int, error: Exception) -> None:
+    message = f"Error {kind} task {task_index}: {error}"
+    logger.error(message)
+    error.args = (message,)
+    raise error
+
+
+def _raise_multi_reset(entry_index: int, task_index: int, error: Exception) -> None:
+    message = f"Error resetting task {task_index} in entry {entry_index}: {error}"
+    logger.error(message)
+    error.args = (message,)
+    raise error
+
+
 @dataclass(frozen=True)
 class TurnInfoConfig:
     """Configuration for injecting turn/step info into structured messages.
@@ -1122,7 +1136,6 @@ class TrajectoryRunner:
                     )
                 )
             except Exception as e:
-                logger.error(f"Error resetting task {task_index}: {e}")
                 if eval_logger:
                     eval_logger.on_error(
                         _ErrorEvent(
@@ -1131,19 +1144,7 @@ class TrajectoryRunner:
                             error=str(e),
                         )
                     )
-                result_slots[pos] = TrajectoryResult(
-                    trajectory=Trajectory(
-                        episode_id=f"error_{task_index}",
-                        initial_state=State(
-                            observation=Observation(prompt=""),
-                            hidden=None,
-                            metadata=_error_metadata(task_index),
-                        ),
-                    ),
-                    total_reward=0.0,
-                    success=False,
-                    metadata={"error": str(e), "task_index": task_index},
-                )
+                _raise_with_context("resetting", task_index, e)
 
         reset_errors = total - len(active)
 
@@ -1282,10 +1283,6 @@ class TrajectoryRunner:
                                 )
                             )
                 except Exception as e:
-                    logger.error(f"Error stepping task {t.task_index}: {e}")
-                    t.done = True
-                    t.error = str(e)
-                    completed_count += 1
                     if eval_logger:
                         eval_logger.on_error(
                             _ErrorEvent(
@@ -1294,6 +1291,7 @@ class TrajectoryRunner:
                                 error=str(e),
                             )
                         )
+                    _raise_with_context("stepping", t.task_index, e)
 
             if progress_callback:
                 done_count = reset_errors + sum(1 for t in active if t.done)
@@ -1844,8 +1842,6 @@ def _run_multi_eval_impl(
 
     # Reset all tasks across all entries
     all_trajectories: list[_MultiActiveTrajectory] = []
-    # Track reset errors per entry for result assembly
-    reset_error_results: dict[int, list[TrajectoryResult]] = {i: [] for i in range(len(entries))}
 
     for entry_idx, entry in enumerate(entries):
         for task_index in entry.task_indices:
@@ -1869,7 +1865,6 @@ def _run_multi_eval_impl(
                     )
                 )
             except Exception as e:
-                logger.error(f"Error resetting task {task_index} in entry {entry_idx}: {e}")
                 if entry_idx in entry_loggers:
                     entry_loggers[entry_idx].on_error(
                         _ErrorEvent(
@@ -1878,21 +1873,7 @@ def _run_multi_eval_impl(
                             error=str(e),
                         )
                     )
-                reset_error_results[entry_idx].append(
-                    TrajectoryResult(
-                        trajectory=Trajectory(
-                            episode_id=f"error_{task_index}",
-                            initial_state=State(
-                                observation=Observation(prompt=""),
-                                hidden=None,
-                                metadata=_error_metadata(task_index),
-                            ),
-                        ),
-                        total_reward=0.0,
-                        success=False,
-                        metadata={"error": str(e), "task_index": task_index},
-                    )
-                )
+                _raise_multi_reset(entry_idx, task_index, e)
 
     if batch_size is not None and len(all_trajectories) > batch_size:
         # Chunk trajectories and process each chunk
@@ -1905,11 +1886,9 @@ def _run_multi_eval_impl(
                 max_steps_per_entry,
                 progress_callback=progress_callback,
                 total_for_progress=total,
-                progress_offset=sum(1 for t in all_trajectories[:start] if t.inner.done)
-                + sum(len(v) for v in reset_error_results.values()),
+                progress_offset=sum(1 for t in all_trajectories[:start] if t.inner.done),
             )
     else:
-        reset_errors_total = sum(len(v) for v in reset_error_results.values())
         _run_multi_lockstep(
             all_trajectories,
             backend,
@@ -1917,13 +1896,11 @@ def _run_multi_eval_impl(
             max_steps_per_entry,
             progress_callback=progress_callback,
             total_for_progress=total,
-            progress_offset=reset_errors_total,
+            progress_offset=0,
         )
 
     # Partition results by entry_index
-    per_entry_results: dict[int, list[TrajectoryResult]] = {
-        i: list(reset_error_results[i]) for i in range(len(entries))
-    }
+    per_entry_results: dict[int, list[TrajectoryResult]] = {i: [] for i in range(len(entries))}
     for t in all_trajectories:
         per_entry_results[t.entry_index].append(_finalize_trajectory(t.inner))
 
@@ -2481,22 +2458,7 @@ class SegmentedTrajectoryRunner:
                     )
                 )
             except Exception as e:
-                logger.error(f"Error resetting task {task_index}: {e}")
-                result_slots[pos] = TrajectoryResult(
-                    trajectory=Trajectory(
-                        episode_id=f"error_{task_index}",
-                        initial_state=State(
-                            observation=Observation(prompt=""),
-                            hidden=None,
-                            metadata=_error_metadata(task_index),
-                        ),
-                    ),
-                    total_reward=0.0,
-                    success=False,
-                    metadata={"error": str(e), "task_index": task_index},
-                )
-
-        reset_errors = total - len(active)
+                _raise_with_context("resetting", task_index, e)
 
         # Phase 2: Lockstep segment generation
         while True:
@@ -2607,12 +2569,10 @@ class SegmentedTrajectoryRunner:
                         t.generation_done = True
 
                 except Exception as e:
-                    logger.error(f"Error stepping task {t.task_index}: {e}")
-                    t.done = True
-                    t.error = str(e)
+                    _raise_with_context("stepping", t.task_index, e)
 
             if progress_callback:
-                done_count = reset_errors + sum(1 for t in active if t.done or t.generation_done)
+                done_count = sum(1 for t in active if t.done or t.generation_done)
                 progress_callback(done_count, total)
 
         # Phase 3: Buffer drain
@@ -2641,9 +2601,7 @@ class SegmentedTrajectoryRunner:
                     if step_result.done:
                         t.done = True
                 except Exception as e:
-                    logger.error(f"Error draining buffer for task {t.task_index}: {e}")
-                    t.done = True
-                    t.error = str(e)
+                    _raise_with_context("draining buffer for task", t.task_index, e)
 
         # Phase 4: Complete remainder for COMPLETE callbacks
         for t in active:
@@ -2660,9 +2618,7 @@ class SegmentedTrajectoryRunner:
                     if terminal:
                         t.done = True
                 except Exception as e:
-                    logger.error(f"Error completing task {t.task_index}: {e}")
-                    t.done = True
-                    t.error = str(e)
+                    _raise_with_context("completing", t.task_index, e)
 
         # Phase 5: Finalize non-terminal trajectories
         for t in active:
@@ -2683,9 +2639,7 @@ class SegmentedTrajectoryRunner:
                     t.state = finalize_result.next_state
                     t.done = True
                 except Exception as e:
-                    logger.error(f"Error finalizing task {t.task_index}: {e}")
-                    t.done = True
-                    t.error = str(e)
+                    _raise_with_context("finalizing", t.task_index, e)
 
         # Phase 6: Build results
         for t in active:

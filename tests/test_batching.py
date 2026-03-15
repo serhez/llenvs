@@ -788,8 +788,8 @@ class TestTrajectoryRunnerBatch:
         assert len(result.trajectory_results) == 1
         assert backend.batch_call_sizes == [1]
 
-    def test_reset_error_handled_per_trajectory(self):
-        """Reset failure for one task doesn't stop others."""
+    def test_reset_error_raises(self):
+        """Reset failure aborts the batch immediately."""
 
         class FailingResetEnv(MockSingleTurnEnv):
             def reset(self, *, seed=None, options=None):
@@ -802,16 +802,11 @@ class TestTrajectoryRunnerBatch:
         backend = BatchTrackingBackend()
         runner = TrajectoryRunner(environment=env, backend=backend)
 
-        result = runner.run_batch([0, 1, 2])
+        with pytest.raises(ValueError, match="Error resetting task 1: bad task"):
+            runner.run_batch([0, 1, 2])
 
-        assert len(result.trajectory_results) == 3
-        assert result.trajectory_results[0].success
-        assert not result.trajectory_results[1].success
-        assert "error" in result.trajectory_results[1].metadata
-        assert result.trajectory_results[2].success
-
-    def test_step_error_handled_per_trajectory(self):
-        """Step failure for one trajectory marks it failed, others continue."""
+    def test_step_error_raises(self):
+        """Unexpected step failure aborts the batch immediately."""
 
         class FailingStepEnv(MockMultiTurnEnv):
             def step(self, state, action):
@@ -823,13 +818,8 @@ class TestTrajectoryRunnerBatch:
         backend = BatchTrackingBackend()
         runner = TrajectoryRunner(environment=env, backend=backend)
 
-        result = runner.run_batch([0, 1, 2])
-
-        assert len(result.trajectory_results) == 3
-        assert result.trajectory_results[0].success
-        assert not result.trajectory_results[1].success
-        assert "error" in result.trajectory_results[1].metadata
-        assert result.trajectory_results[2].success
+        with pytest.raises(RuntimeError, match="Error stepping task 1: step failed"):
+            runner.run_batch([0, 1, 2])
 
 
 # --- TrajectoryRunner tool batch tests ---
@@ -1274,8 +1264,8 @@ class TestSegmentedTrajectoryRunnerBatch:
         last_info = tr.trajectory.transitions[-1].info
         assert last_info.get("finalize") is True
 
-    def test_reset_error_handled(self):
-        """Reset failure for one task doesn't stop others."""
+    def test_reset_error_raises(self):
+        """Reset failure aborts segmented batch execution."""
 
         class FailResetBase(MockBaseEnvForSegmented):
             def reset(self, *, seed=None, options=None):
@@ -1296,11 +1286,8 @@ class TestSegmentedTrajectoryRunnerBatch:
         )
         runner = SegmentedTrajectoryRunner(environment=env, backend=backend)
 
-        result = runner.run_batch([0, 1, 2])
-
-        assert len(result.trajectory_results) == 3
-        assert not result.trajectory_results[1].success
-        assert "error" in result.trajectory_results[1].metadata
+        with pytest.raises(ValueError, match="Error resetting task 1: bad task 1"):
+            runner.run_batch([0, 1, 2])
 
     def test_progress_callback(self):
         """Progress callback reports increasing completion."""

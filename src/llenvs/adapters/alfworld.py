@@ -828,6 +828,16 @@ class AlfWorldAdapter:
             type_names = {ALFWORLD_TASK_TYPES[tid] for tid in task_types}
             game_files = tuple(gf for gf in game_files if _extract_task_type(gf) in type_names)
 
+        if not game_files:
+            details = f"split={split!r}"
+            if task_types is not None:
+                details += f", task_types={task_types!r}"
+            raise ValueError(
+                "No ALFWorld games found for the requested configuration "
+                f"({details}). This usually means the split has no matching games "
+                "or the game-file layout does not match the expected task-type naming."
+            )
+
         return AlfWorldEnvironment(
             game_files=game_files,
             config=resolved_config,

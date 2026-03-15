@@ -891,6 +891,16 @@ class TestAlfWorldAdapter:
 
         assert len(env) == 2
 
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_get_environment_empty_filtered_task_types_raises(self, mock_get):
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
+        self._set_game_files(mock_env_mod, "/data/unexpected_layout/game.tw")
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        adapter = AlfWorldAdapter()
+        with pytest.raises(ValueError, match="No ALFWorld games found"):
+            adapter.get_environment(task_types=[1])
+
     def test_import_error(self):
         adapter = AlfWorldAdapter()
         with patch.dict("sys.modules", {"alfworld": None, "alfworld.agents.environment": None}):
