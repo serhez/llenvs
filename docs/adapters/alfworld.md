@@ -253,6 +253,22 @@ print(result_b.next_state.hidden.trajectory)  # ("go to desk 1",)
 
 The `trajectory` field on `AlfWorldHidden` stores the complete action history needed for replay. Observations use demangled entity names via AlfWorld's `AlfredDemangler` wrapper for readable text.
 
+## Troubleshooting
+
+### "ALFWorld data directory does not exist"
+
+The adapter validates that the game data directory exists before loading environments. If you see this error, run:
+
+```bash
+alfworld-download
+```
+
+This downloads ~3.5 GB of game data into `$ALFWORLD_DATA` (defaults to `~/.cache/alfworld/`). The adapter's error message includes the resolved `ALFWORLD_DATA` path and the specific data directory it expected.
+
+### "No ALFWorld games found"
+
+The data directory exists but contains no valid game files for the requested split/task-type combination. The error message includes the scanned data path. Verify that the directory has the expected layout (e.g., `json_2.1.1/valid_unseen/` for `eval_out_of_distribution`).
+
 ## Limitations
 
 - No seed support — AlfWorld games are deterministic per game file

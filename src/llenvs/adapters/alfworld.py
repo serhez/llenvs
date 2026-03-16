@@ -7,6 +7,7 @@ Agents navigate rooms and manipulate objects using text commands.
 Reference: https://github.com/alfworld/alfworld
 """
 
+import os
 import re
 import uuid
 from copy import deepcopy
@@ -38,6 +39,12 @@ _TASK_TYPE_NAMES: set[str] = set(ALFWORLD_TASK_TYPES.values())
 DEFAULT_ALFWORLD_PROMPTS: dict[str, str] = {
     "objective_prefix": "Objective: {objective}",
     "admissible_commands_prefix": "Admissible commands:",
+}
+
+_SPLIT_DATA_KEYS: dict[str, str] = {
+    "train": "data_path",
+    "eval_in_distribution": "eval_id_data_path",
+    "eval_out_of_distribution": "eval_ood_data_path",
 }
 
 
@@ -812,6 +819,17 @@ class AlfWorldAdapter:
         resolved_config.setdefault("env", {})
         resolved_config["env"]["train_eval"] = split
 
+        # Validate data directory exists before constructing the env
+        data_key = _SPLIT_DATA_KEYS[split]
+        data_path = resolved_config.get("dataset", {}).get(data_key, "")
+        if not os.path.isdir(data_path):
+            alfworld_data = getattr(alfworld_mod, "ALFWORLD_DATA", "unknown")
+            raise ValueError(
+                f"ALFWorld data directory does not exist: {data_path}\n"
+                f"ALFWORLD_DATA is set to: {alfworld_data}\n"
+                "Run `alfworld-download` to fetch game data (~3.5 GB)."
+            )
+
         # Load ALFWorld text environment to get game files
         tw_env_cls = self._get_textworld_env_class(alfworld_env_mod)
         tw_env = tw_env_cls(resolved_config, train_eval=split)
@@ -834,7 +852,8 @@ class AlfWorldAdapter:
                 details += f", task_types={task_types!r}"
             raise ValueError(
                 "No ALFWorld games found for the requested configuration "
-                f"({details}). This usually means the split has no matching games "
+                f"({details}). Scanned data path: {data_path}. "
+                "This usually means the split has no matching games "
                 "or the game-file layout does not match the expected task-type naming."
             )
 

@@ -707,6 +707,11 @@ class TestTaskTypes:
 class TestAlfWorldAdapter:
     """Tests for AlfWorldAdapter."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_data_dir_exists(self):
+        with patch("llenvs.adapters.alfworld.os.path.isdir", return_value=True):
+            yield
+
     @staticmethod
     def _resolved_config(mock_env_mod: MagicMock) -> dict[str, Any]:
         return mock_env_mod.get_environment.return_value.call_args.args[0]
@@ -900,6 +905,36 @@ class TestAlfWorldAdapter:
         adapter = AlfWorldAdapter()
         with pytest.raises(ValueError, match="No ALFWorld games found"):
             adapter.get_environment(task_types=[1])
+
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_missing_data_directory_raises_with_path(self, mock_get):
+        """Adapter raises early when the data directory does not exist."""
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        adapter = AlfWorldAdapter()
+        with patch("llenvs.adapters.alfworld.os.path.isdir", return_value=False):
+            with pytest.raises(ValueError, match="does not exist") as exc_info:
+                adapter.get_environment()
+
+        msg = str(exc_info.value)
+        assert "/mock/alfworld-data" in msg
+        assert "alfworld-download" in msg
+
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_empty_game_files_error_includes_data_path(self, mock_get):
+        """'No games found' error includes the scanned data path."""
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
+        self._set_game_files(mock_env_mod)  # empty game files
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        adapter = AlfWorldAdapter()
+        with pytest.raises(ValueError, match="No ALFWorld games found") as exc_info:
+            adapter.get_environment()
+
+        msg = str(exc_info.value)
+        assert "Scanned data path" in msg
+        assert "/mock/alfworld-data" in msg
 
     def test_import_error(self):
         adapter = AlfWorldAdapter()
@@ -1339,6 +1374,11 @@ class TestAlfWorldVisualMode:
 
 class TestAlfWorldAdapterVisual:
     """Tests for visual parameter on AlfWorldAdapter."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_data_dir_exists(self):
+        with patch("llenvs.adapters.alfworld.os.path.isdir", return_value=True):
+            yield
 
     @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
     def test_adapter_passes_visual_flag(self, mock_get):
