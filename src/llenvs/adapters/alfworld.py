@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
+from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
 from llenvs.core.state import (
     Action,
@@ -81,6 +82,27 @@ def _extract_task_type(game_file: str) -> str:
         if task_type_name in game_file:
             return task_type_name
     return "unknown"
+
+
+def _unbatch_admissible_commands(raw: Any) -> tuple[str, ...]:
+    """Handle both batched and flat admissible-command formats.
+
+    TextWorld's batched gym wrapper returns ``[["cmd1", "cmd2"]]``.
+    The single-game wrapper (``batch_size=None``) already unbatches and
+    returns ``["cmd1", "cmd2"]``.  Both formats must produce the same
+    ``tuple[str, ...]`` result.
+
+    Args:
+        raw: Raw admissible_commands value from TextWorld infos.
+
+    Returns:
+        Tuple of command strings.
+    """
+    if not isinstance(raw, (list, tuple)) or not raw:
+        return ()
+    if isinstance(raw[0], (list, tuple)):
+        return tuple(raw[0])  # batched: [["cmd1", "cmd2"]]
+    return tuple(raw)  # flat: ["cmd1", "cmd2"]
 
 
 @dataclass(frozen=True)
@@ -181,6 +203,7 @@ class AlfWorldEnvironment:
         visual: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        answer_extractor: AnswerExtractor | None = None,
     ) -> None:
         """Initialize AlfWorld environment wrapper.
 
@@ -199,6 +222,11 @@ class AlfWorldEnvironment:
                 native rewards.
             prompts: Override default prompt components. Keys:
                 objective_prefix, admissible_commands_prefix.
+            answer_extractor: Extractor applied to raw action text before
+                passing the command to TextWorld. When set, the extracted
+                command is used for both the TextWorld step and the
+                conversation history, keeping the history clean of
+                reasoning tokens.
         """
         self._game_files = game_files
         self._config = config
@@ -211,6 +239,7 @@ class AlfWorldEnvironment:
         self._prompts = {**DEFAULT_ALFWORLD_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
+        self._answer_extractor = answer_extractor
 
         # Cache registered env_ids to avoid TextWorld registry leak
         self._env_id_cache: dict[str, str] = {}
@@ -325,7 +354,13 @@ class AlfWorldEnvironment:
         raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
         info = {}
         if isinstance(infos, dict):
-            info = {k: (v[0] if isinstance(v, (list, tuple)) else v) for k, v in infos.items()}
+            for k, v in infos.items():
+                if k == "admissible_commands":
+                    info[k] = _unbatch_admissible_commands(v)
+                elif isinstance(v, (list, tuple)):
+                    info[k] = v[0]
+                else:
+                    info[k] = v
 
         # Extract text and images from observation
         images: tuple[ImageContent, ...] = ()
@@ -467,6 +502,32 @@ class AlfWorldEnvironment:
             "game_file": game_file,
         }
 
+    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+        """Return the text to store as the assistant turn in conversation history.
+
+        Uses the extracted command when available. On extraction failure, applies
+        the extractor's pre-cleaners (e.g. ``strip_thinking_tokens``) to the raw
+        text so that reasoning tokens never appear in the history.
+
+        Args:
+            raw_text: The original ``action.text``.
+            extracted_cmd: Result of extraction, or ``None`` if extraction failed.
+
+        Returns:
+            Cleaned text suitable for the conversation history.
+        """
+        if extracted_cmd is not None:
+            return extracted_cmd
+        if self._answer_extractor is None:
+            return raw_text
+        from llenvs.core.extraction import CleanedExtractor
+        if isinstance(self._answer_extractor, CleanedExtractor):
+            cleaned = raw_text
+            for cleaner in self._answer_extractor.pre_cleaners:
+                cleaned = cleaner(cleaned)
+            return cleaned
+        return raw_text
+
     def step(
         self,
         state: State[AlfWorldHidden],
@@ -483,13 +544,19 @@ class AlfWorldEnvironment:
         """
         action_text = action.text or ""
 
+        # Extract clean command for TextWorld (strips reasoning tokens etc.)
+        extracted_cmd: str | None = None
+        if self._answer_extractor is not None and action.text:
+            extracted_cmd, _ = self._answer_extractor.extract(action.text)
+        cmd_for_env = extracted_cmd or action_text
+
         # Create fresh env and replay trajectory to reach current state
         gym_env, _, _, _ = self._init_game(state.hidden.game_file)
         for cmd in state.hidden.trajectory:
             gym_env.step(cmd)
 
         # Apply new action
-        obs, scores, dones, infos = gym_env.step(action_text)
+        obs, scores, dones, infos = gym_env.step(cmd_for_env)
         gym_env.close()
 
         # Unbatch results
@@ -501,9 +568,7 @@ class AlfWorldEnvironment:
             won_val = infos.get("won", False)
             won = won_val[0] if isinstance(won_val, (list, tuple)) else won_val
             ac_val = infos.get("admissible_commands", ())
-            admissible_commands = tuple(
-                ac_val[0] if isinstance(ac_val, (list, tuple)) and ac_val else ac_val
-            )
+            admissible_commands = _unbatch_admissible_commands(ac_val)
 
         # Extract text and images from observation
         images: tuple[ImageContent, ...] = ()
@@ -533,9 +598,9 @@ class AlfWorldEnvironment:
             objective=state.hidden.objective,
             game_file=state.hidden.game_file,
             episode_step=next_step,
-            last_action=action_text,
+            last_action=cmd_for_env,
             admissible_commands=admissible_commands,
-            trajectory=(*state.hidden.trajectory, action_text),
+            trajectory=(*state.hidden.trajectory, cmd_for_env),
         )
 
         user_msg: dict[str, Any] = {"role": "user", "content": obs_prompt}
@@ -545,7 +610,7 @@ class AlfWorldEnvironment:
             ]
 
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action_text},
+            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
             user_msg,
         )
         state_parts = [obs_text]
@@ -590,9 +655,11 @@ class AlfWorldEnvironment:
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
+            extracted_action=extracted_cmd,
+            resolved_action=extracted_cmd,
             info={
                 "won": won,
-                "action": action_text,
+                "action": cmd_for_env,
                 "admissible_commands": admissible_commands,
             },
         )
@@ -763,6 +830,7 @@ class AlfWorldAdapter:
         visual: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         **kwargs: Any,
     ) -> AlfWorldEnvironment:
         """Create an AlfWorld environment.
@@ -787,6 +855,8 @@ class AlfWorldAdapter:
                 Requires ``ai2thor`` (GPU + OpenGL).
             extra_rewards: Additional reward functions.
             prompts: Override default prompt components.
+            answer_extractor: Extractor applied to raw action text before
+                passing the command to TextWorld.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -866,6 +936,7 @@ class AlfWorldAdapter:
             visual=visual,
             extra_rewards=extra_rewards,
             prompts=prompts,
+            answer_extractor=answer_extractor,
         )
 
     def get_default_system_prompt(self, name: str) -> None:

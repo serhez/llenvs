@@ -128,12 +128,33 @@ env = adapter.get_environment(
     include_admissible_commands=True,  # default: True
     include_objective_in_obs=True,  # default: True
     task_types=[1, 2, 3],  # filter task types (None = all)
+    answer_extractor=my_extractor,  # extract command from raw model output
     prompts={  # override prompt templates
         "objective_prefix": "Goal: {objective}",
         "admissible_commands_prefix": "Valid actions:",
     },
 )
 ```
+
+### Answer Extractor
+
+TextWorld requires exact command strings (e.g., `go to shelf 1`). When a model produces free-form text with reasoning or formatting around the command, pass an `answer_extractor` to strip the noise before forwarding to TextWorld:
+
+```python
+from llenvs.core.extraction import TagBasedExtractor, CleanedExtractor, resolve_cleaners
+
+extractor = CleanedExtractor(
+    TagBasedExtractor(tag_name="answer"),
+    pre_cleaners=resolve_cleaners(["strip_thinking_tokens"], kind="pre"),
+)
+env = adapter.get_environment(answer_extractor=extractor)
+```
+
+When an extractor is provided:
+- The extracted command is passed to TextWorld for stepping and stored in `hidden.trajectory` for replay
+- The assistant turn in the conversation history contains the extracted command (not raw text), keeping the history clean
+- `StepResult.extracted_action` and `StepResult.resolved_action` are set to the extracted command
+- If extraction fails (returns `None`), the raw `action.text` is used as a fallback
 
 ## Rewards
 

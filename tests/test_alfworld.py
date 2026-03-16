@@ -16,6 +16,7 @@ from llenvs.adapters.alfworld import (
     AlfWorldReward,
     _extract_objective,
     _extract_task_type,
+    _unbatch_admissible_commands,
 )
 from llenvs.core.reward import RewardType
 from llenvs.core.state import Action, ImageContent, Observation, ObservationContent
@@ -1396,3 +1397,288 @@ class TestAlfWorldAdapterVisual:
         adapter = AlfWorldAdapter()
         env = adapter.get_environment()
         assert env._visual is False
+
+
+# ---------------------------------------------------------------------------
+# Admissible commands unbatching tests
+# ---------------------------------------------------------------------------
+
+
+class TestUnbatchAdmissibleCommands:
+    """Tests for _unbatch_admissible_commands."""
+
+    def test_batched_format(self):
+        """TextWorld batched format: [['cmd1', 'cmd2']]."""
+        raw = [["go to shelf 1", "go to desk 1", "inventory"]]
+        result = _unbatch_admissible_commands(raw)
+        assert result == ("go to shelf 1", "go to desk 1", "inventory")
+
+    def test_flat_format(self):
+        """TextworldGymEnv single-game format: ['cmd1', 'cmd2']."""
+        raw = ["go to shelf 1", "go to desk 1", "inventory"]
+        result = _unbatch_admissible_commands(raw)
+        assert result == ("go to shelf 1", "go to desk 1", "inventory")
+
+    def test_empty_list(self):
+        raw: list = []
+        assert _unbatch_admissible_commands(raw) == ()
+
+    def test_empty_inner_list(self):
+        """Batched with empty inner list."""
+        raw: list = [[]]
+        assert _unbatch_admissible_commands(raw) == ()
+
+    def test_none_input(self):
+        assert _unbatch_admissible_commands(None) == ()  # type: ignore[arg-type]
+
+    def test_single_command_flat(self):
+        raw = ["look"]
+        result = _unbatch_admissible_commands(raw)
+        assert result == ("look",)
+
+    def test_single_command_batched(self):
+        raw = [["look"]]
+        result = _unbatch_admissible_commands(raw)
+        assert result == ("look",)
+
+    def test_returns_tuple(self):
+        raw = ["cmd1", "cmd2"]
+        result = _unbatch_admissible_commands(raw)
+        assert isinstance(result, tuple)
+
+
+class TestFlatFormatAdmissibleCommandsInStep:
+    """Verify step() handles flat admissible commands (TextworldGymEnv single-game)."""
+
+    def test_step_flat_format_admissible_commands(self):
+        """step() using _unbatch_admissible_commands produces correct tuple from flat list."""
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
+
+        flat_commands = ["go to shelf 1", "look", "inventory"]
+
+        def mock_init_game(game_file):
+            fresh = MagicMock()
+            # simulate TextworldGymEnv single-game: already flat
+            fresh.reset.return_value = (
+                ["-= Welcome =-\n\nYour task is to: test task."],
+                {"won": [False], "admissible_commands": flat_commands},
+            )
+            obs_list, infos = fresh.reset()
+            raw_obs = obs_list[0]
+            # Use _unbatch_admissible_commands as the real _init_game now does
+            info = {}
+            for k, v in infos.items():
+                if k == "admissible_commands":
+                    info[k] = _unbatch_admissible_commands(v)
+                elif isinstance(v, (list, tuple)):
+                    info[k] = v[0]
+                else:
+                    info[k] = v
+            return fresh, raw_obs, info, ()
+
+        env._init_game = mock_init_game  # type: ignore[assignment]
+        state, _ = env.reset(options={"task_index": 0})
+        # admissible_commands should be a proper tuple of strings, not characters
+        assert state.hidden.admissible_commands == tuple(flat_commands)
+        for cmd in state.hidden.admissible_commands:
+            assert isinstance(cmd, str)
+            assert len(cmd) > 1  # not individual characters
+
+    def test_step_flat_format_in_step(self):
+        """step() correctly unbatches flat admissible commands from step response."""
+        env = _make_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Override _init_game to return flat format for step's replay
+        flat_cmds_after_step = ["take mug 1 from shelf 1", "examine shelf 1", "inventory"]
+
+        real_init_game = env._init_game
+
+        def mock_init_for_step(game_file):
+            fresh_mock = MagicMock()
+            _, raw_obs, info, imgs = real_init_game(game_file)
+            # Override step to return flat format
+            fresh_mock.step.return_value = (
+                [raw_obs],
+                [0.0],
+                [False],
+                {"won": False, "admissible_commands": flat_cmds_after_step},
+            )
+            return fresh_mock, raw_obs, info, imgs
+
+        env._init_game = mock_init_for_step  # type: ignore[assignment]
+        result = env.step(state, Action(text="go to shelf 1"))
+        assert result.next_state.hidden.admissible_commands == tuple(flat_cmds_after_step)
+        for cmd in result.next_state.hidden.admissible_commands:
+            assert isinstance(cmd, str)
+            assert len(cmd) > 1
+
+
+# ---------------------------------------------------------------------------
+# Answer extractor tests
+# ---------------------------------------------------------------------------
+
+
+class SimpleTagExtractor:
+    """Minimal extractor that pulls text from <answer>...</answer>."""
+
+    def extract(self, text: str | None) -> tuple[str | None, dict]:
+        if not text:
+            return None, {}
+        import re
+        m = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+        if m:
+            return m.group(1).strip(), {}
+        return None, {}
+
+
+def _make_cleaned_tag_extractor() -> Any:
+    """Create a CleanedExtractor(TagBased) with a think-stripping pre-cleaner."""
+    import re
+    from llenvs.core.extraction import CleanedExtractor
+
+    def strip_think(text: str) -> str:
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    return CleanedExtractor(inner=SimpleTagExtractor(), pre_cleaners=[strip_think])
+
+
+class TestAlfWorldAnswerExtractor:
+    """Tests for answer_extractor parameter on AlfWorldEnvironment."""
+
+    def test_extractor_applied_to_env_step(self):
+        """Extracted command is forwarded to gym_env.step()."""
+        extractor = SimpleTagExtractor()
+        env = _make_env(answer_extractor=extractor)
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Raw text includes thinking + answer tag; only extracted part should reach TextWorld
+        raw_text = "Let me think... I should go to the shelf. <answer>go to shelf 1</answer>"
+        result = env.step(state, Action(text=raw_text))
+
+        # TextWorld received "go to shelf 1" → shelf observation
+        obs_text = result.next_state.observation.state.text
+        assert "shelf 1" in obs_text
+
+    def test_extracted_action_set_in_step_result(self):
+        """StepResult.extracted_action and resolved_action reflect extracted command."""
+        extractor = SimpleTagExtractor()
+        env = _make_env(answer_extractor=extractor)
+        state, _ = env.reset(options={"task_index": 0})
+
+        raw_text = "Some reasoning <answer>go to desk 1</answer> done."
+        result = env.step(state, Action(text=raw_text))
+
+        assert result.extracted_action == "go to desk 1"
+        assert result.resolved_action == "go to desk 1"
+
+    def test_history_contains_extracted_command(self):
+        """Conversation history stores the clean extracted command, not raw text."""
+        extractor = SimpleTagExtractor()
+        env = _make_env(answer_extractor=extractor)
+        state, _ = env.reset(options={"task_index": 0})
+
+        raw_text = "<think>thinking...</think> <answer>go to shelf 1</answer>"
+        result = env.step(state, Action(text=raw_text))
+
+        assistant_msgs = [
+            m for m in result.next_state.observation.messages if m.get("role") == "assistant"
+        ]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "go to shelf 1"
+        assert "<think>" not in assistant_msgs[0]["content"]
+
+    def test_trajectory_contains_extracted_command(self):
+        """Hidden trajectory stores extracted commands for replay."""
+        extractor = SimpleTagExtractor()
+        env = _make_env(answer_extractor=extractor)
+        state, _ = env.reset(options={"task_index": 0})
+
+        raw_text = "<answer>go to shelf 1</answer>"
+        result = env.step(state, Action(text=raw_text))
+
+        assert result.next_state.hidden.trajectory == ("go to shelf 1",)
+        assert result.next_state.hidden.last_action == "go to shelf 1"
+
+    def test_fallback_to_raw_when_extraction_fails(self):
+        """When extraction returns None, raw action text is used for TextWorld."""
+        extractor = SimpleTagExtractor()
+        env = _make_env(answer_extractor=extractor)
+        state, _ = env.reset(options={"task_index": 0})
+
+        # No <answer> tag → extraction fails → fall back to raw text for env step
+        raw_text = "go to desk 1"
+        result = env.step(state, Action(text=raw_text))
+
+        # StepResult.extracted_action is None (extractor returned None)
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+        # Raw text was still used to step TextWorld
+        obs_text = result.next_state.observation.state.text
+        assert "desk 1" in obs_text
+
+    def test_pre_cleaners_applied_to_history_on_extraction_failure(self):
+        """When extraction fails, pre-cleaners still clean the history text."""
+        extractor = _make_cleaned_tag_extractor()
+        env = _make_env(answer_extractor=extractor)
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Thinking tokens + no answer tag → extraction fails, but pre-cleaners run
+        raw_text = "<think>I need to go to the desk.</think> go to desk 1"
+        result = env.step(state, Action(text=raw_text))
+
+        assert result.extracted_action is None  # no <answer> tag found
+        assistant_msgs = [
+            m for m in result.next_state.observation.messages if m.get("role") == "assistant"
+        ]
+        assert len(assistant_msgs) == 1
+        # <think> block should be stripped from history even though extraction failed
+        assert "<think>" not in assistant_msgs[0]["content"]
+        assert "go to desk 1" in assistant_msgs[0]["content"]
+
+    def test_pre_cleaners_not_applied_when_extractor_is_plain(self):
+        """With a plain (non-CleanedExtractor) extractor, fallback uses raw text."""
+        env = _make_env(answer_extractor=SimpleTagExtractor())
+        state, _ = env.reset(options={"task_index": 0})
+
+        raw_text = "<think>thinking</think> go to desk 1"
+        result = env.step(state, Action(text=raw_text))
+
+        assert result.extracted_action is None
+        assistant_msgs = [
+            m for m in result.next_state.observation.messages if m.get("role") == "assistant"
+        ]
+        # Plain extractor has no pre_cleaners → raw text in history
+        assert assistant_msgs[0]["content"] == raw_text
+
+    def test_no_extractor_uses_raw_text(self):
+        """Without extractor, extracted_action/resolved_action are None."""
+        env = _make_env()  # no extractor
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="go to shelf 1"))
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+
+    def test_extractor_stored_on_env(self):
+        extractor = SimpleTagExtractor()
+        env = AlfWorldEnvironment(
+            game_files=MOCK_GAME_FILES, config={}, answer_extractor=extractor
+        )
+        assert env._answer_extractor is extractor
+
+    def test_no_extractor_stored_as_none(self):
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
+        assert env._answer_extractor is None
+
+    @patch("llenvs.adapters.alfworld.AlfWorldAdapter._get_alfworld")
+    def test_adapter_passes_answer_extractor(self, mock_get):
+        mock_alfworld, mock_env_mod, _ = _make_mock_alfworld()
+        mock_get.return_value = (mock_alfworld, mock_env_mod)
+
+        with patch("llenvs.adapters.alfworld.os.path.isdir", return_value=True):
+            extractor = SimpleTagExtractor()
+            env = AlfWorldAdapter().get_environment(answer_extractor=extractor)
+
+        assert isinstance(env, AlfWorldEnvironment)
+        assert env._answer_extractor is extractor
