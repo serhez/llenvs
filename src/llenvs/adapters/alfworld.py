@@ -486,10 +486,10 @@ class AlfWorldEnvironment:
         # Create fresh env and replay trajectory to reach current state
         gym_env, _, _, _ = self._init_game(state.hidden.game_file)
         for cmd in state.hidden.trajectory:
-            gym_env.step([cmd])
+            gym_env.step(cmd)
 
         # Apply new action
-        obs, scores, dones, infos = gym_env.step([action_text])
+        obs, scores, dones, infos = gym_env.step(action_text)
         gym_env.close()
 
         # Unbatch results

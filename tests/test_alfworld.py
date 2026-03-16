@@ -55,10 +55,9 @@ class MockAlfWorldGymEnv:
         return [obs], infos
 
     def step(
-        self, actions: list[str]
+        self, action: str
     ) -> tuple[list[str], list[float], list[bool], dict[str, list]]:
         self._step_count += 1
-        action = actions[0]
 
         if action == "go to desk 1":
             obs = "You arrive at desk 1. On the desk 1, you see a pencil 1."
@@ -1209,10 +1208,9 @@ class MockThorGymEnv:
         return [obs], infos
 
     def step(
-        self, actions: list[str]
+        self, action: str
     ) -> tuple[list[dict[str, Any]], list[float], list[bool], dict[str, list]]:
         self._step_count += 1
-        action = actions[0]
 
         frame = np.random.randint(0, 255, (300, 300, 3), dtype=np.uint8)
 
