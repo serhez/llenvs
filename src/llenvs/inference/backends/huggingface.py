@@ -554,6 +554,27 @@ class HuggingFaceBackend(ModelBackend):
         results = self.generate([prompt], params)
         return results[0]
 
+    def generate_chat_with_prefix(
+        self,
+        messages: list[ChatMessage],
+        assistant_prefix: str,
+        params: SamplingParams,
+    ) -> GenerationResult:
+        """Generate a continuation from a partial assistant response."""
+        message_dicts = [m.to_dict() for m in messages]
+        if self._tokenizer.chat_template is not None:
+            prompt = self._tokenizer.apply_chat_template(
+                message_dicts,
+                tokenize=False,
+                add_generation_prompt=True,
+                **self._chat_template_kwargs,
+            )
+        else:
+            prompt = self._format_messages_fallback(messages)
+        full_prefix = prompt + assistant_prefix
+        results = self.continue_from_prefix(full_prefix, params, num_continuations=1)
+        return results[0]
+
     def continue_from_prefix(
         self,
         prefix: str,

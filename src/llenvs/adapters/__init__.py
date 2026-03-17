@@ -488,7 +488,7 @@ def _register_adapters() -> None:
     # Register Harbor adapter if available
     try:
         adapter = HarborAdapter()
-        adapter._get_harbor()
+        adapter._get_harbor_api()
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # harbor not installed, skip registration

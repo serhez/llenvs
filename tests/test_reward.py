@@ -146,6 +146,13 @@ class TestSignalBundle:
         found = bundle.by_name("format")
         assert found is None
 
+    def test_by_name_required_raises(self):
+        """Required lookup should raise for missing signals."""
+        signal = Signal(name="correctness", reward_type=RewardType.OUTCOME, reward=1.0)
+        bundle = SignalBundle(signals=(signal,))
+        with pytest.raises(ValueError, match="Signal 'format' not found"):
+            bundle.by_name("format", required=True)
+
     def test_by_type(self):
         """Test filtering signals by type."""
         bundle = SignalBundle(

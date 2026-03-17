@@ -11,7 +11,7 @@ In structured message building mode, the model's context is assembled as:
 1. **System prompt** (if any)
 2. **Task description** — static, set once at reset
 3. **History** — prior (action, observation) pairs, controlled by `history_fn`
-4. **Current state** — the latest observation, always included
+4. **Current state** — the latest observation. On step 0, this is omitted when it is identical to the task description, so the initial prompt is not duplicated.
 
 The `history_fn` parameter controls step 3. It receives a list of `HistoryEntry` objects and returns `ChatMessage` objects for the history portion.
 
@@ -33,7 +33,7 @@ result = run_evaluation(
 
 ### `no_history`
 
-Drops all prior turns. The model sees only the task description and current state. Useful for environments where the current observation is self-contained.
+Drops all prior turns. The model sees only the task description and current state, except for the step-0 dedupe case where an identical initial state is omitted. Useful for environments where the current observation is self-contained.
 
 ```python
 from llenvs.evaluation import run_evaluation, no_history
