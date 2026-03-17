@@ -143,7 +143,7 @@ class TestSignalBundle:
         signal = Signal(name="correctness", reward_type=RewardType.OUTCOME, reward=1.0)
         bundle = SignalBundle(signals=(signal,))
 
-        found = bundle.by_name("format")
+        found = bundle.by_name("format", required=False)
         assert found is None
 
     def test_by_name_required_raises(self):

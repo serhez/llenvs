@@ -259,7 +259,7 @@ class TestHuggingFaceEnvironment:
         assert correctness.reward == 1.0
 
         # No format reward by default
-        assert result.rewards.by_name("format") is None
+        assert result.rewards.by_name("format", required=False) is None
 
     def test_step_incorrect_answer(self, mock_hf_dataset):
         """Test step with incorrect answer."""

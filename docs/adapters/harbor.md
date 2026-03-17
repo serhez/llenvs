@@ -184,7 +184,7 @@ Available in tool mode:
 | `env_factory` | callable | `None` | `(task) -> BaseEnvironment` factory |
 | `verify_factory` | callable | `None` | `(task, env) -> Verifier` factory |
 | `dataset_path` | `str` | `None` | Local path to dataset directory |
-| `environment_type` | `str` | `"docker"` | Harbor environment type |
+| `environment_type` | `str` | `"docker"` | Harbor environment type. Built-in Harbor values include `docker`, `daytona`, `e2b`, `modal`, etc. `llenvs` also accepts `podman-hpc` for a local user-space runtime. |
 | `tool_mode` | `bool` | `False` | Use structured tools instead of text |
 | `max_steps` | `int` | `30` | Maximum steps per episode |
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
@@ -284,10 +284,35 @@ Since both trajectory collection and MC evaluation use the same adapter, results
 
 See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
 
+## `podman-hpc` Runtime
+
+For HPC clusters where Docker is unavailable, `llenvs` can route Harbor tasks through a local `podman-hpc` runtime:
+
+```python
+adapter = HarborAdapter()
+env = adapter.get_environment(
+    "terminal-bench@2.0",
+    environment_type="podman-hpc",
+    max_steps=30,
+)
+```
+
+This path preserves the existing Harbor replay model in `llenvs`: trajectory collection runs on one persistent container instance, and MC rollouts restore saved states by creating fresh instances and replaying the command prefix.
+
+Current v1 behavior:
+
+- Single-container Harbor tasks are supported.
+- Task-local `docker-compose.yaml` is supported for a constrained subset centered on a required `main` service plus sidecars.
+- `exec()`, upload, and download operations target `main`; sidecars are runtime-only support services.
+- Supported compose features are limited to common TerminalBench-style fields (`image`, `build.context`, `build.dockerfile`, `command`, `entrypoint`, `environment`, `working_dir`, `volumes`, `depends_on`, `healthcheck`).
+- Unsupported compose features fail fast (`ports`, custom `networks`, `secrets`, `configs`, `profiles`, `devices`, external volumes).
+- The runtime expects `podman-hpc` to be available on the host.
+- Replay remains text-mode only, exactly like `harbor_restore()`.
+
 ## Limitations
 
 - **No seed support** — Harbor tasks are deterministic (fixed Dockerfiles/test scripts).
-- **Docker required** — Container runtime must be available.
+- **Container runtime required** — Docker or an alternative Harbor-supported runtime must be available.
 - **Network-dependent** — Registry queries and image pulls require network access.
 - **Binary rewards** — Native verifiers produce pass/fail only; use `extra_rewards` for finer-grained scoring (e.g., `JudgeReward`).
 - **Text-mode replay only** — `harbor_restore` supports text mode; tool-mode replay requires storing full `Action` objects (deferred).

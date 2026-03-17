@@ -136,7 +136,7 @@ class TestReasoningGymEnvironment:
         assert correctness.reward == 1.0
 
         # No format reward by default
-        assert result.rewards.by_name("format") is None
+        assert result.rewards.by_name("format", required=False) is None
 
         # Check info
         assert result.info["extracted_answer"] == "4"

@@ -428,7 +428,7 @@ class TestGemEnvironment:
         result = env.step(state, action)
 
         # No format reward by default
-        assert result.rewards.by_name("format") is None
+        assert result.rewards.by_name("format", required=False) is None
 
     def test_custom_extractor(self, mock_single_turn_env):
         """Test with custom extractor."""

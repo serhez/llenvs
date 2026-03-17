@@ -1,6 +1,7 @@
 """Tests for the Harbor adapter."""
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -1142,6 +1143,78 @@ class TestHarborAdapter:
         assert mock_env._stopped is True
         assert mock_env._stop_delete is True
 
+    def test_get_environment_builds_local_podman_hpc_factory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        mock_env = MockHarborEnvironment()
+        task = SimpleNamespace(
+            name="task_01",
+            instruction="Solve the task.",
+            paths=SimpleNamespace(environment_dir="/tmp/task_01/environment"),
+            config=SimpleNamespace(
+                environment=SimpleNamespace(
+                    docker_image="ubuntu:latest",
+                    cpus=1,
+                    memory_mb=1024,
+                    allow_internet=True,
+                )
+            ),
+        )
+        created_verifiers: list[Any] = []
+
+        class FakeTrialPaths:
+            def __init__(self, trial_dir):
+                self.trial_dir = trial_dir
+                self.mkdir_called = False
+
+            def mkdir(self):
+                self.mkdir_called = True
+
+        class FakeVerifier:
+            def __init__(self, task: Any, trial_paths: Any, environment: Any, logger: Any = None):
+                self.task = task
+                self.trial_paths = trial_paths
+                self.environment = environment
+                self.logger = logger
+                created_verifiers.append(self)
+
+            async def verify(self):
+                return MockVerifierResult(rewards={"reward": 1.0})
+
+        podman_cls = MagicMock(return_value=mock_env)
+        monkeypatch.setattr("llenvs.adapters.harbor.PodmanHPCEnvironment", podman_cls)
+
+        api = SimpleNamespace(
+            environment_type_enum=lambda value: f"ENV:{value}",
+            environment_factory=SimpleNamespace(create_environment=MagicMock()),
+            trial_paths_class=FakeTrialPaths,
+            verifier_class=FakeVerifier,
+        )
+        monkeypatch.setattr(HarborAdapter, "_get_harbor_api", lambda self: api)
+
+        adapter = HarborAdapter()
+        env = adapter.get_environment(
+            name="terminal-bench@2.0",
+            tasks=(task,),
+            environment_type="podman-hpc",
+        )
+
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.observation.prompt == "Solve the task."
+        podman_cls.assert_called_once()
+        call = podman_cls.call_args
+        assert call.kwargs["environment_dir"] == Path("/tmp/task_01/environment")
+        assert call.kwargs["environment_name"] == "task_01"
+        assert call.kwargs["task_env_config"] is task.config.environment
+        assert call.kwargs["trial_paths"].mkdir_called is True
+
+        result = env.step(state, Action(text="SUBMIT"))
+        assert result.terminated is True
+        assert result.next_state.metadata.info["reward"] == 1.0
+        assert created_verifiers[0].environment is mock_env
+
     def test_list_environments_requires_harbor(self):
         from llenvs.adapters.harbor import HarborAdapter
 
@@ -1528,3 +1601,268 @@ class TestValidateReplayConsistency:
 
         assert result["matches_reference"] is False
         assert any("Reference mismatch" in d for d in result["divergence_details"])
+
+
+class TestPodmanHPCEnvironment:
+    def _make_trial_paths(self, tmp_path):
+        verifier_dir = tmp_path / "verifier"
+        agent_dir = tmp_path / "agent"
+        artifacts_dir = tmp_path / "artifacts"
+        for path in (verifier_dir, agent_dir, artifacts_dir):
+            path.mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            trial_dir=tmp_path,
+            verifier_dir=verifier_dir,
+            agent_dir=agent_dir,
+            artifacts_dir=artifacts_dir,
+        )
+
+    def _make_task_env_config(self, **kwargs: Any):
+        defaults = {
+            "docker_image": "ubuntu:latest",
+            "cpus": 1,
+            "memory_mb": 1024,
+            "allow_internet": True,
+        }
+        defaults.update(kwargs)
+        return SimpleNamespace(**defaults)
+
+    def test_rejects_compose_without_main_service(self, tmp_path):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+
+        (tmp_path / "docker-compose.yaml").write_text("services:\n  db:\n    image: postgres:latest\n")
+
+        with pytest.raises(ValueError, match="main"):
+            PodmanHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id="session-1",
+                trial_paths=self._make_trial_paths(tmp_path / "trial"),
+                task_env_config=self._make_task_env_config(),
+            )
+
+    def test_start_uses_migrate_run_and_bootstrap_dirs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd: list[str], *, check: bool = True, timeout_sec: int | None = None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_podman_command", fake_run)
+
+        run_async(env.start(force_build=False))
+
+        assert env.is_mounted is False
+        assert calls[0][0] == [
+            "podman-hpc",
+            "migrate",
+            "docker://ubuntu:latest",
+        ]
+        assert calls[1][0][:5] == [
+            "podman-hpc",
+            "run",
+            "-d",
+            "--name",
+            env._container_name,
+        ]
+        assert calls[2][0] == [
+            "podman-hpc",
+            "exec",
+            env._container_name,
+            "bash",
+            "-lc",
+            "mkdir -p /logs/agent /logs/verifier",
+        ]
+
+    def test_start_compose_creates_network_and_starts_services(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "app").mkdir()
+        (tmp_path / "docker-compose.yaml").write_text(
+            """
+services:
+  main:
+    image: ubuntu:latest
+    command: ["sleep", "infinity"]
+    depends_on:
+      - db
+    working_dir: /workspace
+    environment:
+      FOO: bar
+    volumes:
+      - ./app:/workspace:ro
+      - cache:/cache
+  db:
+    image: postgres:latest
+    healthcheck:
+      test: ["CMD", "true"]
+volumes:
+  cache: {}
+""".strip()
+        )
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(docker_image=None),
+        )
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+        waited: list[str] = []
+
+        async def fake_run(cmd: list[str], *, check: bool = True, timeout_sec: int | None = None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        async def fake_wait(service_name: str):
+            waited.append(service_name)
+
+        monkeypatch.setattr(env, "_run_podman_command", fake_run)
+        monkeypatch.setattr(env, "_wait_for_service_health", fake_wait)
+
+        run_async(env.start(force_build=False))
+
+        assert calls[0][0] == ["podman-hpc", "network", "create", env._network_name]
+        assert calls[1][0] == ["podman-hpc", "migrate", "docker://postgres:latest"]
+        assert calls[2][0] == ["podman-hpc", "migrate", "docker://ubuntu:latest"]
+        db_run_idx, db_run = next(
+            (i, cmd)
+            for i, (cmd, _check, _timeout) in enumerate(calls)
+            if "--name" in cmd and "session-1-db" in cmd
+        )
+        main_run_idx, main_run = next(
+            (i, cmd)
+            for i, (cmd, _check, _timeout) in enumerate(calls)
+            if "--name" in cmd and "session-1-main" in cmd
+        )
+        assert db_run_idx < main_run_idx
+        assert "--network" in main_run
+        assert env._network_name in main_run
+        assert "--network-alias" in main_run
+        assert "main" in main_run
+        assert "-w" in main_run
+        assert "/workspace" in main_run
+        assert "-e" in main_run
+        assert "FOO=bar" in main_run
+        assert any(part.endswith(":/workspace:ro") for part in main_run)
+        assert any(part.endswith(":/cache") for part in main_run)
+        assert waited == ["db"]
+        assert calls[-1][0] == [
+            "podman-hpc",
+            "exec",
+            "session-1-main",
+            "bash",
+            "-lc",
+            "mkdir -p /logs/agent /logs/verifier",
+        ]
+
+    def test_exec_targets_main_service_for_compose(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "docker-compose.yaml").write_text(
+            """
+services:
+  main:
+    image: ubuntu:latest
+    command: ["sleep", "infinity"]
+  db:
+    image: postgres:latest
+""".strip()
+        )
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(docker_image=None),
+        )
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd: list[str], *, check: bool = True, timeout_sec: int | None = None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_podman_command", fake_run)
+        env._started = True
+
+        result = run_async(env.exec("pwd"))
+
+        assert result.stdout == "ok"
+        assert calls[0][0] == [
+            "podman-hpc",
+            "exec",
+            "session-1-main",
+            "bash",
+            "-lc",
+            "pwd",
+        ]
+
+    def test_exec_respects_cwd_env_and_timeout(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd: list[str], *, check: bool = True, timeout_sec: int | None = None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_podman_command", fake_run)
+        env._started = True
+
+        result = run_async(
+            env.exec(
+                "pwd",
+                cwd="/workspace",
+                env={"FOO": "bar"},
+                timeout_sec=17,
+            )
+        )
+
+        assert result.stdout == "ok"
+        assert calls[0][0] == [
+            "podman-hpc",
+            "exec",
+            "-w",
+            "/workspace",
+            "-e",
+            "FOO=bar",
+            env._container_name,
+            "bash",
+            "-lc",
+            "pwd",
+        ]
+        assert calls[0][2] == 17

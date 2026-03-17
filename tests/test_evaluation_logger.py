@@ -575,7 +575,8 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        runner.run_batch([0, 1, 2])
+        with pytest.raises(RuntimeError, match="Error resetting task 1"):
+            runner.run_batch([0, 1, 2])
 
         files = list((tmp_path / "logs" / "mock_failing").glob("*.jsonl"))
         lines = files[0].read_text().strip().split("\n")
@@ -596,7 +597,8 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        runner.run_batch([0, 1, 2])
+        with pytest.raises(RuntimeError, match="Error stepping task 1"):
+            runner.run_batch([0, 1, 2])
 
         files = list((tmp_path / "logs" / "mock_step_fail").glob("*.jsonl"))
         lines = files[0].read_text().strip().split("\n")

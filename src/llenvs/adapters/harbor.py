@@ -20,13 +20,18 @@ Reference: https://github.com/laude-institute/harbor
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
+import re
 import shlex
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from llenvs.core.async_utils import run_async
 from llenvs.core.environment import (
@@ -214,6 +219,44 @@ class _HarborAPI:
     verifier_class: Any
 
 
+@dataclass(frozen=True)
+class _CLIResult:
+    stdout: str = ""
+    stderr: str = ""
+    return_code: int = 0
+
+
+@dataclass(frozen=True)
+class _PodmanVolumeMount:
+    source: str
+    target: str
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
+class _PodmanHealthcheck:
+    test: str | tuple[str, ...] | None = None
+    interval_sec: float = 1.0
+    timeout_sec: float = 30.0
+    retries: int = 30
+    start_period_sec: float = 0.0
+
+
+@dataclass(frozen=True)
+class _PodmanServiceSpec:
+    name: str
+    image: str | None
+    build_context: Path | None
+    dockerfile: Path | None
+    command: str | tuple[str, ...] | None
+    entrypoint: str | tuple[str, ...] | None
+    environment: tuple[tuple[str, str], ...]
+    working_dir: str | None
+    volumes: tuple[_PodmanVolumeMount, ...]
+    depends_on: tuple[str, ...]
+    healthcheck: _PodmanHealthcheck | None = None
+
+
 # ── Helpers ─────────────────────────────────────────────────────
 
 
@@ -247,6 +290,700 @@ def _run_verifier(
     verifier = verifier_factory(task, harbor_env)
     result = run_async(verifier.verify())
     return result.rewards
+
+
+def _normalize_container_name(name: str) -> str:
+    normalized = name.lower().replace(".", "-")
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in normalized)
+
+
+_COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
+
+
+def _parse_compose_duration(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return default
+    if text.isdigit():
+        return float(text)
+
+    total = 0.0
+    matched = False
+    for amount, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|s|m|h)", text):
+        matched = True
+        scale = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}[unit]
+        total += float(amount) * scale
+    if matched:
+        return total
+
+    raise ValueError(f"Unsupported compose duration: {value!r}")
+
+
+def _topological_service_order(services: dict[str, _PodmanServiceSpec]) -> list[str]:
+    order: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(name: str) -> None:
+        if name in visited:
+            return
+        if name in visiting:
+            raise ValueError(f"Cyclic compose dependency involving {name!r}")
+        visiting.add(name)
+        spec = services[name]
+        for dep in spec.depends_on:
+            if dep not in services:
+                raise ValueError(f"Compose service {name!r} depends on unknown service {dep!r}")
+            visit(dep)
+        visiting.remove(name)
+        visited.add(name)
+        order.append(name)
+
+    for service_name in services:
+        visit(service_name)
+    return order
+
+
+def _compose_shell_command(
+    value: str | tuple[str, ...] | None,
+    *,
+    entrypoint_present: bool = False,
+) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, tuple):
+        return list(value)
+    if entrypoint_present:
+        return [value]
+    return ["sh", "-lc", value]
+
+
+class PodmanHPCEnvironment:
+    """Local Harbor-compatible runtime using ``podman-hpc``.
+
+    This is a Harbor-facing environment object with the methods the llenvs
+    Harbor adapter and Harbor verifiers rely on. It supports Harbor's default
+    single-container tasks and a constrained task-local ``docker-compose.yaml``
+    subset centered on a ``main`` service plus sidecars.
+    """
+
+    def __init__(
+        self,
+        environment_dir: Path,
+        environment_name: str,
+        session_id: str,
+        trial_paths: Any,
+        task_env_config: Any,
+        logger: logging.Logger | None = None,
+        *,
+        podman_command: str = "podman-hpc",
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        self.environment_dir = Path(environment_dir)
+        self.environment_name = environment_name
+        self.session_id = session_id
+        self.trial_paths = trial_paths
+        self.task_env_config = task_env_config
+        self.logger = logger or logging.getLogger(__name__)
+        self._podman = podman_command
+        self._container_name = _normalize_container_name(session_id)
+        self._image_name = f"hb__{_normalize_container_name(environment_name)}"
+        self._started = False
+        self.is_mounted = False
+
+        self._dockerfile_path = self.environment_dir / "Dockerfile"
+        self._compose_path = self.environment_dir / "docker-compose.yaml"
+        self._network_name = f"{self._container_name}-net"
+        self._volume_root = Path(self.trial_paths.trial_dir) / "compose-volumes"
+        self._compose_services: dict[str, _PodmanServiceSpec] = {}
+        self._service_order: tuple[str, ...] = ()
+        self._service_container_names: dict[str, str] = {}
+        self._main_container_name = self._container_name
+        self._validate_definition()
+
+    def _validate_definition(self) -> None:
+        if self._compose_path.exists():
+            self._compose_services = self._parse_compose_definition()
+            if "main" not in self._compose_services:
+                raise ValueError("Compose environments must define a 'main' service")
+            self._service_order = tuple(_topological_service_order(self._compose_services))
+            self._service_container_names = {
+                name: _normalize_container_name(f"{self.session_id}-{name}")
+                for name in self._compose_services
+            }
+            self._main_container_name = self._service_container_names["main"]
+            return
+
+        docker_image = getattr(self.task_env_config, "docker_image", None)
+        if not self._dockerfile_path.exists() and not docker_image:
+            raise FileNotFoundError(
+                f"{self._dockerfile_path} not found and task_env_config.docker_image is unset."
+            )
+
+    async def _run_podman_command(
+        self,
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: int | None = None,
+    ) -> _CLIResult:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(self.environment_dir),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=os.environ.copy(),
+        )
+        try:
+            if timeout_sec is not None:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    process.communicate(),
+                    timeout=timeout_sec,
+                )
+            else:
+                stdout_b, stderr_b = await process.communicate()
+        except asyncio.TimeoutError:
+            process.terminate()
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+                stdout_b, stderr_b = await process.communicate()
+            raise RuntimeError(f"podman-hpc command timed out after {timeout_sec}s")
+
+        result = _CLIResult(
+            stdout=stdout_b.decode(errors="replace").strip() if stdout_b else "",
+            stderr=stderr_b.decode(errors="replace").strip() if stderr_b else "",
+            return_code=process.returncode or 0,
+        )
+        if check and result.return_code != 0:
+            raise RuntimeError(
+                f"podman-hpc command failed (exit {result.return_code}): "
+                f"{' '.join(cmd)}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+        return result
+
+    def _docker_image_source(self) -> str:
+        image = getattr(self.task_env_config, "docker_image", None)
+        if image is None:
+            raise ValueError("docker_image is required for migrate-based startup")
+        return image if "://" in image else f"docker://{image}"
+
+    def _compose_image_source(self, image: str) -> str:
+        return image if "://" in image else f"docker://{image}"
+
+    def _runtime_env_vars(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "MAIN_IMAGE_NAME": self._image_name,
+                "CONTEXT_DIR": str(self.environment_dir.resolve()),
+                "TEST_DIR": "/tests",
+                "HOST_VERIFIER_LOGS_PATH": str(Path(self.trial_paths.verifier_dir).resolve()),
+                "HOST_AGENT_LOGS_PATH": str(Path(self.trial_paths.agent_dir).resolve()),
+                "ENV_VERIFIER_LOGS_PATH": "/logs/verifier",
+                "ENV_AGENT_LOGS_PATH": "/logs/agent",
+                "CPUS": str(getattr(self.task_env_config, "cpus", 1)),
+                "MEMORY": f"{getattr(self.task_env_config, 'memory_mb', 1024)}M",
+            }
+        )
+        docker_image = getattr(self.task_env_config, "docker_image", None)
+        if docker_image is not None:
+            env["PREBUILT_IMAGE_NAME"] = str(docker_image)
+        return env
+
+    def _interpolate_compose_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            def repl(match: re.Match[str]) -> str:
+                name = match.group(1)
+                default = match.group(2)
+                return self._runtime_env_vars().get(name, default or "")
+
+            return _COMPOSE_VAR_PATTERN.sub(repl, value)
+        if isinstance(value, list):
+            return [self._interpolate_compose_value(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._interpolate_compose_value(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _normalize_environment(self, raw_env: Any) -> tuple[tuple[str, str], ...]:
+        if raw_env is None:
+            return ()
+        if isinstance(raw_env, dict):
+            return tuple(
+                (str(key), "" if value is None else str(value))
+                for key, value in raw_env.items()
+            )
+        if isinstance(raw_env, list):
+            pairs: list[tuple[str, str]] = []
+            for item in raw_env:
+                if not isinstance(item, str):
+                    raise NotImplementedError("Compose environment list entries must be strings")
+                key, sep, value = item.partition("=")
+                pairs.append((key, value if sep else ""))
+            return tuple(pairs)
+        raise NotImplementedError("Unsupported compose environment format")
+
+    def _resolve_volume_source(self, source: str, *, named: bool) -> str:
+        if named:
+            host_path = self._volume_root / source
+            host_path.mkdir(parents=True, exist_ok=True)
+            return str(host_path)
+        host_path = Path(source)
+        if not host_path.is_absolute():
+            host_path = (self.environment_dir / host_path).resolve()
+        return str(host_path)
+
+    def _parse_volume_mount(self, raw_volume: Any) -> _PodmanVolumeMount:
+        if isinstance(raw_volume, str):
+            parts = raw_volume.split(":")
+            if len(parts) < 2:
+                raise NotImplementedError("Compose volume entries must include source and target")
+            source, target = parts[0], parts[1]
+            mode = parts[2] if len(parts) > 2 else ""
+            read_only = "ro" in mode.split(",")
+            named = not source.startswith(("/", ".", "~"))
+            return _PodmanVolumeMount(
+                source=self._resolve_volume_source(source, named=named),
+                target=target,
+                read_only=read_only,
+            )
+
+        if isinstance(raw_volume, dict):
+            volume_type = raw_volume.get("type", "volume")
+            if volume_type not in {"bind", "volume"}:
+                raise NotImplementedError(
+                    f"Unsupported compose volume type: {volume_type!r}"
+                )
+            source = raw_volume.get("source")
+            target = raw_volume.get("target")
+            if not source or not target:
+                raise NotImplementedError("Compose volume mappings require source and target")
+            return _PodmanVolumeMount(
+                source=self._resolve_volume_source(
+                    str(source),
+                    named=volume_type == "volume",
+                ),
+                target=str(target),
+                read_only=bool(raw_volume.get("read_only", False)),
+            )
+
+        raise NotImplementedError("Unsupported compose volume format")
+
+    def _parse_healthcheck(self, raw_healthcheck: Any) -> _PodmanHealthcheck | None:
+        if raw_healthcheck in (None, False):
+            return None
+        if not isinstance(raw_healthcheck, dict):
+            raise NotImplementedError("Unsupported compose healthcheck format")
+        if raw_healthcheck.get("disable") is True:
+            return None
+        test = raw_healthcheck.get("test")
+        if isinstance(test, list):
+            normalized_test: str | tuple[str, ...] | None = tuple(str(part) for part in test)
+        elif test is None or isinstance(test, str):
+            normalized_test = test
+        else:
+            raise NotImplementedError("Unsupported compose healthcheck.test format")
+        return _PodmanHealthcheck(
+            test=normalized_test,
+            interval_sec=_parse_compose_duration(raw_healthcheck.get("interval"), 1.0),
+            timeout_sec=_parse_compose_duration(raw_healthcheck.get("timeout"), 30.0),
+            retries=int(raw_healthcheck.get("retries", 30)),
+            start_period_sec=_parse_compose_duration(raw_healthcheck.get("start_period"), 0.0),
+        )
+
+    def _parse_compose_definition(self) -> dict[str, _PodmanServiceSpec]:
+        data = yaml.safe_load(self._compose_path.read_text()) or {}
+        data = self._interpolate_compose_value(data)
+        if not isinstance(data, dict):
+            raise ValueError("docker-compose.yaml must define a mapping")
+
+        top_level_networks = data.get("networks")
+        if top_level_networks:
+            raise NotImplementedError("Compose networks are not supported by podman-hpc runtime")
+
+        top_level_volumes = data.get("volumes", {})
+        if not isinstance(top_level_volumes, dict):
+            raise ValueError("Top-level compose volumes must be a mapping")
+        for name, cfg in top_level_volumes.items():
+            if not cfg:
+                continue
+            if not isinstance(cfg, dict):
+                raise NotImplementedError("Unsupported top-level compose volume configuration")
+            if cfg.get("external"):
+                raise NotImplementedError(
+                    f"External compose volume {name!r} is not supported"
+                )
+
+        raw_services = data.get("services")
+        if not isinstance(raw_services, dict) or not raw_services:
+            raise ValueError("docker-compose.yaml must define at least one service")
+
+        services: dict[str, _PodmanServiceSpec] = {}
+        for name, raw_service in raw_services.items():
+            if not isinstance(raw_service, dict):
+                raise ValueError(f"Compose service {name!r} must be a mapping")
+            unsupported_keys = {"ports", "networks", "secrets", "configs", "profiles", "devices"}
+            present_unsupported = unsupported_keys.intersection(raw_service)
+            if present_unsupported:
+                raise NotImplementedError(
+                    f"Unsupported compose fields for service {name!r}: "
+                    + ", ".join(sorted(present_unsupported))
+                )
+
+            build_context: Path | None = None
+            dockerfile: Path | None = None
+            build = raw_service.get("build")
+            if isinstance(build, str):
+                build_context = (self.environment_dir / build).resolve()
+            elif isinstance(build, dict):
+                unsupported_build_keys = set(build).difference({"context", "dockerfile"})
+                if unsupported_build_keys:
+                    raise NotImplementedError(
+                        f"Unsupported compose build fields for service {name!r}: "
+                        + ", ".join(sorted(unsupported_build_keys))
+                    )
+                build_context = (self.environment_dir / build.get("context", ".")).resolve()
+                dockerfile_name = build.get("dockerfile")
+                if dockerfile_name is not None:
+                    dockerfile = (build_context / str(dockerfile_name)).resolve()
+            elif build is not None:
+                raise NotImplementedError("Unsupported compose build format")
+
+            image = raw_service.get("image")
+            if build_context is None and image is None:
+                raise ValueError(
+                    f"Compose service {name!r} must define either image or build"
+                )
+
+            command = raw_service.get("command")
+            if isinstance(command, list):
+                normalized_command: str | tuple[str, ...] | None = tuple(
+                    str(part) for part in command
+                )
+            else:
+                normalized_command = None if command is None else str(command)
+
+            entrypoint = raw_service.get("entrypoint")
+            if isinstance(entrypoint, list):
+                normalized_entrypoint: str | tuple[str, ...] | None = tuple(
+                    str(part) for part in entrypoint
+                )
+            else:
+                normalized_entrypoint = None if entrypoint is None else str(entrypoint)
+
+            depends_on_raw = raw_service.get("depends_on", ())
+            if isinstance(depends_on_raw, dict):
+                depends_on = tuple(str(dep_name) for dep_name in depends_on_raw)
+            elif isinstance(depends_on_raw, list):
+                depends_on = tuple(str(dep_name) for dep_name in depends_on_raw)
+            elif depends_on_raw in (None, ()):
+                depends_on = ()
+            else:
+                raise NotImplementedError("Unsupported compose depends_on format")
+
+            services[name] = _PodmanServiceSpec(
+                name=name,
+                image=None if image is None else str(image),
+                build_context=build_context,
+                dockerfile=dockerfile,
+                command=normalized_command,
+                entrypoint=normalized_entrypoint,
+                environment=self._normalize_environment(raw_service.get("environment")),
+                working_dir=(
+                    None
+                    if raw_service.get("working_dir") is None
+                    else str(raw_service.get("working_dir"))
+                ),
+                volumes=tuple(
+                    self._parse_volume_mount(volume)
+                    for volume in raw_service.get("volumes", ())
+                ),
+                depends_on=depends_on,
+                healthcheck=self._parse_healthcheck(raw_service.get("healthcheck")),
+            )
+        return services
+
+    def _service_image_name(self, service_name: str) -> str:
+        return f"{self._image_name}__{_normalize_container_name(service_name)}"
+
+    async def _prepare_service_image(
+        self,
+        service: _PodmanServiceSpec,
+        *,
+        force_build: bool,
+    ) -> str:
+        if service.build_context is not None:
+            build_cmd = [
+                self._podman,
+                "build",
+                "-t",
+                self._service_image_name(service.name),
+            ]
+            if service.dockerfile is not None:
+                build_cmd.extend(["-f", str(service.dockerfile)])
+            build_cmd.append(str(service.build_context))
+            await self._run_podman_command(build_cmd)
+            return self._service_image_name(service.name)
+
+        if service.image is None:
+            raise ValueError(f"Compose service {service.name!r} has no runnable image")
+        if not force_build:
+            await self._run_podman_command(
+                [self._podman, "migrate", self._compose_image_source(service.image)],
+            )
+        return service.image
+
+    def _build_service_run_command(
+        self,
+        service: _PodmanServiceSpec,
+        image_ref: str,
+    ) -> list[str]:
+        cmd = [
+            self._podman,
+            "run",
+            "-d",
+            "--name",
+            self._service_container_names[service.name],
+            "--network",
+            self._network_name,
+            "--network-alias",
+            service.name,
+            "--cpus",
+            str(getattr(self.task_env_config, "cpus", 1)),
+            "--memory",
+            f"{getattr(self.task_env_config, 'memory_mb', 1024)}M",
+        ]
+        if service.working_dir:
+            cmd.extend(["-w", service.working_dir])
+        for key, value in service.environment:
+            cmd.extend(["-e", f"{key}={value}"])
+        for volume in service.volumes:
+            suffix = ":ro" if volume.read_only else ""
+            cmd.extend(["-v", f"{volume.source}:{volume.target}{suffix}"])
+        if service.entrypoint is not None:
+            entrypoint_value = (
+                json.dumps(list(service.entrypoint))
+                if isinstance(service.entrypoint, tuple)
+                else service.entrypoint
+            )
+            cmd.extend(["--entrypoint", entrypoint_value])
+        cmd.append(image_ref)
+        cmd.extend(
+            _compose_shell_command(
+                service.command,
+                entrypoint_present=service.entrypoint is not None,
+            )
+        )
+        return cmd
+
+    def _healthcheck_command(self, service_name: str) -> str | None:
+        healthcheck = self._compose_services[service_name].healthcheck
+        if healthcheck is None or healthcheck.test is None:
+            return None
+        if isinstance(healthcheck.test, str):
+            return healthcheck.test
+        if not healthcheck.test:
+            return None
+        head, *tail = healthcheck.test
+        upper_head = head.upper()
+        if upper_head == "NONE":
+            return None
+        if upper_head == "CMD":
+            return shlex.join(tail)
+        if upper_head == "CMD-SHELL":
+            return " ".join(tail)
+        return shlex.join(list(healthcheck.test))
+
+    async def _wait_for_service_health(self, service_name: str) -> None:
+        healthcheck = self._compose_services[service_name].healthcheck
+        command = self._healthcheck_command(service_name)
+        if healthcheck is None or command is None:
+            return
+        if healthcheck.start_period_sec > 0:
+            await asyncio.sleep(healthcheck.start_period_sec)
+        attempts = max(1, healthcheck.retries)
+        for attempt in range(attempts):
+            result = await self.exec_service(
+                service_name,
+                command,
+                timeout_sec=max(1, int(healthcheck.timeout_sec)),
+            )
+            if result.return_code == 0:
+                return
+            if attempt < attempts - 1:
+                await asyncio.sleep(healthcheck.interval_sec)
+        raise RuntimeError(
+            f"Compose service {service_name!r} failed healthcheck after {attempts} attempts"
+        )
+
+    async def exec_service(
+        self,
+        service_name: str,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+    ) -> _CLIResult:
+        if service_name not in self._service_container_names:
+            raise ValueError(f"Unknown compose service: {service_name}")
+        cmd = [self._podman, "exec"]
+        if cwd:
+            cmd.extend(["-w", cwd])
+        if env:
+            for key, value in env.items():
+                cmd.extend(["-e", f"{key}={value}"])
+        cmd.extend([self._service_container_names[service_name], "bash", "-lc", command])
+        return await self._run_podman_command(cmd, check=False, timeout_sec=timeout_sec)
+
+    async def _bootstrap_runtime_dirs(self) -> None:
+        if self._compose_services:
+            await self.exec_service("main", "mkdir -p /logs/agent /logs/verifier")
+            return
+        await self._run_podman_command(
+            [
+                self._podman,
+                "exec",
+                self._main_container_name,
+                "bash",
+                "-lc",
+                "mkdir -p /logs/agent /logs/verifier",
+            ],
+            check=False,
+        )
+
+    async def _start_compose(self, force_build: bool) -> None:
+        network_cmd = [self._podman, "network", "create"]
+        if getattr(self.task_env_config, "allow_internet", True) is False:
+            network_cmd.append("--internal")
+        network_cmd.append(self._network_name)
+        await self._run_podman_command(network_cmd)
+
+        image_refs: dict[str, str] = {}
+        for service_name in self._service_order:
+            image_refs[service_name] = await self._prepare_service_image(
+                self._compose_services[service_name],
+                force_build=force_build,
+            )
+
+        for service_name in self._service_order:
+            await self._run_podman_command(
+                self._build_service_run_command(
+                    self._compose_services[service_name],
+                    image_refs[service_name],
+                )
+            )
+            if self._compose_services[service_name].healthcheck is not None:
+                await self._wait_for_service_health(service_name)
+
+        await self._bootstrap_runtime_dirs()
+        self._started = True
+
+    async def start(self, force_build: bool = False) -> None:
+        if self._compose_services:
+            await self._start_compose(force_build=force_build)
+            return
+
+        docker_image = getattr(self.task_env_config, "docker_image", None)
+        if docker_image and not force_build:
+            await self._run_podman_command(
+                [self._podman, "migrate", self._docker_image_source()],
+            )
+            image_ref = docker_image
+        else:
+            await self._run_podman_command(
+                [self._podman, "build", "-t", self._image_name, str(self.environment_dir)],
+            )
+            image_ref = self._image_name
+
+        run_cmd = [
+            self._podman,
+            "run",
+            "-d",
+            "--name",
+            self._container_name,
+        ]
+        if getattr(self.task_env_config, "allow_internet", True) is False:
+            run_cmd.extend(["--network", "none"])
+        run_cmd.extend([image_ref, "bash", "-lc", "while true; do sleep 3600; done"])
+        await self._run_podman_command(run_cmd)
+        await self._bootstrap_runtime_dirs()
+        self._started = True
+
+    async def stop(self, delete: bool = True) -> None:
+        if not self._started:
+            return
+        try:
+            if self._compose_services:
+                verb = ["rm", "-f"] if delete else ["stop"]
+                for service_name in reversed(self._service_order):
+                    await self._run_podman_command(
+                        [
+                            self._podman,
+                            *verb,
+                            self._service_container_names[service_name],
+                        ],
+                        check=False,
+                    )
+                if delete:
+                    await self._run_podman_command(
+                        [self._podman, "network", "rm", self._network_name],
+                        check=False,
+                    )
+            else:
+                cmd = [self._podman, "rm", "-f", self._container_name]
+                if not delete:
+                    cmd = [self._podman, "stop", self._container_name]
+                await self._run_podman_command(cmd, check=False)
+        finally:
+            self._started = False
+
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+    ) -> _CLIResult:
+        if not self._started:
+            raise RuntimeError("podman-hpc environment has not been started")
+
+        cmd = [self._podman, "exec"]
+        if cwd:
+            cmd.extend(["-w", cwd])
+        if env:
+            for key, value in env.items():
+                cmd.extend(["-e", f"{key}={value}"])
+        cmd.extend([self._main_container_name, "bash", "-lc", command])
+        return await self._run_podman_command(cmd, check=False, timeout_sec=timeout_sec)
+
+    async def upload_file(self, source_path: Path | str, target_path: str) -> None:
+        await self._run_podman_command(
+            [self._podman, "cp", str(source_path), f"{self._main_container_name}:{target_path}"]
+        )
+
+    async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
+        await self._run_podman_command(
+            [self._podman, "cp", str(source_dir), f"{self._main_container_name}:{target_dir}"]
+        )
+
+    async def download_file(self, source_path: str, target_path: Path | str) -> None:
+        await self._run_podman_command(
+            [self._podman, "cp", f"{self._main_container_name}:{source_path}", str(target_path)]
+        )
+
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+        await self._run_podman_command(
+            [self._podman, "cp", f"{self._main_container_name}:{source_dir}", str(target_dir)]
+        )
 
 
 # ── Text-mode environment ───────────────────────────────────────
@@ -995,6 +1732,8 @@ class HarborAdapter:
             if env_factory is None:
 
                 def build_harbor_env(task: Any) -> Any:
+                    if environment_type == "podman-hpc":
+                        return self._create_local_environment(api, task, environment_type, **kwargs)
                     return self._create_harbor_environment(api, task, environment_type, **kwargs)
 
                 env_factory = build_harbor_env
@@ -1114,6 +1853,31 @@ class HarborAdapter:
         )
         env.trial_paths = trial_paths
         return env
+
+    @staticmethod
+    def _create_local_environment(
+        api: "_HarborAPI",
+        task: Any,
+        environment_type: str,
+        **kwargs: Any,
+    ) -> Any:
+        trial_paths = api.trial_paths_class(trial_dir=Path("trials") / str(uuid.uuid4()))
+        trial_paths.mkdir()
+
+        if environment_type == "podman-hpc":
+            env = PodmanHPCEnvironment(
+                environment_dir=Path(task.paths.environment_dir),
+                environment_name=task.name,
+                session_id=str(uuid.uuid4()),
+                trial_paths=trial_paths,
+                task_env_config=task.config.environment,
+                logger=logger,
+                **kwargs,
+            )
+            env.trial_paths = trial_paths
+            return env
+
+        raise ValueError(f"Unsupported local Harbor environment type: {environment_type}")
 
 
 # ── Restore / replay utilities ──────────────────────────────────
