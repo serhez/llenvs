@@ -426,6 +426,13 @@ def _coalesce_messages(messages: list[ChatMessage]) -> list[ChatMessage]:
     return result
 
 
+def _normalize_text_for_comparison(text: str | None) -> str:
+    """Normalize observation text for equality checks."""
+    if not text:
+        return ""
+    return "\n".join(line.rstrip() for line in text.strip().splitlines())
+
+
 @dataclass
 class TrajectoryRunner:
     """Runs trajectories through an environment with a model backend.
@@ -596,8 +603,19 @@ class TrajectoryRunner:
         fn = self.history_fn if self.history_fn is not None else full_history
         messages.extend(fn(history_entries))
 
+        # Skip the synthetic step-0 state when it exactly mirrors the task.
+        # Many adapters initialize both fields from the same prompt text, and
+        # structured mode would otherwise duplicate the first user message.
+        skip_current_state = False
+        if obs.state is not None and task is not None and state.metadata.step == 0:
+            skip_current_state = (
+                _normalize_text_for_comparison(obs.state.text)
+                == _normalize_text_for_comparison(task.text)
+                and obs.state.images == task.images
+            )
+
         # Always add current state observation (with optional turn info prefix)
-        if obs.state is not None:
+        if obs.state is not None and not skip_current_state:
             state_text = obs.state.text
             if tic is not None:
                 turn = state.metadata.step + 1
@@ -1108,6 +1126,13 @@ class TrajectoryRunner:
         if not task_indices:
             return _aggregate_results([])
 
+        if self.env_factory is not None and not self.environment.spec.pure_step:
+            return self._run_batch_inner_multi_instance(
+                task_indices,
+                progress_callback,
+                eval_logger,
+            )
+
         max_steps = self.environment.spec.max_steps or 100
         total = len(task_indices)
         result_slots: list[TrajectoryResult | None] = [None] * total
@@ -1313,6 +1338,249 @@ class TrajectoryRunner:
             progress_callback(total, total)
 
         return _aggregate_results([r for r in result_slots if r is not None])
+
+    def _run_batch_inner_multi_instance(
+        self,
+        task_indices: list[int],
+        progress_callback: Callable[[int, int], None] | None,
+        eval_logger: _EvalLogger | None,
+    ) -> BatchResult:
+        """Run batch trajectories with one environment instance per task."""
+        if not task_indices:
+            return _aggregate_results([])
+
+        assert self.env_factory is not None
+
+        max_steps = self.environment.spec.max_steps or 100
+        total = len(task_indices)
+        result_slots: list[TrajectoryResult | None] = [None] * total
+
+        envs: list[Environment[Any]] = []
+        active: list[_ActiveTrajectory] = []
+        try:
+            # Phase 1: Reset all tasks with dedicated env instances
+            for pos, task_index in enumerate(task_indices):
+                env = self.env_factory()
+                envs.append(env)
+                try:
+                    state, reset_info = env.reset(options={"task_index": task_index})
+                    trajectory: Trajectory[Any] = Trajectory.create(state)
+                    active.append(
+                        _ActiveTrajectory(
+                            position=pos,
+                            task_index=task_index,
+                            state=state,
+                            reset_info=reset_info,
+                            trajectory=trajectory,
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Error resetting task {task_index}: {e}")
+                    if eval_logger:
+                        eval_logger.on_error(
+                            _ErrorEvent(
+                                task_index=task_index,
+                                phase="reset",
+                                error=str(e),
+                            )
+                        )
+                    result_slots[pos] = TrajectoryResult(
+                        trajectory=Trajectory(
+                            episode_id=f"error_{task_index}",
+                            initial_state=State(
+                                observation=Observation(prompt=""),
+                                hidden=None,
+                                metadata=_error_metadata(task_index),
+                            ),
+                        ),
+                        total_reward=0.0,
+                        success=False,
+                        metadata={"error": str(e), "task_index": task_index},
+                    )
+
+            reset_errors = total - len(active)
+
+            # Phase 2: Lockstep generation
+            completed_count = reset_errors
+            while True:
+                remaining = [t for t in active if not t.done]
+                if not remaining:
+                    break
+
+                messages_batch = [
+                    self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+                ]
+
+                # Use tool calling if tools available and backend supports it
+                first_obs = remaining[0].state.observation
+                tools = list(first_obs.available_tools)
+                use_native_tools = tools and self.backend.capabilities.supports_function_calling
+                use_text_tools = tools and not use_native_tools and self.tool_call_parser is not None
+
+                if use_native_tools:
+                    gen_results = self.backend.generate_with_tools_batch(
+                        messages_batch, tools, self.sampling_params
+                    )
+                elif use_text_tools:
+                    assert self.tool_call_parser is not None
+                    tools_text = self.tool_call_parser.format_tools(tuple(tools))
+                    modified_batch = [
+                        self._inject_tools_in_messages(msgs, tools_text)
+                        for msgs in messages_batch
+                    ]
+                    raw_results = self.backend.generate_chat_batch(
+                        modified_batch, self.sampling_params
+                    )
+                    gen_results = []
+                    for raw in raw_results:
+                        parsed = self.tool_call_parser.parse(raw.text or "", tuple(tools))
+                        gen_results.append(
+                            GenerationResult(
+                                text=parsed.text,
+                                finish_reason=raw.finish_reason,
+                                tool_calls=parsed.tool_calls,
+                                token_logprobs=raw.token_logprobs,
+                                prompt_tokens=raw.prompt_tokens,
+                                completion_tokens=raw.completion_tokens,
+                                metadata=raw.metadata,
+                            )
+                        )
+                else:
+                    if tools and not hasattr(self, "_batch_tool_warning_logged"):
+                        logger.warning(
+                            "Environment provides %d tools but backend '%s' does "
+                            "not support function calling and no tool_call_parser "
+                            "is configured. Tools will be ignored.",
+                            len(tools),
+                            type(self.backend).__name__,
+                        )
+                        self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
+                    gen_results = self.backend.generate_chat_batch(
+                        messages_batch, self.sampling_params
+                    )
+
+                # Second elicitation for truncated outputs in batch
+                if self.sampling_params.second_elicitation_suffix is not None:
+                    needs_elicitation = [
+                        (i, gen)
+                        for i, gen in enumerate(gen_results)
+                        if gen.finish_reason == StopReason.MAX_TOKENS
+                    ]
+                    if needs_elicitation:
+                        suffix = self._resolve_elicitation_suffix()
+                        elicitation_msgs = [
+                            self._build_elicitation_messages(messages_batch[i], gen, suffix)
+                            for i, gen in needs_elicitation
+                        ]
+                        elicitation_params = self._elicitation_params()
+                        elicitation_results = self.backend.generate_chat_batch(
+                            elicitation_msgs, elicitation_params
+                        )
+                        for (i, first), second in zip(needs_elicitation, elicitation_results):
+                            gen_results[i] = self._merge_elicitation(first, second, suffix)
+
+                actions_for_step = [gen_result.to_agent_action() for gen_result in gen_results]
+                with ThreadPoolExecutor() as executor:
+                    step_futures = {
+                        t.position: executor.submit(envs[t.position].step, t.state, action)
+                        for t, action in zip(remaining, actions_for_step)
+                    }
+
+                    for t, gen_result, action in zip(
+                        remaining,
+                        gen_results,
+                        actions_for_step,
+                    ):
+                        try:
+                            step_result = step_futures[t.position].result()
+
+                            gen_info: dict[str, Any] = {
+                                "prompt_tokens": gen_result.prompt_tokens,
+                                "completion_tokens": gen_result.completion_tokens,
+                                "finish_reason": gen_result.finish_reason.name,
+                            }
+                            if gen_result.has_tool_calls:
+                                gen_info["has_tool_calls"] = True
+                                gen_info["num_tool_calls"] = len(gen_result.tool_calls)
+
+                            transition: Transition[Any] = Transition(
+                                state=t.state,
+                                action=action,
+                                next_state=step_result.next_state,
+                                rewards=step_result.rewards,
+                                extracted_action=step_result.extracted_action,
+                                resolved_action=step_result.resolved_action,
+                                info={
+                                    "generation": gen_info,
+                                    "step": step_result.info,
+                                },
+                            )
+                            t.trajectory.add_transition(transition)
+                            t.state = step_result.next_state
+                            t.step_count += 1
+
+                            if eval_logger:
+                                eval_logger.on_step(
+                                    _StepEvent(
+                                        task_index=t.task_index,
+                                        step_num=t.step_count,
+                                        reward_total=step_result.rewards.total,
+                                        prompt_tokens=gen_result.prompt_tokens,
+                                        completion_tokens=gen_result.completion_tokens,
+                                        has_tool_calls=gen_result.has_tool_calls,
+                                        num_tool_calls=len(gen_result.tool_calls)
+                                        if gen_result.has_tool_calls
+                                        else 0,
+                                    )
+                                )
+
+                            if step_result.done or t.step_count >= max_steps:
+                                t.done = True
+                                completed_count += 1
+                                if eval_logger:
+                                    result = _finalize_trajectory(t)
+                                    eval_logger.on_trajectory_end(
+                                        _TrajectoryEndEvent(
+                                            task_index=t.task_index,
+                                            success=result.success,
+                                            total_reward=result.total_reward,
+                                            num_steps=len(t.trajectory),
+                                            completed_count=completed_count,
+                                            total_count=total,
+                                        )
+                                    )
+                        except Exception as e:
+                            logger.error(f"Error stepping task {t.task_index}: {e}")
+                            t.done = True
+                            t.error = str(e)
+                            completed_count += 1
+                            if eval_logger:
+                                eval_logger.on_error(
+                                    _ErrorEvent(
+                                        task_index=t.task_index,
+                                        phase="step",
+                                        error=str(e),
+                                    )
+                                )
+
+                if progress_callback:
+                    done_count = reset_errors + sum(1 for t in active if t.done)
+                    progress_callback(done_count, total)
+
+            # Phase 3: Build results
+            for t in active:
+                result_slots[t.position] = _finalize_trajectory(t)
+
+            if progress_callback:
+                progress_callback(total, total)
+
+            return _aggregate_results([r for r in result_slots if r is not None])
+        finally:
+            for env in envs:
+                try:
+                    env.close()
+                except Exception:
+                    pass
 
     # -----------------------------------------------------------------
     # Run-from-state API

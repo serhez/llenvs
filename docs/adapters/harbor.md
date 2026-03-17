@@ -67,17 +67,44 @@ print(result.rewards.total)
 ### With Pre-loaded Tasks
 
 ```python
-import harbor
+from pathlib import Path
+import uuid
 
-tasks = tuple(sorted(harbor.load_tasks("/path/to/dataset"), key=lambda t: t.name))
-env_factory = lambda task: harbor.create_environment(task, environment_type="docker")
-verifier_factory = lambda task, env: harbor.create_verifier(task, env)
+from harbor.environments.factory import EnvironmentFactory
+from harbor.models.environment_type import EnvironmentType
+from harbor.models.task.task import Task
+from harbor.models.trial.paths import TrialPaths
+from harbor.verifier.verifier import Verifier
+
+tasks = tuple(
+    sorted(
+        (Task(p) for p in Path("/path/to/dataset").iterdir()),
+        key=lambda t: t.name,
+    )
+)
+
+def env_factory(task):
+    trial_paths = TrialPaths(trial_dir=Path("trials") / str(uuid.uuid4()))
+    trial_paths.mkdir()
+    env = EnvironmentFactory.create_environment(
+        type=EnvironmentType.DOCKER,
+        environment_dir=task.paths.environment_dir,
+        environment_name=task.name,
+        session_id=str(uuid.uuid4()),
+        trial_paths=trial_paths,
+        task_env_config=task.config.environment,
+    )
+    env.trial_paths = trial_paths
+    return env
+
+def verifier_factory(task, env):
+    return Verifier(task=task, trial_paths=env.trial_paths, environment=env)
 
 env = adapter.get_environment(
     "custom-dataset",
     tasks=tasks,
-    harbor_env_factory=env_factory,
-    verifier_factory=verifier_factory,
+    env_factory=env_factory,
+    verify_factory=verifier_factory,
     max_steps=50,
 )
 ```
@@ -95,7 +122,7 @@ The `tool_mode` parameter on `get_environment()` selects the mode.
 
 ### Docker
 
-Container lifecycle is delegated entirely to Harbor. Harbor supports multiple providers (Docker, Daytona, E2B, Modal). The adapter creates and starts containers via `harbor_env_factory`, executes commands via `env.exec()`, and stops containers on `close()` or `reset()`.
+Container lifecycle is delegated entirely to Harbor. Harbor supports multiple providers (Docker, Daytona, E2B, Modal). The adapter creates and starts containers via `env_factory`, executes commands via `env.exec()`, and stops containers on `close()` or `reset()`.
 
 ### Task Discovery
 
@@ -154,8 +181,8 @@ Available in tool mode:
 |---|---|---|---|
 | `name` | `str` | `"terminal-bench@2.0"` | Dataset name with optional version (`"dataset@version"`) |
 | `tasks` | `tuple` | `None` | Pre-loaded Harbor Task objects |
-| `harbor_env_factory` | callable | `None` | `(task) -> BaseEnvironment` factory |
-| `verifier_factory` | callable | `None` | `(task, env) -> Verifier` factory |
+| `env_factory` | callable | `None` | `(task) -> BaseEnvironment` factory |
+| `verify_factory` | callable | `None` | `(task, env) -> Verifier` factory |
 | `dataset_path` | `str` | `None` | Local path to dataset directory |
 | `environment_type` | `str` | `"docker"` | Harbor environment type |
 | `tool_mode` | `bool` | `False` | Use structured tools instead of text |

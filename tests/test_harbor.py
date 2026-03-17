@@ -1,6 +1,7 @@
 """Tests for the Harbor adapter."""
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -9,6 +10,7 @@ import pytest
 from llenvs.core.reward import RewardType
 from llenvs.core.state import Action, State
 from llenvs.core.tools import ToolCall
+from llenvs.core.trajectory import Trajectory
 
 # ── Mock Harbor objects ─────────────────────────────────────────
 
@@ -45,20 +47,32 @@ class MockHarborEnvironment:
         self,
         exec_results: list[MockExecResult] | None = None,
         start_error: bool = False,
+        start_delay: float = 0.0,
     ):
         self._exec_results = exec_results or [MockExecResult(stdout="ok")]
         self._exec_index = 0
         self._started = False
         self._stopped = False
         self._start_error = start_error
+        self._start_delay = start_delay
+        self._start_force_build: bool | None = None
+        self._stop_delete: bool | None = None
         self._exec_history: list[str] = []
+        self.is_mounted = True
+        self.trial_paths: Any | None = None
 
-    async def start(self) -> None:
+    async def start(self, force_build: bool = False) -> None:
+        if self._start_delay:
+            import asyncio
+
+            await asyncio.sleep(self._start_delay)
         if self._start_error:
             raise RuntimeError("Container failed to start")
+        self._start_force_build = force_build
         self._started = True
 
-    async def stop(self) -> None:
+    async def stop(self, delete: bool = True) -> None:
+        self._stop_delete = delete
         self._stopped = True
 
     async def exec(self, command: str, timeout_sec: int = 120, **kwargs: Any) -> MockExecResult:
@@ -70,6 +84,15 @@ class MockHarborEnvironment:
         return MockExecResult(stdout="", stderr="", return_code=0)
 
     async def upload_file(self, local_path: str, remote_path: str) -> None:
+        pass
+
+    async def upload_dir(self, source_dir: str, target_dir: str) -> None:
+        pass
+
+    async def download_dir(self, source_dir: str, target_dir: str) -> None:
+        pass
+
+    async def download_file(self, source_path: str, target_path: str) -> None:
         pass
 
 
@@ -127,6 +150,7 @@ def _make_env(
     max_steps: int = 30,
     submit_keyword: str = "SUBMIT",
     verify_on_truncation: bool = True,
+    start_timeout: int | None = 120,
     exec_timeout: int = 120,
     extra_rewards: tuple = (),
     dataset_name: str = "terminal-bench",
@@ -147,6 +171,7 @@ def _make_env(
         max_steps=max_steps,
         submit_keyword=submit_keyword,
         verify_on_truncation=verify_on_truncation,
+        start_timeout=start_timeout,
         exec_timeout=exec_timeout,
         extra_rewards=extra_rewards,
     )
@@ -158,6 +183,7 @@ def _make_tool_env(
     verifier_result: MockVerifierResult | None = None,
     max_steps: int = 30,
     verify_on_truncation: bool = True,
+    start_timeout: int | None = 120,
     exec_timeout: int = 120,
     extra_rewards: tuple = (),
     dataset_name: str = "terminal-bench",
@@ -177,6 +203,7 @@ def _make_tool_env(
         dataset_name=dataset_name,
         max_steps=max_steps,
         verify_on_truncation=verify_on_truncation,
+        start_timeout=start_timeout,
         exec_timeout=exec_timeout,
         extra_rewards=extra_rewards,
     )
@@ -451,6 +478,29 @@ class TestHarborEnvironment:
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
 
+    def test_reset_runner_messages_do_not_repeat_instruction(self):
+        from unittest.mock import MagicMock
+
+        from llenvs.evaluation.runner import TrajectoryRunner
+        from llenvs.inference.protocol import SamplingParams
+
+        env = _make_env()
+        state, _ = _reset_env(env)
+        trajectory = Trajectory.create(state)
+        runner = TrajectoryRunner(
+            environment=env,
+            backend=MagicMock(),
+            sampling_params=SamplingParams(),
+            system_prompt="System prompt.",
+        )
+
+        messages = runner.build_messages(state, trajectory=trajectory)
+
+        assert len(messages) == 2
+        assert messages[0].role == "system"
+        assert messages[1].role == "user"
+        assert messages[1].content == state.observation.prompt
+
     def test_reset_requires_task_index(self):
         env = _make_env()
         with pytest.raises(ValueError, match="task_index"):
@@ -461,6 +511,12 @@ class TestHarborEnvironment:
         with pytest.raises((ValueError, IndexError)):
             env.reset(options={"task_index": 5})
 
+    def test_reset_start_timeout_raises(self):
+        mock_env = MockHarborEnvironment(start_delay=0.01)
+        env = _make_env(harbor_env=mock_env, start_timeout=0.001)
+        with pytest.raises(TimeoutError, match="Harbor container start timed out"):
+            _reset_env(env)
+
     def test_step_executes_command(self):
         mock_env = MockHarborEnvironment(
             exec_results=[MockExecResult(stdout="file1.txt\nfile2.txt")]
@@ -468,7 +524,10 @@ class TestHarborEnvironment:
         env = _make_env(harbor_env=mock_env)
         state, _ = _reset_env(env)
         result = env.step(state, Action(text="ls"))
-        assert "file1.txt" in result.next_state.observation.state.text
+        state_text = ""
+        if result.next_state.observation.state is not None:
+            state_text = result.next_state.observation.state.text or ""
+        assert "file1.txt" in state_text
         assert result.terminated is False
         assert result.truncated is False
 
@@ -582,7 +641,9 @@ class TestHarborEnvironment:
         env = _make_env(harbor_env=mock_env)
         state, _ = _reset_env(env)
         result = env.step(state, Action(text="rm /root"))
-        obs_text = result.next_state.observation.state.text
+        obs_text = ""
+        if result.next_state.observation.state is not None:
+            obs_text = result.next_state.observation.state.text or ""
         assert "permission denied" in obs_text
 
     def test_step_nonzero_exit_not_terminal(self):
@@ -689,6 +750,12 @@ class TestHarborToolEnvironment:
         state, info = _reset_env(env)
         assert isinstance(state, State)
         assert state.observation.available_tools == env.available_tools
+
+    def test_reset_start_timeout_raises(self):
+        mock_env = MockHarborEnvironment(start_delay=0.01)
+        env = _make_tool_env(harbor_env=mock_env, start_timeout=0.001)
+        with pytest.raises(TimeoutError, match="Harbor container start timed out"):
+            _reset_env(env)
 
     def test_execute_command(self):
         mock_env = MockHarborEnvironment(
@@ -856,8 +923,14 @@ class TestHarborAdapter:
         from llenvs.adapters.harbor import HarborAdapter
 
         adapter = HarborAdapter()
+
+        def boom() -> Any:
+            raise ImportError("harbor")
+
+        adapter._get_harbor_api = boom  # type: ignore[assignment]
+
         with pytest.raises(ImportError, match="harbor"):
-            adapter._get_harbor()
+            adapter._get_harbor_api()
 
     def test_get_native_answer_extractor_returns_none(self):
         from llenvs.adapters.harbor import HarborAdapter
@@ -916,8 +989,8 @@ class TestHarborAdapter:
         env = adapter.get_environment(
             name="test",
             tasks=tasks,
-            harbor_env_factory=env_factory,
-            verifier_factory=verifier_factory,
+            env_factory=env_factory,
+            verify_factory=verifier_factory,
             tool_mode=False,
         )
         assert isinstance(env, HarborEnvironment)
@@ -935,16 +1008,149 @@ class TestHarborAdapter:
         env = adapter.get_environment(
             name="test",
             tasks=tasks,
-            harbor_env_factory=env_factory,
-            verifier_factory=verifier_factory,
+            env_factory=env_factory,
+            verify_factory=verifier_factory,
             tool_mode=True,
         )
         assert isinstance(env, HarborToolEnvironment)
+
+    def test_list_environments_uses_registry_client(self, monkeypatch: pytest.MonkeyPatch):
+        from llenvs.adapters.harbor import HarborAdapter, _HarborAPI
+
+        client = MagicMock()
+        client.get_datasets.return_value = [
+            SimpleNamespace(name="terminal-bench", version="2.0"),
+            SimpleNamespace(name="swe-bench", version="1.0"),
+        ]
+        api = _HarborAPI(
+            registry_client_factory=SimpleNamespace(create=MagicMock(return_value=client)),
+            task_client=object,
+            task_class=object,
+            task_paths_class=object,
+            environment_factory=object,
+            environment_type_enum=str,
+            trial_paths_class=object,
+            verifier_class=object,
+        )
+        monkeypatch.setattr(HarborAdapter, "_get_harbor_api", lambda self: api)
+
+        adapter = HarborAdapter()
+        assert adapter.list_environments() == ["swe-bench@1.0", "terminal-bench@2.0"]
+
+    def test_get_environment_loads_local_tasks_from_dataset_path(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        task_a = tmp_path / "task_a"
+        task_b = tmp_path / "task_b"
+        ignored = tmp_path / "notes"
+        for path in (task_a, task_b, ignored):
+            path.mkdir()
+
+        class FakeTaskPaths:
+            def __init__(self, path):
+                self.path = path
+
+            def is_valid(self, disable_verification: bool = False) -> bool:
+                return self.path.name.startswith("task_")
+
+        class FakeTask:
+            def __init__(self, path):
+                self.name = path.name
+                self.instruction = f"Instruction for {path.name}"
+
+        api = SimpleNamespace(task_paths_class=FakeTaskPaths, task_class=FakeTask)
+        monkeypatch.setattr(HarborAdapter, "_get_harbor_api", lambda self: api)
+
+        adapter = HarborAdapter()
+        env = adapter.get_environment(
+            name="local-dataset",
+            dataset_path=str(tmp_path),
+            env_factory=_make_harbor_env_factory(),
+            verify_factory=_make_verifier_factory(),
+        )
+
+        assert [task.name for task in env._tasks] == ["task_a", "task_b"]
+
+    def test_get_environment_builds_modern_env_and_verifier_factories(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        mock_env = MockHarborEnvironment()
+        task = SimpleNamespace(
+            name="task_01",
+            instruction="Solve the task.",
+            paths=SimpleNamespace(environment_dir="/tmp/task_01/environment"),
+            config=SimpleNamespace(environment=SimpleNamespace()),
+        )
+        env_factory = MagicMock(return_value=mock_env)
+        created_verifiers: list[Any] = []
+
+        class FakeTrialPaths:
+            def __init__(self, trial_dir):
+                self.trial_dir = trial_dir
+                self.mkdir_called = False
+
+            def mkdir(self):
+                self.mkdir_called = True
+
+        class FakeVerifier:
+            def __init__(self, task: Any, trial_paths: Any, environment: Any, logger: Any = None):
+                self.task = task
+                self.trial_paths = trial_paths
+                self.environment = environment
+                self.logger = logger
+                created_verifiers.append(self)
+
+            async def verify(self):
+                return MockVerifierResult(rewards={"reward": 1.0})
+
+        api = SimpleNamespace(
+            environment_type_enum=lambda value: f"ENV:{value}",
+            environment_factory=SimpleNamespace(create_environment=env_factory),
+            trial_paths_class=FakeTrialPaths,
+            verifier_class=FakeVerifier,
+        )
+        monkeypatch.setattr(HarborAdapter, "_get_harbor_api", lambda self: api)
+
+        adapter = HarborAdapter()
+        env = adapter.get_environment(name="terminal-bench@2.0", tasks=(task,))
+
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.observation.prompt == "Solve the task."
+        assert mock_env._started is True
+        assert mock_env._start_force_build is False
+
+        env_call = env_factory.call_args
+        assert env_call.kwargs["type"] == "ENV:docker"
+        assert env_call.kwargs["environment_name"] == "task_01"
+        assert env_call.kwargs["environment_dir"] == "/tmp/task_01/environment"
+        assert env_call.kwargs["task_env_config"] is task.config.environment
+        assert env_call.kwargs["trial_paths"].mkdir_called is True
+        assert mock_env.trial_paths is env_call.kwargs["trial_paths"]
+
+        result = env.step(state, Action(text="SUBMIT"))
+        assert result.terminated is True
+        assert result.next_state.metadata.info["reward"] == 1.0
+        assert created_verifiers[0].task is task
+        assert created_verifiers[0].environment is mock_env
+        assert created_verifiers[0].trial_paths is mock_env.trial_paths
+
+        env.close()
+        assert mock_env._stopped is True
+        assert mock_env._stop_delete is True
 
     def test_list_environments_requires_harbor(self):
         from llenvs.adapters.harbor import HarborAdapter
 
         adapter = HarborAdapter()
+        def boom() -> Any:
+            raise ImportError("harbor")
+
+        adapter._get_harbor_api = boom  # type: ignore[assignment]
+
         with pytest.raises(ImportError):
             adapter.list_environments()
 

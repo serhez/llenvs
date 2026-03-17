@@ -644,6 +644,30 @@ class MockMultiTurnEnv:
         return SignalBundle.empty()
 
 
+class MockNonPureSingleTurnEnv(MockSingleTurnEnv):
+    """Non-pure variant that enforces episode consistency."""
+
+    def __init__(self, num_tasks: int = 5):
+        super().__init__(num_tasks=num_tasks)
+        self._current_episode_id: str | None = None
+
+    @property
+    def spec(self):
+        return EnvironmentSpec(name="mock_non_pure_single", max_steps=1, pure_step=False)
+
+    def reset(self, *, seed=None, options=None):
+        state, info = super().reset(seed=seed, options=options)
+        self._current_episode_id = state.metadata.episode_id
+        return state, info
+
+    def step(self, state, action):
+        if state.metadata.episode_id != self._current_episode_id:
+            raise RuntimeError("episode mismatch")
+        result = super().step(state, action)
+        self._current_episode_id = result.next_state.metadata.episode_id
+        return result
+
+
 class BatchTrackingBackend(ModelBackend):
     """Backend that tracks batch vs individual generation calls."""
 
@@ -698,6 +722,25 @@ class TestTrajectoryRunnerBatch:
         assert len(result.trajectory_results) == 5
         assert backend.individual_call_count == 0
         assert backend.batch_call_sizes == [5]
+
+    def test_non_pure_env_factory_allows_parallel_batch(self):
+        """Non-pure envs should run in parallel when env_factory is provided."""
+        base_env = MockNonPureSingleTurnEnv(num_tasks=3)
+        backend = BatchTrackingBackend()
+
+        def env_factory():
+            return MockNonPureSingleTurnEnv(num_tasks=3)
+
+        runner = TrajectoryRunner(
+            environment=base_env,
+            backend=backend,
+            env_factory=env_factory,
+        )
+
+        result = runner.run_batch([0, 1, 2])
+
+        assert len(result.trajectory_results) == 3
+        assert backend.batch_call_sizes == [3]
 
     def test_multi_turn_decreasing_batch_sizes(self):
         """Batch sizes decrease as trajectories finish."""

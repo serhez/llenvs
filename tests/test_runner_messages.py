@@ -279,6 +279,24 @@ class TestStructuredMessageBuilding:
         assert "Explore the dungeon." in messages[0].content
         assert "You are in a dark room." in messages[0].content
 
+    def test_structured_skips_duplicate_initial_state_when_same_as_task(self):
+        """Step 0 should not repeat identical task/state text."""
+        runner = self._make_runner()
+
+        task = ObservationContent(text="Repeat me once.")
+        initial_state = _make_state(
+            prompt="Repeat me once.",
+            task=task,
+            state=ObservationContent(text="Repeat me once."),
+        )
+        trajectory = Trajectory.create(initial_state)
+
+        messages = runner._build_messages(initial_state, trajectory=trajectory)
+
+        assert len(messages) == 1
+        assert messages[0].role == "user"
+        assert messages[0].content == "Repeat me once."
+
 
 # =============================================================================
 # History function integration tests

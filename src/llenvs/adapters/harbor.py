@@ -19,11 +19,13 @@ Reference: https://github.com/laude-institute/harbor
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shlex
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from llenvs.core.async_utils import run_async
@@ -49,6 +51,15 @@ from llenvs.core.tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
+    if timeout is None:
+        return run_async(coro)
+    try:
+        return run_async(asyncio.wait_for(coro, timeout=timeout))
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"{label} timed out after {timeout}s") from exc
 
 # ── Tool definitions (for tool mode) ────────────────────────────
 
@@ -191,6 +202,18 @@ class HarborReward:
         )
 
 
+@dataclass(frozen=True)
+class _HarborAPI:
+    registry_client_factory: Any
+    task_client: Any
+    task_class: Any
+    task_paths_class: Any
+    environment_factory: Any
+    environment_type_enum: Any
+    trial_paths_class: Any
+    verifier_class: Any
+
+
 # ── Helpers ─────────────────────────────────────────────────────
 
 
@@ -253,6 +276,7 @@ class HarborEnvironment:
         max_steps: int = 30,
         submit_keyword: str = "SUBMIT",
         verify_on_truncation: bool = True,
+        start_timeout: int | None = 120,
         exec_timeout: int = 120,
         extra_rewards: tuple[RewardFunction, ...] = (),
     ) -> None:
@@ -263,6 +287,7 @@ class HarborEnvironment:
         self._max_steps = max_steps
         self._submit_keyword = submit_keyword
         self._verify_on_truncation = verify_on_truncation
+        self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
@@ -320,7 +345,7 @@ class HarborEnvironment:
         # Stop previous container if running
         if self._harbor_env is not None:
             try:
-                run_async(self._harbor_env.stop())
+                run_async(self._harbor_env.stop(delete=True))
             except Exception:
                 pass
 
@@ -329,7 +354,11 @@ class HarborEnvironment:
 
         # Create and start container
         self._harbor_env = self._harbor_env_factory(task)
-        run_async(self._harbor_env.start())
+        _run_with_timeout(
+            self._harbor_env.start(force_build=False),
+            self._start_timeout,
+            "Harbor container start",
+        )
 
         instruction = getattr(task, "instruction", str(task))
 
@@ -477,7 +506,7 @@ class HarborEnvironment:
         """Stop the running container."""
         if self._harbor_env is not None:
             try:
-                run_async(self._harbor_env.stop())
+                run_async(self._harbor_env.stop(delete=True))
             except Exception:
                 pass
             self._harbor_env = None
@@ -510,6 +539,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         dataset_name: str = "terminal-bench",
         max_steps: int = 30,
         verify_on_truncation: bool = True,
+        start_timeout: int | None = 120,
         exec_timeout: int = 120,
         extra_rewards: tuple[RewardFunction, ...] = (),
     ) -> None:
@@ -519,6 +549,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         self._dataset_name = dataset_name
         self._max_steps = max_steps
         self._verify_on_truncation = verify_on_truncation
+        self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
 
         self._tools = HARBOR_TOOLS
@@ -578,7 +609,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         # Stop previous container
         if self._harbor_env is not None:
             try:
-                run_async(self._harbor_env.stop())
+                run_async(self._harbor_env.stop(delete=True))
             except Exception:
                 pass
 
@@ -587,7 +618,11 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
 
         # Create and start container
         self._harbor_env = self._harbor_env_factory(task)
-        run_async(self._harbor_env.start())
+        _run_with_timeout(
+            self._harbor_env.start(force_build=False),
+            self._start_timeout,
+            "Harbor container start",
+        )
 
         instruction = getattr(task, "instruction", str(task))
 
@@ -822,7 +857,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         """Stop the running container."""
         if self._harbor_env is not None:
             try:
-                run_async(self._harbor_env.stop())
+                run_async(self._harbor_env.stop(delete=True))
             except Exception:
                 pass
             self._harbor_env = None
@@ -843,12 +878,28 @@ class HarborAdapter:
     def name(self) -> str:
         return "harbor"
 
-    def _get_harbor(self) -> Any:
-        """Import and return the harbor module."""
+    def _get_harbor_api(self) -> Any:
+        """Import and return Harbor API handles."""
         try:
-            import harbor
+            from harbor.environments.factory import EnvironmentFactory
+            from harbor.models.environment_type import EnvironmentType
+            from harbor.models.task.paths import TaskPaths
+            from harbor.models.task.task import Task
+            from harbor.models.trial.paths import TrialPaths
+            from harbor.registry.client.factory import RegistryClientFactory
+            from harbor.tasks.client import TaskClient
+            from harbor.verifier.verifier import Verifier
 
-            return harbor
+            return _HarborAPI(
+                registry_client_factory=RegistryClientFactory,
+                task_client=TaskClient,
+                task_class=Task,
+                task_paths_class=TaskPaths,
+                environment_factory=EnvironmentFactory,
+                environment_type_enum=EnvironmentType,
+                trial_paths_class=TrialPaths,
+                verifier_class=Verifier,
+            )
         except ImportError as e:
             raise ImportError(
                 "harbor is required for HarborAdapter. "
@@ -879,21 +930,24 @@ class HarborAdapter:
         Raises:
             ImportError: If harbor is not installed.
         """
-        harbor = self._get_harbor()
-        registry = harbor.get_registry()
-        return sorted(registry.list_datasets())
+        api = self._get_harbor_api()
+        client = api.registry_client_factory.create()
+        datasets = client.get_datasets()
+        names = {f"{dataset.name}@{dataset.version}" for dataset in datasets}
+        return sorted(names)
 
     def get_environment(
         self,
         name: str = "terminal-bench@2.0",
         tasks: tuple[Any, ...] | None = None,
-        harbor_env_factory: Any | None = None,
-        verifier_factory: Any | None = None,
+        env_factory: Any | None = None,
+        verify_factory: Any | None = None,
         dataset_path: str | None = None,
         environment_type: str = "docker",
         tool_mode: bool = False,
         max_steps: int = 30,
         submit_keyword: str = "SUBMIT",
+        start_timeout: int | None = 120,
         exec_timeout: int = 120,
         verify_on_truncation: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
@@ -905,9 +959,9 @@ class HarborAdapter:
             name: Dataset name with optional version (e.g., "terminal-bench@2.0").
             tasks: Pre-loaded tuple of Harbor Task objects. If None, loaded
                 from Harbor's registry or ``dataset_path``.
-            harbor_env_factory: Callable ``(task) -> BaseEnvironment`` creating
+            env_factory: Callable ``(task) -> BaseEnvironment`` creating
                 Harbor container environments. If None, built from harbor library.
-            verifier_factory: Callable ``(task, env) -> Verifier``. If None,
+            verify_factory: Callable ``(task, env) -> Verifier``. If None,
                 built from harbor library.
             dataset_path: Local path to dataset directory. Used when tasks
                 and factories are not provided.
@@ -917,6 +971,7 @@ class HarborAdapter:
                 with text-based commands.
             max_steps: Maximum steps per episode.
             submit_keyword: Text mode only — keyword triggering submission.
+            start_timeout: Timeout (seconds) for container start/reset.
             exec_timeout: Per-command timeout in seconds.
             verify_on_truncation: Run verifier when truncating at max_steps.
             extra_rewards: Additional reward functions.
@@ -928,53 +983,56 @@ class HarborAdapter:
         dataset_name, _version = self._parse_name(name)
 
         # Load tasks and create factories from Harbor if not provided
-        if tasks is None or harbor_env_factory is None or verifier_factory is None:
-            harbor = self._get_harbor()
+        if tasks is None or env_factory is None or verify_factory is None:
+            api = self._get_harbor_api()
 
             if tasks is None:
                 if dataset_path is not None:
-                    tasks = tuple(sorted(harbor.load_tasks(dataset_path), key=lambda t: t.name))
+                    tasks = self._load_tasks_from_path(api, dataset_path)
                 else:
-                    registry = harbor.get_registry()
-                    tasks = tuple(
-                        sorted(
-                            registry.get_tasks(dataset_name, version=_version),
-                            key=lambda t: t.name,
-                        )
+                    tasks = self._load_tasks_from_registry(api, dataset_name, _version)
+
+            if env_factory is None:
+
+                def build_harbor_env(task: Any) -> Any:
+                    return self._create_harbor_environment(api, task, environment_type, **kwargs)
+
+                env_factory = build_harbor_env
+
+            if verify_factory is None:
+
+                def build_verifier(task: Any, env: Any) -> Any:
+                    return api.verifier_class(
+                        task=task,
+                        trial_paths=env.trial_paths,
+                        environment=env,
+                        logger=logger,
                     )
 
-            if harbor_env_factory is None:
-
-                def harbor_env_factory(task: Any) -> Any:
-                    return harbor.create_environment(
-                        task, environment_type=environment_type, **kwargs
-                    )
-
-            if verifier_factory is None:
-
-                def verifier_factory(task: Any, env: Any) -> Any:
-                    return harbor.create_verifier(task, env)
+                verify_factory = build_verifier
 
         if tool_mode:
             return HarborToolEnvironment(
                 tasks=tasks,
-                harbor_env_factory=harbor_env_factory,
-                verifier_factory=verifier_factory,
+                harbor_env_factory=env_factory,
+                verifier_factory=verify_factory,
                 dataset_name=dataset_name,
                 max_steps=max_steps,
                 verify_on_truncation=verify_on_truncation,
+                start_timeout=start_timeout,
                 exec_timeout=exec_timeout,
                 extra_rewards=extra_rewards,
             )
 
         return HarborEnvironment(
             tasks=tasks,
-            harbor_env_factory=harbor_env_factory,
-            verifier_factory=verifier_factory,
+            harbor_env_factory=env_factory,
+            verifier_factory=verify_factory,
             dataset_name=dataset_name,
             max_steps=max_steps,
             submit_keyword=submit_keyword,
             verify_on_truncation=verify_on_truncation,
+            start_timeout=start_timeout,
             exec_timeout=exec_timeout,
             extra_rewards=extra_rewards,
         )
@@ -1004,6 +1062,58 @@ class HarborAdapter:
             "version": version,
             "description": f"Harbor containerized environment ({dataset_name})",
         }
+
+    @staticmethod
+    def _load_tasks_from_path(api: "_HarborAPI", dataset_path: str) -> tuple[Any, ...]:
+        tasks_root = Path(dataset_path)
+        if not tasks_root.exists():
+            raise FileNotFoundError(f"Dataset path does not exist: {dataset_path}")
+
+        tasks: list[Any] = []
+        for entry in sorted(tasks_root.iterdir()):
+            if not entry.is_dir():
+                continue
+            task_paths = api.task_paths_class(entry)
+            if task_paths.is_valid():
+                tasks.append(api.task_class(entry))
+
+        if not tasks:
+            raise ValueError(
+                "No valid Harbor tasks found in dataset_path. "
+                "Expected task directories with instruction.md, task.toml, and environment/."
+            )
+
+        return tuple(sorted(tasks, key=lambda t: t.name))
+
+    @staticmethod
+    def _load_tasks_from_registry(
+        api: "_HarborAPI", dataset_name: str, version: str | None
+    ) -> tuple[Any, ...]:
+        client = api.registry_client_factory.create()
+        spec = client.get_dataset_spec(dataset_name, version=version)
+        task_ids = [task.to_source_task_id() for task in spec.tasks]
+        task_dirs = api.task_client().download_tasks(task_ids=task_ids)
+        tasks = [api.task_class(task_dir=task_dir) for task_dir in task_dirs]
+        return tuple(sorted(tasks, key=lambda t: t.name))
+
+    @staticmethod
+    def _create_harbor_environment(
+        api: "_HarborAPI", task: Any, environment_type: str, **kwargs: Any
+    ) -> Any:
+        trial_paths = api.trial_paths_class(trial_dir=Path("trials") / str(uuid.uuid4()))
+        trial_paths.mkdir()
+        env_type = api.environment_type_enum(environment_type)
+        env = api.environment_factory.create_environment(
+            type=env_type,
+            environment_dir=task.paths.environment_dir,
+            environment_name=task.name,
+            session_id=str(uuid.uuid4()),
+            trial_paths=trial_paths,
+            task_env_config=task.config.environment,
+            **kwargs,
+        )
+        env.trial_paths = trial_paths
+        return env
 
 
 # ── Restore / replay utilities ──────────────────────────────────

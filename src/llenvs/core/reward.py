@@ -71,11 +71,21 @@ class SignalBundle:
         """Weighted sum of all numeric rewards (skips feedback-only signals)."""
         return sum(s.reward * s.weight for s in self.signals if s.reward is not None)
 
-    def by_name(self, name: str) -> Signal | None:
-        """Get a signal by name."""
+    def by_name(self, name: str, *, required: bool = True) -> Signal | None:
+        """Get a signal by name.
+
+        If ``required=True`` (default) and the signal is missing, raises ValueError.
+        """
         for signal in self.signals:
             if signal.name == name:
                 return signal
+        if required:
+            available = ", ".join(sorted({s.name for s in self.signals}))
+            if available:
+                raise ValueError(
+                    f"Signal {name!r} not found. Available: [{available}]"
+                )
+            raise ValueError(f"Signal {name!r} not found. No signals available.")
         return None
 
     def by_type(self, reward_type: RewardType) -> tuple[Signal, ...]:
