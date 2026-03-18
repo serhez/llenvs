@@ -27,7 +27,7 @@ import re
 import shlex
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -140,6 +140,36 @@ HARBOR_TOOLS: tuple[ToolDefinition, ...] = (
 
 
 @dataclass(frozen=True)
+class HarborSnapshotOptions:
+    """Options required to export and restore an exact Harbor snapshot."""
+
+    file_locks: bool = False
+    tcp_established: bool = False
+    tcp_close: bool = False
+    ignore_volumes: bool = False
+
+
+@dataclass(frozen=True)
+class HarborSnapshotRef:
+    """Reference to an exact runtime snapshot artifact on disk."""
+
+    runtime: str
+    relative_path: str
+    options: HarborSnapshotOptions = field(default_factory=HarborSnapshotOptions)
+
+
+@dataclass(frozen=True)
+class HarborSnapshotEligibility:
+    """Static exact-snapshot eligibility for a Harbor task."""
+
+    task_index: int
+    task_name: str
+    eligible: bool
+    reason_code: str | None = None
+    reason_detail: str | None = None
+
+
+@dataclass(frozen=True)
 class HarborHidden:
     """Hidden state for Harbor environments.
 
@@ -150,6 +180,7 @@ class HarborHidden:
         episode_step: Current step in the episode.
         last_action: Text of the last action taken.
         trajectory: Command history (frozen tuple).
+        snapshot_ref: Optional exact runtime snapshot artifact for this state.
     """
 
     task_index: int
@@ -158,6 +189,7 @@ class HarborHidden:
     episode_step: int
     last_action: str | None = None
     trajectory: tuple[str, ...] = ()
+    snapshot_ref: HarborSnapshotRef | None = None
 
 
 # ── Reward function ─────────────────────────────────────────────
@@ -297,7 +329,121 @@ def _normalize_container_name(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in normalized)
 
 
+def _normalize_snapshot_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized not in {"replay", "snapshot_exact"}:
+        raise ValueError(
+            f"Unknown Harbor state capture mode: {mode!r}. "
+            "Valid values: ['replay', 'snapshot_exact']"
+        )
+    return normalized
+
+
+def _snapshot_relative_path(
+    snapshot_artifact_root: Path,
+    state: State[HarborHidden],
+) -> Path:
+    return (
+        Path(snapshot_artifact_root.name)
+        / _normalize_container_name(state.hidden.task_name)
+        / state.metadata.episode_id
+        / f"state_{state.metadata.step:04d}.tar"
+    )
+
+
+def _snapshot_runtime_name(harbor_env: Any) -> str:
+    runtime = getattr(harbor_env, "snapshot_runtime", None)
+    if isinstance(runtime, str) and runtime:
+        return runtime
+    raise RuntimeError(
+        "Harbor exact snapshots require a runtime that exposes snapshot_runtime"
+    )
+
+
+def _capture_state_snapshot(
+    harbor_env: Any,
+    state: State[HarborHidden],
+    *,
+    state_capture_mode: str,
+    snapshot_artifact_root: Path | None,
+    snapshot_options: HarborSnapshotOptions,
+) -> State[HarborHidden]:
+    if state_capture_mode == "replay":
+        return state
+    if snapshot_artifact_root is None:
+        raise ValueError(
+            "snapshot_artifact_root is required when state_capture_mode='snapshot_exact'"
+        )
+
+    export_checkpoint = getattr(harbor_env, "export_checkpoint", None)
+    if not callable(export_checkpoint):
+        raise RuntimeError(
+            "Harbor exact snapshots require a runtime with export_checkpoint() support"
+        )
+
+    relative_path = _snapshot_relative_path(snapshot_artifact_root, state)
+    artifact_path = snapshot_artifact_root.parent / relative_path
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    run_async(
+        export_checkpoint(
+            artifact_path,
+            file_locks=snapshot_options.file_locks,
+            tcp_established=snapshot_options.tcp_established,
+            ignore_volumes=snapshot_options.ignore_volumes,
+        )
+    )
+    return State(
+        observation=state.observation,
+        hidden=replace(
+            state.hidden,
+            snapshot_ref=HarborSnapshotRef(
+                runtime=_snapshot_runtime_name(harbor_env),
+                relative_path=str(relative_path),
+                options=snapshot_options,
+            ),
+        ),
+        metadata=state.metadata,
+    )
+
+
+def _restore_state_snapshot(
+    harbor_env: Any,
+    snapshot_ref: HarborSnapshotRef,
+    *,
+    artifact_root: Path | str,
+) -> None:
+    restore_checkpoint = getattr(harbor_env, "restore_checkpoint", None)
+    if not callable(restore_checkpoint):
+        raise RuntimeError(
+            "Harbor exact snapshots require a runtime with restore_checkpoint() support"
+        )
+
+    runtime_name = _snapshot_runtime_name(harbor_env)
+    if snapshot_ref.runtime != runtime_name:
+        raise ValueError(
+            f"Snapshot runtime mismatch: dataset requires {snapshot_ref.runtime!r}, "
+            f"but environment runtime is {runtime_name!r}"
+        )
+
+    import_path = Path(artifact_root) / snapshot_ref.relative_path
+    if not import_path.exists():
+        raise FileNotFoundError(f"Snapshot artifact not found: {import_path}")
+
+    run_async(
+        restore_checkpoint(
+            import_path,
+            file_locks=snapshot_ref.options.file_locks,
+            tcp_established=snapshot_ref.options.tcp_established,
+            tcp_close=snapshot_ref.options.tcp_close,
+            ignore_volumes=snapshot_ref.options.ignore_volumes,
+        )
+    )
+
+
 _COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}:]+)(?::-([^}]*))?\}")
+_PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS = frozenset(
+    {"ports", "networks", "secrets", "configs", "profiles", "devices"}
+)
 
 
 def _parse_compose_duration(value: Any, default: float) -> float:
@@ -362,6 +508,201 @@ def _compose_shell_command(
     return ["sh", "-lc", value]
 
 
+def _normalize_compose_environment(raw_env: Any) -> tuple[tuple[str, str], ...]:
+    if raw_env is None:
+        return ()
+    if isinstance(raw_env, dict):
+        return tuple(
+            (str(key), "" if value is None else str(value))
+            for key, value in raw_env.items()
+        )
+    if isinstance(raw_env, list):
+        pairs: list[tuple[str, str]] = []
+        for item in raw_env:
+            if not isinstance(item, str):
+                raise NotImplementedError("Compose environment list entries must be strings")
+            key, sep, value = item.partition("=")
+            pairs.append((key, value if sep else ""))
+        return tuple(pairs)
+    raise NotImplementedError("Unsupported compose environment format")
+
+
+def _validate_compose_volume_entry(raw_volume: Any) -> None:
+    if isinstance(raw_volume, str):
+        parts = raw_volume.split(":")
+        if len(parts) < 2:
+            raise NotImplementedError("Compose volume entries must include source and target")
+        return
+
+    if isinstance(raw_volume, dict):
+        volume_type = raw_volume.get("type", "volume")
+        if volume_type not in {"bind", "volume"}:
+            raise NotImplementedError(
+                f"Unsupported compose volume type: {volume_type!r}"
+            )
+        source = raw_volume.get("source")
+        target = raw_volume.get("target")
+        if not source or not target:
+            raise NotImplementedError("Compose volume mappings require source and target")
+        return
+
+    raise NotImplementedError("Unsupported compose volume format")
+
+
+def _validate_compose_healthcheck(raw_healthcheck: Any) -> None:
+    if raw_healthcheck in (None, False):
+        return
+    if not isinstance(raw_healthcheck, dict):
+        raise NotImplementedError("Unsupported compose healthcheck format")
+    if raw_healthcheck.get("disable") is True:
+        return
+    test = raw_healthcheck.get("test")
+    if not isinstance(test, (list, str, type(None))):
+        raise NotImplementedError("Unsupported compose healthcheck.test format")
+    _parse_compose_duration(raw_healthcheck.get("interval"), 1.0)
+    _parse_compose_duration(raw_healthcheck.get("timeout"), 30.0)
+    _parse_compose_duration(raw_healthcheck.get("start_period"), 0.0)
+
+
+def _analyze_podman_snapshot_definition(
+    *,
+    task_index: int,
+    task_name: str,
+    environment_dir: Path,
+    task_env_config: Any,
+) -> HarborSnapshotEligibility:
+    dockerfile_path = environment_dir / "Dockerfile"
+    compose_path = environment_dir / "docker-compose.yaml"
+
+    def ineligible(code: str, detail: str) -> HarborSnapshotEligibility:
+        return HarborSnapshotEligibility(
+            task_index=task_index,
+            task_name=task_name,
+            eligible=False,
+            reason_code=code,
+            reason_detail=detail,
+        )
+
+    if not compose_path.exists():
+        docker_image = getattr(task_env_config, "docker_image", None)
+        if not dockerfile_path.exists() and not docker_image:
+            return ineligible(
+                "missing_container_source",
+                "Task defines neither environment/Dockerfile nor task_env_config.docker_image.",
+            )
+        return HarborSnapshotEligibility(task_index=task_index, task_name=task_name, eligible=True)
+
+    try:
+        data = yaml.safe_load(compose_path.read_text()) or {}
+    except Exception as exc:
+        return ineligible("invalid_compose_yaml", str(exc))
+
+    if not isinstance(data, dict):
+        return ineligible("invalid_compose_yaml", "docker-compose.yaml must define a mapping")
+
+    top_level_networks = data.get("networks")
+    if top_level_networks:
+        return ineligible(
+            "unsupported_compose_networks",
+            "Compose networks are not supported by podman-hpc runtime.",
+        )
+
+    top_level_volumes = data.get("volumes", {})
+    if not isinstance(top_level_volumes, dict):
+        return ineligible(
+            "invalid_compose_volumes",
+            "Top-level compose volumes must be a mapping.",
+        )
+    for name, cfg in top_level_volumes.items():
+        if not cfg:
+            continue
+        if not isinstance(cfg, dict):
+            return ineligible(
+                "invalid_compose_volumes",
+                "Unsupported top-level compose volume configuration.",
+            )
+        if cfg.get("external"):
+            return ineligible(
+                "unsupported_external_volume",
+                f"External compose volume {name!r} is not supported.",
+            )
+
+    raw_services = data.get("services")
+    if not isinstance(raw_services, dict) or not raw_services:
+        return ineligible(
+            "invalid_compose_services",
+            "docker-compose.yaml must define at least one service.",
+        )
+
+    if "main" not in raw_services:
+        return ineligible(
+            "missing_main_service",
+            "Compose environments must define a 'main' service.",
+        )
+
+    if len(raw_services) != 1:
+        return ineligible(
+            "multi_service_compose",
+            f"Exact Harbor snapshots currently support only one compose service; found {len(raw_services)}.",
+        )
+
+    for name, raw_service in raw_services.items():
+        if not isinstance(raw_service, dict):
+            return ineligible(
+                "invalid_compose_service",
+                f"Compose service {name!r} must be a mapping.",
+            )
+
+        present_unsupported = _PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS.intersection(
+            raw_service
+        )
+        if present_unsupported:
+            return ineligible(
+                "unsupported_compose_service_fields",
+                f"Unsupported compose fields for service {name!r}: "
+                + ", ".join(sorted(present_unsupported)),
+            )
+
+        build = raw_service.get("build")
+        if isinstance(build, dict):
+            unsupported_build_keys = set(build).difference({"context", "dockerfile"})
+            if unsupported_build_keys:
+                return ineligible(
+                    "unsupported_compose_build_fields",
+                    f"Unsupported compose build fields for service {name!r}: "
+                    + ", ".join(sorted(unsupported_build_keys)),
+                )
+        elif build is not None and not isinstance(build, str):
+            return ineligible(
+                "invalid_compose_build",
+                "Unsupported compose build format.",
+            )
+
+        image = raw_service.get("image")
+        if build is None and image is None:
+            return ineligible(
+                "missing_build_or_image",
+                f"Compose service {name!r} must define either image or build.",
+            )
+
+        depends_on_raw = raw_service.get("depends_on", ())
+        if not isinstance(depends_on_raw, (dict, list, tuple, type(None))):
+            return ineligible(
+                "invalid_compose_depends_on",
+                "Unsupported compose depends_on format.",
+            )
+
+        try:
+            _normalize_compose_environment(raw_service.get("environment"))
+            for volume in raw_service.get("volumes", ()):
+                _validate_compose_volume_entry(volume)
+            _validate_compose_healthcheck(raw_service.get("healthcheck"))
+        except (NotImplementedError, ValueError) as exc:
+            return ineligible("invalid_compose_runtime_shape", str(exc))
+
+    return HarborSnapshotEligibility(task_index=task_index, task_name=task_name, eligible=True)
+
+
 class PodmanHPCEnvironment:
     """Local Harbor-compatible runtime using ``podman-hpc``.
 
@@ -391,6 +732,7 @@ class PodmanHPCEnvironment:
         self.task_env_config = task_env_config
         self.logger = logger or logging.getLogger(__name__)
         self._podman = podman_command
+        self.snapshot_runtime = "podman-hpc"
         self._container_name = _normalize_container_name(session_id)
         self._image_name = f"hb__{_normalize_container_name(environment_name)}"
         self._started = False
@@ -631,8 +973,9 @@ class PodmanHPCEnvironment:
         for name, raw_service in raw_services.items():
             if not isinstance(raw_service, dict):
                 raise ValueError(f"Compose service {name!r} must be a mapping")
-            unsupported_keys = {"ports", "networks", "secrets", "configs", "profiles", "devices"}
-            present_unsupported = unsupported_keys.intersection(raw_service)
+            present_unsupported = _PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS.intersection(
+                raw_service
+            )
             if present_unsupported:
                 raise NotImplementedError(
                     f"Unsupported compose fields for service {name!r}: "
@@ -946,6 +1289,80 @@ class PodmanHPCEnvironment:
         finally:
             self._started = False
 
+    async def export_checkpoint(
+        self,
+        export_path: Path | str,
+        *,
+        file_locks: bool = False,
+        tcp_established: bool = False,
+        ignore_volumes: bool = False,
+    ) -> None:
+        if self._compose_services:
+            raise NotImplementedError(
+                "Exact Harbor snapshots are not supported for compose-backed podman-hpc tasks"
+            )
+        if not self._started:
+            raise RuntimeError("podman-hpc environment has not been started")
+
+        export_path = Path(export_path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            self._podman,
+            "container",
+            "checkpoint",
+            "--export",
+            str(export_path),
+            "--compress",
+            "none",
+            "--leave-running",
+        ]
+        if file_locks:
+            cmd.append("--file-locks")
+        if tcp_established:
+            cmd.append("--tcp-established")
+        if ignore_volumes:
+            cmd.append("--ignore-volumes")
+        cmd.append(self._container_name)
+        await self._run_podman_command(cmd)
+
+    async def restore_checkpoint(
+        self,
+        import_path: Path | str,
+        *,
+        file_locks: bool = False,
+        tcp_established: bool = False,
+        tcp_close: bool = False,
+        ignore_volumes: bool = False,
+    ) -> None:
+        if self._compose_services:
+            raise NotImplementedError(
+                "Exact Harbor snapshots are not supported for compose-backed podman-hpc tasks"
+            )
+
+        if self._started:
+            await self.stop(delete=True)
+
+        cmd = [
+            self._podman,
+            "container",
+            "restore",
+            "--import",
+            str(import_path),
+            "--name",
+            self._container_name,
+            "--keep",
+        ]
+        if file_locks:
+            cmd.append("--file-locks")
+        if tcp_established:
+            cmd.append("--tcp-established")
+        elif tcp_close:
+            cmd.append("--tcp-close")
+        if ignore_volumes:
+            cmd.append("--ignore-volumes")
+        await self._run_podman_command(cmd)
+        self._started = True
+
     async def exec(
         self,
         command: str,
@@ -1016,6 +1433,9 @@ class HarborEnvironment:
         start_timeout: int | None = 120,
         exec_timeout: int = 120,
         extra_rewards: tuple[RewardFunction, ...] = (),
+        state_capture_mode: str = "replay",
+        snapshot_artifact_root: Path | str | None = None,
+        snapshot_options: HarborSnapshotOptions | None = None,
     ) -> None:
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
@@ -1026,6 +1446,11 @@ class HarborEnvironment:
         self._verify_on_truncation = verify_on_truncation
         self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
+        self._state_capture_mode = _normalize_snapshot_mode(state_capture_mode)
+        self._snapshot_artifact_root = (
+            None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
+        )
+        self._snapshot_options = snapshot_options or HarborSnapshotOptions()
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -1121,6 +1546,13 @@ class HarborEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        state = _capture_state_snapshot(
+            self._harbor_env,
+            state,
+            state_capture_mode=self._state_capture_mode,
+            snapshot_artifact_root=self._snapshot_artifact_root,
+            snapshot_options=self._snapshot_options,
+        )
         self._state_tracker.track(state)
 
         return state, {
@@ -1212,6 +1644,13 @@ class HarborEnvironment:
             hidden=next_hidden,
             metadata=next_metadata,
         )
+        next_state = _capture_state_snapshot(
+            self._harbor_env,
+            next_state,
+            state_capture_mode=self._state_capture_mode,
+            snapshot_artifact_root=self._snapshot_artifact_root,
+            snapshot_options=self._snapshot_options,
+        )
 
         rewards = self.compute_rewards(state, action, next_state)
         self._state_tracker.track(next_state)
@@ -1279,6 +1718,9 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         start_timeout: int | None = 120,
         exec_timeout: int = 120,
         extra_rewards: tuple[RewardFunction, ...] = (),
+        state_capture_mode: str = "replay",
+        snapshot_artifact_root: Path | str | None = None,
+        snapshot_options: HarborSnapshotOptions | None = None,
     ) -> None:
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
@@ -1288,6 +1730,11 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         self._verify_on_truncation = verify_on_truncation
         self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
+        self._state_capture_mode = _normalize_snapshot_mode(state_capture_mode)
+        self._snapshot_artifact_root = (
+            None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
+        )
+        self._snapshot_options = snapshot_options or HarborSnapshotOptions()
 
         self._tools = HARBOR_TOOLS
         self._executor = None  # Not used — we handle execution directly
@@ -1385,6 +1832,13 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        state = _capture_state_snapshot(
+            self._harbor_env,
+            state,
+            state_capture_mode=self._state_capture_mode,
+            snapshot_artifact_root=self._snapshot_artifact_root,
+            snapshot_options=self._snapshot_options,
+        )
         self._state_tracker.track(state)
 
         return state, {
@@ -1563,6 +2017,13 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             hidden=next_hidden,
             metadata=next_metadata,
         )
+        next_state = _capture_state_snapshot(
+            self._harbor_env,
+            next_state,
+            state_capture_mode=self._state_capture_mode,
+            snapshot_artifact_root=self._snapshot_artifact_root,
+            snapshot_options=self._snapshot_options,
+        )
 
         rewards = self._compute_rewards(state, action, next_state)
         self._state_tracker.track(next_state)
@@ -1673,6 +2134,56 @@ class HarborAdapter:
         names = {f"{dataset.name}@{dataset.version}" for dataset in datasets}
         return sorted(names)
 
+    def load_tasks(
+        self,
+        name: str = "terminal-bench@2.0",
+        *,
+        dataset_path: str | None = None,
+    ) -> tuple[Any, ...]:
+        """Load Harbor tasks without creating environments."""
+        dataset_name, version = self._parse_name(name)
+        api = self._get_harbor_api()
+        if dataset_path is not None:
+            return self._load_tasks_from_path(api, dataset_path)
+        return self._load_tasks_from_registry(api, dataset_name, version)
+
+    def inspect_snapshot_eligibility(
+        self,
+        name: str = "terminal-bench@2.0",
+        *,
+        tasks: tuple[Any, ...] | None = None,
+        dataset_path: str | None = None,
+        environment_type: str = "docker",
+    ) -> tuple[HarborSnapshotEligibility, ...]:
+        """Statically inspect which Harbor tasks support exact snapshots."""
+        if tasks is None:
+            tasks = self.load_tasks(name, dataset_path=dataset_path)
+
+        if environment_type != "podman-hpc":
+            return tuple(
+                HarborSnapshotEligibility(
+                    task_index=i,
+                    task_name=task.name,
+                    eligible=False,
+                    reason_code="unsupported_snapshot_runtime",
+                    reason_detail=(
+                        "Exact Harbor snapshots are currently implemented only "
+                        "for environment_type='podman-hpc'."
+                    ),
+                )
+                for i, task in enumerate(tasks)
+            )
+
+        return tuple(
+            _analyze_podman_snapshot_definition(
+                task_index=i,
+                task_name=task.name,
+                environment_dir=Path(task.paths.environment_dir),
+                task_env_config=task.config.environment,
+            )
+            for i, task in enumerate(tasks)
+        )
+
     def get_environment(
         self,
         name: str = "terminal-bench@2.0",
@@ -1688,6 +2199,9 @@ class HarborAdapter:
         exec_timeout: int = 120,
         verify_on_truncation: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
+        state_capture_mode: str = "replay",
+        snapshot_artifact_root: Path | str | None = None,
+        snapshot_options: HarborSnapshotOptions | None = None,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
         """Create a Harbor environment.
@@ -1712,6 +2226,9 @@ class HarborAdapter:
             exec_timeout: Per-command timeout in seconds.
             verify_on_truncation: Run verifier when truncating at max_steps.
             extra_rewards: Additional reward functions.
+            state_capture_mode: ``"replay"`` or ``"snapshot_exact"``.
+            snapshot_artifact_root: Snapshot artifact root for exact capture.
+            snapshot_options: Runtime-specific exact snapshot options.
             **kwargs: Passed to Harbor constructors.
 
         Returns:
@@ -1724,10 +2241,7 @@ class HarborAdapter:
             api = self._get_harbor_api()
 
             if tasks is None:
-                if dataset_path is not None:
-                    tasks = self._load_tasks_from_path(api, dataset_path)
-                else:
-                    tasks = self._load_tasks_from_registry(api, dataset_name, _version)
+                tasks = self.load_tasks(name, dataset_path=dataset_path)
 
             if env_factory is None:
 
@@ -1761,6 +2275,9 @@ class HarborAdapter:
                 start_timeout=start_timeout,
                 exec_timeout=exec_timeout,
                 extra_rewards=extra_rewards,
+                state_capture_mode=state_capture_mode,
+                snapshot_artifact_root=snapshot_artifact_root,
+                snapshot_options=snapshot_options,
             )
 
         return HarborEnvironment(
@@ -1774,6 +2291,9 @@ class HarborAdapter:
             start_timeout=start_timeout,
             exec_timeout=exec_timeout,
             extra_rewards=extra_rewards,
+            state_capture_mode=state_capture_mode,
+            snapshot_artifact_root=snapshot_artifact_root,
+            snapshot_options=snapshot_options,
         )
 
     def get_default_system_prompt(self, name: str) -> str:
@@ -1904,7 +2424,12 @@ def harbor_restore(
         ValueError: If the task name at the given index doesn't match
             the expected task name from the saved state.
     """
-    current, info = env.reset(options={"task_index": state.hidden.task_index})
+    current, info = env.reset(
+        options={
+            "task_index": state.hidden.task_index,
+            "episode_id": state.metadata.episode_id,
+        }
+    )
 
     # Validate task identity
     if state.hidden.task_name and info.get("task_name"):
@@ -1920,6 +2445,41 @@ def harbor_restore(
         current = result.next_state
 
     return current
+
+
+def harbor_snapshot_restore(
+    env: HarborEnvironment,
+    state: State[HarborHidden],
+    *,
+    artifact_root: Path | str,
+) -> State[HarborHidden]:
+    """Restore a Harbor env to an exact saved state from a checkpoint artifact."""
+    snapshot_ref = state.hidden.snapshot_ref
+    if snapshot_ref is None:
+        raise ValueError("Cannot snapshot-restore Harbor state without hidden.snapshot_ref")
+
+    _current, info = env.reset(
+        options={
+            "task_index": state.hidden.task_index,
+            "episode_id": state.metadata.episode_id,
+        }
+    )
+
+    if state.hidden.task_name and info.get("task_name"):
+        if state.hidden.task_name != info["task_name"]:
+            raise ValueError(
+                f"Task name mismatch: expected {state.hidden.task_name!r}, "
+                f"got {info['task_name']!r} at index {state.hidden.task_index}. "
+                f"Dataset version may have changed."
+            )
+
+    harbor_env = getattr(env, "_harbor_env", None)
+    if harbor_env is None:
+        raise RuntimeError("Harbor environment reset did not initialize a runtime")
+
+    _restore_state_snapshot(harbor_env, snapshot_ref, artifact_root=artifact_root)
+    env._state_tracker.track(state)
+    return state
 
 
 def validate_replay_consistency(

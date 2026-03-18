@@ -59,8 +59,11 @@ class MockHarborEnvironment:
         self._start_force_build: bool | None = None
         self._stop_delete: bool | None = None
         self._exec_history: list[str] = []
+        self._checkpoint_exports: list[tuple[Path, dict[str, Any]]] = []
+        self._checkpoint_restores: list[tuple[Path, dict[str, Any]]] = []
         self.is_mounted = True
         self.trial_paths: Any | None = None
+        self.snapshot_runtime = "podman-hpc"
 
     async def start(self, force_build: bool = False) -> None:
         if self._start_delay:
@@ -95,6 +98,20 @@ class MockHarborEnvironment:
 
     async def download_file(self, source_path: str, target_path: str) -> None:
         pass
+
+    async def export_checkpoint(
+        self,
+        export_path: Path | str,
+        **kwargs: Any,
+    ) -> None:
+        self._checkpoint_exports.append((Path(export_path), dict(kwargs)))
+
+    async def restore_checkpoint(
+        self,
+        import_path: Path | str,
+        **kwargs: Any,
+    ) -> None:
+        self._checkpoint_restores.append((Path(import_path), dict(kwargs)))
 
 
 def _make_harbor_env_factory(
@@ -155,6 +172,8 @@ def _make_env(
     exec_timeout: int = 120,
     extra_rewards: tuple = (),
     dataset_name: str = "terminal-bench",
+    state_capture_mode: str = "replay",
+    snapshot_artifact_root: Path | None = None,
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -175,6 +194,8 @@ def _make_env(
         start_timeout=start_timeout,
         exec_timeout=exec_timeout,
         extra_rewards=extra_rewards,
+        state_capture_mode=state_capture_mode,
+        snapshot_artifact_root=snapshot_artifact_root,
     )
 
 
@@ -188,6 +209,8 @@ def _make_tool_env(
     exec_timeout: int = 120,
     extra_rewards: tuple = (),
     dataset_name: str = "terminal-bench",
+    state_capture_mode: str = "replay",
+    snapshot_artifact_root: Path | None = None,
 ):
     """Create a HarborToolEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborToolEnvironment
@@ -207,12 +230,27 @@ def _make_tool_env(
         start_timeout=start_timeout,
         exec_timeout=exec_timeout,
         extra_rewards=extra_rewards,
+        state_capture_mode=state_capture_mode,
+        snapshot_artifact_root=snapshot_artifact_root,
     )
 
 
 def _reset_env(env, task_index: int = 0):
     """Reset an environment and return (state, info)."""
     return env.reset(options={"task_index": task_index})
+
+
+def _make_snapshot_task(tmp_path: Path, name: str, *, dockerfile: str | None = None, compose: str | None = None):
+    task_dir = tmp_path / name
+    env_dir = task_dir / "environment"
+    env_dir.mkdir(parents=True, exist_ok=True)
+    if dockerfile is not None:
+        (env_dir / "Dockerfile").write_text(dockerfile)
+    if compose is not None:
+        (env_dir / "docker-compose.yaml").write_text(compose)
+    config = SimpleNamespace(environment=SimpleNamespace(docker_image=None, cpus=1, memory_mb=1024))
+    paths = SimpleNamespace(environment_dir=env_dir)
+    return SimpleNamespace(name=name, paths=paths, config=config)
 
 
 # ── TestHarborHidden ────────────────────────────────────────────
@@ -233,7 +271,95 @@ class TestHarborHidden:
         assert h.instruction == "Decrypt the file"
         assert h.episode_step == 0
         assert h.last_action is None
-        assert h.trajectory == ()
+
+
+class TestHarborSnapshotEligibility:
+    def test_inspect_snapshot_eligibility_accepts_single_container_task(self, tmp_path):
+        from llenvs.adapters.harbor import HarborAdapter, HarborSnapshotEligibility
+
+        task = _make_snapshot_task(
+            tmp_path,
+            "task_01",
+            dockerfile="FROM ubuntu:latest\n",
+        )
+
+        results = HarborAdapter().inspect_snapshot_eligibility(
+            tasks=(task,),
+            environment_type="podman-hpc",
+        )
+
+        assert results == (
+            HarborSnapshotEligibility(
+                task_index=0,
+                task_name="task_01",
+                eligible=True,
+                reason_code=None,
+                reason_detail=None,
+            ),
+        )
+
+    def test_inspect_snapshot_eligibility_rejects_multi_service_compose(self, tmp_path):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        task = _make_snapshot_task(
+            tmp_path,
+            "task_01",
+            compose=(
+                "services:\n"
+                "  main:\n"
+                "    image: ubuntu:latest\n"
+                "  db:\n"
+                "    image: postgres:latest\n"
+            ),
+        )
+
+        results = HarborAdapter().inspect_snapshot_eligibility(
+            tasks=(task,),
+            environment_type="podman-hpc",
+        )
+
+        assert results[0].eligible is False
+        assert results[0].reason_code == "multi_service_compose"
+
+    def test_inspect_snapshot_eligibility_rejects_unsupported_compose_fields(self, tmp_path):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        task = _make_snapshot_task(
+            tmp_path,
+            "task_01",
+            compose=(
+                "services:\n"
+                "  main:\n"
+                "    image: ubuntu:latest\n"
+                "    ports:\n"
+                "      - '8080:8080'\n"
+            ),
+        )
+
+        results = HarborAdapter().inspect_snapshot_eligibility(
+            tasks=(task,),
+            environment_type="podman-hpc",
+        )
+
+        assert results[0].eligible is False
+        assert results[0].reason_code == "unsupported_compose_service_fields"
+
+    def test_inspect_snapshot_eligibility_rejects_unsupported_runtime(self, tmp_path):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        task = _make_snapshot_task(
+            tmp_path,
+            "task_01",
+            dockerfile="FROM ubuntu:latest\n",
+        )
+
+        results = HarborAdapter().inspect_snapshot_eligibility(
+            tasks=(task,),
+            environment_type="docker",
+        )
+
+        assert results[0].eligible is False
+        assert results[0].reason_code == "unsupported_snapshot_runtime"
 
     def test_frozen(self):
         from llenvs.adapters.harbor import HarborHidden
@@ -272,6 +398,7 @@ class TestHarborHidden:
         )
         assert h.last_action is None
         assert h.trajectory == ()
+        assert h.snapshot_ref is None
 
 
 # ── TestHarborReward ────────────────────────────────────────────
@@ -473,6 +600,29 @@ class TestHarborEnvironment:
         assert h.last_action is None
         assert h.trajectory == ()
 
+    def test_reset_snapshot_exact_captures_checkpoint(self, tmp_path):
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(),
+            state_capture_mode="snapshot_exact",
+            snapshot_artifact_root=tmp_path,
+        )
+
+        state, _ = _reset_env(env)
+
+        assert state.hidden.snapshot_ref is not None
+        assert state.hidden.snapshot_ref.runtime == "podman-hpc"
+        assert state.hidden.snapshot_ref.relative_path.endswith("state_0000.tar")
+        assert env._harbor_env._checkpoint_exports == [
+            (
+                tmp_path.parent / state.hidden.snapshot_ref.relative_path,
+                {
+                    "file_locks": False,
+                    "tcp_established": False,
+                    "ignore_volumes": False,
+                },
+            )
+        ]
+
     def test_reset_metadata(self):
         env = _make_env()
         state, _ = _reset_env(env)
@@ -531,6 +681,28 @@ class TestHarborEnvironment:
         assert "file1.txt" in state_text
         assert result.terminated is False
         assert result.truncated is False
+
+    def test_step_snapshot_exact_captures_checkpoint(self, tmp_path):
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="ok")])
+        env = _make_env(
+            harbor_env=mock_env,
+            state_capture_mode="snapshot_exact",
+            snapshot_artifact_root=tmp_path,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="ls"))
+
+        assert result.next_state.hidden.snapshot_ref is not None
+        assert result.next_state.hidden.snapshot_ref.relative_path.endswith("state_0001.tar")
+        assert mock_env._checkpoint_exports[-1] == (
+            tmp_path.parent / result.next_state.hidden.snapshot_ref.relative_path,
+            {
+                "file_locks": False,
+                "tcp_established": False,
+                "ignore_volumes": False,
+            },
+        )
 
     def test_step_accumulates_messages(self):
         mock_env = MockHarborEnvironment(
@@ -1491,6 +1663,78 @@ class TestHarborRestore:
         assert restored.hidden.episode_step == 0
         assert restored.hidden.trajectory == ()
 
+    def test_harbor_snapshot_restore_restores_checkpoint_archive(self, tmp_path):
+        """harbor_snapshot_restore uses checkpoint restore instead of replay."""
+        from llenvs.adapters.harbor import (
+            HarborHidden,
+            HarborSnapshotOptions,
+            HarborSnapshotRef,
+            harbor_snapshot_restore,
+        )
+
+        snapshot_root = tmp_path / "dataset_root"
+        snapshot_path = snapshot_root / "snapshots/task_00/episode-1/state_0001.tar"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text("checkpoint-bytes")
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(harbor_env=mock_env)
+
+        target_state = State(
+            observation=MagicMock(),
+            hidden=HarborHidden(
+                task_index=0,
+                task_name="task_00",
+                instruction="Task 0 instruction",
+                episode_step=1,
+                trajectory=("ls",),
+                snapshot_ref=HarborSnapshotRef(
+                    runtime="podman-hpc",
+                    relative_path="snapshots/task_00/episode-1/state_0001.tar",
+                    options=HarborSnapshotOptions(file_locks=True),
+                ),
+            ),
+            metadata=MagicMock(step=1, episode_id="episode-1", is_terminal=False),
+        )
+
+        restored = harbor_snapshot_restore(
+            env,
+            target_state,
+            artifact_root=snapshot_root,
+        )
+
+        assert restored is target_state
+        assert mock_env._exec_history == []
+        assert mock_env._checkpoint_restores == [
+            (
+                snapshot_path,
+                {
+                    "file_locks": True,
+                    "tcp_established": False,
+                    "tcp_close": False,
+                    "ignore_volumes": False,
+                },
+            )
+        ]
+
+    def test_harbor_snapshot_restore_requires_snapshot_ref(self, tmp_path):
+        from llenvs.adapters.harbor import HarborHidden, harbor_snapshot_restore
+
+        env = _make_env()
+        target_state = State(
+            observation=MagicMock(),
+            hidden=HarborHidden(
+                task_index=0,
+                task_name="task_00",
+                instruction="Task 0 instruction",
+                episode_step=0,
+            ),
+            metadata=MagicMock(step=0, episode_id="episode-1", is_terminal=False),
+        )
+
+        with pytest.raises(ValueError, match="snapshot_ref"):
+            harbor_snapshot_restore(env, target_state, artifact_root=tmp_path)
+
 
 class TestValidateReplayConsistency:
     """Tests for validate_replay_consistency() utility."""
@@ -1866,3 +2110,95 @@ services:
             "pwd",
         ]
         assert calls[0][2] == 17
+
+    def test_export_checkpoint_uses_container_checkpoint(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd: list[str], *, check: bool = True, timeout_sec: int | None = None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_podman_command", fake_run)
+        env._started = True
+
+        export_path = tmp_path / "checkpoint.tar"
+        run_async(
+            env.export_checkpoint(
+                export_path,
+                file_locks=True,
+                tcp_established=True,
+            )
+        )
+
+        assert calls[0][0] == [
+            "podman-hpc",
+            "container",
+            "checkpoint",
+            "--export",
+            str(export_path),
+            "--compress",
+            "none",
+            "--leave-running",
+            "--file-locks",
+            "--tcp-established",
+            env._container_name,
+        ]
+
+    def test_restore_checkpoint_uses_import_keep_and_name(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd: list[str], *, check: bool = True, timeout_sec: int | None = None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_podman_command", fake_run)
+
+        import_path = tmp_path / "checkpoint.tar"
+        run_async(
+            env.restore_checkpoint(
+                import_path,
+                file_locks=True,
+                tcp_established=True,
+            )
+        )
+
+        assert calls[0][0] == [
+            "podman-hpc",
+            "container",
+            "restore",
+            "--import",
+            str(import_path),
+            "--name",
+            env._container_name,
+            "--keep",
+            "--file-locks",
+            "--tcp-established",
+        ]

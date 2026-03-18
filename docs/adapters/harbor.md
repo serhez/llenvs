@@ -10,7 +10,9 @@ By wrapping Harbor (not individual benchmarks), this adapter provides access to 
 pip install harbor
 ```
 
-Docker is required for running containers.
+Docker is required for Harbor's built-in container backends. On clusters where
+Docker is unavailable, `llenvs` also supports a local `podman-hpc` Harbor
+runtime.
 
 ## Quick Start
 
@@ -172,6 +174,7 @@ Available in tool mode:
 | `episode_step` | `int` | Current step in the episode |
 | `last_action` | `str \| None` | Text of the last action |
 | `trajectory` | `tuple[str, ...]` | Command history |
+| `snapshot_ref` | `HarborSnapshotRef \| None` | Optional exact runtime snapshot artifact for this state |
 
 ## Parameters
 
@@ -191,6 +194,22 @@ Available in tool mode:
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
 | `extra_rewards` | `tuple` | `()` | Additional reward functions |
+| `state_capture_mode` | `str` | `"replay"` | Harbor state capture mode: `replay` or `snapshot_exact` |
+| `snapshot_artifact_root` | `Path \| str \| None` | `None` | Artifact root used when `state_capture_mode="snapshot_exact"` |
+| `snapshot_options` | `HarborSnapshotOptions \| None` | `None` | Exact snapshot options (`file_locks`, `tcp_established`, `tcp_close`, `ignore_volumes`) |
+
+### `HarborAdapter.load_tasks()`
+
+Loads Harbor task definitions without creating environments. This is useful when another layer wants to inspect or filter the task set before collection.
+
+### `HarborAdapter.inspect_snapshot_eligibility()`
+
+Returns per-task static exact-snapshot eligibility for a given runtime. The current implementation is runtime-specific:
+
+- `environment_type="podman-hpc"` inspects the Harbor task definition and reports whether exact snapshots are supported for that task.
+- Other runtimes currently report snapshot eligibility as unsupported.
+
+The result objects include `task_index`, `task_name`, `eligible`, `reason_code`, and `reason_detail`.
 
 ## Capabilities
 
@@ -219,7 +238,7 @@ Use `adapter.list_environments()` to query the registry for all available datase
 
 ## Monte Carlo Rollouts
 
-Harbor environments have `pure_step=False` — container state is mutable and cannot be cheaply reset to a prior state. For MC rollouts (Q-value estimation, value function estimation), use the multi-instance runner with `harbor_restore`:
+Harbor environments have `pure_step=False` — container state is mutable and cannot be cheaply reset to a prior state. Replay-based restore remains the default path for MC rollouts:
 
 ```python
 from llenvs.adapters.harbor import HarborAdapter, harbor_restore
@@ -248,6 +267,40 @@ trajectories = runner.run_batch_from_states(
 ### `harbor_restore()`
 
 Restores a Harbor environment to a saved state by replaying the trajectory prefix. Resets to the original task via `task_index`, then replays each command from `state.hidden.trajectory`. Validates task name to guard against index drift across dataset versions.
+
+### `harbor_snapshot_restore()`
+
+For datasets collected with exact checkpoints, `harbor_snapshot_restore()` restores a fresh Harbor environment from `state.hidden.snapshot_ref` instead of replaying the command prefix.
+
+```python
+from llenvs.adapters.harbor import HarborAdapter, harbor_snapshot_restore
+
+adapter = HarborAdapter()
+env = adapter.get_environment(
+    "terminal-bench@2.0",
+    environment_type="podman-hpc",
+    max_steps=30,
+)
+
+def env_factory():
+    return adapter.get_environment(
+        "terminal-bench@2.0",
+        environment_type="podman-hpc",
+        max_steps=30,
+    )
+
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=sampling_params,
+    env_factory=env_factory,
+    restore_fn=lambda env, state: harbor_snapshot_restore(
+        env,
+        state,
+        artifact_root="/path/to/dataset_dir",
+    ),
+)
+```
 
 ### Replay Validation
 
@@ -297,7 +350,7 @@ env = adapter.get_environment(
 )
 ```
 
-This path preserves the existing Harbor replay model in `llenvs`: trajectory collection runs on one persistent container instance, and MC rollouts restore saved states by creating fresh instances and replaying the command prefix.
+This path preserves the existing Harbor replay model in `llenvs`: replay remains the default restore method. It also adds an opt-in exact snapshot mode for single-container tasks, where states captured during live collection can later be restored with `harbor_snapshot_restore()`.
 
 Current v1 behavior:
 
@@ -308,6 +361,9 @@ Current v1 behavior:
 - Unsupported compose features fail fast (`ports`, custom `networks`, `secrets`, `configs`, `profiles`, `devices`, external volumes).
 - The runtime expects `podman-hpc` to be available on the host.
 - Replay remains text-mode only, exactly like `harbor_restore()`.
+- Exact snapshot export/restore is currently limited to single-container tasks. Compose-backed tasks still use replay.
+- Exact snapshots are additive. If you do not opt in to `state_capture_mode="snapshot_exact"`, Harbor behavior is unchanged.
+- Static snapshot eligibility inspection is available via `HarborAdapter.inspect_snapshot_eligibility()` so callers can filter task sets before starting collection.
 
 ## Limitations
 
@@ -316,3 +372,4 @@ Current v1 behavior:
 - **Network-dependent** — Registry queries and image pulls require network access.
 - **Binary rewards** — Native verifiers produce pass/fail only; use `extra_rewards` for finer-grained scoring (e.g., `JudgeReward`).
 - **Text-mode replay only** — `harbor_restore` supports text mode; tool-mode replay requires storing full `Action` objects (deferred).
+- **Exact snapshot runtime coverage** — v1 exact snapshots require a runtime exposing checkpoint export/restore. `llenvs` currently implements this for `podman-hpc` only.
