@@ -20,11 +20,13 @@ Reference: https://github.com/laude-institute/harbor
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import shlex
+import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -161,6 +163,17 @@ class HarborSnapshotRef:
 @dataclass(frozen=True)
 class HarborSnapshotEligibility:
     """Static exact-snapshot eligibility for a Harbor task."""
+
+    task_index: int
+    task_name: str
+    eligible: bool
+    reason_code: str | None = None
+    reason_detail: str | None = None
+
+
+@dataclass(frozen=True)
+class RuntimeEligibility:
+    """Static runtime eligibility for a Harbor task."""
 
     task_index: int
     task_name: str
@@ -1403,6 +1416,408 @@ class PodmanHPCEnvironment:
         )
 
 
+# ── Apptainer/Singularity HPC runtime ──────────────────────────
+
+
+_APPTAINER_RUNTIME_NAME = "apptainer-hpc"
+_APPTAINER_ALIASES = frozenset({"apptainer-hpc", "singularity-hpc"})
+
+_SIF_MANIFEST_FILENAME = "manifest.json"
+
+
+def _sif_cache_key(image_ref: str) -> str:
+    """Hash-based SIF filename from a Docker/OCI image reference."""
+    return hashlib.sha256(image_ref.encode()).hexdigest()[:16]
+
+
+def _load_sif_manifest(cache_dir: Path) -> dict[str, str]:
+    manifest_path = cache_dir / _SIF_MANIFEST_FILENAME
+    if manifest_path.exists():
+        return json.loads(manifest_path.read_text())
+    return {}
+
+
+def _save_sif_manifest(cache_dir: Path, manifest: dict[str, str]) -> None:
+    manifest_path = cache_dir / _SIF_MANIFEST_FILENAME
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+
+
+class ApptainerHPCEnvironment:
+    """Local Harbor-compatible runtime using Apptainer/Singularity.
+
+    Single-container tasks only. Uses disk-backed writable overlays for
+    filesystem persistence within an episode, and ``--cleanenv --contain
+    --no-home`` for host isolation. File transfer uses a bind-mounted
+    staging directory since Apptainer has no ``cp`` subcommand.
+
+    Compose-backed tasks are rejected at construction time.
+    """
+
+    def __init__(
+        self,
+        environment_dir: Path,
+        environment_name: str,
+        session_id: str,
+        trial_paths: Any,
+        task_env_config: Any,
+        logger: logging.Logger | None = None,
+        *,
+        apptainer_command: str = "apptainer",
+        sif_cache_dir: str | None = None,
+        fakeroot: bool = False,
+        overlay_size_mb: int = 512,
+        **kwargs: Any,
+    ) -> None:
+        del kwargs
+        self.environment_dir = Path(environment_dir)
+        self.environment_name = environment_name
+        self.session_id = session_id
+        self.trial_paths = trial_paths
+        self.task_env_config = task_env_config
+        self.logger = logger or logging.getLogger(__name__)
+
+        self._apptainer = apptainer_command
+        self._fakeroot = fakeroot
+        self._overlay_size_mb = overlay_size_mb
+        self.snapshot_runtime = _APPTAINER_RUNTIME_NAME
+        self._instance_name = _normalize_container_name(session_id)
+        self._started = False
+        self.is_mounted = True  # log dirs bind-mounted
+
+        self._sif_cache_dir = (
+            Path(sif_cache_dir)
+            if sif_cache_dir is not None
+            else Path.home() / ".cache" / "llenvs" / "sif"
+        )
+        self._trial_dir = Path(self.trial_paths.trial_dir)
+        self._staging_dir = self._trial_dir / "staging"
+        self._overlay_path = self._trial_dir / "overlay.img"
+
+        self._validate_definition()
+        self._sif_path = self._resolve_sif_path()
+
+    def _validate_definition(self) -> None:
+        compose_path = self.environment_dir / "docker-compose.yaml"
+        if compose_path.exists():
+            raise NotImplementedError(
+                "Compose-backed tasks are not supported by the Apptainer runtime. "
+                f"Found docker-compose.yaml in {self.environment_dir}"
+            )
+        dockerfile_path = self.environment_dir / "Dockerfile"
+        docker_image = getattr(self.task_env_config, "docker_image", None)
+        if not dockerfile_path.exists() and not docker_image:
+            raise FileNotFoundError(
+                f"Task {self.environment_name!r} defines neither a Dockerfile "
+                "nor task_env_config.docker_image."
+            )
+
+    def _resolve_sif_path(self) -> Path:
+        docker_image = getattr(self.task_env_config, "docker_image", None)
+        if docker_image:
+            cache_key = _sif_cache_key(docker_image)
+            return self._sif_cache_dir / f"{cache_key}.sif"
+        # Dockerfile-only: look for a SIF keyed by environment name
+        cache_key = _sif_cache_key(f"dockerfile://{self.environment_name}")
+        return self._sif_cache_dir / f"{cache_key}.sif"
+
+    async def _run_apptainer_command(
+        self,
+        cmd: list[str],
+        *,
+        check: bool = True,
+        timeout_sec: int | None = None,
+    ) -> _CLIResult:
+        self.logger.debug("apptainer cmd: %s", " ".join(cmd))
+        env = os.environ.copy()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(self.environment_dir),
+            env=env,
+        )
+        try:
+            if timeout_sec is not None:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_sec
+                )
+            else:
+                stdout, stderr = await proc.communicate()
+        except asyncio.TimeoutError:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                proc.kill()
+            raise RuntimeError(
+                f"apptainer command timed out after {timeout_sec}s: {' '.join(cmd)}"
+            )
+
+        result = _CLIResult(
+            stdout=stdout.decode("utf-8", errors="replace").rstrip(),
+            stderr=stderr.decode("utf-8", errors="replace").rstrip(),
+            return_code=proc.returncode or 0,
+        )
+        if check and result.return_code != 0:
+            raise RuntimeError(
+                f"apptainer command failed (exit {result.return_code}): "
+                f"{' '.join(cmd)}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+        return result
+
+    async def start(self, force_build: bool = False) -> None:
+        # Validate network isolation constraint
+        allow_internet = getattr(self.task_env_config, "allow_internet", True)
+        if not allow_internet:
+            raise RuntimeError(
+                "Apptainer runtime cannot enforce network isolation "
+                "(allow_internet=False). Use podman-hpc for tasks requiring "
+                "network isolation."
+            )
+
+        # Ensure SIF exists
+        if not self._sif_path.exists():
+            docker_image = getattr(self.task_env_config, "docker_image", None)
+            if docker_image and not force_build:
+                raise FileNotFoundError(
+                    f"SIF image not found at {self._sif_path}. "
+                    f"Pre-build it on a login node: "
+                    f"{self._apptainer} build {self._sif_path} "
+                    f"docker://{docker_image}"
+                )
+            raise FileNotFoundError(
+                f"SIF image not found at {self._sif_path}. "
+                "Pre-build it on a node with Docker/Podman access."
+            )
+
+        # Create overlay
+        self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        await self._run_apptainer_command([
+            self._apptainer, "overlay", "create",
+            "--size", str(self._overlay_size_mb),
+            str(self._overlay_path),
+        ])
+
+        # Create staging directory
+        self._staging_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create log directories on host for bind mounts
+        verifier_dir = self._trial_dir / "verifier"
+        agent_dir = self._trial_dir / "agent"
+        verifier_dir.mkdir(parents=True, exist_ok=True)
+        agent_dir.mkdir(parents=True, exist_ok=True)
+
+        # Start instance
+        cmd = [
+            self._apptainer, "instance", "start",
+            "--overlay", str(self._overlay_path),
+            "--cleanenv",
+            "--contain",
+            "--no-home",
+        ]
+        if self._fakeroot:
+            cmd.append("--fakeroot")
+        cmd.extend([
+            "--bind", f"{self._staging_dir}:/staging",
+            "--bind", f"{verifier_dir}:/logs/verifier",
+            "--bind", f"{agent_dir}:/logs/agent",
+            str(self._sif_path),
+            self._instance_name,
+        ])
+        await self._run_apptainer_command(cmd)
+
+        # Bootstrap runtime directories inside the container
+        await self._run_apptainer_command([
+            self._apptainer, "exec", "--cleanenv",
+            f"instance://{self._instance_name}",
+            "bash", "-lc", "mkdir -p /logs/agent /logs/verifier",
+        ])
+
+        self._started = True
+
+    async def stop(self, delete: bool = True) -> None:
+        if not self._started:
+            return
+        try:
+            await self._run_apptainer_command(
+                [self._apptainer, "instance", "stop", self._instance_name],
+                check=False,
+            )
+        finally:
+            self._started = False
+            if delete:
+                if self._overlay_path.exists():
+                    self._overlay_path.unlink()
+                if self._staging_dir.exists():
+                    shutil.rmtree(self._staging_dir, ignore_errors=True)
+
+    async def exec(
+        self,
+        command: str,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_sec: int | None = None,
+    ) -> _CLIResult:
+        cmd = [self._apptainer, "exec", "--cleanenv"]
+        if cwd is not None:
+            cmd.extend(["--pwd", cwd])
+        if env:
+            for key, value in env.items():
+                cmd.extend(["--env", f"{key}={value}"])
+        cmd.extend([
+            f"instance://{self._instance_name}",
+            "bash", "-lc", command,
+        ])
+        return await self._run_apptainer_command(cmd, check=False, timeout_sec=timeout_sec)
+
+    async def upload_file(self, source_path: Path | str, target_path: str) -> None:
+        upload_id = str(uuid.uuid4())[:8]
+        staging = self._staging_dir / "upload" / upload_id
+        staging.mkdir(parents=True, exist_ok=True)
+        src = Path(source_path)
+        staged = staging / src.name
+        shutil.copy2(str(src), str(staged))
+        await self._run_apptainer_command([
+            self._apptainer, "exec", "--cleanenv",
+            f"instance://{self._instance_name}",
+            "bash", "-lc", f"cp -a /staging/upload/{upload_id}/{src.name} {target_path}",
+        ])
+        shutil.rmtree(str(staging), ignore_errors=True)
+
+    async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
+        upload_id = str(uuid.uuid4())[:8]
+        staging = self._staging_dir / "upload" / upload_id
+        shutil.copytree(str(source_dir), str(staging))
+        await self._run_apptainer_command([
+            self._apptainer, "exec", "--cleanenv",
+            f"instance://{self._instance_name}",
+            "bash", "-lc", f"mkdir -p {target_dir} && cp -a /staging/upload/{upload_id}/. {target_dir}/",
+        ])
+        shutil.rmtree(str(staging), ignore_errors=True)
+
+    async def download_file(self, source_path: str, target_path: Path | str) -> None:
+        download_id = str(uuid.uuid4())[:8]
+        staging = self._staging_dir / "download" / download_id
+        staging.mkdir(parents=True, exist_ok=True)
+        basename = Path(source_path).name
+        await self._run_apptainer_command([
+            self._apptainer, "exec", "--cleanenv",
+            f"instance://{self._instance_name}",
+            "bash", "-lc", f"cp -a {source_path} /staging/download/{download_id}/{basename}",
+        ])
+        shutil.copy2(str(staging / basename), str(target_path))
+        shutil.rmtree(str(staging), ignore_errors=True)
+
+    async def download_dir(self, source_dir: str, target_dir: Path | str) -> None:
+        download_id = str(uuid.uuid4())[:8]
+        staging = self._staging_dir / "download" / download_id
+        staging.mkdir(parents=True, exist_ok=True)
+        await self._run_apptainer_command([
+            self._apptainer, "exec", "--cleanenv",
+            f"instance://{self._instance_name}",
+            "bash", "-lc", f"cp -a {source_dir}/. /staging/download/{download_id}/",
+        ])
+        if Path(target_dir).exists():
+            shutil.rmtree(str(target_dir))
+        shutil.copytree(str(staging), str(target_dir))
+        shutil.rmtree(str(staging), ignore_errors=True)
+
+
+# ── Runtime eligibility ────────────────────────────────────────
+
+
+def _analyze_apptainer_runtime_eligibility(
+    *,
+    task_index: int,
+    task_name: str,
+    environment_dir: Path,
+    task_env_config: Any,
+    sif_cache_dir: Path | None = None,
+) -> RuntimeEligibility:
+    """Check whether a Harbor task can run on the Apptainer HPC runtime."""
+
+    def ineligible(code: str, detail: str) -> RuntimeEligibility:
+        return RuntimeEligibility(
+            task_index=task_index,
+            task_name=task_name,
+            eligible=False,
+            reason_code=code,
+            reason_detail=detail,
+        )
+
+    compose_path = environment_dir / "docker-compose.yaml"
+    if compose_path.exists():
+        return ineligible(
+            "multi_service_compose",
+            "Compose-backed tasks are not supported by the Apptainer runtime.",
+        )
+
+    dockerfile_path = environment_dir / "Dockerfile"
+    docker_image = getattr(task_env_config, "docker_image", None)
+    if not dockerfile_path.exists() and not docker_image:
+        return ineligible(
+            "missing_container_source",
+            "Task defines neither a Dockerfile nor task_env_config.docker_image.",
+        )
+
+    # Check if SIF exists when sif_cache_dir is provided
+    if sif_cache_dir is not None:
+        if docker_image:
+            sif_key = _sif_cache_key(docker_image)
+        else:
+            sif_key = _sif_cache_key(f"dockerfile://{task_name}")
+        sif_path = Path(sif_cache_dir) / f"{sif_key}.sif"
+        if not sif_path.exists():
+            return ineligible(
+                "missing_sif_image",
+                f"Pre-built SIF image not found at {sif_path}.",
+            )
+
+    allow_internet = getattr(task_env_config, "allow_internet", True)
+    if not allow_internet:
+        return ineligible(
+            "network_isolation",
+            "Apptainer runtime cannot enforce network isolation (allow_internet=False).",
+        )
+
+    return RuntimeEligibility(
+        task_index=task_index, task_name=task_name, eligible=True
+    )
+
+
+def inspect_harbor_runtime_eligibility(
+    tasks: tuple[Any, ...],
+    environment_type: str,
+    *,
+    sif_cache_dir: str | None = None,
+) -> tuple[RuntimeEligibility, ...]:
+    """Statically inspect which Harbor tasks are eligible for a given runtime.
+
+    For ``podman-hpc``, all tasks are eligible (it supports compose and
+    Dockerfiles natively). For ``apptainer-hpc``, tasks are checked for
+    compose, SIF availability, and network isolation constraints.
+    """
+    normalized = environment_type.strip().lower()
+    if normalized in _APPTAINER_ALIASES:
+        cache_dir = Path(sif_cache_dir) if sif_cache_dir else None
+        return tuple(
+            _analyze_apptainer_runtime_eligibility(
+                task_index=i,
+                task_name=task.name,
+                environment_dir=Path(task.paths.environment_dir),
+                task_env_config=task.config.environment,
+                sif_cache_dir=cache_dir,
+            )
+            for i, task in enumerate(tasks)
+        )
+
+    # podman-hpc and other runtimes: all eligible
+    return tuple(
+        RuntimeEligibility(task_index=i, task_name=task.name, eligible=True)
+        for i, task in enumerate(tasks)
+    )
+
+
 # ── Text-mode environment ───────────────────────────────────────
 
 
@@ -2246,7 +2661,7 @@ class HarborAdapter:
             if env_factory is None:
 
                 def build_harbor_env(task: Any) -> Any:
-                    if environment_type == "podman-hpc":
+                    if environment_type == "podman-hpc" or environment_type in _APPTAINER_ALIASES:
                         return self._create_local_environment(api, task, environment_type, **kwargs)
                     return self._create_harbor_environment(api, task, environment_type, **kwargs)
 
@@ -2386,6 +2801,19 @@ class HarborAdapter:
 
         if environment_type == "podman-hpc":
             env = PodmanHPCEnvironment(
+                environment_dir=Path(task.paths.environment_dir),
+                environment_name=task.name,
+                session_id=str(uuid.uuid4()),
+                trial_paths=trial_paths,
+                task_env_config=task.config.environment,
+                logger=logger,
+                **kwargs,
+            )
+            env.trial_paths = trial_paths
+            return env
+
+        if environment_type in _APPTAINER_ALIASES:
+            env = ApptainerHPCEnvironment(
                 environment_dir=Path(task.paths.environment_dir),
                 environment_name=task.name,
                 session_id=str(uuid.uuid4()),

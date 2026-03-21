@@ -2202,3 +2202,417 @@ services:
             "--file-locks",
             "--tcp-established",
         ]
+
+
+class TestApptainerHPCEnvironment:
+    def _make_trial_paths(self, tmp_path):
+        for name in ("verifier", "agent", "artifacts"):
+            (tmp_path / name).mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            trial_dir=tmp_path,
+            verifier_dir=tmp_path / "verifier",
+            agent_dir=tmp_path / "agent",
+            artifacts_dir=tmp_path / "artifacts",
+        )
+
+    def _make_task_env_config(self, **kwargs: Any):
+        defaults = {
+            "docker_image": "ubuntu:latest",
+            "cpus": 1,
+            "memory_mb": 1024,
+            "allow_internet": True,
+        }
+        defaults.update(kwargs)
+        return SimpleNamespace(**defaults)
+
+    def test_rejects_compose_tasks(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+
+        (tmp_path / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ubuntu:latest\n"
+        )
+        with pytest.raises(NotImplementedError, match="Compose"):
+            ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id="session-1",
+                trial_paths=self._make_trial_paths(tmp_path / "trial"),
+                task_env_config=self._make_task_env_config(),
+            )
+
+    def test_rejects_missing_container_source(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+
+        with pytest.raises(FileNotFoundError, match="Dockerfile"):
+            ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id="session-1",
+                trial_paths=self._make_trial_paths(tmp_path / "trial"),
+                task_env_config=self._make_task_env_config(docker_image=None),
+            )
+
+    def test_singularity_hpc_normalizes_to_apptainer_hpc(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        assert env.snapshot_runtime == "apptainer-hpc"
+
+    def test_is_mounted_is_true(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        assert env.is_mounted is True
+
+    def test_start_fails_fast_if_sif_missing(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(tmp_path / "sif_cache"),
+        )
+        with pytest.raises(FileNotFoundError, match="SIF"):
+            run_async(env.start())
+
+    def test_start_fails_if_allow_internet_false(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(allow_internet=False),
+            sif_cache_dir=str(sif_dir),
+        )
+        # Create the SIF file so we get past that check
+        env._sif_path.touch()
+        with pytest.raises(RuntimeError, match="network isolation"):
+            run_async(env.start())
+
+    def test_start_calls_overlay_create_and_instance_start(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            overlay_size_mb=256,
+        )
+        env._sif_path.touch()
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        # First call: overlay create
+        assert calls[0][0][:3] == ["apptainer", "overlay", "create"]
+        assert "--size" in calls[0][0]
+        assert "256" in calls[0][0]
+
+        # Second call: instance start
+        inst_cmd = calls[1][0]
+        assert inst_cmd[:3] == ["apptainer", "instance", "start"]
+        assert "--overlay" in inst_cmd
+        assert "--cleanenv" in inst_cmd
+        assert "--contain" in inst_cmd
+        assert "--no-home" in inst_cmd
+        assert f"instance://" not in " ".join(inst_cmd)  # instance start uses plain name
+        assert env._instance_name == inst_cmd[-1]
+
+        # Third call: bootstrap dirs
+        bootstrap_cmd = calls[2][0]
+        assert "apptainer" == bootstrap_cmd[0]
+        assert "exec" == bootstrap_cmd[1]
+        assert "--cleanenv" in bootstrap_cmd
+        assert f"instance://{env._instance_name}" in bootstrap_cmd
+        assert "mkdir -p /logs/agent /logs/verifier" in bootstrap_cmd
+
+        assert env._started is True
+
+    def test_start_with_fakeroot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            fakeroot=True,
+        )
+        env._sif_path.touch()
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        inst_cmd = calls[1][0]
+        assert "--fakeroot" in inst_cmd
+
+    def test_exec_uses_instance_prefix_pwd_cleanenv_and_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        env._started = True
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        result = run_async(
+            env.exec("pwd", cwd="/workspace", env={"FOO": "bar"}, timeout_sec=17)
+        )
+
+        assert result.stdout == "ok"
+        cmd = calls[0][0]
+        assert cmd[0] == "apptainer"
+        assert cmd[1] == "exec"
+        assert "--cleanenv" in cmd
+        assert "--pwd" in cmd
+        pwd_idx = cmd.index("--pwd")
+        assert cmd[pwd_idx + 1] == "/workspace"
+        assert "--env" in cmd
+        env_idx = cmd.index("--env")
+        assert cmd[env_idx + 1] == "FOO=bar"
+        assert f"instance://{env._instance_name}" in cmd
+        assert cmd[-3:] == ["bash", "-lc", "pwd"]
+        assert calls[0][2] == 17
+
+    def test_stop_calls_instance_stop(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        env._started = True
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.stop())
+
+        assert calls[0][0] == [
+            "apptainer", "instance", "stop", env._instance_name
+        ]
+        assert env._started is False
+
+    def test_upload_dir_via_staging(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+        )
+        env._staging_dir.mkdir(parents=True, exist_ok=True)
+        env._started = True
+
+        source_dir = tmp_path / "tests"
+        source_dir.mkdir()
+        (source_dir / "test_a.sh").write_text("echo ok")
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.upload_dir(source_dir, "/tests"))
+
+        # Should have called exec with cp command
+        assert len(calls) == 1
+        cmd = calls[0][0]
+        assert "exec" in cmd
+        assert f"instance://{env._instance_name}" in cmd
+        assert any("cp -a" in arg and "/tests/" in arg for arg in cmd)
+
+    def test_no_checkpoint_methods(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        assert not hasattr(env, "export_checkpoint")
+        assert not hasattr(env, "restore_checkpoint")
+
+
+class TestRuntimeEligibility:
+    def _make_task(self, tmp_path, name, *, dockerfile=None, compose=None, docker_image=None, allow_internet=True):
+        env_dir = tmp_path / name
+        env_dir.mkdir(parents=True, exist_ok=True)
+        if dockerfile:
+            (env_dir / "Dockerfile").write_text(dockerfile)
+        if compose:
+            (env_dir / "docker-compose.yaml").write_text(compose)
+        config = SimpleNamespace(
+            environment=SimpleNamespace(
+                docker_image=docker_image,
+                allow_internet=allow_internet,
+            )
+        )
+        paths = SimpleNamespace(environment_dir=str(env_dir))
+        return SimpleNamespace(name=name, config=config, paths=paths)
+
+    def test_podman_hpc_all_eligible(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n"),
+            self._make_task(tmp_path, "t1", compose="services:\n  main:\n    image: x\n"),
+        )
+        results = inspect_harbor_runtime_eligibility(tasks, "podman-hpc")
+        assert all(r.eligible for r in results)
+
+    def test_apptainer_hpc_rejects_compose(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0", compose="services:\n  main:\n    image: x\n"),
+        )
+        results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
+        assert not results[0].eligible
+        assert results[0].reason_code == "multi_service_compose"
+
+    def test_apptainer_hpc_rejects_network_isolation(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n", allow_internet=False),
+        )
+        results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
+        assert not results[0].eligible
+        assert results[0].reason_code == "network_isolation"
+
+    def test_apptainer_hpc_rejects_missing_sif(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0", docker_image="ubuntu:latest"),
+        )
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        results = inspect_harbor_runtime_eligibility(
+            tasks, "apptainer-hpc", sif_cache_dir=str(sif_dir)
+        )
+        assert not results[0].eligible
+        assert results[0].reason_code == "missing_sif_image"
+
+    def test_apptainer_hpc_accepts_valid_task(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n"),
+        )
+        # No sif_cache_dir = skip SIF check
+        results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
+        assert results[0].eligible
+
+    def test_singularity_hpc_routes_to_apptainer(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0", compose="services:\n  main:\n    image: x\n"),
+        )
+        results = inspect_harbor_runtime_eligibility(tasks, "singularity-hpc")
+        assert not results[0].eligible
+        assert results[0].reason_code == "multi_service_compose"
+
+    def test_apptainer_hpc_rejects_missing_source(self, tmp_path):
+        from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
+
+        tasks = (
+            self._make_task(tmp_path, "t0"),
+        )
+        results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
+        assert not results[0].eligible
+        assert results[0].reason_code == "missing_container_source"
