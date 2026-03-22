@@ -2343,13 +2343,16 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
-        # First call: overlay create
-        assert calls[0][0][:3] == ["apptainer", "overlay", "create"]
-        assert "--size" in calls[0][0]
-        assert "256" in calls[0][0]
+        # First call: --version (runtime info probe)
+        assert calls[0][0] == ["apptainer", "--version"]
 
-        # Second call: instance start
-        inst_cmd = calls[1][0]
+        # Second call: overlay create
+        assert calls[1][0][:3] == ["apptainer", "overlay", "create"]
+        assert "--size" in calls[1][0]
+        assert "256" in calls[1][0]
+
+        # Third call: instance start
+        inst_cmd = calls[2][0]
         assert inst_cmd[:3] == ["apptainer", "instance", "start"]
         assert "--overlay" in inst_cmd
         assert "--cleanenv" in inst_cmd
@@ -2358,8 +2361,8 @@ class TestApptainerHPCEnvironment:
         assert f"instance://" not in " ".join(inst_cmd)  # instance start uses plain name
         assert env._instance_name == inst_cmd[-1]
 
-        # Third call: bootstrap dirs
-        bootstrap_cmd = calls[2][0]
+        # Fourth call: bootstrap dirs
+        bootstrap_cmd = calls[3][0]
         assert "apptainer" == bootstrap_cmd[0]
         assert "exec" == bootstrap_cmd[1]
         assert "--cleanenv" in bootstrap_cmd
@@ -2397,7 +2400,8 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
-        inst_cmd = calls[1][0]
+        # calls[0] = --version, calls[1] = overlay create, calls[2] = instance start
+        inst_cmd = calls[2][0]
         assert "--fakeroot" in inst_cmd
 
     def test_exec_uses_instance_prefix_pwd_cleanenv_and_env(

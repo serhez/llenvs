@@ -1466,6 +1466,7 @@ class ApptainerHPCEnvironment:
         sif_cache_dir: str | None = None,
         fakeroot: bool = False,
         overlay_size_mb: int = 512,
+        writable_tmpfs: bool = False,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -1479,6 +1480,7 @@ class ApptainerHPCEnvironment:
         self._apptainer = apptainer_command
         self._fakeroot = fakeroot
         self._overlay_size_mb = overlay_size_mb
+        self._writable_tmpfs = writable_tmpfs
         self.snapshot_runtime = _APPTAINER_RUNTIME_NAME
         self._instance_name = _normalize_container_name(session_id)
         self._started = False
@@ -1565,7 +1567,51 @@ class ApptainerHPCEnvironment:
             )
         return result
 
+    async def _log_runtime_info(self) -> None:
+        """Probe and log Apptainer runtime capabilities."""
+        # Version
+        version_str = "unknown"
+        try:
+            result = await self._run_apptainer_command(
+                [self._apptainer, "--version"], check=False
+            )
+            if result.return_code == 0 and result.stdout:
+                version_str = result.stdout.strip()
+        except Exception:
+            pass
+
+        # Overlay mode
+        if self._writable_tmpfs:
+            overlay_mode = "writable-tmpfs (in-memory)"
+        else:
+            overlay_mode = f"disk-backed overlay ({self._overlay_size_mb} MB)"
+
+        # SIF cache stats
+        sif_count = 0
+        if self._sif_cache_dir.exists():
+            sif_count = len(list(self._sif_cache_dir.glob("*.sif")))
+
+        # Fakeroot
+        fakeroot_str = "enabled" if self._fakeroot else "disabled"
+
+        self.logger.info(
+            "Harbor runtime: %s (%s %s)\n"
+            "  fakeroot: %s\n"
+            "  overlay mode: %s\n"
+            "  SIF cache: %s (%d images)\n"
+            "  isolation: --cleanenv --contain --no-home",
+            _APPTAINER_RUNTIME_NAME,
+            self._apptainer,
+            version_str,
+            fakeroot_str,
+            overlay_mode,
+            self._sif_cache_dir,
+            sif_count,
+        )
+
     async def start(self, force_build: bool = False) -> None:
+        await self._log_runtime_info()
+
         # Validate network isolation constraint
         allow_internet = getattr(self.task_env_config, "allow_internet", True)
         if not allow_internet:
@@ -1590,31 +1636,33 @@ class ApptainerHPCEnvironment:
                 "Pre-build it on a node with Docker/Podman access."
             )
 
-        # Create overlay
-        self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
-        await self._run_apptainer_command([
-            self._apptainer, "overlay", "create",
-            "--size", str(self._overlay_size_mb),
-            str(self._overlay_path),
-        ])
-
-        # Create staging directory
+        # Create staging directory and host log dirs for bind mounts
         self._staging_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create log directories on host for bind mounts
         verifier_dir = self._trial_dir / "verifier"
         agent_dir = self._trial_dir / "agent"
         verifier_dir.mkdir(parents=True, exist_ok=True)
         agent_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create overlay (skip for writable-tmpfs mode)
+        if not self._writable_tmpfs:
+            self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
+            await self._run_apptainer_command([
+                self._apptainer, "overlay", "create",
+                "--size", str(self._overlay_size_mb),
+                str(self._overlay_path),
+            ])
+
         # Start instance
-        cmd = [
-            self._apptainer, "instance", "start",
-            "--overlay", str(self._overlay_path),
+        cmd = [self._apptainer, "instance", "start"]
+        if self._writable_tmpfs:
+            cmd.append("--writable-tmpfs")
+        else:
+            cmd.extend(["--overlay", str(self._overlay_path)])
+        cmd.extend([
             "--cleanenv",
             "--contain",
             "--no-home",
-        ]
+        ])
         if self._fakeroot:
             cmd.append("--fakeroot")
         cmd.extend([
