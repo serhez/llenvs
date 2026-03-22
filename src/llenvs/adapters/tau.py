@@ -1,13 +1,15 @@
-"""tau2 adapter — wraps tau2-bench customer service benchmark as MDP environments.
+"""Tau adapter — wraps tau-bench customer service benchmark as MDP environments.
 
-tau2-bench (https://github.com/sierra-research/tau2-bench) is a multi-turn
+tau-bench (https://github.com/sierra-research/tau2-bench) is a multi-turn
 customer service benchmark evaluating LLM agents across domains (airline,
-retail, telecom). It features heavy tool usage with stateful DB-backed tools,
-an LLM-powered user simulator, and multi-signal evaluation.
+retail, telecom, banking_knowledge). It features heavy tool usage with stateful
+DB-backed tools, an LLM-powered user simulator, and multi-signal evaluation.
 
 Key design: Tools have internal DB state — tool execution is delegated to
 tau2's ``Environment.make_tool_call()`` rather than extracted and called
 directly. User simulation is delegated to tau2's ``UserSimulator``.
+
+Note: The pip package is named ``tau2`` (install with ``pip install tau2``).
 """
 
 from __future__ import annotations
@@ -41,8 +43,9 @@ logger = logging.getLogger(__name__)
 
 # ── Constants ────────────────────────────────────────────────────
 
-TAU2_DOMAINS: tuple[str, ...] = ("airline", "retail", "telecom")
-TAU2_SPLITS: tuple[str, ...] = ("base", "train", "test")
+TAU_DOMAINS: tuple[str, ...] = ("airline", "retail", "telecom", "banking_knowledge")
+TAU_DOMAINS_WITH_SPLITS: tuple[str, ...] = ("airline", "retail", "telecom")
+TAU_SPLITS: tuple[str, ...] = ("base", "train", "test")
 
 _STOP_TOKENS: tuple[str, ...] = ("###STOP###", "###TRANSFER###", "###OUT-OF-SCOPE###")
 
@@ -50,7 +53,7 @@ _STOP_TOKENS: tuple[str, ...] = ("###STOP###", "###TRANSFER###", "###OUT-OF-SCOP
 # ── Tool conversion ─────────────────────────────────────────────
 
 
-def _tau2_tools_to_definitions(
+def _tau_tools_to_definitions(
     tools: list[Any],
 ) -> tuple[ToolDefinition, ...]:
     """Convert tau2 Tool objects to ToolDefinitions.
@@ -69,7 +72,7 @@ def _tau2_tools_to_definitions(
     for tool in tools:
         schema = getattr(tool, "openai_schema", None)
         if schema is None:
-            logger.warning(f"Skipping tau2 tool without openai_schema: {tool}")
+            logger.warning(f"Skipping tau tool without openai_schema: {tool}")
             continue
         oai_schemas.append(schema)
 
@@ -80,13 +83,13 @@ def _tau2_tools_to_definitions(
 
 
 @dataclass(frozen=True)
-class Tau2Hidden:
-    """Hidden state for tau2 environments.
+class TauHidden:
+    """Hidden state for tau-bench environments.
 
     Attributes:
         task_index: Index into the task list.
-        task_id: The tau2 task identifier.
-        domain: The tau2 domain (airline, retail, telecom).
+        task_id: The task identifier.
+        domain: The tau-bench domain.
         episode_step: Current step in the episode.
         last_action: Text of the last action taken.
         messages: Conversation message history (frozen tuple).
@@ -108,14 +111,14 @@ class Tau2Hidden:
 
 
 @dataclass
-class Tau2Reward:
+class TauReward:
     """Primary OUTCOME reward using tau2's aggregate evaluation score.
 
     Non-terminal steps return None reward (STEP type).
     Terminal steps read the overall ``reward`` from tau2's ``RewardInfo``.
     """
 
-    _name: str = "tau2"
+    _name: str = "tau"
 
     @property
     def name(self) -> str:
@@ -160,15 +163,16 @@ class Tau2Reward:
 
 
 @dataclass
-class Tau2DetailedRewards:
+class TauDetailedRewards:
     """Optional reward function emitting per-criterion breakdown.
 
     Emits a single OUTCOME signal with metadata containing per-criterion
-    scores (db_reward, action_reward, communicate_reward, nl_reward).
-    Available via ``extra_rewards`` for fine-grained analysis.
+    scores (db_reward, action_reward, communicate_reward, nl_reward,
+    env_assertion_reward). Available via ``extra_rewards`` for fine-grained
+    analysis.
     """
 
-    _name: str = "tau2_detailed"
+    _name: str = "tau_detailed"
 
     @property
     def name(self) -> str:
@@ -230,6 +234,12 @@ class Tau2DetailedRewards:
             met = sum(1 for a in nl_assertions if getattr(a, "met", False))
             metadata["nl_reward"] = met / max(len(nl_assertions), 1)
 
+        env_assertions = getattr(reward_info, "env_assertions", None)
+        if env_assertions:
+            metadata["env_assertions"] = len(env_assertions)
+            met = sum(1 for a in env_assertions if getattr(a, "met", False))
+            metadata["env_assertion_reward"] = met / max(len(env_assertions), 1)
+
         score = getattr(reward_info, "reward", 0.0)
         return Signal(
             name=self.name,
@@ -243,7 +253,7 @@ class Tau2DetailedRewards:
 
 
 def _contains_stop_token(text: str | None) -> bool:
-    """Check if text contains any tau2 stop token."""
+    """Check if text contains any tau-bench stop token."""
     if text is None:
         return False
     return any(token in text for token in _STOP_TOKENS)
@@ -258,8 +268,8 @@ def _result_to_str(result: Any) -> str:
     return str(result)
 
 
-class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
-    """MDP wrapper for tau2-bench customer service benchmark.
+class TauEnvironment(BaseToolEnvironment[TauHidden]):
+    """MDP wrapper for tau-bench customer service benchmark.
 
     Each task provides a set of tools backed by domain databases. Tool
     execution is delegated to tau2's ``Environment.make_tool_call()``.
@@ -287,7 +297,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
         self._executor = None  # Not used — tau2 handles execution
 
         self._native_rewards: tuple[RewardFunction, ...] = (
-            Tau2Reward(),
+            TauReward(),
             *self._tool_monitoring_rewards(),
         )
         self._extra_rewards = extra_rewards
@@ -300,8 +310,8 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
     @property
     def spec(self) -> EnvironmentSpec:
         return EnvironmentSpec(
-            name=f"tau2:{self._domain}",
-            adapter="tau2",
+            name=f"tau:{self._domain}",
+            adapter="tau",
             max_steps=self._max_steps,
             observation_type=Observation,
             action_type=Action,
@@ -325,7 +335,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[State[Tau2Hidden], dict[str, Any]]:
+    ) -> tuple[State[TauHidden], dict[str, Any]]:
         options = options or {}
         if "task_index" not in options:
             raise ValueError("options must contain 'task_index'")
@@ -346,11 +356,11 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
                     message_history=getattr(initial_state, "message_history", None),
                 )
             except Exception as e:
-                logger.warning(f"Failed to set tau2 initial state: {e}")
+                logger.warning(f"Failed to set initial state: {e}")
 
         # Get tools from tau2 environment
         raw_tools = self._tau2_env.get_tools()
-        self._tools = _tau2_tools_to_definitions(raw_tools)
+        self._tools = _tau_tools_to_definitions(raw_tools)
 
         # Initialize user simulator state
         if self._user_simulator is not None:
@@ -372,7 +382,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
             else:
                 prompt = ""
 
-        hidden = Tau2Hidden(
+        hidden = TauHidden(
             task_index=task_index,
             task_id=getattr(task, "id", str(task_index)),
             domain=self._domain,
@@ -410,10 +420,10 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
 
     def step(
         self,
-        state: State[Tau2Hidden],
+        state: State[TauHidden],
         action: Action,
-    ) -> StepResult[Tau2Hidden]:
-        self._state_tracker.validate(state, "Tau2Environment")
+    ) -> StepResult[TauHidden]:
+        self._state_tracker.validate(state, "TauEnvironment")
 
         next_step = state.hidden.episode_step + 1
         terminated = False
@@ -443,7 +453,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
                         )
                     )
                 except Exception as e:
-                    logger.warning(f"tau2 tool call {tc.name} failed: {e}")
+                    logger.warning(f"Tool call {tc.name} failed: {e}")
                     tool_results.append(
                         ToolResult.from_error(
                             call_id=tc.id,
@@ -565,7 +575,7 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
                 else None,
             )
 
-        next_hidden = Tau2Hidden(
+        next_hidden = TauHidden(
             task_index=state.hidden.task_index,
             task_id=state.hidden.task_id,
             domain=self._domain,
@@ -609,9 +619,9 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
 
     def compute_rewards(
         self,
-        state: State[Tau2Hidden],
+        state: State[TauHidden],
         action: Action,
-        next_state: State[Tau2Hidden],
+        next_state: State[TauHidden],
     ) -> SignalBundle:
         signals = []
         for reward_fn in self.reward_functions:
@@ -623,30 +633,30 @@ class Tau2Environment(BaseToolEnvironment[Tau2Hidden]):
 # ── Adapter ──────────────────────────────────────────────────────
 
 
-class Tau2Adapter:
-    """Adapter for the tau2-bench customer service benchmark.
+class TauAdapter:
+    """Adapter for the tau-bench customer service benchmark.
 
     Wraps tau2's multi-turn, tool-using customer service environments
-    across airline, retail, and telecom domains.
+    across airline, retail, telecom, and banking_knowledge domains.
     """
 
     @property
     def name(self) -> str:
-        return "tau2"
+        return "tau"
 
-    def _get_tau2(self) -> Any:
+    def _get_tau(self) -> Any:
         try:
             import tau2
 
             return tau2
         except ImportError as e:
             raise ImportError(
-                "tau2 is required for Tau2Adapter. Install with: pip install tau2"
+                "tau2 is required for TauAdapter. Install with: pip install tau2"
             ) from e
 
     @staticmethod
     def _parse_domain(name: str) -> str:
-        """Extract domain from environment name like 'tau2:airline' or 'tau2:airline:base'."""
+        """Extract domain from environment name like 'tau:airline' or 'tau:airline:base'."""
         parts = name.split(":")
         if len(parts) >= 2:
             return parts[1]
@@ -654,7 +664,7 @@ class Tau2Adapter:
 
     @staticmethod
     def _parse_split(name: str) -> str | None:
-        """Extract split from environment name like 'tau2:airline:base'."""
+        """Extract split from environment name like 'tau:airline:base'."""
         parts = name.split(":")
         if len(parts) >= 3:
             return parts[2]
@@ -662,10 +672,11 @@ class Tau2Adapter:
 
     def list_environments(self) -> list[str]:
         envs: list[str] = []
-        for domain in TAU2_DOMAINS:
-            envs.append(f"tau2:{domain}")
-            for split in TAU2_SPLITS:
-                envs.append(f"tau2:{domain}:{split}")
+        for domain in TAU_DOMAINS:
+            envs.append(f"tau:{domain}")
+            if domain in TAU_DOMAINS_WITH_SPLITS:
+                for split in TAU_SPLITS:
+                    envs.append(f"tau:{domain}:{split}")
         return envs
 
     def get_environment(
@@ -679,11 +690,11 @@ class Tau2Adapter:
         user_simulator: Any | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         **kwargs: Any,
-    ) -> Tau2Environment:
-        """Create a tau2 environment.
+    ) -> TauEnvironment:
+        """Create a tau-bench environment.
 
         Args:
-            name: Environment name (e.g., "tau2:airline", "tau2:retail:base").
+            name: Environment name (e.g., "tau:airline", "tau:retail:base").
             tasks: Pre-loaded list of tau2 Task objects.
             task_split: Task split name (base, train, test). Overridden by name.
             tau2_env: Pre-created tau2 Environment. If None, created from registry.
@@ -691,10 +702,11 @@ class Tau2Adapter:
             solo_mode: If True, no user simulator (agent uses tools only).
             user_simulator: Pre-created UserSimulator. If None, created from tau2.
             extra_rewards: Additional reward functions.
-            **kwargs: Passed to tau2 environment/task constructors.
+            **kwargs: Forwarded to tau2's environment constructor (e.g.,
+                ``retrieval_variant`` for banking_knowledge).
 
         Returns:
-            Tau2Environment wrapping the domain.
+            TauEnvironment wrapping the domain.
 
         Raises:
             ValueError: If tasks cannot be loaded.
@@ -704,29 +716,29 @@ class Tau2Adapter:
 
         # Load tasks if not provided
         if tasks is None:
-            tau2 = self._get_tau2()
+            tau2 = self._get_tau()
             try:
                 tasks_loader = tau2.registry.get_tasks_loader(domain)
                 tasks = tasks_loader(task_split_name=split)
             except Exception as e:
                 raise ValueError(
-                    f"Could not load tasks for tau2:{domain}. "
+                    f"Could not load tasks for tau:{domain}. "
                     f"Provide tasks= directly or ensure tau2 is properly installed. "
                     f"Error: {e}"
                 ) from e
 
         # Create tau2 environment if not provided
         if tau2_env is None:
-            tau2 = self._get_tau2()
+            tau2 = self._get_tau()
             try:
                 env_constructor = tau2.registry.get_env_constructor(domain)
-                tau2_env = env_constructor(solo_mode=solo_mode)
+                tau2_env = env_constructor(solo_mode=solo_mode, **kwargs)
             except Exception as e:
                 raise ValueError(
-                    f"Could not create tau2 environment for domain '{domain}'. Error: {e}"
+                    f"Could not create environment for domain '{domain}'. Error: {e}"
                 ) from e
 
-        return Tau2Environment(
+        return TauEnvironment(
             domain=domain,
             tasks=tasks,
             tau2_env=tau2_env,
@@ -767,6 +779,6 @@ class Tau2Adapter:
             "name": name,
             "adapter": self.name,
             "domain": domain,
-            "description": f"tau2-bench customer service benchmark ({domain})",
-            "domains": list(TAU2_DOMAINS),
+            "description": f"tau-bench customer service benchmark ({domain})",
+            "domains": list(TAU_DOMAINS),
         }

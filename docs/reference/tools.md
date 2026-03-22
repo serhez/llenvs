@@ -54,7 +54,7 @@ When `raw_schema` is set, `to_openai_schema()` and `to_anthropic_schema()` use i
 The flat `parameters` tuple remains as a best-effort parse for inspection and display.
 
 ```python
-# Tool with nested schema (e.g., from tau2, Aviary, Verifiers)
+# Tool with nested schema (e.g., from tau, Aviary, Verifiers)
 tool = ToolDefinition(
     name="update_booking",
     description="Update a flight booking",
@@ -87,7 +87,7 @@ tool.to_openai_schema()   # => raw_schema (unchanged)
 tool.to_anthropic_schema() # => converts to Anthropic format preserving nested structure
 ```
 
-`raw_schema` is automatically set by `oai_tools_to_definitions()` (used by Aviary, Verifiers, SciAgentGYM, tau2 adapters) and `_mcp_tools_to_definitions()` (used by OpenEnv adapter).
+`raw_schema` is automatically set by `oai_tools_to_definitions()` (used by Aviary, Verifiers, SciAgentGYM, tau adapters) and `_mcp_tools_to_definitions()` (used by OpenEnv adapter).
 
 Example:
 

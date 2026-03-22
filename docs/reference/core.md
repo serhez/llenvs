@@ -176,7 +176,7 @@ The raw model generation is always available on `transition.action.text` (or the
 
 - **Extraction-only adapters** (reasoning_gym, huggingface, gem, verifiers, iterative): `extracted_action == resolved_action`.
 - **Extraction + mapping adapters** (gymnasium, craftax): `resolved_action` uses `ActionMapper.format_action()` and differs from `extracted_action` when the env maps to named actions.
-- **Non-extracting adapters** (dialogue, agentgym, lmrl, openenv, tau2): both `extracted_action` and `resolved_action` are `None`.
+- **Non-extracting adapters** (dialogue, agentgym, lmrl, openenv, tau): both `extracted_action` and `resolved_action` are `None`.
 - On extraction failure, `extracted_action` and `resolved_action` are both `None`.
 - On mapping failure (extraction succeeded but action invalid), `extracted_action` is set but `resolved_action` is `None`.
 

@@ -1,4 +1,4 @@
-"""Tests for the tau2 adapter."""
+"""Tests for the tau adapter."""
 
 from dataclasses import dataclass, field
 from typing import Any
@@ -209,69 +209,70 @@ class MockRewardInfo:
         action_checks: list | None = None,
         communicate_checks: list | None = None,
         nl_assertions: list | None = None,
+        env_assertions: list | None = None,
     ):
         self.reward = reward
         self.db_check = db_check
         self.action_checks = action_checks
         self.communicate_checks = communicate_checks
         self.nl_assertions = nl_assertions
+        self.env_assertions = env_assertions
         self.reward_breakdown = {}
         self.reward_basis = []
         self.info = {}
-        self.env_assertions = None
 
 
 def _make_tasks(n: int = 5) -> list[MockTau2Task]:
     return [MockTau2Task(task_id=f"task_{i:03d}") for i in range(n)]
 
 
-# ── TestTau2ToolConversion ───────────────────────────────────────
+# ── TestTauToolConversion ───────────────────────────────────────
 
 
-class TestTau2ToolConversion:
+class TestTauToolConversion:
     def test_basic_conversion(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         tools = [MockTau2Tool("get_info", "Get information")]
-        defs = _tau2_tools_to_definitions(tools)
+        defs = _tau_tools_to_definitions(tools)
 
         assert len(defs) == 1
         assert defs[0].name == "get_info"
         assert defs[0].description == "Get information"
 
     def test_empty_tools(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
-        assert _tau2_tools_to_definitions([]) == ()
+        assert _tau_tools_to_definitions([]) == ()
 
     def test_multiple_tools(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         tools = [
             MockTau2Tool("tool_a", "Tool A"),
             MockTau2Tool("tool_b", "Tool B"),
             MockTau2Tool("tool_c", "Tool C"),
         ]
-        defs = _tau2_tools_to_definitions(tools)
+        defs = _tau_tools_to_definitions(tools)
         assert len(defs) == 3
         names = {d.name for d in defs}
         assert names == {"tool_a", "tool_b", "tool_c"}
 
     def test_raw_schema_preserved(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         tool = _make_nested_tool()
-        defs = _tau2_tools_to_definitions([tool])
+        defs = _tau_tools_to_definitions([tool])
 
         assert defs[0].raw_schema is not None
         # Round-trip via to_openai_schema should match original
         assert defs[0].to_openai_schema() == tool.openai_schema
 
     def test_nested_schema_roundtrip(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         tool = _make_nested_tool()
-        defs = _tau2_tools_to_definitions([tool])
+        defs = _tau_tools_to_definitions([tool])
         oai = defs[0].to_openai_schema()
 
         # Nested structure preserved
@@ -281,19 +282,19 @@ class TestTau2ToolConversion:
         assert "name" in passengers["items"]["properties"]
 
     def test_flat_params_best_effort(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         tool = MockTau2Tool("simple", "Simple tool")
-        defs = _tau2_tools_to_definitions([tool])
+        defs = _tau_tools_to_definitions([tool])
         assert len(defs[0].parameters) == 1
         assert defs[0].parameters[0].name == "arg1"
         assert defs[0].parameters[0].type == ToolParameterType.STRING
 
     def test_anthropic_schema_from_raw(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         tool = _make_nested_tool()
-        defs = _tau2_tools_to_definitions([tool])
+        defs = _tau_tools_to_definitions([tool])
         anthropic = defs[0].to_anthropic_schema()
 
         assert anthropic["name"] == "update_booking"
@@ -301,23 +302,23 @@ class TestTau2ToolConversion:
         assert "passengers" in anthropic["input_schema"]["properties"]
 
     def test_tool_without_openai_schema_skipped(self):
-        from llenvs.adapters.tau2 import _tau2_tools_to_definitions
+        from llenvs.adapters.tau import _tau_tools_to_definitions
 
         bad_tool = MagicMock(spec=[])  # No openai_schema attribute
         good_tool = MockTau2Tool("good", "Good tool")
-        defs = _tau2_tools_to_definitions([bad_tool, good_tool])
+        defs = _tau_tools_to_definitions([bad_tool, good_tool])
         assert len(defs) == 1
         assert defs[0].name == "good"
 
 
-# ── TestTau2Hidden ──────────────────────────────────────────────
+# ── TestTauHidden ──────────────────────────────────────────────
 
 
-class TestTau2Hidden:
+class TestTauHidden:
     def test_creation(self):
-        from llenvs.adapters.tau2 import Tau2Hidden
+        from llenvs.adapters.tau import TauHidden
 
-        hidden = Tau2Hidden(
+        hidden = TauHidden(
             task_index=0,
             task_id="task_001",
             domain="airline",
@@ -329,16 +330,16 @@ class TestTau2Hidden:
         assert hidden.episode_step == 0
 
     def test_frozen(self):
-        from llenvs.adapters.tau2 import Tau2Hidden
+        from llenvs.adapters.tau import TauHidden
 
-        hidden = Tau2Hidden(task_index=0, task_id="t1", domain="retail")
+        hidden = TauHidden(task_index=0, task_id="t1", domain="retail")
         with pytest.raises(AttributeError):
             hidden.task_index = 1  # type: ignore
 
     def test_defaults(self):
-        from llenvs.adapters.tau2 import Tau2Hidden
+        from llenvs.adapters.tau import TauHidden
 
-        hidden = Tau2Hidden(task_index=0, task_id="t1", domain="retail")
+        hidden = TauHidden(task_index=0, task_id="t1", domain="retail")
         assert hidden.episode_step == 0
         assert hidden.last_action is None
         assert hidden.messages == ()
@@ -346,9 +347,9 @@ class TestTau2Hidden:
         assert hidden.reward_info is None
 
     def test_full_creation(self):
-        from llenvs.adapters.tau2 import Tau2Hidden
+        from llenvs.adapters.tau import TauHidden
 
-        hidden = Tau2Hidden(
+        hidden = TauHidden(
             task_index=2,
             task_id="task_005",
             domain="telecom",
@@ -364,14 +365,14 @@ class TestTau2Hidden:
         assert hidden.termination_reason == "agent_stop"
 
 
-# ── TestTau2Reward ──────────────────────────────────────────────
+# ── TestTauReward ──────────────────────────────────────────────
 
 
-class TestTau2Reward:
+class TestTauReward:
     def _make_states(self, is_terminal=True, reward_info=None):
-        from llenvs.adapters.tau2 import Tau2Hidden
+        from llenvs.adapters.tau import TauHidden
 
-        hidden = Tau2Hidden(
+        hidden = TauHidden(
             task_index=0,
             task_id="t1",
             domain="airline",
@@ -391,51 +392,51 @@ class TestTau2Reward:
         return state, action, next_state
 
     def test_name(self):
-        from llenvs.adapters.tau2 import Tau2Reward
+        from llenvs.adapters.tau import TauReward
 
-        reward = Tau2Reward()
-        assert reward.name == "tau2"
+        reward = TauReward()
+        assert reward.name == "tau"
 
     def test_reward_type(self):
-        from llenvs.adapters.tau2 import Tau2Reward
+        from llenvs.adapters.tau import TauReward
 
-        reward = Tau2Reward()
+        reward = TauReward()
         assert reward.reward_type == RewardType.OUTCOME
 
     def test_intermediate_none(self):
-        from llenvs.adapters.tau2 import Tau2Reward
+        from llenvs.adapters.tau import TauReward
 
-        reward = Tau2Reward()
+        reward = TauReward()
         state, action, next_state = self._make_states(is_terminal=False)
         signal = reward.compute(state, action, next_state)
         assert signal.reward is None
         assert signal.reward_type == RewardType.STEP
 
     def test_terminal_no_reward_info(self):
-        from llenvs.adapters.tau2 import Tau2Reward
+        from llenvs.adapters.tau import TauReward
 
-        reward = Tau2Reward()
+        reward = TauReward()
         state, action, next_state = self._make_states(is_terminal=True)
         signal = reward.compute(state, action, next_state)
         assert signal.reward == 0.0
         assert signal.reward_type == RewardType.OUTCOME
 
     def test_terminal_with_reward_info(self):
-        from llenvs.adapters.tau2 import Tau2Reward
+        from llenvs.adapters.tau import TauReward
 
         reward_info = MockRewardInfo(reward=0.8)
-        reward = Tau2Reward()
+        reward = TauReward()
         state, action, next_state = self._make_states(is_terminal=True, reward_info=reward_info)
         signal = reward.compute(state, action, next_state)
         assert signal.reward == 0.8
         assert signal.reward_type == RewardType.OUTCOME
 
 
-class TestTau2DetailedRewards:
+class TestTauDetailedRewards:
     def _make_states(self, is_terminal=True, reward_info=None):
-        from llenvs.adapters.tau2 import Tau2Hidden
+        from llenvs.adapters.tau import TauHidden
 
-        hidden = Tau2Hidden(
+        hidden = TauHidden(
             task_index=0,
             task_id="t1",
             domain="airline",
@@ -455,29 +456,29 @@ class TestTau2DetailedRewards:
         return state, action, next_state
 
     def test_name(self):
-        from llenvs.adapters.tau2 import Tau2DetailedRewards
+        from llenvs.adapters.tau import TauDetailedRewards
 
-        reward = Tau2DetailedRewards()
-        assert reward.name == "tau2_detailed"
+        reward = TauDetailedRewards()
+        assert reward.name == "tau_detailed"
 
     def test_intermediate_none(self):
-        from llenvs.adapters.tau2 import Tau2DetailedRewards
+        from llenvs.adapters.tau import TauDetailedRewards
 
-        reward = Tau2DetailedRewards()
+        reward = TauDetailedRewards()
         state, action, next_state = self._make_states(is_terminal=False)
         signal = reward.compute(state, action, next_state)
         assert signal.reward is None
         assert signal.reward_type == RewardType.STEP
 
     def test_terminal_with_db_check(self):
-        from llenvs.adapters.tau2 import Tau2DetailedRewards
+        from llenvs.adapters.tau import TauDetailedRewards
 
         db_check = MagicMock()
         db_check.db_reward = 1.0
         db_check.db_match = True
 
         reward_info = MockRewardInfo(reward=0.8, db_check=db_check)
-        reward = Tau2DetailedRewards()
+        reward = TauDetailedRewards()
         state, action, next_state = self._make_states(is_terminal=True, reward_info=reward_info)
         signal = reward.compute(state, action, next_state)
         assert signal.reward_type == RewardType.OUTCOME
@@ -486,25 +487,43 @@ class TestTau2DetailedRewards:
         assert "db_reward" in signal.metadata
 
     def test_terminal_no_reward_info(self):
-        from llenvs.adapters.tau2 import Tau2DetailedRewards
+        from llenvs.adapters.tau import TauDetailedRewards
 
-        reward = Tau2DetailedRewards()
+        reward = TauDetailedRewards()
         state, action, next_state = self._make_states(is_terminal=True)
         signal = reward.compute(state, action, next_state)
         assert signal.reward == 0.0
         assert signal.reward_type == RewardType.OUTCOME
 
+    def test_terminal_with_env_assertions(self):
+        from llenvs.adapters.tau import TauDetailedRewards
 
-# ── TestTau2Environment ─────────────────────────────────────────
+        env_assertion_1 = MagicMock()
+        env_assertion_1.met = True
+        env_assertion_2 = MagicMock()
+        env_assertion_2.met = False
+
+        reward_info = MockRewardInfo(
+            reward=0.5, env_assertions=[env_assertion_1, env_assertion_2]
+        )
+        reward = TauDetailedRewards()
+        state, action, next_state = self._make_states(is_terminal=True, reward_info=reward_info)
+        signal = reward.compute(state, action, next_state)
+        assert signal.metadata is not None
+        assert signal.metadata["env_assertions"] == 2
+        assert signal.metadata["env_assertion_reward"] == 0.5  # 1 of 2 met
 
 
-class TestTau2Environment:
+# ── TestTauEnvironment ─────────────────────────────────────────
+
+
+class TestTauEnvironment:
     def _make_env(self, tasks=None, domain="airline", **kwargs):
-        from llenvs.adapters.tau2 import Tau2Environment
+        from llenvs.adapters.tau import TauEnvironment
 
         t = tasks or _make_tasks()
         mock_tau2_env = MockTau2Environment()
-        return Tau2Environment(
+        return TauEnvironment(
             domain=domain,
             tasks=t,
             tau2_env=mock_tau2_env,
@@ -514,8 +533,8 @@ class TestTau2Environment:
     def test_spec(self):
         env = self._make_env()
         spec = env.spec
-        assert spec.name == "tau2:airline"
-        assert spec.adapter == "tau2"
+        assert spec.name == "tau:airline"
+        assert spec.adapter == "tau"
         assert spec.is_multi_turn is True
         assert spec.pure_step is False
         assert spec.supports_task_index is True
@@ -541,14 +560,14 @@ class TestTau2Environment:
     def test_reward_functions(self):
         env = self._make_env()
         assert len(env.reward_functions) >= 1
-        assert env.reward_functions[0].name == "tau2"
+        assert env.reward_functions[0].name == "tau"
 
     def test_extra_rewards(self):
         extractor = TagBasedExtractor()
         format_reward = FormatReward(extractor)
         env = self._make_env(extra_rewards=(format_reward,))
         names = [r.name for r in env.reward_functions]
-        assert "tau2" in names
+        assert "tau" in names
         assert "format" in names
 
     def test_reset(self):
@@ -706,7 +725,7 @@ class TestTau2Environment:
         action = Action(text="Done")
         result = env.step(state, action)
 
-        sig = result.rewards.by_name("tau2")
+        sig = result.rewards.by_name("tau")
         assert sig is not None
 
     def test_step_tool_results_in_info(self):
@@ -735,9 +754,9 @@ class TestTau2Environment:
         # Override make_tool_call to raise
         mock_env.make_tool_call = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("DB error"))
 
-        from llenvs.adapters.tau2 import Tau2Environment
+        from llenvs.adapters.tau import TauEnvironment
 
-        env = Tau2Environment(
+        env = TauEnvironment(
             domain="airline",
             tasks=_make_tasks(),
             tau2_env=mock_env,
@@ -764,16 +783,16 @@ class TestTau2Environment:
         assert len(rewards.signals) >= 1
 
 
-# ── TestTau2SoloMode ────────────────────────────────────────────
+# ── TestTauSoloMode ────────────────────────────────────────────
 
 
-class TestTau2SoloMode:
+class TestTauSoloMode:
     def _make_env(self, tasks=None, **kwargs):
-        from llenvs.adapters.tau2 import Tau2Environment
+        from llenvs.adapters.tau import TauEnvironment
 
         t = tasks or [MockTau2Task(ticket="Fix order #12345")]
         mock_tau2_env = MockTau2Environment(solo_mode=True)
-        return Tau2Environment(
+        return TauEnvironment(
             domain="airline",
             tasks=t,
             tau2_env=mock_tau2_env,
@@ -824,132 +843,170 @@ class TestTau2SoloMode:
         assert result.terminated is False
 
 
-# ── TestTau2Adapter ─────────────────────────────────────────────
+# ── TestTauAdapter ─────────────────────────────────────────────
 
 
-class TestTau2Adapter:
+class TestTauAdapter:
     def test_name(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
-        assert adapter.name == "tau2"
+        adapter = TauAdapter()
+        assert adapter.name == "tau"
 
     def test_list_environments(self):
-        from llenvs.adapters.tau2 import TAU2_DOMAINS, Tau2Adapter
+        from llenvs.adapters.tau import TAU_DOMAINS, TauAdapter
 
-        adapter = Tau2Adapter()
+        adapter = TauAdapter()
         envs = adapter.list_environments()
-        for domain in TAU2_DOMAINS:
-            assert f"tau2:{domain}" in envs
+        for domain in TAU_DOMAINS:
+            assert f"tau:{domain}" in envs
+
+    def test_list_environments_splits(self):
+        from llenvs.adapters.tau import TAU_DOMAINS_WITH_SPLITS, TAU_SPLITS, TauAdapter
+
+        adapter = TauAdapter()
+        envs = adapter.list_environments()
+        # Domains with splits should have split variants
+        for domain in TAU_DOMAINS_WITH_SPLITS:
+            for split in TAU_SPLITS:
+                assert f"tau:{domain}:{split}" in envs
+
+    def test_list_environments_no_splits_for_banking(self):
+        from llenvs.adapters.tau import TAU_SPLITS, TauAdapter
+
+        adapter = TauAdapter()
+        envs = adapter.list_environments()
+        # banking_knowledge should NOT have split variants
+        for split in TAU_SPLITS:
+            assert f"tau:banking_knowledge:{split}" not in envs
 
     def test_import_error(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
+        adapter = TauAdapter()
         with pytest.raises(ImportError, match="tau2"):
-            adapter._get_tau2()
+            adapter._get_tau()
 
     def test_get_environment_with_tasks(self, monkeypatch):
-        from llenvs.adapters.tau2 import Tau2Adapter, Tau2Environment
+        from llenvs.adapters.tau import TauAdapter, TauEnvironment
 
-        adapter = Tau2Adapter()
+        adapter = TauAdapter()
         mock_tau2 = MagicMock()
-        monkeypatch.setattr(adapter, "_get_tau2", lambda: mock_tau2)
+        monkeypatch.setattr(adapter, "_get_tau", lambda: mock_tau2)
 
         tasks = _make_tasks()
         mock_tau2_env = MockTau2Environment()
-        env = adapter.get_environment("tau2:airline", tasks=tasks, tau2_env=mock_tau2_env)
-        assert isinstance(env, Tau2Environment)
+        env = adapter.get_environment("tau:airline", tasks=tasks, tau2_env=mock_tau2_env)
+        assert isinstance(env, TauEnvironment)
 
     def test_get_environment_requires_tasks_or_loader(self, monkeypatch):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
+        adapter = TauAdapter()
         mock_tau2 = MagicMock()
         # Make registry.get_tasks_loader raise so we get the ValueError
         mock_tau2.registry.get_tasks_loader.side_effect = RuntimeError("no tasks")
-        monkeypatch.setattr(adapter, "_get_tau2", lambda: mock_tau2)
+        monkeypatch.setattr(adapter, "_get_tau", lambda: mock_tau2)
 
         with pytest.raises(ValueError, match="tasks"):
-            adapter.get_environment("tau2:airline")
+            adapter.get_environment("tau:airline")
+
+    def test_get_environment_forwards_kwargs(self, monkeypatch):
+        from llenvs.adapters.tau import TauAdapter
+
+        adapter = TauAdapter()
+        mock_tau2 = MagicMock()
+        monkeypatch.setattr(adapter, "_get_tau", lambda: mock_tau2)
+
+        tasks = _make_tasks()
+        adapter.get_environment(
+            "tau:banking_knowledge",
+            tasks=tasks,
+            retrieval_variant="qwen_embeddings_grep",
+        )
+        # env_constructor should have been called with the kwarg
+        mock_tau2.registry.get_env_constructor.return_value.assert_called_once_with(
+            solo_mode=False, retrieval_variant="qwen_embeddings_grep"
+        )
 
     def test_get_native_answer_extractor(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
-        assert adapter.get_native_answer_extractor("tau2:airline") is None
+        adapter = TauAdapter()
+        assert adapter.get_native_answer_extractor("tau:airline") is None
 
     def test_get_prompt_template(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
-        assert adapter.get_prompt_template("tau2:airline") is None
+        adapter = TauAdapter()
+        assert adapter.get_prompt_template("tau:airline") is None
 
     def test_get_environment_info(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
-        info = adapter.get_environment_info("tau2:airline")
-        assert info["name"] == "tau2:airline"
-        assert info["adapter"] == "tau2"
+        adapter = TauAdapter()
+        info = adapter.get_environment_info("tau:airline")
+        assert info["name"] == "tau:airline"
+        assert info["adapter"] == "tau"
 
     def test_max_steps_passed_through(self, monkeypatch):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
+        adapter = TauAdapter()
         mock_tau2 = MagicMock()
-        monkeypatch.setattr(adapter, "_get_tau2", lambda: mock_tau2)
+        monkeypatch.setattr(adapter, "_get_tau", lambda: mock_tau2)
 
         tasks = _make_tasks()
         mock_tau2_env = MockTau2Environment()
         env = adapter.get_environment(
-            "tau2:airline", tasks=tasks, tau2_env=mock_tau2_env, max_steps=50
+            "tau:airline", tasks=tasks, tau2_env=mock_tau2_env, max_steps=50
         )
         assert env._max_steps == 50
 
     def test_get_default_system_prompt(self, monkeypatch):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
+        adapter = TauAdapter()
         mock_tau2 = MagicMock()
-        monkeypatch.setattr(adapter, "_get_tau2", lambda: mock_tau2)
+        monkeypatch.setattr(adapter, "_get_tau", lambda: mock_tau2)
 
         mock_tau2_env = MockTau2Environment(policy="Always help the customer.")
-        prompt = adapter.get_default_system_prompt("tau2:airline", tau2_env=mock_tau2_env)
+        prompt = adapter.get_default_system_prompt("tau:airline", tau2_env=mock_tau2_env)
         assert "Always help the customer" in prompt
 
     def test_domain_parsing(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
-        assert adapter._parse_domain("tau2:airline") == "airline"
-        assert adapter._parse_domain("tau2:retail") == "retail"
-        assert adapter._parse_domain("tau2:telecom") == "telecom"
-        assert adapter._parse_domain("tau2:airline:base") == "airline"
+        adapter = TauAdapter()
+        assert adapter._parse_domain("tau:airline") == "airline"
+        assert adapter._parse_domain("tau:retail") == "retail"
+        assert adapter._parse_domain("tau:telecom") == "telecom"
+        assert adapter._parse_domain("tau:banking_knowledge") == "banking_knowledge"
+        assert adapter._parse_domain("tau:airline:base") == "airline"
 
     def test_split_parsing(self):
-        from llenvs.adapters.tau2 import Tau2Adapter
+        from llenvs.adapters.tau import TauAdapter
 
-        adapter = Tau2Adapter()
-        assert adapter._parse_split("tau2:airline") is None
-        assert adapter._parse_split("tau2:airline:base") == "base"
-        assert adapter._parse_split("tau2:airline:test") == "test"
-
-
-# ── TestTau2Integration ─────────────────────────────────────────
+        adapter = TauAdapter()
+        assert adapter._parse_split("tau:airline") is None
+        assert adapter._parse_split("tau:airline:base") == "base"
+        assert adapter._parse_split("tau:airline:test") == "test"
 
 
-class TestTau2Integration:
+# ── TestTauIntegration ─────────────────────────────────────────
+
+
+class TestTauIntegration:
     """Integration-style tests using the full adapter flow."""
 
     def test_tool_call_then_text_then_stop(self):
         """Full episode: tool call -> text to user -> user stops."""
-        from llenvs.adapters.tau2 import Tau2Environment
+        from llenvs.adapters.tau import TauEnvironment
 
         user_sim = MockUserSimulator(
             responses=["I'll check.", "###STOP###"],
         )
-        env = Tau2Environment(
+        env = TauEnvironment(
             domain="airline",
             tasks=_make_tasks(),
             tau2_env=MockTau2Environment(),
@@ -978,9 +1035,9 @@ class TestTau2Integration:
 
     def test_multiple_tool_calls_single_step(self):
         """Multiple tool calls in a single action."""
-        from llenvs.adapters.tau2 import Tau2Environment
+        from llenvs.adapters.tau import TauEnvironment
 
-        env = Tau2Environment(
+        env = TauEnvironment(
             domain="airline",
             tasks=_make_tasks(),
             tau2_env=MockTau2Environment(),
@@ -1002,9 +1059,9 @@ class TestTau2Integration:
 
     def test_mixed_valid_invalid_tools(self):
         """Mix of valid and invalid tool calls."""
-        from llenvs.adapters.tau2 import Tau2Environment
+        from llenvs.adapters.tau import TauEnvironment
 
-        env = Tau2Environment(
+        env = TauEnvironment(
             domain="airline",
             tasks=_make_tasks(),
             tau2_env=MockTau2Environment(),

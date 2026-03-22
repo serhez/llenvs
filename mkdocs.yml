@@ -104,7 +104,7 @@ nav:
     - SciAgentGYM: adapters/sciagentgym.md
     - InterCode: adapters/intercode.md
     - MARE: adapters/mare.md
-    - tau2: adapters/tau2.md
+    - Tau: adapters/tau.md
     - Craftax: adapters/craftax.md
     - MolmoSpaces: adapters/molmospaces.md
     - Harbor: adapters/harbor.md

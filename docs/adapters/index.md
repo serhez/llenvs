@@ -128,13 +128,13 @@ llenvs wraps 18+ environment libraries through a unified adapter interface. Each
 
     [:octicons-arrow-right-24: MARE](mare.md)
 
--   :material-headset:{ .lg .middle } **tau2**
+-   :material-headset:{ .lg .middle } **Tau**
 
     ---
 
-    Multi-turn customer service benchmark — airline, retail, telecom.
+    Multi-turn customer service benchmark — airline, retail, telecom, banking knowledge.
 
-    [:octicons-arrow-right-24: tau2](tau2.md)
+    [:octicons-arrow-right-24: Tau](tau.md)
 
 -   :material-axe:{ .lg .middle } **Craftax**
 

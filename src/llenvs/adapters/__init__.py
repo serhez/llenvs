@@ -134,14 +134,15 @@ from llenvs.adapters.sciagentgym import (
     SciAgentGymHidden,
     SciAgentGymReward,
 )
-from llenvs.adapters.tau2 import (
-    TAU2_DOMAINS,
-    TAU2_SPLITS,
-    Tau2Adapter,
-    Tau2DetailedRewards,
-    Tau2Environment,
-    Tau2Hidden,
-    Tau2Reward,
+from llenvs.adapters.tau import (
+    TAU_DOMAINS,
+    TAU_DOMAINS_WITH_SPLITS,
+    TAU_SPLITS,
+    TauAdapter,
+    TauDetailedRewards,
+    TauEnvironment,
+    TauHidden,
+    TauReward,
 )
 from llenvs.adapters.verifiers import (
     VerifiersAdapter,
@@ -286,14 +287,15 @@ __all__ = [
     "MolmoSpacesToolExecutor",
     "MOLMOSPACES_PRESETS",
     "MOLMOSPACES_TASKS",
-    # tau2
-    "Tau2Environment",
-    "Tau2Hidden",
-    "Tau2Adapter",
-    "Tau2Reward",
-    "Tau2DetailedRewards",
-    "TAU2_DOMAINS",
-    "TAU2_SPLITS",
+    # Tau
+    "TauEnvironment",
+    "TauHidden",
+    "TauAdapter",
+    "TauReward",
+    "TauDetailedRewards",
+    "TAU_DOMAINS",
+    "TAU_DOMAINS_WITH_SPLITS",
+    "TAU_SPLITS",
 ]
 
 
@@ -475,10 +477,10 @@ def _register_adapters() -> None:
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
-    # Register tau2 adapter if available
+    # Register tau adapter if available
     try:
-        adapter = Tau2Adapter()
-        adapter._get_tau2()
+        adapter = TauAdapter()
+        adapter._get_tau()
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # tau2 not installed, skip registration
