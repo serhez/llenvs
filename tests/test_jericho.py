@@ -100,6 +100,12 @@ class MockFrotzEnv:
     def game_over(self) -> bool:
         return self._done
 
+    def get_state(self) -> tuple:
+        return (self._step_count, self._score, self._done)
+
+    def set_state(self, state: tuple) -> None:
+        self._step_count, self._score, self._done = state
+
     def seed(self, seed: int) -> None:
         self._seeded = True
         self._seed_value = seed
@@ -137,6 +143,7 @@ def _make_env(
 
     def mock_init_game(game_file: str) -> tuple[str, dict[str, Any]]:
         env._frotz_env = mock_frotz
+        env._current_game_file = game_file
         obs = mock_frotz.reset()
         info = {
             "score": mock_frotz.get_score(),
@@ -909,3 +916,94 @@ class TestJerichoRegistration:
         with patch.object(adapter, "_get_jericho", side_effect=ImportError("no jericho")):
             with pytest.raises(ImportError):
                 adapter._get_jericho()
+
+
+# ---------------------------------------------------------------------------
+# Pure step tests
+# ---------------------------------------------------------------------------
+
+
+class TestJerichoPureStep:
+    """Tests for pure_step=True state save/restore."""
+
+    def _make_pure_env(self, mock_frotz: MockFrotzEnv | None = None, **kwargs) -> JerichoEnvironment:
+        return _make_env(
+            game_files=("/games/zork1.z5",),
+            game_names=("zork1",),
+            mock_frotz=mock_frotz or MockFrotzEnv(),
+            pure_step=True,
+            **kwargs,
+        )
+
+    def test_spec_reflects_pure_step(self):
+        env = self._make_pure_env()
+        assert env.spec.pure_step is True
+
+    def test_default_pure_step_false(self):
+        env = _make_env()
+        assert env.spec.pure_step is False
+
+    def test_hidden_has_frotz_state_and_prev_score(self):
+        env = self._make_pure_env()
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert state.hidden.frotz_state is not None
+        assert state.hidden.prev_score == 0  # initial score
+
+    def test_branching_from_same_state(self):
+        """Step from the same state with two different actions — both work."""
+        mock_frotz = MockFrotzEnv()
+        env = self._make_pure_env(mock_frotz=mock_frotz)
+        state_0, _ = env.reset(options={"task_index": 0})
+
+        # Branch A: open mailbox (no score change)
+        result_a = env.step(state_0, Action(text="open mailbox"))
+        assert result_a.next_state.hidden.score == 0
+
+        # Branch B from the same state_0: take leaflet (score = 5)
+        result_b = env.step(state_0, Action(text="take leaflet"))
+        assert result_b.next_state.hidden.score == 5
+
+        # Both branches are independent
+        assert result_a.next_state.hidden.score != result_b.next_state.hidden.score
+
+    def test_score_delta_correct_after_restore(self):
+        """Score delta uses hidden.prev_score, not stale instance state."""
+        mock_frotz = MockFrotzEnv()
+        env = self._make_pure_env(mock_frotz=mock_frotz)
+        state_0, _ = env.reset(options={"task_index": 0})
+
+        # Step to get score = 5
+        result_1 = env.step(state_0, Action(text="take leaflet"))
+        assert result_1.next_state.hidden.score == 5
+
+        # Now branch back to state_0 (score was 0) and take leaflet again
+        result_2 = env.step(state_0, Action(text="take leaflet"))
+        # Score delta should be 5 (from 0 to 5), not 0 (from stale 5 to 5)
+        signal = result_2.rewards.by_name("game_score")
+        assert signal.reward == 5
+
+    def test_frotz_state_captured_after_step(self):
+        env = self._make_pure_env()
+        state_0, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state_0, Action(text="open mailbox"))
+        assert result.next_state.hidden.frotz_state is not None
+        # State should differ from initial (step count changed)
+        assert result.next_state.hidden.frotz_state != state_0.hidden.frotz_state
+
+    def test_no_state_tracker_in_pure_mode(self):
+        env = self._make_pure_env()
+        assert env._state_tracker is None
+
+    def test_adapter_forwards_pure_step(self):
+        adapter = JerichoAdapter()
+        with patch.object(adapter, "_get_jericho") as mock_get:
+            mock_get.return_value = MagicMock()
+            with patch(
+                "llenvs.adapters.jericho._list_bundled_games",
+                return_value={"zork1": "/games/zork1.z5"},
+            ):
+                env = adapter.get_environment(name="jericho:zork1", pure_step=True)
+        assert env._pure_step is True
+        assert env.spec.pure_step is True

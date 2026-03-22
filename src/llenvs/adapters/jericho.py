@@ -8,7 +8,7 @@ Reference: https://github.com/microsoft/jericho
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,8 @@ class JerichoHidden:
         max_score: Maximum achievable score.
         moves: Move counter from Jericho.
         valid_actions: Currently valid actions.
+        prev_score: Score at the previous step (for delta computation).
+        frotz_state: Z-Machine snapshot from ``get_state()`` (pure_step only).
     """
 
     task_index: int
@@ -77,6 +79,8 @@ class JerichoHidden:
     max_score: int
     moves: int
     valid_actions: tuple[str, ...]
+    prev_score: int = 0
+    frotz_state: Any = field(default=None, repr=False, hash=False, compare=False)
 
 
 @dataclass
@@ -159,6 +163,7 @@ class JerichoEnvironment:
         include_valid_actions: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        pure_step: bool = False,
     ) -> None:
         """Initialize Jericho environment wrapper.
 
@@ -172,21 +177,25 @@ class JerichoEnvironment:
                 native rewards.
             prompts: Override default prompt components. Keys:
                 valid_actions_prefix.
+            pure_step: When True, step() saves/restores Z-Machine state
+                via Jericho's native get_state()/set_state(), enabling
+                branching from arbitrary states (MC rollouts).
         """
         self._game_files = game_files
         self._game_names = game_names
         self._max_steps = max_steps
         self._include_valid_actions = include_valid_actions
+        self._pure_step = pure_step
         self._native_rewards: tuple[RewardFunction, ...] = (JerichoReward(),)
         self._extra_rewards = extra_rewards
         self._prompts = {**DEFAULT_JERICHO_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
-        self._state_tracker = _StateContinuityTracker()
+        self._state_tracker = None if pure_step else _StateContinuityTracker()
 
         # Current FrotzEnv instance (re-created per task)
         self._frotz_env: Any = None
-        self._prev_score: int = 0
+        self._current_game_file: str | None = None
 
     def __len__(self) -> int:
         return len(self._game_files)
@@ -214,7 +223,7 @@ class JerichoEnvironment:
             supports_task_index=True,
             supports_len=True,
             supports_seed=True,
-            pure_step=False,
+            pure_step=self._pure_step,
             metadata={
                 "num_games": len(self._game_files),
                 "description": "Classic interactive fiction text adventure",
@@ -243,6 +252,7 @@ class JerichoEnvironment:
             self._frotz_env.close()
 
         self._frotz_env = jericho.FrotzEnv(game_file)
+        self._current_game_file = game_file
         obs = self._frotz_env.reset()
 
         info = {
@@ -314,8 +324,8 @@ class JerichoEnvironment:
         # Get valid actions
         valid_actions = tuple(self._frotz_env.get_valid_actions())
 
-        # Track score
-        self._prev_score = init_info["score"]
+        # Capture Z-Machine state for pure_step
+        frotz_state = self._frotz_env.get_state() if self._pure_step else None
 
         # Build observation
         obs_prompt = self._build_observation_prompt(raw_obs, valid_actions)
@@ -336,6 +346,8 @@ class JerichoEnvironment:
             max_score=init_info["max_score"],
             moves=init_info["moves"],
             valid_actions=valid_actions,
+            prev_score=init_info["score"],
+            frotz_state=frotz_state,
         )
 
         observation = Observation(
@@ -367,7 +379,8 @@ class JerichoEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
-        self._state_tracker.track(state)
+        if self._state_tracker is not None:
+            self._state_tracker.track(state)
 
         return state, {
             "task_index": task_index,
@@ -391,7 +404,20 @@ class JerichoEnvironment:
         Returns:
             StepResult containing next state, rewards, and done flags.
         """
-        self._state_tracker.validate(state, "JerichoEnvironment")
+        if self._state_tracker is not None:
+            self._state_tracker.validate(state, "JerichoEnvironment")
+
+        # Restore Z-Machine state for pure_step
+        if self._pure_step:
+            if self._frotz_env is None or self._current_game_file != state.hidden.game_file:
+                import jericho
+
+                if self._frotz_env is not None:
+                    self._frotz_env.close()
+                self._frotz_env = jericho.FrotzEnv(state.hidden.game_file)
+                self._frotz_env.reset()
+                self._current_game_file = state.hidden.game_file
+            self._frotz_env.set_state(state.hidden.frotz_state)
 
         # Step Jericho environment
         raw_obs, reward, done, info = self._frotz_env.step(action.text)
@@ -400,8 +426,7 @@ class JerichoEnvironment:
         current_score = self._frotz_env.get_score()
         max_score = self._frotz_env.get_max_score()
         moves = self._frotz_env.get_moves()
-        score_delta = current_score - self._prev_score
-        self._prev_score = current_score
+        score_delta = current_score - state.hidden.prev_score
 
         valid_actions = tuple(self._frotz_env.get_valid_actions())
 
@@ -409,6 +434,9 @@ class JerichoEnvironment:
         next_step = state.hidden.episode_step + 1
         terminated = bool(done)
         truncated = next_step >= self._max_steps and not terminated
+
+        # Capture Z-Machine state for pure_step
+        frotz_state = self._frotz_env.get_state() if self._pure_step else None
 
         # Build next observation
         obs_prompt = self._build_observation_prompt(raw_obs, valid_actions)
@@ -423,6 +451,8 @@ class JerichoEnvironment:
             max_score=max_score,
             moves=moves,
             valid_actions=valid_actions,
+            prev_score=current_score,
+            frotz_state=frotz_state,
         )
 
         new_messages = tuple(state.observation.messages) + (
@@ -466,7 +496,8 @@ class JerichoEnvironment:
 
         # Compute rewards
         rewards = self.compute_rewards(state, action, next_state)
-        self._state_tracker.track(next_state)
+        if self._state_tracker is not None:
+            self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,
@@ -556,6 +587,7 @@ class JerichoAdapter:
         include_valid_actions: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        pure_step: bool = False,
         **kwargs: Any,
     ) -> JerichoEnvironment:
         """Create a Jericho environment.
@@ -572,6 +604,8 @@ class JerichoAdapter:
                 in observations. Defaults to False (wrapper fidelity).
             extra_rewards: Additional reward functions.
             prompts: Override default prompt components.
+            pure_step: When True, enable state save/restore via
+                Jericho's native get_state()/set_state() for branching.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -624,6 +658,7 @@ class JerichoAdapter:
             include_valid_actions=include_valid_actions,
             extra_rewards=extra_rewards,
             prompts=prompts,
+            pure_step=pure_step,
         )
 
     def get_default_system_prompt(self, name: str) -> None:

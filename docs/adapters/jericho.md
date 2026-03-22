@@ -19,7 +19,7 @@ from llenvs.adapters import JerichoAdapter
 from llenvs.core import Action
 
 adapter = JerichoAdapter()
-env = adapter.get_environment("jericho:zork1")
+env = adapter.get_environment("jericho:zork1", pure_step=True)
 
 state, info = env.reset(options={"task_index": 0})
 print(state.observation.prompt)
@@ -111,6 +111,7 @@ env = adapter.get_environment(
     name="jericho:zork1",
     max_steps=100,                         # default: 100
     include_valid_actions=False,           # default: False (wrapper fidelity)
+    pure_step=True,                        # default: False; enable for MC rollouts
     prompts={                              # override prompt templates
         "valid_actions_prefix": "Available commands:",
     },
@@ -165,6 +166,8 @@ class JerichoHidden:
     max_score: int                     # maximum achievable score
     moves: int                         # move counter from Jericho
     valid_actions: tuple[str, ...]     # currently valid actions
+    prev_score: int = 0               # score at previous step (for delta)
+    frotz_state: Any = None           # Z-Machine snapshot (pure_step only)
 ```
 
 ## Using with TrajectoryRunner
@@ -193,8 +196,24 @@ print(f"Score: {result.trajectory.final_state.hidden.score}")
 print(f"Max: {result.trajectory.final_state.hidden.max_score}")
 ```
 
+## State Snapshots (pure_step)
+
+With `pure_step=True`, the adapter uses Jericho's native `get_state()/set_state()` to save and restore Z-Machine state. This enables stepping from any previously visited state (branching), which is required for Monte Carlo rollout-based ground truth estimation.
+
+```python
+env = adapter.get_environment("jericho:zork1", pure_step=True)
+state_0, _ = env.reset(options={"task_index": 0})
+
+# Branch A
+result_a = env.step(state_0, Action(text="go north"))
+
+# Branch B from the same state
+result_b = env.step(state_0, Action(text="open mailbox"))
+```
+
+State snapshots are compact (native Z-Machine tuples, a few KB) and much faster than pickle-based approaches.
+
 ## Limitations
 
-- Non-pure (`pure_step=False`) — cannot branch with `DirectStrategy`; use `ActionReplay` or `ProcessFork` strategies
 - Seed support is available but behavior may vary by game
 - Some games may have quirks in their Z-Machine implementations
