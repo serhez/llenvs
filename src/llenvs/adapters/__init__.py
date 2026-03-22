@@ -158,6 +158,7 @@ from llenvs.adapters.webshop import (
     WebShopEnvironment,
     WebShopHidden,
     WebShopReward,
+    webshop_restore,
 )
 
 __all__ = [
@@ -192,6 +193,7 @@ __all__ = [
     "WebShopHidden",
     "WebShopAdapter",
     "WebShopReward",
+    "webshop_restore",
     # AgentGym
     "AgentGymEnvironment",
     "AgentGymHidden",

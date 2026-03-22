@@ -1,5 +1,6 @@
 """Tests for the WebShop adapter."""
 
+import pickle
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ from llenvs.adapters.webshop import (
     WebShopEnvironment,
     WebShopHidden,
     WebShopReward,
+    webshop_restore,
 )
 from llenvs.core.reward import RewardType
 from llenvs.core.state import Action, Observation, ObservationContent
@@ -146,6 +148,7 @@ class TestWebShopHidden:
             instruction="Find red headphones",
             session_id="123",
             task_index=0,
+            task_name="Find red headphones",
             episode_step=2,
             last_action="search[headphones]",
             available_actions=("Buy Now", "Back"),
@@ -154,6 +157,7 @@ class TestWebShopHidden:
         assert hidden.instruction == "Find red headphones"
         assert hidden.session_id == "123"
         assert hidden.task_index == 0
+        assert hidden.task_name == "Find red headphones"
         assert hidden.episode_step == 2
         assert hidden.last_action == "search[headphones]"
         assert "Buy Now" in hidden.available_actions
@@ -164,12 +168,56 @@ class TestWebShopHidden:
             instruction="test",
             session_id="0",
             task_index=0,
+            task_name="test",
             episode_step=0,
             last_action=None,
             available_actions=(),
         )
         with pytest.raises(AttributeError):
             hidden.episode_step = 1  # type: ignore
+
+    def test_trajectory_default(self):
+        """Test trajectory defaults to empty tuple."""
+        hidden = WebShopHidden(
+            instruction="test",
+            session_id="0",
+            task_index=0,
+            task_name="test",
+            episode_step=0,
+            last_action=None,
+            available_actions=(),
+        )
+        assert hidden.trajectory == ()
+
+    def test_gym_snapshot_default(self):
+        """Test gym_snapshot defaults to None."""
+        hidden = WebShopHidden(
+            instruction="test",
+            session_id="0",
+            task_index=0,
+            task_name="test",
+            episode_step=0,
+            last_action=None,
+            available_actions=(),
+        )
+        assert hidden.gym_snapshot is None
+
+    def test_trajectory_and_snapshot_stored(self):
+        """Test trajectory and snapshot can be stored."""
+        snapshot_data = pickle.dumps({"some": "state"})
+        hidden = WebShopHidden(
+            instruction="test",
+            session_id="0",
+            task_index=0,
+            task_name="test",
+            episode_step=2,
+            last_action="click[Buy Now]",
+            available_actions=(),
+            trajectory=("search[test]", "click[Buy Now]"),
+            gym_snapshot=snapshot_data,
+        )
+        assert hidden.trajectory == ("search[test]", "click[Buy Now]")
+        assert hidden.gym_snapshot == snapshot_data
 
 
 class TestWebShopReward:
@@ -659,3 +707,317 @@ class TestWebShopAdapterDefaultSystemPrompt:
         """WebShop adapter returns None for default system prompt."""
         adapter = WebShopAdapter()
         assert adapter.get_default_system_prompt("webshop") is None
+
+
+class TestWebShopTrajectoryTracking:
+    """Tests for trajectory accumulation in hidden state."""
+
+    def test_reset_sets_empty_trajectory(self, mock_webshop_env):
+        """Reset initializes empty trajectory."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert state.hidden.trajectory == ()
+
+    def test_reset_sets_task_name(self, mock_webshop_env):
+        """Reset sets task_name from instruction."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        assert state.hidden.task_name == state.hidden.instruction
+        assert "red wireless headphone" in state.hidden.task_name.lower()
+
+    def test_step_appends_to_trajectory(self, mock_webshop_env):
+        """Each step appends the action text to trajectory."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result1 = env.step(state, Action(text="search[headphones]"))
+        assert result1.next_state.hidden.trajectory == ("search[headphones]",)
+
+        result2 = env.step(
+            result1.next_state,
+            Action(text="click[Product 1 - Red Headphones $45]"),
+        )
+        assert result2.next_state.hidden.trajectory == (
+            "search[headphones]",
+            "click[Product 1 - Red Headphones $45]",
+        )
+
+    def test_trajectory_preserved_through_full_episode(self, mock_webshop_env):
+        """Trajectory accumulates through an entire episode."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        actions = [
+            "search[red headphones]",
+            "click[Product 1 - Red Headphones $45]",
+            "click[Buy Now]",
+        ]
+        current = state
+        for action_text in actions:
+            result = env.step(current, Action(text=action_text))
+            current = result.next_state
+
+        assert current.hidden.trajectory == tuple(actions)
+        assert current.metadata.is_terminal is True
+
+
+class TestWebShopSnapshotCapture:
+    """Tests for gym_snapshot capture via state_capture_mode."""
+
+    def test_no_snapshot_by_default(self, mock_webshop_env):
+        """No snapshot captured when state_capture_mode is None."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="search[headphones]"))
+        assert result.next_state.hidden.gym_snapshot is None
+
+    def test_snapshot_captured_when_enabled(self, mock_webshop_env):
+        """Snapshot captured at each step when state_capture_mode='snapshot'."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            state_capture_mode="snapshot",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="search[headphones]"))
+        assert result.next_state.hidden.gym_snapshot is not None
+        assert isinstance(result.next_state.hidden.gym_snapshot, bytes)
+
+    def test_snapshot_is_picklable(self, mock_webshop_env):
+        """Snapshot bytes can be unpickled back to a gym env."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            state_capture_mode="snapshot",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="search[headphones]"))
+        restored_gym = pickle.loads(result.next_state.hidden.gym_snapshot)
+        assert hasattr(restored_gym, "state")
+        assert hasattr(restored_gym, "text_to_clickable")
+
+    def test_snapshot_captures_state_after_step(self, mock_webshop_env):
+        """Snapshot reflects the state after the step, not before."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            state_capture_mode="snapshot",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="search[headphones]"))
+        restored_gym = pickle.loads(result.next_state.hidden.gym_snapshot)
+
+        # After search, text_to_clickable should have product entries
+        assert "Product 1 - Red Headphones $45" in restored_gym.text_to_clickable
+
+    def test_snapshot_differs_per_step(self, mock_webshop_env):
+        """Each step captures a different snapshot."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            state_capture_mode="snapshot",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        r1 = env.step(state, Action(text="search[headphones]"))
+        r2 = env.step(
+            r1.next_state,
+            Action(text="click[Product 1 - Red Headphones $45]"),
+        )
+
+        assert r1.next_state.hidden.gym_snapshot != r2.next_state.hidden.gym_snapshot
+
+
+class TestWebShopRestore:
+    """Tests for webshop_restore() dual-mode function."""
+
+    def _run_trajectory(self, env, actions):
+        """Helper: reset and step through a list of actions."""
+        state, _ = env.reset(options={"task_index": 0})
+        current = state
+        for action_text in actions:
+            result = env.step(current, Action(text=action_text))
+            current = result.next_state
+        return current
+
+    def test_restore_from_replay(self, mock_webshop_env):
+        """Replay-based restore reaches same observation."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        actions = ["search[headphones]", "click[Product 1 - Red Headphones $45]"]
+        original_state = self._run_trajectory(env, actions)
+
+        # Create fresh env and restore via replay
+        fresh_env = WebShopEnvironment(webshop_env=MockWebShopEnv())
+        restored = webshop_restore(fresh_env, original_state)
+
+        assert restored.hidden.episode_step == original_state.hidden.episode_step
+        assert restored.observation.state.text == original_state.observation.state.text
+
+    def test_restore_from_snapshot(self, mock_webshop_env):
+        """Snapshot-based restore reaches same observation."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            state_capture_mode="snapshot",
+        )
+        actions = ["search[headphones]", "click[Product 1 - Red Headphones $45]"]
+        original_state = self._run_trajectory(env, actions)
+
+        # Verify snapshot exists
+        assert original_state.hidden.gym_snapshot is not None
+
+        # Create fresh env and restore via snapshot
+        fresh_env = WebShopEnvironment(webshop_env=MockWebShopEnv())
+        restored = webshop_restore(fresh_env, original_state)
+
+        assert restored.hidden.episode_step == original_state.hidden.episode_step
+        # Snapshot path returns the saved state directly
+        assert restored.hidden.task_name == original_state.hidden.task_name
+
+    def test_restore_snapshot_sets_gym_env(self, mock_webshop_env):
+        """Snapshot restore replaces the gym env on the wrapper."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            state_capture_mode="snapshot",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="search[headphones]"))
+        snapshot_state = result.next_state
+
+        fresh_gym = MockWebShopEnv()
+        fresh_env = WebShopEnvironment(webshop_env=fresh_gym)
+        webshop_restore(fresh_env, snapshot_state)
+
+        # After snapshot restore, the gym env should have the post-search clickables
+        assert "Product 1 - Red Headphones $45" in fresh_env._env.text_to_clickable
+
+    def test_restore_validates_instruction(self, mock_webshop_env):
+        """Restore raises ValueError on instruction mismatch."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset(options={"task_index": 0})
+
+        # Tamper with task_name to simulate catalog change
+        from dataclasses import replace
+
+        bad_hidden = replace(state.hidden, task_name="Buy a different product entirely")
+        bad_state = replace(state, hidden=bad_hidden)
+
+        fresh_env = WebShopEnvironment(webshop_env=MockWebShopEnv())
+        with pytest.raises(ValueError, match="Instruction mismatch"):
+            webshop_restore(fresh_env, bad_state)
+
+    def test_restore_replay_continues_stepping(self, mock_webshop_env):
+        """After replay restore, can continue stepping normally."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        actions = ["search[headphones]"]
+        original_state = self._run_trajectory(env, actions)
+
+        fresh_env = WebShopEnvironment(webshop_env=MockWebShopEnv())
+        restored = webshop_restore(fresh_env, original_state)
+
+        # Should be able to continue from restored state
+        result = fresh_env.step(
+            restored,
+            Action(text="click[Product 1 - Red Headphones $45]"),
+        )
+        assert result.next_state.hidden.episode_step == 2
+        assert "Red Wireless Headphones" in result.next_state.observation.state.text
+
+
+class TestWebShopLen:
+    """Tests for __len__ on WebShopEnvironment."""
+
+    def test_len_with_num_tasks(self, mock_webshop_env):
+        """__len__ returns num_tasks when provided."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            num_tasks=500,
+        )
+        assert len(env) == 500
+
+    def test_len_not_supported_without_num_tasks(self, mock_webshop_env):
+        """__len__ raises TypeError when num_tasks not provided."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        with pytest.raises(TypeError):
+            len(env)
+
+
+class TestWebShopSpecFlags:
+    """Tests for EnvironmentSpec flags."""
+
+    def test_supports_task_index(self, mock_webshop_env):
+        """Spec reports supports_task_index=True."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        assert env.spec.supports_task_index is True
+
+    def test_pure_step_false(self, mock_webshop_env):
+        """Spec reports pure_step=False."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        assert env.spec.pure_step is False
+
+
+class TestWebShopPureStep:
+    """Tests for pure_step=True support."""
+
+    def test_pure_step_spec_flag(self, mock_webshop_env):
+        """Spec reports pure_step=True when enabled."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
+        assert env.spec.pure_step is True
+
+    def test_pure_step_no_state_tracker_error(self, mock_webshop_env):
+        """Stepping from a stale state works with pure_step=True."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
+        state_0, _ = env.reset()
+
+        # First step
+        env.step(state_0, Action(text="search[headphones]"))
+
+        # Replay from state_0 — should NOT raise
+        result = env.step(state_0, Action(text="search[shoes]"))
+        assert result.next_state.hidden.episode_step == 1
+
+    def test_pure_step_auto_captures_snapshot_on_reset(self, mock_webshop_env):
+        """Reset captures gym snapshot when pure_step=True."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
+        state, _ = env.reset()
+
+        assert state.hidden.gym_snapshot is not None
+        assert isinstance(state.hidden.gym_snapshot, bytes)
+
+    def test_pure_step_auto_captures_snapshot_on_step(self, mock_webshop_env):
+        """Step captures gym snapshot when pure_step=True."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
+        state, _ = env.reset()
+
+        result = env.step(state, Action(text="search[headphones]"))
+        assert result.next_state.hidden.gym_snapshot is not None
+        assert isinstance(result.next_state.hidden.gym_snapshot, bytes)
+
+    def test_pure_step_branch_from_earlier_state(self, mock_webshop_env):
+        """Branching from an earlier state produces correct independent results."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
+        state, _ = env.reset()
+
+        # Branch A: search headphones
+        result_a = env.step(state, Action(text="search[headphones]"))
+        last_msg_a = result_a.next_state.observation.messages[-1]["content"]
+
+        # Branch B: search shoes (from same initial state)
+        result_b = env.step(state, Action(text="search[shoes]"))
+        last_msg_b = result_b.next_state.observation.messages[-1]["content"]
+
+        # Different search queries → different observations
+        assert "headphones" in last_msg_a.lower()
+        assert "shoes" in last_msg_b.lower()
+        assert last_msg_a != last_msg_b
+
+    def test_pure_step_default_false_still_has_tracker(self, mock_webshop_env):
+        """Default pure_step=False still enforces state continuity."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state_0, _ = env.reset()
+
+        env.step(state_0, Action(text="search[headphones]"))
+
+        with pytest.raises(NotImplementedError, match="pure_step=False"):
+            env.step(state_0, Action(text="search[shoes]"))

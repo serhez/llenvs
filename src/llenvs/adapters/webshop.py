@@ -7,7 +7,9 @@ webpages using search and click actions to find and purchase products.
 Reference: https://github.com/princeton-nlp/WebShop
 """
 
+import pickle
 import uuid
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,17 +26,23 @@ class WebShopHidden:
         instruction: The shopping task instruction (what to buy).
         session_id: WebShop session identifier.
         task_index: Index of the current task.
+        task_name: Instruction text, used for identity validation during restore.
         episode_step: Current step within the episode.
         last_action: The last action taken (for context).
         available_actions: Currently available clickable elements.
+        trajectory: Accumulated action history for replay-based restore.
+        gym_snapshot: Pickled gym env state for snapshot-based restore.
     """
 
     instruction: str
     session_id: str
     task_index: int
+    task_name: str
     episode_step: int
     last_action: str | None
     available_actions: tuple[str, ...]
+    trajectory: tuple[str, ...] = ()
+    gym_snapshot: bytes | None = None
 
 
 @dataclass
@@ -116,6 +124,9 @@ class WebShopEnvironment:
         include_instruction_in_obs: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
+        state_capture_mode: str | None = None,
+        num_tasks: int | None = None,
+        pure_step: bool = False,
     ) -> None:
         """Initialize WebShop environment wrapper.
 
@@ -131,6 +142,12 @@ class WebShopEnvironment:
             extra_rewards: Additional reward functions appended after native rewards.
             prompts: Override default prompt components. Keys:
                 instruction_prefix, step_format, action_hint.
+            state_capture_mode: Controls gym env snapshot capture.
+                None (default): no snapshots, trajectory-only.
+                "snapshot": pickle gym env after each step for fast restore.
+            num_tasks: Number of tasks available. Required for __len__.
+            pure_step: When True, step() saves/restores gym env state
+                via pickle, enabling branching from arbitrary states.
         """
         self._env = webshop_env
         self._observation_mode = observation_mode
@@ -141,7 +158,10 @@ class WebShopEnvironment:
         self._prompts = {**DEFAULT_WEBSHOP_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
-        self._state_tracker = _StateContinuityTracker()
+        self._state_capture_mode = state_capture_mode
+        self._num_tasks = num_tasks
+        self._pure_step = pure_step
+        self._state_tracker = None if pure_step else _StateContinuityTracker()
 
         # Track current instruction for observation building
         self._current_instruction: str = ""
@@ -156,6 +176,16 @@ class WebShopEnvironment:
         """No tools available in WebShop environments."""
         return ()
 
+    def __len__(self) -> int:
+        """Return number of available tasks.
+
+        Raises:
+            TypeError: If num_tasks was not provided at construction.
+        """
+        if self._num_tasks is None:
+            raise TypeError("WebShopEnvironment has no len(); pass num_tasks to the constructor")
+        return self._num_tasks
+
     @property
     def spec(self) -> EnvironmentSpec:
         """Get environment specification."""
@@ -166,6 +196,8 @@ class WebShopEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
+            supports_task_index=True,
+            pure_step=self._pure_step,
             metadata={
                 "observation_mode": self._observation_mode,
                 "description": "E-commerce product search and purchase",
@@ -285,13 +317,18 @@ class WebShopEnvironment:
 
         state_text = raw_obs
 
+        # Capture gym env snapshot for pure_step
+        gym_snapshot = _capture_gym_snapshot(self._env) if self._pure_step else None
+
         hidden = WebShopHidden(
             instruction=instruction,
             session_id=str(session),
             task_index=task_index,
+            task_name=instruction,
             episode_step=0,
             last_action=None,
             available_actions=available,
+            gym_snapshot=gym_snapshot,
         )
 
         observation = Observation(
@@ -312,7 +349,8 @@ class WebShopEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
-        self._state_tracker.track(state)
+        if self._state_tracker is not None:
+            self._state_tracker.track(state)
 
         return state, {
             "task_index": task_index,
@@ -336,7 +374,12 @@ class WebShopEnvironment:
         Returns:
             StepResult containing next state, rewards, and done flags.
         """
-        self._state_tracker.validate(state, "WebShopEnvironment")
+        if self._state_tracker is not None:
+            self._state_tracker.validate(state, "WebShopEnvironment")
+
+        # Restore gym env from snapshot for pure_step
+        if self._pure_step:
+            self._env = pickle.loads(state.hidden.gym_snapshot)
 
         # Step WebShop environment
         raw_obs, reward, done, info = self._env.step(action.text)
@@ -351,13 +394,21 @@ class WebShopEnvironment:
         # Check truncation
         truncated = next_step >= self._max_steps and not done
 
+        # Capture gym env snapshot if enabled or pure_step
+        gym_snapshot: bytes | None = None
+        if self._pure_step or self._state_capture_mode == "snapshot":
+            gym_snapshot = _capture_gym_snapshot(self._env)
+
         new_hidden = WebShopHidden(
             instruction=state.hidden.instruction,
             session_id=state.hidden.session_id,
             task_index=state.hidden.task_index,
+            task_name=state.hidden.task_name,
             episode_step=next_step,
             last_action=action.text,
             available_actions=available,
+            trajectory=state.hidden.trajectory + (action.text,),
+            gym_snapshot=gym_snapshot,
         )
 
         state_text = raw_obs
@@ -392,7 +443,8 @@ class WebShopEnvironment:
 
         # Compute rewards
         rewards = self.compute_rewards(state, action, next_state)
-        self._state_tracker.track(next_state)
+        if self._state_tracker is not None:
+            self._state_tracker.track(next_state)
 
         return StepResult(
             next_state=next_state,
@@ -420,6 +472,104 @@ class WebShopEnvironment:
             signals.append(signal)
 
         return SignalBundle(signals=tuple(signals))
+
+
+def _capture_gym_snapshot(gym_env: Any) -> bytes | None:
+    """Pickle the gym env for later restoration.
+
+    Returns None and warns if the gym env is not picklable.
+    """
+    try:
+        return pickle.dumps(gym_env)
+    except (pickle.PicklingError, TypeError, AttributeError) as e:
+        warnings.warn(
+            f"WebShop gym env is not picklable ({e}); "
+            "snapshot capture disabled, falling back to replay-only restore",
+            stacklevel=3,
+        )
+        return None
+
+
+def webshop_restore(
+    env: WebShopEnvironment,
+    state: State[WebShopHidden],
+) -> State[WebShopHidden]:
+    """Restore a WebShop env to a saved state.
+
+    Uses snapshot if available (O(1)), falls back to action replay (O(N)).
+
+    Args:
+        env: A fresh WebShopEnvironment instance (from env_factory).
+        state: The target state to restore to (from a prior trajectory).
+
+    Returns:
+        The restored state, ready for continued stepping.
+
+    Raises:
+        ValueError: If instruction at task_index doesn't match the saved state.
+    """
+    if state.hidden.gym_snapshot is not None:
+        return _restore_from_snapshot(env, state)
+    return _restore_from_replay(env, state)
+
+
+def _restore_from_snapshot(
+    env: WebShopEnvironment,
+    state: State[WebShopHidden],
+) -> State[WebShopHidden]:
+    """Restore by loading a pickled gym env snapshot."""
+    # Reset to initialize shared state (product catalog, search index)
+    current, _ = env.reset(
+        options={
+            "task_index": state.hidden.task_index,
+            "session": state.hidden.session_id,
+            "episode_id": state.metadata.episode_id,
+        }
+    )
+
+    # Validate instruction identity
+    if state.hidden.task_name and current.hidden.task_name:
+        if state.hidden.task_name != current.hidden.task_name:
+            raise ValueError(
+                f"Instruction mismatch at task_index {state.hidden.task_index}: "
+                f"expected {state.hidden.task_name!r}, "
+                f"got {current.hidden.task_name!r}"
+            )
+
+    # Replace gym env with snapshot
+    env._env = pickle.loads(state.hidden.gym_snapshot)
+    env._state_tracker.track(state)
+    return state
+
+
+def _restore_from_replay(
+    env: WebShopEnvironment,
+    state: State[WebShopHidden],
+) -> State[WebShopHidden]:
+    """Restore by resetting and replaying the action history."""
+    current, _ = env.reset(
+        options={
+            "task_index": state.hidden.task_index,
+            "session": state.hidden.session_id,
+            "episode_id": state.metadata.episode_id,
+        }
+    )
+
+    # Validate instruction identity
+    if state.hidden.task_name and current.hidden.task_name:
+        if state.hidden.task_name != current.hidden.task_name:
+            raise ValueError(
+                f"Instruction mismatch at task_index {state.hidden.task_index}: "
+                f"expected {state.hidden.task_name!r}, "
+                f"got {current.hidden.task_name!r}"
+            )
+
+    # Replay action history
+    for action_text in state.hidden.trajectory:
+        result = env.step(current, Action(text=action_text))
+        current = result.next_state
+
+    return current
 
 
 class WebShopAdapter:
@@ -480,6 +630,7 @@ class WebShopAdapter:
         num_products: int | None = None,
         human_goals: bool = True,
         prompts: dict[str, str] | None = None,
+        pure_step: bool = False,
         **kwargs: Any,
     ) -> WebShopEnvironment:
         """Create a WebShop environment.
@@ -491,6 +642,8 @@ class WebShopAdapter:
             max_steps: Maximum steps per episode.
             num_products: Number of products to load (None = all).
             human_goals: Use human-written goals (True) or templates.
+            pure_step: When True, enable state save/restore via
+                pickle for branching from arbitrary states.
             **kwargs: Additional arguments passed to WebAgentTextEnv.
 
         Returns:
@@ -531,6 +684,7 @@ class WebShopAdapter:
             observation_mode=observation_mode,
             max_steps=max_steps,
             prompts=prompts,
+            pure_step=pure_step,
         )
 
     def get_default_system_prompt(self, name: str) -> None:
