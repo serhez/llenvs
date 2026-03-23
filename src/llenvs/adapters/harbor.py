@@ -41,6 +41,7 @@ from llenvs.core.environment import (
     StepResult,
     _StateContinuityTracker,
 )
+from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.reward import (
     RewardFunction,
     RewardType,
@@ -1899,6 +1900,7 @@ class HarborEnvironment:
         state_capture_mode: str = "replay",
         snapshot_artifact_root: Path | str | None = None,
         snapshot_options: HarborSnapshotOptions | None = None,
+        answer_extractor: AnswerExtractor | None = None,
     ) -> None:
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
@@ -1914,6 +1916,7 @@ class HarborEnvironment:
             None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
         )
         self._snapshot_options = snapshot_options or HarborSnapshotOptions()
+        self._answer_extractor = answer_extractor
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -2023,6 +2026,25 @@ class HarborEnvironment:
             "task_name": hidden.task_name,
         }
 
+    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+        """Return text for the assistant turn in conversation history.
+
+        Uses extracted command when available. On extraction failure, applies
+        the extractor's pre-cleaners to strip reasoning tokens from history.
+        """
+        if extracted_cmd is not None:
+            return extracted_cmd
+        if self._answer_extractor is None:
+            return raw_text
+        from llenvs.core.extraction import CleanedExtractor
+
+        if isinstance(self._answer_extractor, CleanedExtractor):
+            cleaned = raw_text
+            for cleaner in self._answer_extractor.pre_cleaners:
+                cleaned = cleaner(cleaned)
+            return cleaned
+        return raw_text
+
     def step(
         self,
         state: State[HarborHidden],
@@ -2035,14 +2057,20 @@ class HarborEnvironment:
         terminated = False
         truncated = False
 
-        # Check for submit keyword
-        if self._submit_keyword in action_text:
+        # Extract clean command (strips reasoning tokens etc.)
+        extracted_cmd: str | None = None
+        if self._answer_extractor is not None and action_text:
+            extracted_cmd, _ = self._answer_extractor.extract(action_text)
+        cmd_for_env = extracted_cmd or action_text
+
+        # Check for submit keyword on extracted command
+        if self._submit_keyword in cmd_for_env:
             terminated = True
 
         # Execute command in container (even for submit, to maintain trajectory)
         if not terminated:
             exec_result = run_async(
-                self._harbor_env.exec(action_text, timeout_sec=self._exec_timeout)
+                self._harbor_env.exec(cmd_for_env, timeout_sec=self._exec_timeout)
             )
             obs_text = _format_exec_result(exec_result)
         else:
@@ -2071,13 +2099,13 @@ class HarborEnvironment:
             task_name=state.hidden.task_name,
             instruction=state.hidden.instruction,
             episode_step=next_step,
-            last_action=action_text,
-            trajectory=state.hidden.trajectory + (action_text,),
+            last_action=cmd_for_env,
+            trajectory=state.hidden.trajectory + (cmd_for_env,),
         )
 
         # Build messages
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action_text},
+            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
             {"role": "user", "content": obs_text},
         )
 
@@ -2123,6 +2151,8 @@ class HarborEnvironment:
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
+            extracted_action=extracted_cmd,
+            resolved_action=extracted_cmd,
             info={
                 "episode_step": next_step,
                 "observation": obs_text,
@@ -2665,6 +2695,7 @@ class HarborAdapter:
         state_capture_mode: str = "replay",
         snapshot_artifact_root: Path | str | None = None,
         snapshot_options: HarborSnapshotOptions | None = None,
+        answer_extractor: AnswerExtractor | None = None,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
         """Create a Harbor environment.
@@ -2692,6 +2723,8 @@ class HarborAdapter:
             state_capture_mode: ``"replay"`` or ``"snapshot_exact"``.
             snapshot_artifact_root: Snapshot artifact root for exact capture.
             snapshot_options: Runtime-specific exact snapshot options.
+            answer_extractor: Text mode only — extractor for parsing agent
+                responses (strips reasoning tokens, etc.).
             **kwargs: Passed to Harbor constructors.
 
         Returns:
@@ -2757,6 +2790,7 @@ class HarborAdapter:
             state_capture_mode=state_capture_mode,
             snapshot_artifact_root=snapshot_artifact_root,
             snapshot_options=snapshot_options,
+            answer_extractor=answer_extractor,
         )
 
     def get_default_system_prompt(self, name: str) -> str:

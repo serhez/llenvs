@@ -14,6 +14,7 @@ from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
+from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
 DEFAULT_JERICHO_PROMPTS: dict[str, str] = {
@@ -164,6 +165,7 @@ class JerichoEnvironment:
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
+        answer_extractor: AnswerExtractor | None = None,
     ) -> None:
         """Initialize Jericho environment wrapper.
 
@@ -180,6 +182,9 @@ class JerichoEnvironment:
             pure_step: When True, step() saves/restores Z-Machine state
                 via Jericho's native get_state()/set_state(), enabling
                 branching from arbitrary states (MC rollouts).
+            answer_extractor: Optional extractor for parsing clean
+                commands from raw model output (strips reasoning tokens,
+                etc.).
         """
         self._game_files = game_files
         self._game_names = game_names
@@ -192,6 +197,7 @@ class JerichoEnvironment:
         if prompts:
             self._prompts.update(prompts)
         self._state_tracker = None if pure_step else _StateContinuityTracker()
+        self._answer_extractor = answer_extractor
 
         # Current FrotzEnv instance (re-created per task)
         self._frotz_env: Any = None
@@ -390,6 +396,25 @@ class JerichoEnvironment:
             "max_score": init_info["max_score"],
         }
 
+    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+        """Return text for the assistant turn in conversation history.
+
+        Uses extracted command when available. On extraction failure, applies
+        the extractor's pre-cleaners to strip reasoning tokens from history.
+        """
+        if extracted_cmd is not None:
+            return extracted_cmd
+        if self._answer_extractor is None:
+            return raw_text
+        from llenvs.core.extraction import CleanedExtractor
+
+        if isinstance(self._answer_extractor, CleanedExtractor):
+            cleaned = raw_text
+            for cleaner in self._answer_extractor.pre_cleaners:
+                cleaned = cleaner(cleaned)
+            return cleaned
+        return raw_text
+
     def step(
         self,
         state: State[JerichoHidden],
@@ -419,8 +444,16 @@ class JerichoEnvironment:
                 self._current_game_file = state.hidden.game_file
             self._frotz_env.set_state(state.hidden.frotz_state)
 
+        action_text = action.text or ""
+
+        # Extract clean command (strips reasoning tokens etc.)
+        extracted_cmd: str | None = None
+        if self._answer_extractor is not None and action_text:
+            extracted_cmd, _ = self._answer_extractor.extract(action_text)
+        cmd_for_env = extracted_cmd or action_text
+
         # Step Jericho environment
-        raw_obs, reward, done, info = self._frotz_env.step(action.text)
+        raw_obs, reward, done, info = self._frotz_env.step(cmd_for_env)
 
         # Get current score and valid actions
         current_score = self._frotz_env.get_score()
@@ -446,7 +479,7 @@ class JerichoEnvironment:
             game_name=state.hidden.game_name,
             game_file=state.hidden.game_file,
             episode_step=next_step,
-            last_action=action.text,
+            last_action=cmd_for_env,
             score=current_score,
             max_score=max_score,
             moves=moves,
@@ -456,7 +489,7 @@ class JerichoEnvironment:
         )
 
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action.text or ""},
+            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
             {"role": "user", "content": obs_prompt},
         )
         new_observation = Observation(
@@ -484,7 +517,7 @@ class JerichoEnvironment:
                 "max_score": max_score,
                 "score_delta": score_delta,
                 "done": done,
-                "last_action": action.text,
+                "last_action": cmd_for_env,
             },
         )
 
@@ -504,12 +537,14 @@ class JerichoEnvironment:
             rewards=rewards,
             terminated=terminated,
             truncated=truncated,
+            extracted_action=extracted_cmd,
+            resolved_action=extracted_cmd,
             info={
                 "score": current_score,
                 "max_score": max_score,
                 "score_delta": score_delta,
                 "done": done,
-                "action": action.text,
+                "action": cmd_for_env,
                 "valid_actions": valid_actions,
             },
         )
@@ -588,6 +623,7 @@ class JerichoAdapter:
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
+        answer_extractor: AnswerExtractor | None = None,
         **kwargs: Any,
     ) -> JerichoEnvironment:
         """Create a Jericho environment.
@@ -606,6 +642,8 @@ class JerichoAdapter:
             prompts: Override default prompt components.
             pure_step: When True, enable state save/restore via
                 Jericho's native get_state()/set_state() for branching.
+            answer_extractor: Optional extractor for parsing clean
+                commands from raw model output.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -659,6 +697,7 @@ class JerichoAdapter:
             extra_rewards=extra_rewards,
             prompts=prompts,
             pure_step=pure_step,
+            answer_extractor=answer_extractor,
         )
 
     def get_default_system_prompt(self, name: str) -> None:

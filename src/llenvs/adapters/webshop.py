@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
+from llenvs.core.extraction import AnswerExtractor
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
 from llenvs.core.state import Action, Observation, ObservationContent, State, StateMetadata
 
@@ -127,6 +128,7 @@ class WebShopEnvironment:
         state_capture_mode: str | None = None,
         num_tasks: int | None = None,
         pure_step: bool = False,
+        answer_extractor: AnswerExtractor | None = None,
     ) -> None:
         """Initialize WebShop environment wrapper.
 
@@ -148,6 +150,8 @@ class WebShopEnvironment:
             num_tasks: Number of tasks available. Required for __len__.
             pure_step: When True, step() saves/restores gym env state
                 via pickle, enabling branching from arbitrary states.
+            answer_extractor: Extractor applied to raw action text before
+                sending to WebShop. Strips reasoning tokens, etc.
         """
         self._env = webshop_env
         self._observation_mode = observation_mode
@@ -161,6 +165,7 @@ class WebShopEnvironment:
         self._state_capture_mode = state_capture_mode
         self._num_tasks = num_tasks
         self._pure_step = pure_step
+        self._answer_extractor = answer_extractor
         self._state_tracker = None if pure_step else _StateContinuityTracker()
 
         # Track current instruction for observation building
@@ -358,6 +363,25 @@ class WebShopEnvironment:
             "session_id": str(session),
         }
 
+    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+        """Return text for the assistant turn in conversation history.
+
+        Uses extracted command when available. On extraction failure, applies
+        the extractor's pre-cleaners to strip reasoning tokens from history.
+        """
+        if extracted_cmd is not None:
+            return extracted_cmd
+        if self._answer_extractor is None:
+            return raw_text
+        from llenvs.core.extraction import CleanedExtractor
+
+        if isinstance(self._answer_extractor, CleanedExtractor):
+            cleaned = raw_text
+            for cleaner in self._answer_extractor.pre_cleaners:
+                cleaned = cleaner(cleaned)
+            return cleaned
+        return raw_text
+
     def step(
         self,
         state: State[WebShopHidden],
@@ -377,12 +401,20 @@ class WebShopEnvironment:
         if self._state_tracker is not None:
             self._state_tracker.validate(state, "WebShopEnvironment")
 
+        action_text = action.text or ""
+
+        # Extract clean command (strips reasoning tokens etc.)
+        extracted_cmd: str | None = None
+        if self._answer_extractor is not None and action_text:
+            extracted_cmd, _ = self._answer_extractor.extract(action_text)
+        cmd_for_env = extracted_cmd or action_text
+
         # Restore gym env from snapshot for pure_step
         if self._pure_step:
             self._env = pickle.loads(state.hidden.gym_snapshot)
 
         # Step WebShop environment
-        raw_obs, reward, done, info = self._env.step(action.text)
+        raw_obs, reward, done, info = self._env.step(cmd_for_env)
 
         # Extract available actions from new observation
         available = self._extract_available_actions(raw_obs)
@@ -405,16 +437,16 @@ class WebShopEnvironment:
             task_index=state.hidden.task_index,
             task_name=state.hidden.task_name,
             episode_step=next_step,
-            last_action=action.text,
+            last_action=cmd_for_env,
             available_actions=available,
-            trajectory=state.hidden.trajectory + (action.text,),
+            trajectory=state.hidden.trajectory + (cmd_for_env,),
             gym_snapshot=gym_snapshot,
         )
 
         state_text = raw_obs
 
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": action.text or ""},
+            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
             {"role": "user", "content": obs_prompt},
         )
         new_observation = Observation(
@@ -431,7 +463,7 @@ class WebShopEnvironment:
             info={
                 **state.metadata.info,
                 "webshop_reward": reward,
-                "last_action": action.text,
+                "last_action": cmd_for_env,
             },
         )
 
@@ -451,9 +483,11 @@ class WebShopEnvironment:
             rewards=rewards,
             terminated=done,
             truncated=truncated,
+            extracted_action=extracted_cmd,
+            resolved_action=extracted_cmd,
             info={
                 "webshop_reward": reward,
-                "action": action.text,
+                "action": cmd_for_env,
                 "done": done,
             },
         )
@@ -631,6 +665,7 @@ class WebShopAdapter:
         human_goals: bool = True,
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
+        answer_extractor: AnswerExtractor | None = None,
         **kwargs: Any,
     ) -> WebShopEnvironment:
         """Create a WebShop environment.
@@ -644,6 +679,8 @@ class WebShopAdapter:
             human_goals: Use human-written goals (True) or templates.
             pure_step: When True, enable state save/restore via
                 pickle for branching from arbitrary states.
+            answer_extractor: Extractor applied to raw action text before
+                sending to WebShop. Strips reasoning tokens, etc.
             **kwargs: Additional arguments passed to WebAgentTextEnv.
 
         Returns:
@@ -685,6 +722,7 @@ class WebShopAdapter:
             max_steps=max_steps,
             prompts=prompts,
             pure_step=pure_step,
+            answer_extractor=answer_extractor,
         )
 
     def get_default_system_prompt(self, name: str) -> None:
