@@ -463,7 +463,7 @@ class CraftaxEnvironment:
         if max_steps is not None:
             self._max_steps = max_steps
         else:
-            params = craftax_env.default_params()
+            params = craftax_env.default_params
             self._max_steps = getattr(params, "max_steps_in_episode", 1000)
 
         # JAX random module (injectable for testing)
@@ -654,7 +654,7 @@ class CraftaxEnvironment:
         rng_key = self._jax_random.PRNGKey(resolved_seed)
 
         # Reset Craftax env
-        params = self._craftax_env.default_params()
+        params = self._craftax_env.default_params
         raw_obs, craftax_state = self._craftax_env.reset(rng_key, params)
 
         # Render observation
@@ -750,7 +750,7 @@ class CraftaxEnvironment:
         next_rng_key = keys[1]
 
         # Step Craftax env
-        params = self._craftax_env.default_params()
+        params = self._craftax_env.default_params
         raw_obs, new_craftax_state, reward, done, info = self._craftax_env.step(
             step_key, state.hidden.craftax_state, action_idx, params
         )
