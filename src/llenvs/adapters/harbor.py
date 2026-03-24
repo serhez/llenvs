@@ -1488,11 +1488,11 @@ class ApptainerHPCEnvironment:
         self.is_mounted = True  # log dirs bind-mounted
 
         self._sif_cache_dir = (
-            Path(sif_cache_dir)
+            Path(sif_cache_dir).resolve()
             if sif_cache_dir is not None
             else Path.home() / ".cache" / "llenvs" / "sif"
         )
-        self._trial_dir = Path(self.trial_paths.trial_dir)
+        self._trial_dir = Path(self.trial_paths.trial_dir).resolve()
         self._staging_dir = self._trial_dir / "staging"
         self._overlay_path = self._trial_dir / "overlay.img"
 
