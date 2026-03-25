@@ -270,7 +270,9 @@ class JerichoEnvironment:
 
         self._frotz_env = jericho.FrotzEnv(game_file)
         self._current_game_file = game_file
-        obs = self._frotz_env.reset()
+        result = self._frotz_env.reset()
+        # Newer jericho versions return (obs, info); older return just obs.
+        obs = result[0] if isinstance(result, tuple) else result
 
         info = {
             "score": self._frotz_env.get_score(),
