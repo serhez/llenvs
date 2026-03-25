@@ -34,6 +34,16 @@ def _game_name_from_path(path: str) -> str:
     return Path(path).stem
 
 
+_ROM_EXTENSIONS = frozenset(
+    (".z1", ".z2", ".z3", ".z4", ".z5", ".z6", ".z7", ".z8")
+)
+
+_ROM_DIRS = (
+    "games",
+    "z-machine-games-master/jericho-game-suite",
+)
+
+
 def _list_bundled_games() -> dict[str, str]:
     """List all bundled games available in jericho's package data.
 
@@ -42,14 +52,15 @@ def _list_bundled_games() -> dict[str, str]:
     """
     import jericho
 
-    games_dir = Path(jericho.__file__).parent / "games"
-    if not games_dir.is_dir():
-        return {}
-
+    pkg_root = Path(jericho.__file__).parent
     result: dict[str, str] = {}
-    for f in sorted(games_dir.iterdir()):
-        if f.suffix in (".z1", ".z2", ".z3", ".z4", ".z5", ".z6", ".z7", ".z8"):
-            result[f.stem] = str(f)
+    for rel in _ROM_DIRS:
+        games_dir = pkg_root / rel
+        if not games_dir.is_dir():
+            continue
+        for f in sorted(games_dir.iterdir()):
+            if f.suffix in _ROM_EXTENSIONS and f.stem not in result:
+                result[f.stem] = str(f)
     return result
 
 
