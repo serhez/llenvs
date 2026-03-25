@@ -414,13 +414,16 @@ class TestJerichoEnvironment:
         state, info = env.reset()
         assert state.hidden.task_index == 0
 
-    def test_reset_out_of_range(self, env: JerichoEnvironment):
-        with pytest.raises(IndexError, match="out of range"):
-            env.reset(options={"task_index": 999})
+    def test_reset_wraps_task_index(self, env: JerichoEnvironment):
+        """task_index beyond game count wraps via modulo."""
+        state, info = env.reset(options={"task_index": 999})
+        assert state.hidden.task_index == 999
+        assert state.hidden.game_name == env._game_names[999 % len(env._game_files)]
 
     def test_reset_negative_index(self, env: JerichoEnvironment):
-        with pytest.raises(IndexError, match="out of range"):
-            env.reset(options={"task_index": -1})
+        """Negative task_index wraps via Python modulo semantics."""
+        state, info = env.reset(options={"task_index": -1})
+        assert state.hidden.game_name == env._game_names[-1 % len(env._game_files)]
 
     def test_reset_with_seed(self, env: JerichoEnvironment, mock_frotz: MockFrotzEnv):
         env.reset(seed=42, options={"task_index": 0})

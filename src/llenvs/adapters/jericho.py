@@ -327,18 +327,19 @@ class JerichoEnvironment:
         options = options or {}
         task_index = options.get("task_index", 0)
 
-        if task_index < 0 or task_index >= len(self._game_files):
-            raise IndexError(f"task_index {task_index} out of range [0, {len(self._game_files)})")
-
-        game_file = self._game_files[task_index]
-        game_name = self._game_names[task_index]
+        # Wrap task_index so multiple trajectories reuse available games.
+        # For single-game envs (e.g., "jericho:zork1"), all task indices
+        # map to the same game but produce varied episodes via seeding.
+        game_idx = task_index % len(self._game_files)
+        game_file = self._game_files[game_idx]
+        game_name = self._game_names[game_idx]
 
         # Initialize the game
         raw_obs, init_info = self._init_game(game_file)
 
-        # Seed if requested
-        if seed is not None:
-            self._frotz_env.seed(seed)
+        # Seed: use explicit seed if given, otherwise derive from task_index.
+        resolved_seed = seed if seed is not None else task_index * 7919 + 42
+        self._frotz_env.seed(resolved_seed)
 
         # Get valid actions
         valid_actions = tuple(self._frotz_env.get_valid_actions())
