@@ -1736,6 +1736,7 @@ class ApptainerHPCEnvironment:
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
         upload_id = str(uuid.uuid4())[:8]
         staging = self._staging_dir / "upload" / upload_id
+        staging.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(str(source_dir), str(staging))
         await self._run_apptainer_command([
             self._apptainer, "exec", "--cleanenv",
