@@ -20,6 +20,7 @@ Reference: https://github.com/laude-institute/harbor
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import json
 import logging
@@ -27,10 +28,11 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -1383,11 +1385,14 @@ class PodmanHPCEnvironment:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: int | None = None,
+        user: str | int | None = None,
     ) -> _CLIResult:
         if not self._started:
             raise RuntimeError("podman-hpc environment has not been started")
 
         cmd = [self._podman, "exec"]
+        if user is not None:
+            cmd.extend(["--user", str(user)])
         if cwd:
             cmd.extend(["-w", cwd])
         if env:
@@ -1494,10 +1499,122 @@ class ApptainerHPCEnvironment:
         )
         self._trial_dir = Path(self.trial_paths.trial_dir).resolve()
         self._staging_dir = self._trial_dir / "staging"
+        self._binds_dir = self._trial_dir / "binds"
+        self._app_bind_dir = self._binds_dir / "app"
+        self._tests_bind_dir = self._binds_dir / "tests"
         self._overlay_path = self._trial_dir / "overlay.img"
+        cache_root_base = (
+            Path(os.environ["TMPDIR"]).resolve()
+            if "TMPDIR" in os.environ
+            else self._sif_cache_dir.parent
+        )
+        self._app_seed_cache_dir = (
+            cache_root_base / "llenvs" / "apptainer-app-seeds"
+        )
 
         self._validate_definition()
         self._sif_path = self._resolve_sif_path()
+
+    def _app_seed_cache_key(self) -> str:
+        try:
+            stat = self._sif_path.stat()
+            material = (
+                f"{self.environment_name}:{self._sif_path}:"
+                f"{stat.st_size}:{stat.st_mtime_ns}"
+            )
+        except FileNotFoundError:
+            material = f"{self.environment_name}:{self._sif_path}"
+        return hashlib.sha256(material.encode()).hexdigest()[:24]
+
+    def _prepare_app_seed_dir(self) -> Path:
+        self._app_seed_cache_dir.mkdir(parents=True, exist_ok=True)
+        seed_dir = self._app_seed_cache_dir / self._app_seed_cache_key()
+        lock_path = self._app_seed_cache_dir / f"{seed_dir.name}.lock"
+        with lock_path.open("w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if seed_dir.exists():
+                return seed_dir
+
+            tmp_seed_dir = self._app_seed_cache_dir / f".{seed_dir.name}.{uuid.uuid4().hex}.tmp"
+            tmp_seed_dir.mkdir(parents=True, exist_ok=False)
+            try:
+                self._extract_app_seed(tmp_seed_dir)
+                os.replace(tmp_seed_dir, seed_dir)
+            finally:
+                if tmp_seed_dir.exists():
+                    shutil.rmtree(tmp_seed_dir, ignore_errors=True)
+        return seed_dir
+
+    def _extract_app_seed(self, target_dir: Path) -> None:
+        cmd = [
+            self._apptainer,
+            "exec",
+            "--cleanenv",
+            "--bind",
+            f"{target_dir}:/seed",
+            str(self._sif_path),
+            "bash",
+            "-lc",
+            "if [ -d /app ]; then cp -a /app/. /seed/; fi",
+        ]
+        self.logger.debug("apptainer seed cmd: %s", " ".join(cmd))
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.environment_dir),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"apptainer seed extraction failed (exit {result.returncode}): "
+                f"{' '.join(cmd)}\nstdout: {result.stdout.rstrip()}\n"
+                f"stderr: {result.stderr.rstrip()}"
+            )
+
+    @staticmethod
+    def _copy_dir_contents(source_dir: Path, target_dir: Path) -> None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for item in source_dir.iterdir():
+            dest = target_dir / item.name
+            if item.is_symlink():
+                if dest.exists() or dest.is_symlink():
+                    if dest.is_dir() and not dest.is_symlink():
+                        shutil.rmtree(dest)
+                    else:
+                        dest.unlink()
+                os.symlink(os.readlink(item), dest)
+            elif item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True, symlinks=True)
+            else:
+                shutil.copy2(item, dest)
+
+    def _prepare_trial_bind_dirs(self) -> None:
+        app_seed_dir = self._prepare_app_seed_dir()
+        if self._binds_dir.exists():
+            shutil.rmtree(self._binds_dir, ignore_errors=True)
+        self._binds_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(app_seed_dir, self._app_bind_dir, symlinks=True)
+        self._tests_bind_dir.mkdir(parents=True, exist_ok=True)
+
+    def _resolve_bind_target(self, container_path: str) -> Path | None:
+        path = PurePosixPath(container_path)
+        if not path.is_absolute():
+            return None
+        parts = path.parts[1:]
+        if not parts:
+            return None
+        if parts[0] == "app":
+            root = self._app_bind_dir
+        elif parts[0] == "tests":
+            root = self._tests_bind_dir
+        else:
+            return None
+        rel_parts = parts[1:]
+        if any(part in {"..", "."} for part in rel_parts):
+            raise ValueError(f"Unsupported container path: {container_path!r}")
+        return root.joinpath(*rel_parts)
 
     def _validate_definition(self) -> None:
         compose_path = self.environment_dir / "docker-compose.yaml"
@@ -1639,6 +1756,7 @@ class ApptainerHPCEnvironment:
 
         # Create staging directory and host log dirs for bind mounts
         self._staging_dir.mkdir(parents=True, exist_ok=True)
+        self._prepare_trial_bind_dirs()
         verifier_dir = self._trial_dir / "verifier"
         agent_dir = self._trial_dir / "agent"
         verifier_dir.mkdir(parents=True, exist_ok=True)
@@ -1668,6 +1786,8 @@ class ApptainerHPCEnvironment:
             cmd.append("--fakeroot")
         cmd.extend([
             "--bind", f"{self._staging_dir}:/staging",
+            "--bind", f"{self._app_bind_dir}:/app",
+            "--bind", f"{self._tests_bind_dir}:/tests",
             "--bind", f"{verifier_dir}:/logs/verifier",
             "--bind", f"{agent_dir}:/logs/agent",
             str(self._sif_path),
@@ -1697,6 +1817,8 @@ class ApptainerHPCEnvironment:
             if delete:
                 if self._overlay_path.exists():
                     self._overlay_path.unlink()
+                if self._binds_dir.exists():
+                    shutil.rmtree(self._binds_dir, ignore_errors=True)
                 if self._staging_dir.exists():
                     shutil.rmtree(self._staging_dir, ignore_errors=True)
 
@@ -1706,6 +1828,7 @@ class ApptainerHPCEnvironment:
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_sec: int | None = None,
+        user: str | int | None = None,
     ) -> _CLIResult:
         cmd = [self._apptainer, "exec", "--cleanenv"]
         if cwd is not None:
@@ -1720,6 +1843,11 @@ class ApptainerHPCEnvironment:
         return await self._run_apptainer_command(cmd, check=False, timeout_sec=timeout_sec)
 
     async def upload_file(self, source_path: Path | str, target_path: str) -> None:
+        host_target = self._resolve_bind_target(target_path)
+        if host_target is not None:
+            host_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(source_path), str(host_target))
+            return
         upload_id = str(uuid.uuid4())[:8]
         staging = self._staging_dir / "upload" / upload_id
         staging.mkdir(parents=True, exist_ok=True)
@@ -1734,6 +1862,10 @@ class ApptainerHPCEnvironment:
         shutil.rmtree(str(staging), ignore_errors=True)
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
+        host_target = self._resolve_bind_target(target_dir)
+        if host_target is not None:
+            self._copy_dir_contents(Path(source_dir), host_target)
+            return
         upload_id = str(uuid.uuid4())[:8]
         staging = self._staging_dir / "upload" / upload_id
         staging.parent.mkdir(parents=True, exist_ok=True)
@@ -2091,7 +2223,8 @@ class HarborEnvironment:
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:
-                    logger.warning(f"Verifier failed: {e}")
+                    cause = e.__cause__ if e.__cause__ else e
+                    logger.warning("Verifier failed: %s (cause: %s)", e, cause)
                     reward_value = 0.0
 
         # Build next hidden
@@ -2458,7 +2591,8 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:
-                    logger.warning(f"Verifier failed: {e}")
+                    cause = e.__cause__ if e.__cause__ else e
+                    logger.warning("Verifier failed: %s (cause: %s)", e, cause)
                     reward_value = 0.0
 
         # Build next observation via BaseToolEnvironment helper

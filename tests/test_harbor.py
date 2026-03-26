@@ -2323,11 +2323,12 @@ class TestApptainerHPCEnvironment:
         (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
         sif_dir = tmp_path / "sif_cache"
         sif_dir.mkdir()
+        trial = tmp_path / "trial"
         env = ApptainerHPCEnvironment(
             environment_dir=tmp_path,
             environment_name="task_01",
             session_id="session-1",
-            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            trial_paths=self._make_trial_paths(trial),
             task_env_config=self._make_task_env_config(),
             sif_cache_dir=str(sif_dir),
             overlay_size_mb=256,
@@ -2340,6 +2341,9 @@ class TestApptainerHPCEnvironment:
             calls.append((cmd, check, timeout_sec))
             return MockExecResult(stdout="ok")
 
+        seed_dir = tmp_path / "seed-cache" / "task_01"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(env, "_prepare_app_seed_dir", lambda: seed_dir)
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
@@ -2358,6 +2362,9 @@ class TestApptainerHPCEnvironment:
         assert "--cleanenv" in inst_cmd
         assert "--contain" in inst_cmd
         assert "--no-home" in inst_cmd
+        assert "--bind" in inst_cmd
+        assert f"{trial / 'binds' / 'app'}:/app" in inst_cmd
+        assert f"{trial / 'binds' / 'tests'}:/tests" in inst_cmd
         assert f"instance://" not in " ".join(inst_cmd)  # instance start uses plain name
         assert env._instance_name == inst_cmd[-1]
 
@@ -2370,6 +2377,83 @@ class TestApptainerHPCEnvironment:
         assert "mkdir -p /logs/agent /logs/verifier" in bootstrap_cmd
 
         assert env._started is True
+
+    def test_start_seeds_trial_app_and_tests_binds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+        )
+        env._sif_path.touch()
+
+        seed_calls: list[Path] = []
+
+        def fake_prepare_seed() -> Path:
+            seed_dir = tmp_path / "seed-cache" / "task_01"
+            seed_dir.mkdir(parents=True, exist_ok=True)
+            (seed_dir / "README.txt").write_text("seeded")
+            seed_calls.append(seed_dir)
+            return seed_dir
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_prepare_app_seed_dir", fake_prepare_seed)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        assert seed_calls == [tmp_path / "seed-cache" / "task_01"]
+        assert (trial / "binds" / "app" / "README.txt").read_text() == "seeded"
+        assert (trial / "binds" / "tests").is_dir()
+
+    def test_upload_dir_to_tests_uses_bound_host_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+        )
+        env._started = True
+        env._tests_bind_dir.mkdir(parents=True, exist_ok=True)
+
+        source_dir = tmp_path / "tests"
+        source_dir.mkdir()
+        (source_dir / "test_a.sh").write_text("echo ok")
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.upload_dir(source_dir, "/tests"))
+
+        assert calls == []
+        assert (env._tests_bind_dir / "test_a.sh").read_text() == "echo ok"
 
     def test_start_with_fakeroot(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
@@ -2397,6 +2481,9 @@ class TestApptainerHPCEnvironment:
             calls.append((cmd, check, timeout_sec))
             return MockExecResult(stdout="ok")
 
+        seed_dir = tmp_path / "seed-cache" / "task_01"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(env, "_prepare_app_seed_dir", lambda: seed_dir)
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
@@ -2506,14 +2593,14 @@ class TestApptainerHPCEnvironment:
             return MockExecResult(stdout="ok")
 
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
-        run_async(env.upload_dir(source_dir, "/tests"))
+        run_async(env.upload_dir(source_dir, "/workspace/tests"))
 
         # Should have called exec with cp command
         assert len(calls) == 1
         cmd = calls[0][0]
         assert "exec" in cmd
         assert f"instance://{env._instance_name}" in cmd
-        assert any("cp -a" in arg and "/tests/" in arg for arg in cmd)
+        assert any("cp -a" in arg and "/workspace/tests/" in arg for arg in cmd)
 
     def test_no_checkpoint_methods(self, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
