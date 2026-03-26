@@ -2739,12 +2739,14 @@ class HarborAdapter:
             if tasks is None:
                 tasks = self.load_tasks(name, dataset_path=dataset_path)
 
+            trials_dir = kwargs.pop("trials_dir", None)
+
             if env_factory is None:
 
                 def build_harbor_env(task: Any) -> Any:
                     if environment_type == "podman-hpc" or environment_type in _APPTAINER_ALIASES:
-                        return self._create_local_environment(api, task, environment_type, **kwargs)
-                    return self._create_harbor_environment(api, task, environment_type, **kwargs)
+                        return self._create_local_environment(api, task, environment_type, trials_dir=trials_dir, **kwargs)
+                    return self._create_harbor_environment(api, task, environment_type, trials_dir=trials_dir, **kwargs)
 
                 env_factory = build_harbor_env
 
@@ -2854,9 +2856,10 @@ class HarborAdapter:
 
     @staticmethod
     def _create_harbor_environment(
-        api: "_HarborAPI", task: Any, environment_type: str, **kwargs: Any
+        api: "_HarborAPI", task: Any, environment_type: str, *, trials_dir: str | Path | None = None, **kwargs: Any
     ) -> Any:
-        trial_paths = api.trial_paths_class(trial_dir=Path("trials") / str(uuid.uuid4()))
+        trials_base = Path(trials_dir) if trials_dir is not None else Path("trials")
+        trial_paths = api.trial_paths_class(trial_dir=trials_base / str(uuid.uuid4()))
         trial_paths.mkdir()
         env_type = api.environment_type_enum(environment_type)
         env = api.environment_factory.create_environment(
@@ -2876,9 +2879,12 @@ class HarborAdapter:
         api: "_HarborAPI",
         task: Any,
         environment_type: str,
+        *,
+        trials_dir: str | Path | None = None,
         **kwargs: Any,
     ) -> Any:
-        trial_paths = api.trial_paths_class(trial_dir=Path("trials") / str(uuid.uuid4()))
+        trials_base = Path(trials_dir) if trials_dir is not None else Path("trials")
+        trial_paths = api.trial_paths_class(trial_dir=trials_base / str(uuid.uuid4()))
         trial_paths.mkdir()
 
         if environment_type == "podman-hpc":
