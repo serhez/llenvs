@@ -1503,6 +1503,7 @@ class ApptainerHPCEnvironment:
         self._app_bind_dir = self._binds_dir / "app"
         self._tests_bind_dir = self._binds_dir / "tests"
         self._overlay_path = self._trial_dir / "overlay.img"
+        self._dockerfile_path = self.environment_dir / "Dockerfile"
         cache_root_base = (
             Path(os.environ["TMPDIR"]).resolve()
             if "TMPDIR" in os.environ
@@ -1514,6 +1515,7 @@ class ApptainerHPCEnvironment:
 
         self._validate_definition()
         self._sif_path = self._resolve_sif_path()
+        self._default_cwd = self._resolve_default_cwd()
 
     def _app_seed_cache_key(self) -> str:
         try:
@@ -1623,13 +1625,37 @@ class ApptainerHPCEnvironment:
                 "Compose-backed tasks are not supported by the Apptainer runtime. "
                 f"Found docker-compose.yaml in {self.environment_dir}"
             )
-        dockerfile_path = self.environment_dir / "Dockerfile"
         docker_image = getattr(self.task_env_config, "docker_image", None)
-        if not dockerfile_path.exists() and not docker_image:
+        if not self._dockerfile_path.exists() and not docker_image:
             raise FileNotFoundError(
                 f"Task {self.environment_name!r} defines neither a Dockerfile "
                 "nor task_env_config.docker_image."
             )
+
+    def _resolve_default_cwd(self) -> str:
+        workdir = "/app"
+        if not self._dockerfile_path.exists():
+            return workdir
+
+        current = PurePosixPath("/")
+        for raw_line in self._dockerfile_path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            upper = line.upper()
+            if not upper.startswith("WORKDIR "):
+                continue
+            value = line.split(None, 1)[1].strip()
+            if not value:
+                continue
+            if value.startswith(("'", '"')) and value.endswith(("'", '"')) and len(value) >= 2:
+                value = value[1:-1]
+            next_path = PurePosixPath(value)
+            if not next_path.is_absolute():
+                next_path = current / next_path
+            current = next_path
+            workdir = current.as_posix()
+        return workdir
 
     def _resolve_sif_path(self) -> Path:
         docker_image = getattr(self.task_env_config, "docker_image", None)
@@ -1831,8 +1857,9 @@ class ApptainerHPCEnvironment:
         user: str | int | None = None,
     ) -> _CLIResult:
         cmd = [self._apptainer, "exec", "--cleanenv"]
-        if cwd is not None:
-            cmd.extend(["--pwd", cwd])
+        effective_cwd = cwd if cwd is not None else self._default_cwd
+        if effective_cwd is not None:
+            cmd.extend(["--pwd", effective_cwd])
         if env:
             for key, value in env.items():
                 cmd.extend(["--env", f"{key}={value}"])

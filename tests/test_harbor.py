@@ -2534,6 +2534,70 @@ class TestApptainerHPCEnvironment:
         assert cmd[-3:] == ["bash", "-lc", "pwd"]
         assert calls[0][2] == 17
 
+    def test_exec_defaults_to_image_workdir_when_cwd_omitted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\nWORKDIR /app\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        env._started = True
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        result = run_async(env.exec("pwd"))
+
+        assert result.stdout == "ok"
+        cmd = calls[0][0]
+        assert "--pwd" in cmd
+        pwd_idx = cmd.index("--pwd")
+        assert cmd[pwd_idx + 1] == "/app"
+
+    def test_exec_defaults_to_app_when_dockerfile_has_no_workdir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+        env._started = True
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        result = run_async(env.exec("pwd"))
+
+        assert result.stdout == "ok"
+        cmd = calls[0][0]
+        assert "--pwd" in cmd
+        pwd_idx = cmd.index("--pwd")
+        assert cmd[pwd_idx + 1] == "/app"
+
     def test_stop_calls_instance_stop(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
