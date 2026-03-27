@@ -356,6 +356,8 @@ Current v1 behavior:
 
 - Single-container Harbor tasks are supported.
 - Apptainer-backed single-container tasks default `exec()` to the image workdir, falling back to `/app` when no `WORKDIR` is declared.
+- `apptainer-hpc` supports `rootfs_mode="auto" | "overlay" | "sandbox"`. `auto` probes whether the overlay path yields a writable root filesystem and falls back to writable per-trial sandbox copies when it does not.
+- Overlay mode keeps `/app` and `/tests` writable with host-backed binds; sandbox mode uses the writable rootfs directly and does not bind those paths.
 - Task-local `docker-compose.yaml` is supported for a constrained subset centered on a required `main` service plus sidecars.
 - `exec()`, upload, and download operations target `main`; sidecars are runtime-only support services.
 - Supported compose features are limited to common TerminalBench-style fields (`image`, `build.context`, `build.dockerfile`, `command`, `entrypoint`, `environment`, `working_dir`, `volumes`, `depends_on`, `healthcheck`).

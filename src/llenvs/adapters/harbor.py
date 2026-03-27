@@ -29,6 +29,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -61,6 +62,9 @@ from llenvs.core.tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+_APPTAINER_ROOTFS_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
+_APPTAINER_ROOTFS_PROBE_CACHE_LOCK = threading.Lock()
 
 
 def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
@@ -1451,10 +1455,10 @@ def _save_sif_manifest(cache_dir: Path, manifest: dict[str, str]) -> None:
 class ApptainerHPCEnvironment:
     """Local Harbor-compatible runtime using Apptainer/Singularity.
 
-    Single-container tasks only. Uses disk-backed writable overlays for
-    filesystem persistence within an episode, and ``--cleanenv --contain
-    --no-home`` for host isolation. File transfer uses a bind-mounted
-    staging directory since Apptainer has no ``cp`` subcommand.
+    Single-container tasks only. Supports an overlay fast path plus a
+    writable-sandbox fallback, and uses ``--cleanenv --contain --no-home``
+    for host isolation. File transfer uses a bind-mounted staging
+    directory since Apptainer has no ``cp`` subcommand.
 
     Compose-backed tasks are rejected at construction time.
     """
@@ -1473,6 +1477,7 @@ class ApptainerHPCEnvironment:
         fakeroot: bool = False,
         overlay_size_mb: int = 512,
         writable_tmpfs: bool = False,
+        rootfs_mode: str = "auto",
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -1487,10 +1492,18 @@ class ApptainerHPCEnvironment:
         self._fakeroot = fakeroot
         self._overlay_size_mb = overlay_size_mb
         self._writable_tmpfs = writable_tmpfs
+        normalized_rootfs_mode = rootfs_mode.strip().lower()
+        if normalized_rootfs_mode not in {"auto", "overlay", "sandbox"}:
+            raise ValueError(
+                "rootfs_mode must be one of {'auto', 'overlay', 'sandbox'}, "
+                f"got {rootfs_mode!r}"
+            )
+        self._rootfs_mode = normalized_rootfs_mode
         self.snapshot_runtime = _APPTAINER_RUNTIME_NAME
         self._instance_name = _normalize_container_name(session_id)
         self._started = False
         self.is_mounted = True  # log dirs bind-mounted
+        self._active_rootfs_mode: str | None = None
 
         self._sif_cache_dir = (
             Path(sif_cache_dir).resolve()
@@ -1503,6 +1516,7 @@ class ApptainerHPCEnvironment:
         self._app_bind_dir = self._binds_dir / "app"
         self._tests_bind_dir = self._binds_dir / "tests"
         self._overlay_path = self._trial_dir / "overlay.img"
+        self._sandbox_rootfs_dir = self._trial_dir / "rootfs"
         self._dockerfile_path = self.environment_dir / "Dockerfile"
         cache_root_base = (
             Path(os.environ["TMPDIR"]).resolve()
@@ -1511,6 +1525,9 @@ class ApptainerHPCEnvironment:
         )
         self._app_seed_cache_dir = (
             cache_root_base / "llenvs" / "apptainer-app-seeds"
+        )
+        self._sandbox_seed_cache_dir = (
+            cache_root_base / "llenvs" / "apptainer-sandboxes"
         )
 
         self._validate_definition()
@@ -1600,7 +1617,98 @@ class ApptainerHPCEnvironment:
         shutil.copytree(app_seed_dir, self._app_bind_dir, symlinks=True)
         self._tests_bind_dir.mkdir(parents=True, exist_ok=True)
 
+    def _sandbox_seed_cache_key(self) -> str:
+        try:
+            stat = self._sif_path.stat()
+            material = (
+                f"{self.environment_name}:{self._sif_path}:"
+                f"{stat.st_size}:{stat.st_mtime_ns}"
+            )
+        except FileNotFoundError:
+            material = f"{self.environment_name}:{self._sif_path}"
+        return hashlib.sha256(material.encode()).hexdigest()[:24]
+
+    def _build_sandbox_seed(self, target_dir: Path) -> None:
+        cmd = [
+            self._apptainer,
+            "build",
+            "--sandbox",
+            str(target_dir),
+            str(self._sif_path),
+        ]
+        self.logger.debug("apptainer sandbox seed cmd: %s", " ".join(cmd))
+        result = subprocess.run(
+            cmd,
+            cwd=str(self.environment_dir),
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"apptainer sandbox build failed (exit {result.returncode}): "
+                f"{' '.join(cmd)}\nstdout: {result.stdout.rstrip()}\n"
+                f"stderr: {result.stderr.rstrip()}"
+            )
+
+    def _prepare_sandbox_seed_dir(self) -> Path:
+        self._sandbox_seed_cache_dir.mkdir(parents=True, exist_ok=True)
+        seed_dir = self._sandbox_seed_cache_dir / self._sandbox_seed_cache_key()
+        lock_path = self._sandbox_seed_cache_dir / f"{seed_dir.name}.lock"
+        with lock_path.open("w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            if seed_dir.exists():
+                return seed_dir
+
+            tmp_seed_dir = self._sandbox_seed_cache_dir / f".{seed_dir.name}.{uuid.uuid4().hex}.tmp"
+            try:
+                self._build_sandbox_seed(tmp_seed_dir)
+                os.replace(tmp_seed_dir, seed_dir)
+            finally:
+                if tmp_seed_dir.exists():
+                    shutil.rmtree(tmp_seed_dir, ignore_errors=True)
+        return seed_dir
+
+    def _copy_tree_reflink(self, source_dir: Path, target_dir: Path) -> None:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source = f"{source_dir}/."
+
+        def run_copy(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                cmd,
+                cwd=str(self.environment_dir),
+                env=os.environ.copy(),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        reflink_cmd = ["cp", "-a", "--reflink=auto", source, str(target_dir)]
+        reflink_result = run_copy(reflink_cmd)
+        if reflink_result.returncode == 0:
+            return
+
+        fallback_cmd = ["cp", "-a", source, str(target_dir)]
+        fallback_result = run_copy(fallback_cmd)
+        if fallback_result.returncode != 0:
+            raise RuntimeError(
+                f"apptainer sandbox clone failed (exit {fallback_result.returncode}): "
+                f"{' '.join(fallback_cmd)}\n"
+                f"stdout: {fallback_result.stdout.rstrip()}\n"
+                f"stderr: {fallback_result.stderr.rstrip()}"
+            )
+
+    def _prepare_trial_rootfs(self) -> Path:
+        seed_dir = self._prepare_sandbox_seed_dir()
+        if self._sandbox_rootfs_dir.exists():
+            shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
+        self._copy_tree_reflink(seed_dir, self._sandbox_rootfs_dir)
+        return self._sandbox_rootfs_dir
+
     def _resolve_bind_target(self, container_path: str) -> Path | None:
+        if self._active_rootfs_mode != "overlay":
+            return None
         path = PurePosixPath(container_path)
         if not path.is_absolute():
             return None
@@ -1665,6 +1773,33 @@ class ApptainerHPCEnvironment:
         # Dockerfile-only: look for a SIF keyed by environment name
         cache_key = _sif_cache_key(f"dockerfile://{self.environment_name}")
         return self._sif_cache_dir / f"{cache_key}.sif"
+
+    def _rootfs_probe_cache_key(self) -> tuple[Any, ...]:
+        try:
+            stat = self._sif_path.stat()
+            size = stat.st_size
+            mtime_ns = stat.st_mtime_ns
+        except FileNotFoundError:
+            size = None
+            mtime_ns = None
+        return (
+            str(self._sif_path),
+            size,
+            mtime_ns,
+            self._fakeroot,
+            self._overlay_size_mb,
+            self._writable_tmpfs,
+        )
+
+    def _get_cached_overlay_probe(self) -> bool | None:
+        key = self._rootfs_probe_cache_key()
+        with _APPTAINER_ROOTFS_PROBE_CACHE_LOCK:
+            return _APPTAINER_ROOTFS_PROBE_CACHE.get(key)
+
+    def _set_cached_overlay_probe(self, value: bool) -> None:
+        key = self._rootfs_probe_cache_key()
+        with _APPTAINER_ROOTFS_PROBE_CACHE_LOCK:
+            _APPTAINER_ROOTFS_PROBE_CACHE[key] = value
 
     async def _run_apptainer_command(
         self,
@@ -1741,6 +1876,7 @@ class ApptainerHPCEnvironment:
         self.logger.info(
             "Harbor runtime: %s (%s %s)\n"
             "  fakeroot: %s\n"
+            "  rootfs mode request: %s\n"
             "  overlay mode: %s\n"
             "  SIF cache: %s (%d images)\n"
             "  isolation: --cleanenv --contain --no-home",
@@ -1748,56 +1884,61 @@ class ApptainerHPCEnvironment:
             self._apptainer,
             version_str,
             fakeroot_str,
+            self._rootfs_mode,
             overlay_mode,
             self._sif_cache_dir,
             sif_count,
         )
 
-    async def start(self, force_build: bool = False) -> None:
-        await self._log_runtime_info()
+    async def _probe_root_writability(self) -> bool:
+        result = await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                "touch /.vb_probe && rm /.vb_probe",
+            ],
+            check=False,
+        )
+        return result.return_code == 0
 
-        # Validate network isolation constraint
-        allow_internet = getattr(self.task_env_config, "allow_internet", True)
-        if not allow_internet:
-            raise RuntimeError(
-                "Apptainer runtime cannot enforce network isolation "
-                "(allow_internet=False). Use podman-hpc for tasks requiring "
-                "network isolation."
-            )
+    async def _bootstrap_log_dirs(self) -> None:
+        await self._run_apptainer_command([
+            self._apptainer,
+            "exec",
+            "--cleanenv",
+            f"instance://{self._instance_name}",
+            "bash",
+            "-lc",
+            "mkdir -p /logs/agent /logs/verifier",
+        ])
 
-        # Ensure SIF exists
-        if not self._sif_path.exists():
-            docker_image = getattr(self.task_env_config, "docker_image", None)
-            if docker_image and not force_build:
-                raise FileNotFoundError(
-                    f"SIF image not found at {self._sif_path}. "
-                    f"Pre-build it on a login node: "
-                    f"{self._apptainer} build {self._sif_path} "
-                    f"docker://{docker_image}"
-                )
-            raise FileNotFoundError(
-                f"SIF image not found at {self._sif_path}. "
-                "Pre-build it on a node with Docker/Podman access."
-            )
-
-        # Create staging directory and host log dirs for bind mounts
+    def _prepare_runtime_dirs(self) -> tuple[Path, Path]:
         self._staging_dir.mkdir(parents=True, exist_ok=True)
-        self._prepare_trial_bind_dirs()
         verifier_dir = self._trial_dir / "verifier"
         agent_dir = self._trial_dir / "agent"
         verifier_dir.mkdir(parents=True, exist_ok=True)
         agent_dir.mkdir(parents=True, exist_ok=True)
+        return verifier_dir, agent_dir
 
-        # Create overlay (skip for writable-tmpfs mode)
+    async def _start_overlay_instance(self) -> None:
+        verifier_dir, agent_dir = self._prepare_runtime_dirs()
+        self._prepare_trial_bind_dirs()
+
         if not self._writable_tmpfs:
             self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
             await self._run_apptainer_command([
-                self._apptainer, "overlay", "create",
-                "--size", str(self._overlay_size_mb),
+                self._apptainer,
+                "overlay",
+                "create",
+                "--size",
+                str(self._overlay_size_mb),
                 str(self._overlay_path),
             ])
 
-        # Start instance
         cmd = [self._apptainer, "instance", "start"]
         if self._writable_tmpfs:
             cmd.append("--writable-tmpfs")
@@ -1820,15 +1961,101 @@ class ApptainerHPCEnvironment:
             self._instance_name,
         ])
         await self._run_apptainer_command(cmd)
-
-        # Bootstrap runtime directories inside the container
-        await self._run_apptainer_command([
-            self._apptainer, "exec", "--cleanenv",
-            f"instance://{self._instance_name}",
-            "bash", "-lc", "mkdir -p /logs/agent /logs/verifier",
-        ])
-
+        await self._bootstrap_log_dirs()
         self._started = True
+        self._active_rootfs_mode = "overlay"
+
+    async def _start_sandbox_instance(self) -> None:
+        verifier_dir, agent_dir = self._prepare_runtime_dirs()
+        rootfs_dir = self._prepare_trial_rootfs()
+
+        cmd = [self._apptainer, "instance", "start", "--writable"]
+        cmd.extend([
+            "--cleanenv",
+            "--contain",
+            "--no-home",
+        ])
+        if self._fakeroot:
+            cmd.append("--fakeroot")
+        cmd.extend([
+            "--bind", f"{self._staging_dir}:/staging",
+            "--bind", f"{verifier_dir}:/logs/verifier",
+            "--bind", f"{agent_dir}:/logs/agent",
+            str(rootfs_dir),
+            self._instance_name,
+        ])
+        await self._run_apptainer_command(cmd)
+        await self._bootstrap_log_dirs()
+        self._started = True
+        self._active_rootfs_mode = "sandbox"
+
+    async def start(self, force_build: bool = False) -> None:
+        await self._log_runtime_info()
+
+        allow_internet = getattr(self.task_env_config, "allow_internet", True)
+        if not allow_internet:
+            raise RuntimeError(
+                "Apptainer runtime cannot enforce network isolation "
+                "(allow_internet=False). Use podman-hpc for tasks requiring "
+                "network isolation."
+            )
+
+        if not self._sif_path.exists():
+            docker_image = getattr(self.task_env_config, "docker_image", None)
+            if docker_image and not force_build:
+                raise FileNotFoundError(
+                    f"SIF image not found at {self._sif_path}. "
+                    f"Pre-build it on a login node: "
+                    f"{self._apptainer} build {self._sif_path} "
+                    f"docker://{docker_image}"
+                )
+            raise FileNotFoundError(
+                f"SIF image not found at {self._sif_path}. "
+                "Pre-build it on a node with Docker/Podman access."
+            )
+
+        cached_probe = self._get_cached_overlay_probe()
+        if self._rootfs_mode == "sandbox":
+            await self._start_sandbox_instance()
+            self.logger.info("Apptainer rootfs mode selected: sandbox")
+            return
+        if self._rootfs_mode == "overlay" and cached_probe is False:
+            raise RuntimeError(
+                "Apptainer overlay mode did not provide writable root semantics "
+                "for this image on this host. Set rootfs_mode: auto or "
+                "rootfs_mode: sandbox to use writable sandboxes instead."
+            )
+        if self._rootfs_mode == "auto" and cached_probe is False:
+            await self._start_sandbox_instance()
+            self.logger.info(
+                "Apptainer rootfs mode selected: sandbox (cached overlay probe failure)"
+            )
+            return
+
+        await self._start_overlay_instance()
+        if cached_probe is True:
+            self.logger.info("Apptainer rootfs mode selected: overlay (cached)")
+            return
+
+        overlay_ok = await self._probe_root_writability()
+        self._set_cached_overlay_probe(overlay_ok)
+        if overlay_ok:
+            self.logger.info("Apptainer rootfs mode selected: overlay")
+            return
+
+        await self.stop(delete=True)
+        if self._rootfs_mode == "overlay":
+            raise RuntimeError(
+                "Apptainer overlay mode did not provide writable root semantics "
+                "for this image on this host. Set rootfs_mode: auto or "
+                "rootfs_mode: sandbox to use writable sandboxes instead."
+            )
+
+        self.logger.info(
+            "Apptainer overlay probe failed; falling back to writable sandbox"
+        )
+        await self._start_sandbox_instance()
+        self.logger.info("Apptainer rootfs mode selected: sandbox")
 
     async def stop(self, delete: bool = True) -> None:
         if not self._started:
@@ -1840,11 +2067,14 @@ class ApptainerHPCEnvironment:
             )
         finally:
             self._started = False
+            self._active_rootfs_mode = None
             if delete:
                 if self._overlay_path.exists():
                     self._overlay_path.unlink()
                 if self._binds_dir.exists():
                     shutil.rmtree(self._binds_dir, ignore_errors=True)
+                if self._sandbox_rootfs_dir.exists():
+                    shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
                 if self._staging_dir.exists():
                     shutil.rmtree(self._staging_dir, ignore_errors=True)
 

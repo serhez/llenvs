@@ -2332,6 +2332,7 @@ class TestApptainerHPCEnvironment:
             task_env_config=self._make_task_env_config(),
             sif_cache_dir=str(sif_dir),
             overlay_size_mb=256,
+            rootfs_mode="overlay",
         )
         env._sif_path.touch()
 
@@ -2376,6 +2377,12 @@ class TestApptainerHPCEnvironment:
         assert f"instance://{env._instance_name}" in bootstrap_cmd
         assert "mkdir -p /logs/agent /logs/verifier" in bootstrap_cmd
 
+        # Fifth call: overlay writability probe
+        probe_cmd = calls[4][0]
+        assert probe_cmd[:2] == ["apptainer", "exec"]
+        assert f"instance://{env._instance_name}" in probe_cmd
+        assert "touch /.vb_probe && rm /.vb_probe" in probe_cmd[-1]
+
         assert env._started is True
 
     def test_start_seeds_trial_app_and_tests_binds(
@@ -2395,6 +2402,7 @@ class TestApptainerHPCEnvironment:
             trial_paths=self._make_trial_paths(trial),
             task_env_config=self._make_task_env_config(),
             sif_cache_dir=str(sif_dir),
+            rootfs_mode="overlay",
         )
         env._sif_path.touch()
 
@@ -2437,6 +2445,7 @@ class TestApptainerHPCEnvironment:
             task_env_config=self._make_task_env_config(),
         )
         env._started = True
+        env._active_rootfs_mode = "overlay"
         env._tests_bind_dir.mkdir(parents=True, exist_ok=True)
 
         source_dir = tmp_path / "tests"
@@ -2472,6 +2481,7 @@ class TestApptainerHPCEnvironment:
             task_env_config=self._make_task_env_config(),
             sif_cache_dir=str(sif_dir),
             fakeroot=True,
+            rootfs_mode="overlay",
         )
         env._sif_path.touch()
 
@@ -2490,6 +2500,213 @@ class TestApptainerHPCEnvironment:
         # calls[0] = --version, calls[1] = overlay create, calls[2] = instance start
         inst_cmd = calls[2][0]
         assert "--fakeroot" in inst_cmd
+
+    def test_start_sandbox_uses_writable_rootfs_without_app_or_tests_binds(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="sandbox",
+        )
+        env._sif_path.touch()
+
+        rootfs_dir = trial / "rootfs"
+
+        def fake_prepare_trial_rootfs() -> Path:
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        inst_cmd = calls[1][0]
+        assert inst_cmd[:3] == ["apptainer", "instance", "start"]
+        assert "--writable" in inst_cmd
+        assert "--overlay" not in inst_cmd
+        assert "--writable-tmpfs" not in inst_cmd
+        assert all(":/app" not in arg for arg in inst_cmd)
+        assert all(":/tests" not in arg for arg in inst_cmd)
+        assert str(rootfs_dir) in inst_cmd
+        assert env._active_rootfs_mode == "sandbox"
+
+    def test_start_auto_falls_back_to_sandbox_when_overlay_probe_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE.clear()
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+        )
+        env._sif_path.touch()
+
+        rootfs_dir = trial / "rootfs"
+
+        def fake_prepare_seed() -> Path:
+            seed_dir = tmp_path / "seed-cache" / "task_01"
+            seed_dir.mkdir(parents=True, exist_ok=True)
+            (seed_dir / "README.txt").write_text("seeded")
+            return seed_dir
+
+        def fake_prepare_trial_rootfs() -> Path:
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        async def fake_probe() -> bool:
+            return False
+
+        monkeypatch.setattr(env, "_prepare_app_seed_dir", fake_prepare_seed)
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        monkeypatch.setattr(env, "_probe_root_writability", fake_probe)
+        run_async(env.start())
+
+        inst_cmds = [cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]]
+        assert len(inst_cmds) == 2
+        assert "--overlay" in inst_cmds[0] or "--writable-tmpfs" in inst_cmds[0]
+        assert "--writable" in inst_cmds[1]
+        assert str(rootfs_dir) in inst_cmds[1]
+        assert env._active_rootfs_mode == "sandbox"
+
+    def test_auto_reuses_cached_overlay_probe_result(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE.clear()
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        sif_path = sif_dir / "ca0c1413bbd82bab.sif"
+        sif_path.touch()
+
+        def make_env(trial_name: str) -> ApptainerHPCEnvironment:
+            env = ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id=f"session-{trial_name}",
+                trial_paths=self._make_trial_paths(tmp_path / trial_name),
+                task_env_config=self._make_task_env_config(),
+                sif_cache_dir=str(sif_dir),
+            )
+            env._sif_path = sif_path
+            return env
+
+        env_a = make_env("trial-a")
+        env_b = make_env("trial-b")
+
+        def fake_prepare_seed() -> Path:
+            seed_dir = tmp_path / "seed-cache" / "task_01"
+            seed_dir.mkdir(parents=True, exist_ok=True)
+            return seed_dir
+
+        def rootfs_for(env: ApptainerHPCEnvironment) -> Path:
+            return Path(env.trial_paths.trial_dir) / "rootfs"
+
+        calls_a: list[tuple[list[str], bool, int | None]] = []
+        calls_b: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run_a(cmd, *, check=True, timeout_sec=None):
+            calls_a.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        async def fake_run_b(cmd, *, check=True, timeout_sec=None):
+            calls_b.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        async def fake_probe() -> bool:
+            return False
+
+        monkeypatch.setattr(env_a, "_prepare_app_seed_dir", fake_prepare_seed)
+        monkeypatch.setattr(env_b, "_prepare_app_seed_dir", fake_prepare_seed)
+        monkeypatch.setattr(env_a, "_prepare_trial_rootfs", lambda: rootfs_for(env_a))
+        monkeypatch.setattr(env_b, "_prepare_trial_rootfs", lambda: rootfs_for(env_b))
+        monkeypatch.setattr(env_a, "_run_apptainer_command", fake_run_a)
+        monkeypatch.setattr(env_b, "_run_apptainer_command", fake_run_b)
+        monkeypatch.setattr(env_a, "_probe_root_writability", fake_probe)
+
+        run_async(env_a.start())
+        run_async(env_b.start())
+
+        inst_cmds_a = [cmd for cmd, _check, _timeout in calls_a if cmd[:3] == ["apptainer", "instance", "start"]]
+        inst_cmds_b = [cmd for cmd, _check, _timeout in calls_b if cmd[:3] == ["apptainer", "instance", "start"]]
+        assert len(inst_cmds_a) == 2
+        assert len(inst_cmds_b) == 1
+        assert "--writable" in inst_cmds_b[0]
+
+    def test_overlay_mode_raises_with_remediation_when_probe_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="overlay",
+        )
+        env._sif_path.touch()
+
+        seed_dir = tmp_path / "seed-cache" / "task_01"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            return MockExecResult(stdout="ok")
+
+        async def fake_probe() -> bool:
+            return False
+
+        monkeypatch.setattr(env, "_prepare_app_seed_dir", lambda: seed_dir)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        monkeypatch.setattr(env, "_probe_root_writability", fake_probe)
+
+        with pytest.raises(RuntimeError, match="rootfs_mode: auto or rootfs_mode: sandbox"):
+            run_async(env.start())
 
     def test_exec_uses_instance_prefix_pwd_cleanenv_and_env(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
@@ -2627,6 +2844,41 @@ class TestApptainerHPCEnvironment:
             "apptainer", "instance", "stop", env._instance_name
         ]
         assert env._started is False
+
+    def test_upload_dir_to_tests_uses_generic_exec_in_sandbox_mode(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+            rootfs_mode="sandbox",
+        )
+        env._started = True
+        env._active_rootfs_mode = "sandbox"
+
+        source_dir = tmp_path / "tests"
+        source_dir.mkdir()
+        (source_dir / "test_a.sh").write_text("echo ok")
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.upload_dir(source_dir, "/tests"))
+
+        assert len(calls) == 1
+        assert calls[0][0][:2] == ["apptainer", "exec"]
+        assert "mkdir -p /tests && cp -a " in calls[0][0][-1]
 
     def test_upload_dir_via_staging(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
