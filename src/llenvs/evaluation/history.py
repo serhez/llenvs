@@ -30,6 +30,32 @@ if TYPE_CHECKING:
 # Type alias for history functions.
 HistoryFn = Callable[["list[HistoryEntry]"], list[ChatMessage]]
 
+# Type alias for budget-aware history builders.
+# Receives (entries, available_tokens) and returns messages.
+BudgetHistoryFn = Callable[["list[HistoryEntry]", int], list[ChatMessage]]
+
+
+@dataclass(frozen=True)
+class PromptBudget:
+    """Token-budget-aware prompt construction for TrajectoryRunner.
+
+    When set on a runner, the runner computes the token cost of non-history
+    parts (system prompt, task, current state) and passes the remaining
+    budget to ``build_history``.
+
+    Attributes:
+        max_prompt_tokens: Maximum tokens for the entire prompt
+            (``max_model_len - max_generation_tokens``).
+        estimate_tokens: Callable that returns the estimated token count
+            for a string.
+        build_history: Callable that receives ``(entries, available_tokens)``
+            and returns chat messages for the history portion.
+    """
+
+    max_prompt_tokens: int
+    estimate_tokens: Callable[[str], int]
+    build_history: BudgetHistoryFn
+
 
 @dataclass(frozen=True)
 class HistoryEntry:

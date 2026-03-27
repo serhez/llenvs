@@ -475,6 +475,7 @@ class TrajectoryRunner:
     log: LogConfig | None = None
     max_image_history: int | None = None
     history_fn: HistoryFn | None = None
+    prompt_budget: Any | None = None  # PromptBudget — uses Any to avoid circular import
     include_reasoning_in_history: bool = False
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
@@ -530,6 +531,10 @@ class TrajectoryRunner:
 
         return messages
 
+    # Estimated per-message overhead tokens for chat template formatting
+    # (role tags, special tokens, etc.)
+    _MSG_OVERHEAD_TOKENS: int = 5
+
     def _build_structured_messages(
         self,
         state: State[Any],
@@ -543,7 +548,14 @@ class TrajectoryRunner:
         3. history_fn(entries) — prior (action, observation) pairs
         4. [user: current state.text + state.images]
 
-        When ``history_fn`` is None (default), ``full_history`` is used.
+        When ``prompt_budget`` is set, computes the token cost of non-history
+        parts and passes the remaining budget to ``prompt_budget.build_history``
+        instead of using ``history_fn``.
+
+        When ``history_fn`` is None (default) and ``prompt_budget`` is None,
+        ``full_history`` is used. ``prompt_budget`` takes precedence over
+        ``history_fn`` when both are set.
+
         The ``include_reasoning_in_history`` flag controls whether prior
         actions show the full model response or the extracted action.
         """
@@ -613,13 +625,7 @@ class TrajectoryRunner:
                     )
                 )
 
-        # Apply history function
-        fn = self.history_fn if self.history_fn is not None else full_history
-        messages.extend(fn(history_entries))
-
-        # Skip the synthetic step-0 state when it exactly mirrors the task.
-        # Many adapters initialize both fields from the same prompt text, and
-        # structured mode would otherwise duplicate the first user message.
+        # Resolve current state content early so we can measure it for budgets
         skip_current_state = False
         if obs.state is not None and task is not None and state.metadata.step == 0:
             skip_current_state = (
@@ -628,9 +634,9 @@ class TrajectoryRunner:
                 and obs.state.images == task.images
             )
 
-        # Always add current state observation (with optional turn info prefix)
+        current_state_text: str | None = None
         if obs.state is not None and not skip_current_state:
-            state_text = obs.state.text
+            current_state_text = obs.state.text
             if tic is not None:
                 turn = state.metadata.step + 1
                 if max_steps is not None:
@@ -643,13 +649,36 @@ class TrajectoryRunner:
                     prefix = tic.state_prefix_no_max.format(
                         turn=turn,
                     )
-                state_text = prefix + state_text
+                current_state_text = prefix + current_state_text
 
+        # Apply history function or prompt budget
+        if self.prompt_budget is not None:
+            budget = self.prompt_budget
+            # Estimate non-history token cost
+            non_history_tokens = 0
+            for msg in messages:
+                non_history_tokens += (
+                    budget.estimate_tokens(msg.content or "")
+                    + self._MSG_OVERHEAD_TOKENS
+                )
+            if current_state_text is not None:
+                non_history_tokens += (
+                    budget.estimate_tokens(current_state_text)
+                    + self._MSG_OVERHEAD_TOKENS
+                )
+            available = max(0, budget.max_prompt_tokens - non_history_tokens)
+            messages.extend(budget.build_history(history_entries, available))
+        else:
+            fn = self.history_fn if self.history_fn is not None else full_history
+            messages.extend(fn(history_entries))
+
+        # Add current state observation
+        if current_state_text is not None:
             messages.append(
                 ChatMessage(
                     role="user",
-                    content=state_text,
-                    images=obs.state.images,
+                    content=current_state_text,
+                    images=obs.state.images if obs.state else (),
                 )
             )
 

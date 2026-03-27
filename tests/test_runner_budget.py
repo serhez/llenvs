@@ -1,0 +1,265 @@
+"""Tests for TrajectoryRunner with PromptBudget integration."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+from llenvs.core.reward import SignalBundle
+from llenvs.core.state import (
+    Action,
+    Observation,
+    ObservationContent,
+    State,
+    StateMetadata,
+)
+from llenvs.core.trajectory import Trajectory, Transition
+from llenvs.evaluation.history import HistoryEntry, PromptBudget
+from llenvs.evaluation.runner import TrajectoryRunner
+from llenvs.inference.protocol import ChatMessage, SamplingParams
+
+
+def _make_state(
+    task: ObservationContent | None = None,
+    state: ObservationContent | None = None,
+    step: int = 0,
+) -> State:
+    return State(
+        observation=Observation(
+            prompt="",
+            messages=(),
+            task=task,
+            state=state,
+        ),
+        hidden=None,
+        metadata=StateMetadata(
+            step=step,
+            episode_id="test",
+        ),
+    )
+
+
+def _simple_estimator(text: str) -> int:
+    """1 token per character."""
+    return len(text)
+
+
+class TestRunnerWithPromptBudget:
+    """Tests for TrajectoryRunner using PromptBudget instead of history_fn."""
+
+    def _make_runner(self, system_prompt=None, prompt_budget=None, history_fn=None):
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        mock_backend = MagicMock()
+
+        kwargs = dict(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+            system_prompt=system_prompt,
+        )
+        if prompt_budget is not None:
+            kwargs["prompt_budget"] = prompt_budget
+        if history_fn is not None:
+            kwargs["history_fn"] = history_fn
+
+        return TrajectoryRunner(**kwargs)
+
+    def test_build_history_receives_available_tokens(self) -> None:
+        """Verify build_history callback receives correct available tokens."""
+        received_args: list[tuple] = []
+
+        def mock_build_history(entries, available_tokens):
+            received_args.append((entries, available_tokens))
+            return []  # return no messages
+
+        budget = PromptBudget(
+            max_prompt_tokens=1000,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build_history,
+        )
+        runner = self._make_runner(system_prompt="System.", prompt_budget=budget)
+
+        task = ObservationContent(text="Task description.")
+        state_content = ObservationContent(text="Current state.")
+        initial_state = _make_state(task=task, state=state_content, step=1)
+
+        # Add a transition so there's history
+        prev_state = _make_state(task=task, state=ObservationContent(text="Prev."), step=0)
+        trajectory = Trajectory.create(prev_state)
+        trajectory.add_transition(
+            Transition(
+                state=prev_state,
+                action=Action(text="action1"),
+                next_state=initial_state,
+                rewards=SignalBundle(()),
+            )
+        )
+
+        runner._build_structured_messages(initial_state, trajectory)
+
+        assert len(received_args) == 1
+        entries, available = received_args[0]
+        assert len(entries) == 1
+        assert entries[0].action_text == "action1"
+
+        # available should be: max_prompt_tokens - (system + task + state + overheads)
+        system_cost = len("System.") + 5  # content + overhead
+        task_cost = len("Task description.") + 5
+        state_cost = len("Current state.") + 5
+        expected_available = 1000 - system_cost - task_cost - state_cost
+        assert available == expected_available
+
+    def test_ample_budget_large_available(self) -> None:
+        """When budget is huge, build_history gets a large available_tokens."""
+        received_available: list[int] = []
+
+        def mock_build_history(entries, available_tokens):
+            received_available.append(available_tokens)
+            return []
+
+        budget = PromptBudget(
+            max_prompt_tokens=100000,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build_history,
+        )
+        runner = self._make_runner(prompt_budget=budget)
+
+        task = ObservationContent(text="Short task.")
+        state_content = ObservationContent(text="Short state.")
+        state = _make_state(task=task, state=state_content, step=1)
+        prev = _make_state(task=task, state=ObservationContent(text="S."), step=0)
+        traj = Trajectory.create(prev)
+        traj.add_transition(Transition(
+            state=prev, action=Action(text="a"), next_state=state,
+            rewards=SignalBundle(()),
+        ))
+
+        runner._build_structured_messages(state, traj)
+
+        assert len(received_available) == 1
+        assert received_available[0] > 99000
+
+    def test_large_system_prompt_shrinks_budget(self) -> None:
+        """A large system prompt reduces available tokens for history."""
+        received_available: list[int] = []
+
+        def mock_build_history(entries, available_tokens):
+            received_available.append(available_tokens)
+            return []
+
+        budget = PromptBudget(
+            max_prompt_tokens=500,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build_history,
+        )
+        big_system = "X" * 300
+        runner = self._make_runner(system_prompt=big_system, prompt_budget=budget)
+
+        task = ObservationContent(text="Task.")
+        state_content = ObservationContent(text="State.")
+        state = _make_state(task=task, state=state_content, step=1)
+        prev = _make_state(task=task, state=ObservationContent(text="P."), step=0)
+        traj = Trajectory.create(prev)
+        traj.add_transition(Transition(
+            state=prev, action=Action(text="a"), next_state=state,
+            rewards=SignalBundle(()),
+        ))
+
+        runner._build_structured_messages(state, traj)
+
+        assert len(received_available) == 1
+        # 500 - 300 (system) - 5 (task) - 6 (state) - 15 (overheads) ≈ 174
+        assert received_available[0] < 200
+
+    def test_prompt_budget_takes_precedence_over_history_fn(self) -> None:
+        """When both prompt_budget and history_fn are set, budget wins."""
+        budget_called = []
+        history_fn_called = []
+
+        def mock_build_history(entries, available_tokens):
+            budget_called.append(True)
+            return []
+
+        def mock_history_fn(entries):
+            history_fn_called.append(True)
+            return []
+
+        budget = PromptBudget(
+            max_prompt_tokens=1000,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build_history,
+        )
+        runner = self._make_runner(
+            prompt_budget=budget,
+            history_fn=mock_history_fn,
+        )
+
+        task = ObservationContent(text="Task.")
+        state = _make_state(task=task, state=ObservationContent(text="S."), step=1)
+        prev = _make_state(task=task, state=ObservationContent(text="P."), step=0)
+        traj = Trajectory.create(prev)
+        traj.add_transition(Transition(
+            state=prev, action=Action(text="a"), next_state=state,
+            rewards=SignalBundle(()),
+        ))
+
+        runner._build_structured_messages(state, traj)
+
+        assert len(budget_called) == 1
+        assert len(history_fn_called) == 0
+
+    def test_no_budget_uses_history_fn(self) -> None:
+        """Without prompt_budget, history_fn is used as before."""
+        history_fn_called = []
+
+        def mock_history_fn(entries):
+            history_fn_called.append(True)
+            return []
+
+        runner = self._make_runner(history_fn=mock_history_fn)
+
+        task = ObservationContent(text="Task.")
+        state = _make_state(task=task, state=ObservationContent(text="S."), step=1)
+        prev = _make_state(task=task, state=ObservationContent(text="P."), step=0)
+        traj = Trajectory.create(prev)
+        traj.add_transition(Transition(
+            state=prev, action=Action(text="a"), next_state=state,
+            rewards=SignalBundle(()),
+        ))
+
+        runner._build_structured_messages(state, traj)
+
+        assert len(history_fn_called) == 1
+
+    def test_available_tokens_floor_at_zero(self) -> None:
+        """Available tokens should never go negative."""
+        received_available: list[int] = []
+
+        def mock_build_history(entries, available_tokens):
+            received_available.append(available_tokens)
+            return []
+
+        budget = PromptBudget(
+            max_prompt_tokens=10,  # Very small
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build_history,
+        )
+        # System prompt alone exceeds budget
+        runner = self._make_runner(
+            system_prompt="X" * 100,
+            prompt_budget=budget,
+        )
+
+        task = ObservationContent(text="Task.")
+        state = _make_state(task=task, state=ObservationContent(text="S."), step=1)
+        prev = _make_state(task=task, state=ObservationContent(text="P."), step=0)
+        traj = Trajectory.create(prev)
+        traj.add_transition(Transition(
+            state=prev, action=Action(text="a"), next_state=state,
+            rewards=SignalBundle(()),
+        ))
+
+        runner._build_structured_messages(state, traj)
+
+        assert len(received_available) == 1
+        assert received_available[0] == 0

@@ -7,8 +7,10 @@ from llenvs.evaluation.continuation import (
     select_strategy,
 )
 from llenvs.evaluation.history import (
+    BudgetHistoryFn,
     HistoryEntry,
     HistoryFn,
+    PromptBudget,
     full_history,
     last_n_history,
     no_history,
@@ -53,8 +55,10 @@ from llenvs.evaluation.runner import (
 
 __all__ = [
     # History control
+    "BudgetHistoryFn",
     "HistoryEntry",
     "HistoryFn",
+    "PromptBudget",
     "full_history",
     "no_history",
     "last_n_history",
