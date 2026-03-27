@@ -2932,6 +2932,244 @@ class TestApptainerHPCEnvironment:
         assert not hasattr(env, "export_checkpoint")
         assert not hasattr(env, "restore_checkpoint")
 
+    def test_sandbox_creates_bind_mount_dirs_in_rootfs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="sandbox",
+        )
+        env._sif_path.touch()
+
+        rootfs_dir = trial / "rootfs"
+
+        def fake_prepare_trial_rootfs() -> Path:
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        dirs_at_instance_start: list[list[str]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            if cmd[:3] == ["apptainer", "instance", "start"]:
+                # Record which bind-mount dirs exist at the time of start.
+                dirs_at_instance_start.append([
+                    d for d in ("staging", "logs/verifier", "logs/agent")
+                    if (rootfs_dir / d).exists()
+                ])
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        assert dirs_at_instance_start == [["staging", "logs/verifier", "logs/agent"]]
+
+    def test_concurrent_overlay_probe_runs_only_once(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import threading
+
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE.clear()
+        harbor_mod._APPTAINER_ROOTFS_PROBE_EVENTS.clear()
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        sif_path = sif_dir / "ca0c1413bbd82bab.sif"
+        sif_path.touch()
+
+        def make_env(name: str) -> ApptainerHPCEnvironment:
+            trial = tmp_path / name
+            env = ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id=f"session-{name}",
+                trial_paths=self._make_trial_paths(trial),
+                task_env_config=self._make_task_env_config(),
+                sif_cache_dir=str(sif_dir),
+            )
+            env._sif_path = sif_path
+            return env
+
+        env_a = make_env("trial-a")
+        env_b = make_env("trial-b")
+
+        probe_count = 0
+        # Barrier ensures both threads are inside start() before either probes.
+        entry_barrier = threading.Barrier(2, timeout=5)
+
+        def fake_prepare_seed() -> Path:
+            seed_dir = tmp_path / "seed-cache" / "task_01"
+            seed_dir.mkdir(parents=True, exist_ok=True)
+            return seed_dir
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            return MockExecResult(stdout="ok")
+
+        async def fake_probe() -> bool:
+            nonlocal probe_count
+            probe_count += 1
+            return False
+
+        # Use _log_runtime_info as a sync point so both threads are inside
+        # start() before either reaches _wait_for_overlay_probe.
+        async def synced_log_a():
+            entry_barrier.wait()
+
+        async def synced_log_b():
+            entry_barrier.wait()
+
+        for env in (env_a, env_b):
+            monkeypatch.setattr(env, "_prepare_app_seed_dir", fake_prepare_seed)
+            monkeypatch.setattr(env, "_prepare_trial_rootfs",
+                                lambda e=env: (Path(e.trial_paths.trial_dir) / "rootfs"))
+            monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+            monkeypatch.setattr(env, "_probe_root_writability", fake_probe)
+
+        monkeypatch.setattr(env_a, "_log_runtime_info", synced_log_a)
+        monkeypatch.setattr(env_b, "_log_runtime_info", synced_log_b)
+
+        errors: list[Exception] = []
+
+        def run_start(env):
+            try:
+                run_async(env.start())
+            except Exception as e:
+                errors.append(e)
+
+        t_a = threading.Thread(target=run_start, args=(env_a,))
+        t_b = threading.Thread(target=run_start, args=(env_b,))
+
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
+
+        assert not errors, f"Threads raised: {errors}"
+        # Only one thread should have probed — the other waited on the event.
+        assert probe_count == 1
+        # Both should end up in sandbox mode.
+        assert env_a._active_rootfs_mode == "sandbox"
+        assert env_b._active_rootfs_mode == "sandbox"
+
+    def test_overlay_probe_waiters_recover_if_first_owner_fails(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import threading
+
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE.clear()
+        harbor_mod._APPTAINER_ROOTFS_PROBE_EVENTS.clear()
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        sif_path = sif_dir / "ca0c1413bbd82bab.sif"
+        sif_path.touch()
+
+        def make_env(name: str) -> ApptainerHPCEnvironment:
+            trial = tmp_path / name
+            env = ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id=f"session-{name}",
+                trial_paths=self._make_trial_paths(trial),
+                task_env_config=self._make_task_env_config(),
+                sif_cache_dir=str(sif_dir),
+            )
+            env._sif_path = sif_path
+            return env
+
+        env_a = make_env("trial-a")
+        env_b = make_env("trial-b")
+
+        entry_barrier = threading.Barrier(2, timeout=5)
+        overlay_start_count = 0
+        probe_count = 0
+
+        async def synced_log():
+            entry_barrier.wait()
+
+        async def fake_probe() -> bool:
+            nonlocal probe_count
+            probe_count += 1
+            return False
+
+        async def fake_start_overlay(env: ApptainerHPCEnvironment) -> None:
+            nonlocal overlay_start_count
+            overlay_start_count += 1
+            if overlay_start_count == 1:
+                raise RuntimeError("overlay start failed")
+            env._started = True
+            env._active_rootfs_mode = "overlay"
+
+        async def fake_start_sandbox(env: ApptainerHPCEnvironment) -> None:
+            env._started = True
+            env._active_rootfs_mode = "sandbox"
+
+        async def fake_stop(delete: bool = True) -> None:
+            return None
+
+        for env in (env_a, env_b):
+            monkeypatch.setattr(env, "_log_runtime_info", synced_log)
+            monkeypatch.setattr(
+                env,
+                "_start_overlay_instance",
+                lambda e=env: fake_start_overlay(e),
+            )
+            monkeypatch.setattr(
+                env,
+                "_start_sandbox_instance",
+                lambda e=env: fake_start_sandbox(e),
+            )
+            monkeypatch.setattr(env, "_probe_root_writability", fake_probe)
+            monkeypatch.setattr(env, "stop", fake_stop)
+
+        errors: list[Exception] = []
+
+        def run_start(env):
+            try:
+                run_async(env.start())
+            except Exception as e:
+                errors.append(e)
+
+        t_a = threading.Thread(target=run_start, args=(env_a,))
+        t_b = threading.Thread(target=run_start, args=(env_b,))
+
+        t_a.start()
+        t_b.start()
+        t_a.join(timeout=10)
+        t_b.join(timeout=10)
+
+        assert not t_a.is_alive()
+        assert not t_b.is_alive()
+        assert len(errors) == 1
+        assert str(errors[0]) == "overlay start failed"
+        assert probe_count == 1
+        assert overlay_start_count == 2
+        assert any(env._active_rootfs_mode == "sandbox" for env in (env_a, env_b))
+        assert harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE
+        assert not harbor_mod._APPTAINER_ROOTFS_PROBE_EVENTS
+
 
 class TestRuntimeEligibility:
     def _make_task(self, tmp_path, name, *, dockerfile=None, compose=None, docker_image=None, allow_internet=True):

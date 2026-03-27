@@ -65,6 +65,7 @@ logger = logging.getLogger(__name__)
 
 _APPTAINER_ROOTFS_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE_LOCK = threading.Lock()
+_APPTAINER_ROOTFS_PROBE_EVENTS: dict[tuple[Any, ...], threading.Event] = {}
 
 
 def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
@@ -1791,15 +1792,35 @@ class ApptainerHPCEnvironment:
             self._writable_tmpfs,
         )
 
-    def _get_cached_overlay_probe(self) -> bool | None:
+    def _finish_overlay_probe(self, value: bool | None) -> None:
         key = self._rootfs_probe_cache_key()
         with _APPTAINER_ROOTFS_PROBE_CACHE_LOCK:
-            return _APPTAINER_ROOTFS_PROBE_CACHE.get(key)
+            if value is not None:
+                _APPTAINER_ROOTFS_PROBE_CACHE[key] = value
+            event = _APPTAINER_ROOTFS_PROBE_EVENTS.pop(key, None)
+        if event is not None:
+            event.set()
 
-    def _set_cached_overlay_probe(self, value: bool) -> None:
+    def _claim_overlay_probe(self) -> tuple[bool | None, bool]:
+        """Return cached probe result or claim responsibility for probing.
+
+        Returns ``(cached_result, is_probe_owner)``. When another thread is
+        already probing, this method waits until that probe finishes and then
+        retries. If the probing thread fails before producing a result, a
+        waiting caller will claim probe ownership and continue.
+        """
         key = self._rootfs_probe_cache_key()
-        with _APPTAINER_ROOTFS_PROBE_CACHE_LOCK:
-            _APPTAINER_ROOTFS_PROBE_CACHE[key] = value
+        while True:
+            with _APPTAINER_ROOTFS_PROBE_CACHE_LOCK:
+                cached = _APPTAINER_ROOTFS_PROBE_CACHE.get(key)
+                if cached is not None:
+                    return cached, False
+                event = _APPTAINER_ROOTFS_PROBE_EVENTS.get(key)
+                if event is None:
+                    _APPTAINER_ROOTFS_PROBE_EVENTS[key] = threading.Event()
+                    return None, True
+
+            event.wait()
 
     async def _run_apptainer_command(
         self,
@@ -1969,6 +1990,11 @@ class ApptainerHPCEnvironment:
         verifier_dir, agent_dir = self._prepare_runtime_dirs()
         rootfs_dir = self._prepare_trial_rootfs()
 
+        # Pre-create bind-mount destinations inside the sandbox rootfs.
+        # With --writable (no overlay), Apptainer cannot auto-create them.
+        for dest in ("staging", "logs/verifier", "logs/agent"):
+            (rootfs_dir / dest).mkdir(parents=True, exist_ok=True)
+
         cmd = [self._apptainer, "instance", "start", "--writable"]
         cmd.extend([
             "--cleanenv",
@@ -2014,11 +2040,13 @@ class ApptainerHPCEnvironment:
                 "Pre-build it on a node with Docker/Podman access."
             )
 
-        cached_probe = self._get_cached_overlay_probe()
         if self._rootfs_mode == "sandbox":
             await self._start_sandbox_instance()
             self.logger.info("Apptainer rootfs mode selected: sandbox")
             return
+
+        cached_probe, probe_owner = self._claim_overlay_probe()
+
         if self._rootfs_mode == "overlay" and cached_probe is False:
             raise RuntimeError(
                 "Apptainer overlay mode did not provide writable root semantics "
@@ -2032,30 +2060,35 @@ class ApptainerHPCEnvironment:
             )
             return
 
-        await self._start_overlay_instance()
-        if cached_probe is True:
-            self.logger.info("Apptainer rootfs mode selected: overlay (cached)")
-            return
+        probe_result: bool | None = cached_probe
+        try:
+            await self._start_overlay_instance()
+            if cached_probe is True:
+                self.logger.info("Apptainer rootfs mode selected: overlay (cached)")
+                return
 
-        overlay_ok = await self._probe_root_writability()
-        self._set_cached_overlay_probe(overlay_ok)
-        if overlay_ok:
-            self.logger.info("Apptainer rootfs mode selected: overlay")
-            return
+            overlay_ok = await self._probe_root_writability()
+            probe_result = overlay_ok
+            if overlay_ok:
+                self.logger.info("Apptainer rootfs mode selected: overlay")
+                return
 
-        await self.stop(delete=True)
-        if self._rootfs_mode == "overlay":
-            raise RuntimeError(
-                "Apptainer overlay mode did not provide writable root semantics "
-                "for this image on this host. Set rootfs_mode: auto or "
-                "rootfs_mode: sandbox to use writable sandboxes instead."
+            await self.stop(delete=True)
+            if self._rootfs_mode == "overlay":
+                raise RuntimeError(
+                    "Apptainer overlay mode did not provide writable root semantics "
+                    "for this image on this host. Set rootfs_mode: auto or "
+                    "rootfs_mode: sandbox to use writable sandboxes instead."
+                )
+
+            self.logger.info(
+                "Apptainer overlay probe failed; falling back to writable sandbox"
             )
-
-        self.logger.info(
-            "Apptainer overlay probe failed; falling back to writable sandbox"
-        )
-        await self._start_sandbox_instance()
-        self.logger.info("Apptainer rootfs mode selected: sandbox")
+            await self._start_sandbox_instance()
+            self.logger.info("Apptainer rootfs mode selected: sandbox")
+        finally:
+            if probe_owner:
+                self._finish_overlay_probe(probe_result)
 
     async def stop(self, delete: bool = True) -> None:
         if not self._started:
