@@ -175,6 +175,9 @@ Available in tool mode:
 | `last_action` | `str \| None` | Text of the last action |
 | `trajectory` | `tuple[str, ...]` | Command history |
 | `snapshot_ref` | `HarborSnapshotRef \| None` | Optional exact runtime snapshot artifact for this state |
+| `fs_restore_risk_now` | `bool` | Whether the current state has filesystem-restore risk signals (resets per step) |
+| `fs_restore_risk_reasons` | `tuple[str, ...]` | Specific risk reasons detected at this step |
+| `fs_restore_risk_ever` | `bool` | Sticky flag — `True` if any prior state in this trajectory had risk |
 
 ## Parameters
 
@@ -197,6 +200,7 @@ Available in tool mode:
 | `state_capture_mode` | `str` | `"replay"` | Harbor state capture mode: `replay` or `snapshot_exact` |
 | `snapshot_artifact_root` | `Path \| str \| None` | `None` | Artifact root used when `state_capture_mode="snapshot_exact"` |
 | `snapshot_options` | `HarborSnapshotOptions \| None` | `None` | Exact snapshot options (`file_locks`, `tcp_established`, `tcp_close`, `ignore_volumes`) |
+| `runtime_probing` | `bool` | `False` | Enable runtime probing to annotate states with filesystem-restore risk signals |
 
 ### `HarborAdapter.load_tasks()`
 
@@ -368,6 +372,28 @@ Current v1 behavior:
 - Exact snapshots are additive. If you do not opt in to `state_capture_mode="snapshot_exact"`, Harbor behavior is unchanged.
 - Static snapshot eligibility inspection is available via `HarborAdapter.inspect_snapshot_eligibility()` so callers can filter task sets before starting collection.
 
+## `apptainer-hpc` Filesystem Checkpoint/Restore
+
+`ApptainerHPCEnvironment` supports tar-based filesystem checkpoint/restore in sandbox mode. These are filesystem-level snapshots, not process-level snapshots — background processes, in-memory state, and open sockets are not preserved across restore:
+
+- `export_checkpoint(path)` — tars the sandbox rootfs to disk. Flushes the host staging directory first (`/staging` is a bind mount and explicitly non-semantic for this optimization).
+- `restore_checkpoint(path)` — stops the running instance, replaces the rootfs with the tar contents, and restarts the instance. Only on-disk state is restored; any processes running in the original instance must be re-launched by subsequent commands.
+- `pid_namespace=True` enables `--pid` namespace isolation, required for process-level runtime probing.
+
+### Runtime Probing
+
+When `runtime_probing=True` is passed to `get_environment()`, each `reset()` and `step()` captures a runtime probe snapshot and annotates the state with risk signals:
+
+- **Processes** (requires `pid_namespace=True`): detects new background processes not in the baseline.
+- **Mounts**: detects mount table changes via `/proc/self/mountinfo` fingerprint.
+- **Listening ports**: detects new listening sockets via `ss`/`netstat`.
+- **Staging content**: detects unexpected files in `/staging`.
+
+Risk signals are stored on `HarborHidden`:
+- `fs_restore_risk_now` — resets each step (current probe vs baseline).
+- `fs_restore_risk_ever` — sticky OR of all prior `risk_now` values.
+- `fs_restore_risk_reasons` — tuple of reason strings (e.g., `"extra_processes:redis-server"`, `"new_listening_ports:8080"`).
+
 ## Limitations
 
 - **No seed support** — Harbor tasks are deterministic (fixed Dockerfiles/test scripts).
@@ -375,4 +401,5 @@ Current v1 behavior:
 - **Network-dependent** — Registry queries and image pulls require network access.
 - **Binary rewards** — Native verifiers produce pass/fail only; use `extra_rewards` for finer-grained scoring (e.g., `JudgeReward`).
 - **Text-mode replay only** — `harbor_restore` supports text mode; tool-mode replay requires storing full `Action` objects (deferred).
-- **Exact snapshot runtime coverage** — v1 exact snapshots require a runtime exposing checkpoint export/restore. `llenvs` currently implements this for `podman-hpc` only.
+- **Exact snapshot runtime coverage** — v1 exact snapshots (process-level CRIU checkpoints) require `podman-hpc`. `inspect_snapshot_eligibility()` only reports eligibility for podman-hpc.
+- **Apptainer filesystem checkpoints** — `apptainer-hpc` supports filesystem-level tar snapshots (sandbox mode only) via `export_checkpoint`/`restore_checkpoint`. These are used by the prediction-time replay cache but are not exact snapshots — background processes, in-memory state, and open sockets are not preserved.

@@ -1187,6 +1187,26 @@ class TestHarborAdapter:
         )
         assert isinstance(env, HarborToolEnvironment)
 
+    def test_tool_mode_rejects_runtime_probing(self):
+        """Should raise ValueError when both tool_mode and runtime_probing are True."""
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks()
+        mock_env = MockHarborEnvironment()
+        env_factory = _make_harbor_env_factory(mock_env)
+        verifier_factory = _make_verifier_factory()
+
+        with pytest.raises(ValueError, match="not supported in tool mode"):
+            adapter.get_environment(
+                name="test",
+                tasks=tasks,
+                env_factory=env_factory,
+                verify_factory=verifier_factory,
+                tool_mode=True,
+                runtime_probing=True,
+            )
+
     def test_list_environments_uses_registry_client(self, monkeypatch: pytest.MonkeyPatch):
         from llenvs.adapters.harbor import HarborAdapter, _HarborAPI
 
@@ -2918,7 +2938,7 @@ class TestApptainerHPCEnvironment:
         assert f"instance://{env._instance_name}" in cmd
         assert any("cp -a" in arg and "/workspace/tests/" in arg for arg in cmd)
 
-    def test_no_checkpoint_methods(self, tmp_path):
+    def test_has_checkpoint_methods(self, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
 
         (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
@@ -2929,8 +2949,10 @@ class TestApptainerHPCEnvironment:
             trial_paths=self._make_trial_paths(tmp_path / "trial"),
             task_env_config=self._make_task_env_config(),
         )
-        assert not hasattr(env, "export_checkpoint")
-        assert not hasattr(env, "restore_checkpoint")
+        assert hasattr(env, "export_checkpoint")
+        assert hasattr(env, "restore_checkpoint")
+        assert hasattr(env, "capture_runtime_probe")
+        assert hasattr(env, "detect_runtime_risk")
 
     def test_sandbox_creates_bind_mount_dirs_in_rootfs(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
@@ -3169,6 +3191,619 @@ class TestApptainerHPCEnvironment:
         assert any(env._active_rootfs_mode == "sandbox" for env in (env_a, env_b))
         assert harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE
         assert not harbor_mod._APPTAINER_ROOTFS_PROBE_EVENTS
+
+
+class TestApptainerCheckpointRestore:
+    """Tests for Apptainer filesystem checkpoint/restore and sandbox start helpers."""
+
+    def _make_trial_paths(self, tmp_path):
+        for name in ("verifier", "agent", "artifacts"):
+            (tmp_path / name).mkdir(parents=True, exist_ok=True)
+        return SimpleNamespace(
+            trial_dir=tmp_path,
+            verifier_dir=tmp_path / "verifier",
+            agent_dir=tmp_path / "agent",
+            artifacts_dir=tmp_path / "artifacts",
+        )
+
+    def _make_task_env_config(self, **kwargs: Any):
+        defaults = {
+            "docker_image": "ubuntu:latest",
+            "cpus": 1,
+            "memory_mb": 1024,
+            "allow_internet": True,
+        }
+        defaults.update(kwargs)
+        return SimpleNamespace(**defaults)
+
+    def _make_env(self, tmp_path, **kwargs):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir(exist_ok=True)
+        trial = tmp_path / "trial"
+        defaults = dict(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="sandbox",
+        )
+        defaults.update(kwargs)
+        env = ApptainerHPCEnvironment(**defaults)
+        env._sif_path.touch()
+        return env
+
+    def test_export_checkpoint_tars_sandbox_rootfs(self, tmp_path):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._active_rootfs_mode = "sandbox"
+        env._started = True
+
+        rootfs = env._sandbox_rootfs_dir
+        rootfs.mkdir(parents=True, exist_ok=True)
+        (rootfs / "file_a.txt").write_text("hello")
+        sub = rootfs / "subdir"
+        sub.mkdir()
+        (sub / "file_b.txt").write_text("world")
+
+        env._staging_dir.mkdir(parents=True, exist_ok=True)
+
+        export_path = tmp_path / "checkpoint.tar"
+        run_async(env.export_checkpoint(export_path))
+
+        assert export_path.exists()
+        assert export_path.stat().st_size > 0
+
+        # Verify tar contents by extracting to a fresh directory
+        import subprocess
+        verify_dir = tmp_path / "verify"
+        verify_dir.mkdir()
+        subprocess.run(
+            ["tar", "-xf", str(export_path), "-C", str(verify_dir)],
+            check=True,
+        )
+        assert (verify_dir / "file_a.txt").read_text() == "hello"
+        assert (verify_dir / "subdir" / "file_b.txt").read_text() == "world"
+
+    def test_restore_checkpoint_replaces_rootfs_and_restarts(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import subprocess
+
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._started = True
+        env._active_rootfs_mode = "sandbox"
+
+        # Create a tar from known content
+        source_dir = tmp_path / "checkpoint_source"
+        source_dir.mkdir()
+        (source_dir / "restored.txt").write_text("restored_content")
+        tar_path = tmp_path / "checkpoint.tar"
+        subprocess.run(
+            ["tar", "-cf", str(tar_path), "-C", str(source_dir), "."],
+            check=True,
+        )
+
+        stop_calls: list[dict] = []
+        start_sandbox_calls: list[Path] = []
+
+        async def fake_stop(delete: bool = True):
+            stop_calls.append({"delete": delete})
+            env._started = False
+
+        async def fake_start_sandbox(rootfs_dir: Path):
+            start_sandbox_calls.append(rootfs_dir)
+            env._started = True
+            env._active_rootfs_mode = "sandbox"
+
+        monkeypatch.setattr(env, "stop", fake_stop)
+        monkeypatch.setattr(env, "_start_sandbox_from_rootfs", fake_start_sandbox)
+
+        run_async(env.restore_checkpoint(tar_path))
+
+        # Verify stop(delete=True) was called
+        assert len(stop_calls) == 1
+        assert stop_calls[0]["delete"] is True
+
+        # Verify rootfs was replaced with tar contents
+        assert (env._sandbox_rootfs_dir / "restored.txt").read_text() == "restored_content"
+
+        # Verify _start_sandbox_from_rootfs was called with the rootfs dir
+        assert len(start_sandbox_calls) == 1
+        assert start_sandbox_calls[0] == env._sandbox_rootfs_dir
+
+    def test_export_flushes_host_staging_dir(self, tmp_path):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._active_rootfs_mode = "sandbox"
+        env._started = True
+
+        # Set up staging dir with some files
+        env._staging_dir.mkdir(parents=True, exist_ok=True)
+        (env._staging_dir / "leftover.txt").write_text("should be removed")
+        (env._staging_dir / "upload").mkdir()
+        (env._staging_dir / "upload" / "data.bin").write_text("stale")
+
+        # Set up rootfs so tar succeeds
+        env._sandbox_rootfs_dir.mkdir(parents=True, exist_ok=True)
+        (env._sandbox_rootfs_dir / "dummy.txt").write_text("content")
+
+        export_path = tmp_path / "checkpoint.tar"
+        run_async(env.export_checkpoint(export_path))
+
+        # Staging dir should exist but be empty (recreated after flush)
+        assert env._staging_dir.exists()
+        assert list(env._staging_dir.iterdir()) == []
+
+    def test_export_requires_sandbox_mode(self, tmp_path):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._active_rootfs_mode = "overlay"
+        env._started = True
+
+        with pytest.raises(RuntimeError, match="sandbox mode"):
+            run_async(env.export_checkpoint(tmp_path / "checkpoint.tar"))
+
+    def test_pid_namespace_flag_adds_pid_to_start_cmd(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path, pid_namespace=True)
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        def fake_prepare_trial_rootfs() -> Path:
+            rootfs_dir = env._sandbox_rootfs_dir
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env._start_sandbox_instance())
+
+        # Find the instance start command
+        inst_cmds = [
+            cmd for cmd, _check, _timeout in calls
+            if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
+        ]
+        assert len(inst_cmds) >= 1
+        assert "--pid" in inst_cmds[0]
+
+    def test_start_sandbox_from_rootfs_reuses_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+
+        # Set up a rootfs dir with content
+        rootfs_dir = tmp_path / "existing_rootfs"
+        rootfs_dir.mkdir()
+        (rootfs_dir / "important.txt").write_text("keep me")
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env._start_sandbox_from_rootfs(rootfs_dir))
+
+        # Content should still be there (not re-extracted from SIF)
+        assert (rootfs_dir / "important.txt").read_text() == "keep me"
+
+        # Instance start should have used the rootfs dir
+        inst_cmds = [
+            cmd for cmd, _check, _timeout in calls
+            if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
+        ]
+        assert len(inst_cmds) == 1
+        assert str(rootfs_dir) in inst_cmds[0]
+        assert env._active_rootfs_mode == "sandbox"
+
+
+class TestRuntimeProbing:
+    """Tests for runtime probe parsing, risk detection, and state annotation."""
+
+    def test_runtime_probe_parses_all_sections(self):
+        from llenvs.adapters.harbor import RuntimeProbeSnapshot, _parse_probe_output
+
+        stdout = (
+            "===PROCS===\n"
+            "bash\n"
+            "python3\n"
+            "nginx\n"
+            "===MOUNTS===\n"
+            "abcdef123456  /proc/self/mountinfo\n"
+            "===SOCKETS===\n"
+            "tcp   LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*\n"
+            "tcp   LISTEN 0 128 0.0.0.0:443 0.0.0.0:*\n"
+            "===STAGING===\n"
+            "upload\n"
+            "download\n"
+        )
+        result = _parse_probe_output(stdout, has_pid_namespace=True)
+
+        assert isinstance(result, RuntimeProbeSnapshot)
+        assert result.process_commands == frozenset({"bash", "python3", "nginx"})
+        assert result.mount_fingerprint == "abcdef123456"
+        assert result.listening_ports == frozenset({8080, 443})
+        assert result.staging_has_content is True
+        assert result.probe_failed is False
+
+    def test_runtime_probe_handles_unavailable_tools(self):
+        from llenvs.adapters.harbor import _parse_probe_output
+
+        stdout = (
+            "===PROCS===\n"
+            "UNAVAILABLE\n"
+            "===MOUNTS===\n"
+            "UNAVAILABLE\n"
+            "===SOCKETS===\n"
+            "UNAVAILABLE\n"
+            "===STAGING===\n"
+            "UNAVAILABLE\n"
+        )
+        result = _parse_probe_output(stdout, has_pid_namespace=True)
+
+        assert result.process_commands == frozenset()
+        assert result.mount_fingerprint == ""
+        assert result.listening_ports == frozenset()
+        assert result.staging_has_content is False
+
+    def test_probe_skips_process_diff_without_pid_namespace(self):
+        from llenvs.adapters.harbor import _parse_probe_output
+
+        stdout = (
+            "===PROCS===\n"
+            "bash\n"
+            "python3\n"
+            "===MOUNTS===\n"
+            "abc123  /proc/self/mountinfo\n"
+            "===SOCKETS===\n"
+            "UNAVAILABLE\n"
+            "===STAGING===\n"
+        )
+        result = _parse_probe_output(stdout, has_pid_namespace=False)
+
+        # Even though process data is present, it should be ignored
+        assert result.process_commands == frozenset()
+
+    def test_detect_risk_extra_processes(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment, RuntimeProbeSnapshot
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        for name in ("verifier", "agent", "artifacts"):
+            (trial / name).mkdir(parents=True, exist_ok=True)
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=SimpleNamespace(
+                trial_dir=trial,
+                verifier_dir=trial / "verifier",
+                agent_dir=trial / "agent",
+                artifacts_dir=trial / "artifacts",
+            ),
+            task_env_config=SimpleNamespace(
+                docker_image="ubuntu:latest", cpus=1, memory_mb=1024, allow_internet=True
+            ),
+            sif_cache_dir=str(sif_dir),
+            pid_namespace=True,
+        )
+
+        env._probe_baseline = RuntimeProbeSnapshot(
+            process_commands=frozenset({"bash"}),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        current = RuntimeProbeSnapshot(
+            process_commands=frozenset({"bash", "redis-server"}),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        risk, reasons = env.detect_runtime_risk(current)
+        assert risk is True
+        assert any("extra_processes" in r and "redis-server" in r for r in reasons)
+
+    def test_detect_risk_new_listening_port(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment, RuntimeProbeSnapshot
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        for name in ("verifier", "agent", "artifacts"):
+            (trial / name).mkdir(parents=True, exist_ok=True)
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=SimpleNamespace(
+                trial_dir=trial,
+                verifier_dir=trial / "verifier",
+                agent_dir=trial / "agent",
+                artifacts_dir=trial / "artifacts",
+            ),
+            task_env_config=SimpleNamespace(
+                docker_image="ubuntu:latest", cpus=1, memory_mb=1024, allow_internet=True
+            ),
+            sif_cache_dir=str(sif_dir),
+        )
+
+        env._probe_baseline = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        current = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset({8080}),
+            staging_has_content=False,
+        )
+
+        risk, reasons = env.detect_runtime_risk(current)
+        assert risk is True
+        assert any("new_listening_ports" in r and "8080" in r for r in reasons)
+
+    def test_detect_risk_mount_change(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment, RuntimeProbeSnapshot
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        for name in ("verifier", "agent", "artifacts"):
+            (trial / name).mkdir(parents=True, exist_ok=True)
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=SimpleNamespace(
+                trial_dir=trial,
+                verifier_dir=trial / "verifier",
+                agent_dir=trial / "agent",
+                artifacts_dir=trial / "artifacts",
+            ),
+            task_env_config=SimpleNamespace(
+                docker_image="ubuntu:latest", cpus=1, memory_mb=1024, allow_internet=True
+            ),
+            sif_cache_dir=str(sif_dir),
+        )
+
+        env._probe_baseline = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        current = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="def",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        risk, reasons = env.detect_runtime_risk(current)
+        assert risk is True
+        assert "mount_table_changed" in reasons
+
+    def test_detect_risk_staging_content(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment, RuntimeProbeSnapshot
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        for name in ("verifier", "agent", "artifacts"):
+            (trial / name).mkdir(parents=True, exist_ok=True)
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=SimpleNamespace(
+                trial_dir=trial,
+                verifier_dir=trial / "verifier",
+                agent_dir=trial / "agent",
+                artifacts_dir=trial / "artifacts",
+            ),
+            task_env_config=SimpleNamespace(
+                docker_image="ubuntu:latest", cpus=1, memory_mb=1024, allow_internet=True
+            ),
+            sif_cache_dir=str(sif_dir),
+        )
+
+        env._probe_baseline = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        current = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=True,
+        )
+
+        risk, reasons = env.detect_runtime_risk(current)
+        assert risk is True
+        assert "staging_content_detected" in reasons
+
+    def test_risk_ever_is_sticky(self):
+        from dataclasses import replace
+
+        from llenvs.adapters.harbor import HarborHidden
+
+        hidden = HarborHidden(
+            task_index=0,
+            task_name="t",
+            instruction="i",
+            episode_step=1,
+            fs_restore_risk_now=True,
+            fs_restore_risk_reasons=("extra_processes:redis",),
+            fs_restore_risk_ever=False,
+        )
+
+        # Simulate what HarborEnvironment.step does:
+        # fs_restore_risk_ever = prev.fs_restore_risk_ever or prev.fs_restore_risk_now
+        next_hidden = HarborHidden(
+            task_index=hidden.task_index,
+            task_name=hidden.task_name,
+            instruction=hidden.instruction,
+            episode_step=hidden.episode_step + 1,
+            fs_restore_risk_ever=hidden.fs_restore_risk_ever or hidden.fs_restore_risk_now,
+        )
+
+        assert next_hidden.fs_restore_risk_ever is True
+        # Even if next step has risk_now=False by default
+        assert next_hidden.fs_restore_risk_now is False
+
+    def test_risk_now_resets_per_step(self):
+        from llenvs.adapters.harbor import HarborHidden, RuntimeProbeSnapshot, _probe_and_annotate_state
+        from llenvs.core.state import Observation, ObservationContent, State, StateMetadata
+
+        hidden = HarborHidden(
+            task_index=0,
+            task_name="t",
+            instruction="i",
+            episode_step=2,
+            fs_restore_risk_now=True,
+            fs_restore_risk_reasons=("mount_table_changed",),
+            fs_restore_risk_ever=True,
+        )
+
+        # Build next hidden as step() does
+        next_hidden = HarborHidden(
+            task_index=hidden.task_index,
+            task_name=hidden.task_name,
+            instruction=hidden.instruction,
+            episode_step=hidden.episode_step + 1,
+            fs_restore_risk_ever=hidden.fs_restore_risk_ever or hidden.fs_restore_risk_now,
+        )
+
+        obs = Observation(
+            prompt="test",
+            task=ObservationContent(text="task"),
+            state=ObservationContent(text="state"),
+        )
+        state = State(
+            observation=obs,
+            hidden=next_hidden,
+            metadata=StateMetadata(step=3, episode_id="ep"),
+        )
+
+        # Create a mock harbor_env with a baseline and no risk
+        class FakeHarborEnv:
+            _pid_namespace = False
+            _probe_baseline = RuntimeProbeSnapshot(
+                process_commands=frozenset(),
+                mount_fingerprint="abc",
+                listening_ports=frozenset(),
+                staging_has_content=False,
+            )
+
+            def capture_runtime_probe(self):
+                import asyncio
+
+                async def _probe():
+                    return RuntimeProbeSnapshot(
+                        process_commands=frozenset(),
+                        mount_fingerprint="abc",
+                        listening_ports=frozenset(),
+                        staging_has_content=False,
+                    )
+                return _probe()
+
+            def detect_runtime_risk(self, current):
+                # No risk this time
+                return False, ()
+
+        annotated = _probe_and_annotate_state(
+            FakeHarborEnv(), state, runtime_probing=True,
+        )
+
+        # risk_now should be False for this step
+        assert annotated.hidden.fs_restore_risk_now is False
+        # risk_ever remains True (sticky from earlier steps)
+        assert annotated.hidden.fs_restore_risk_ever is True
+
+    def test_baseline_probe_failure_recorded_immediately(self):
+        from llenvs.adapters.harbor import HarborHidden, RuntimeProbeSnapshot, _probe_and_annotate_state
+        from llenvs.core.state import Observation, ObservationContent, State, StateMetadata
+
+        hidden = HarborHidden(
+            task_index=0,
+            task_name="t",
+            instruction="i",
+            episode_step=0,
+        )
+        obs = Observation(
+            prompt="test",
+            task=ObservationContent(text="task"),
+            state=ObservationContent(text="state"),
+        )
+        state = State(
+            observation=obs,
+            hidden=hidden,
+            metadata=StateMetadata(step=0, episode_id="ep"),
+        )
+
+        class FakeHarborEnv:
+            _pid_namespace = False
+            _probe_baseline = None  # No baseline yet
+
+            def capture_runtime_probe(self):
+                import asyncio
+
+                async def _probe():
+                    return RuntimeProbeSnapshot(
+                        process_commands=frozenset(),
+                        mount_fingerprint="",
+                        listening_ports=frozenset(),
+                        staging_has_content=False,
+                        probe_failed=True,
+                        probe_error="command not found: ss",
+                    )
+                return _probe()
+
+        fake_env = FakeHarborEnv()
+        annotated = _probe_and_annotate_state(
+            fake_env, state, runtime_probing=True,
+        )
+
+        assert annotated.hidden.fs_restore_risk_now is True
+        assert "baseline_probe_degraded" in annotated.hidden.fs_restore_risk_reasons
+        # Baseline should have been set
+        assert fake_env._probe_baseline is not None
+        assert fake_env._probe_baseline.probe_failed is True
 
 
 class TestRuntimeEligibility:

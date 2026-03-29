@@ -202,6 +202,9 @@ class HarborHidden:
         last_action: Text of the last action taken.
         trajectory: Command history (frozen tuple).
         snapshot_ref: Optional exact runtime snapshot artifact for this state.
+        fs_restore_risk_now: Whether the current state has filesystem-restore risk.
+        fs_restore_risk_reasons: Reasons for the current risk signal.
+        fs_restore_risk_ever: Sticky flag — True if any prior state had risk.
     """
 
     task_index: int
@@ -211,6 +214,26 @@ class HarborHidden:
     last_action: str | None = None
     trajectory: tuple[str, ...] = ()
     snapshot_ref: HarborSnapshotRef | None = None
+    fs_restore_risk_now: bool = False
+    fs_restore_risk_reasons: tuple[str, ...] = ()
+    fs_restore_risk_ever: bool = False
+
+
+@dataclass(frozen=True)
+class RuntimeProbeSnapshot:
+    """Snapshot of container runtime state for filesystem-restore risk detection.
+
+    Captured via a single exec into the running container. Used to detect
+    state that may not survive a tar-based filesystem checkpoint/restore
+    (e.g., background processes, new mounts, open sockets).
+    """
+
+    process_commands: frozenset[str]
+    mount_fingerprint: str
+    listening_ports: frozenset[int]
+    staging_has_content: bool
+    probe_failed: bool = False
+    probe_error: str | None = None
 
 
 # ── Reward function ─────────────────────────────────────────────
@@ -458,6 +481,108 @@ def _restore_state_snapshot(
             tcp_close=snapshot_ref.options.tcp_close,
             ignore_volumes=snapshot_ref.options.ignore_volumes,
         )
+    )
+
+
+def _parse_probe_output(
+    stdout: str, *, has_pid_namespace: bool
+) -> RuntimeProbeSnapshot:
+    """Parse the combined probe script output into a RuntimeProbeSnapshot."""
+    sections: dict[str, str] = {}
+    current_section: str | None = None
+    current_lines: list[str] = []
+    for line in stdout.splitlines():
+        if line.startswith("===") and line.endswith("==="):
+            if current_section is not None:
+                sections[current_section] = "\n".join(current_lines)
+            current_section = line.strip("=")
+            current_lines = []
+        elif current_section is not None:
+            current_lines.append(line)
+    if current_section is not None:
+        sections[current_section] = "\n".join(current_lines)
+
+    # Processes
+    process_commands: frozenset[str] = frozenset()
+    if has_pid_namespace:
+        procs_text = sections.get("PROCS", "UNAVAILABLE").strip()
+        if procs_text and procs_text != "UNAVAILABLE":
+            process_commands = frozenset(
+                line.strip() for line in procs_text.splitlines() if line.strip()
+            )
+
+    # Mounts
+    mounts_text = sections.get("MOUNTS", "UNAVAILABLE").strip()
+    if mounts_text and mounts_text != "UNAVAILABLE":
+        mount_fingerprint = mounts_text.split()[0] if mounts_text else ""
+    else:
+        mount_fingerprint = ""
+
+    # Sockets
+    listening_ports: frozenset[int] = frozenset()
+    sockets_text = sections.get("SOCKETS", "UNAVAILABLE").strip()
+    if sockets_text and sockets_text != "UNAVAILABLE":
+        ports: set[int] = set()
+        for line in sockets_text.splitlines():
+            # ss output: proto state recv-q send-q local:port peer:port ...
+            parts = line.split()
+            for part in parts:
+                if ":" in part:
+                    port_str = part.rsplit(":", 1)[-1]
+                    if port_str.isdigit():
+                        ports.add(int(port_str))
+                        break  # take first port match per line
+        listening_ports = frozenset(ports)
+
+    # Staging
+    staging_text = sections.get("STAGING", "UNAVAILABLE").strip()
+    staging_has_content = bool(
+        staging_text and staging_text != "UNAVAILABLE"
+    )
+
+    return RuntimeProbeSnapshot(
+        process_commands=process_commands,
+        mount_fingerprint=mount_fingerprint,
+        listening_ports=listening_ports,
+        staging_has_content=staging_has_content,
+    )
+
+
+def _probe_and_annotate_state(
+    harbor_env: Any,
+    state: State[HarborHidden],
+    *,
+    runtime_probing: bool,
+) -> State[HarborHidden]:
+    """Capture runtime probe and annotate state with risk signals."""
+    if not runtime_probing:
+        return state
+    capture_fn = getattr(harbor_env, "capture_runtime_probe", None)
+    if not callable(capture_fn):
+        return state
+    probe = run_async(capture_fn())
+    if harbor_env._probe_baseline is None:
+        harbor_env._probe_baseline = probe
+        if probe.probe_failed:
+            return State(
+                observation=state.observation,
+                hidden=replace(
+                    state.hidden,
+                    fs_restore_risk_now=True,
+                    fs_restore_risk_reasons=("baseline_probe_degraded",),
+                ),
+                metadata=state.metadata,
+            )
+        return state
+    risk_now, reasons = harbor_env.detect_runtime_risk(probe)
+    return State(
+        observation=state.observation,
+        hidden=replace(
+            state.hidden,
+            fs_restore_risk_now=risk_now,
+            fs_restore_risk_reasons=reasons,
+        ),
+        metadata=state.metadata,
     )
 
 
@@ -1479,6 +1604,7 @@ class ApptainerHPCEnvironment:
         overlay_size_mb: int = 512,
         writable_tmpfs: bool = False,
         rootfs_mode: str = "auto",
+        pid_namespace: bool = False,
         **kwargs: Any,
     ) -> None:
         del kwargs
@@ -1491,6 +1617,8 @@ class ApptainerHPCEnvironment:
 
         self._apptainer = apptainer_command
         self._fakeroot = fakeroot
+        self._pid_namespace = pid_namespace
+        self._probe_baseline: RuntimeProbeSnapshot | None = None
         self._overlay_size_mb = overlay_size_mb
         self._writable_tmpfs = writable_tmpfs
         normalized_rootfs_mode = rootfs_mode.strip().lower()
@@ -1986,23 +2114,17 @@ class ApptainerHPCEnvironment:
         self._started = True
         self._active_rootfs_mode = "overlay"
 
-    async def _start_sandbox_instance(self) -> None:
+    async def _start_sandbox_from_rootfs(self, rootfs_dir: Path) -> None:
+        """Start sandbox instance from an existing rootfs directory."""
         verifier_dir, agent_dir = self._prepare_runtime_dirs()
-        rootfs_dir = self._prepare_trial_rootfs()
-
-        # Pre-create bind-mount destinations inside the sandbox rootfs.
-        # With --writable (no overlay), Apptainer cannot auto-create them.
         for dest in ("staging", "logs/verifier", "logs/agent"):
             (rootfs_dir / dest).mkdir(parents=True, exist_ok=True)
-
-        cmd = [self._apptainer, "instance", "start", "--writable"]
-        cmd.extend([
-            "--cleanenv",
-            "--contain",
-            "--no-home",
-        ])
+        cmd = [self._apptainer, "instance", "start", "--writable",
+               "--cleanenv", "--contain", "--no-home"]
         if self._fakeroot:
             cmd.append("--fakeroot")
+        if self._pid_namespace:
+            cmd.append("--pid")
         cmd.extend([
             "--bind", f"{self._staging_dir}:/staging",
             "--bind", f"{verifier_dir}:/logs/verifier",
@@ -2014,6 +2136,10 @@ class ApptainerHPCEnvironment:
         await self._bootstrap_log_dirs()
         self._started = True
         self._active_rootfs_mode = "sandbox"
+
+    async def _start_sandbox_instance(self) -> None:
+        rootfs_dir = self._prepare_trial_rootfs()
+        await self._start_sandbox_from_rootfs(rootfs_dir)
 
     async def start(self, force_build: bool = False) -> None:
         await self._log_runtime_info()
@@ -2110,6 +2236,130 @@ class ApptainerHPCEnvironment:
                     shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
                 if self._staging_dir.exists():
                     shutil.rmtree(self._staging_dir, ignore_errors=True)
+
+    async def export_checkpoint(
+        self,
+        export_path: Path | str,
+        *,
+        file_locks: bool = False,
+        tcp_established: bool = False,
+        ignore_volumes: bool = False,
+    ) -> None:
+        """Export sandbox rootfs as a tar archive (filesystem checkpoint).
+
+        Only supported in sandbox mode. The host staging directory is flushed
+        before export — ``/staging`` is a bind mount and is explicitly
+        non-semantic for this optimization.
+        """
+        if self._active_rootfs_mode != "sandbox":
+            raise RuntimeError(
+                "Filesystem checkpoint only supported in sandbox mode"
+            )
+        export_path = Path(export_path)
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        # Flush host staging dir (belt-and-suspenders)
+        if self._staging_dir.exists():
+            shutil.rmtree(self._staging_dir, ignore_errors=True)
+            self._staging_dir.mkdir(parents=True)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["tar", "-cf", str(export_path), "-C", str(self._sandbox_rootfs_dir), "."],
+            check=True,
+        )
+
+    async def restore_checkpoint(
+        self,
+        import_path: Path | str,
+        *,
+        file_locks: bool = False,
+        tcp_established: bool = False,
+        tcp_close: bool = False,
+        ignore_volumes: bool = False,
+    ) -> None:
+        """Restore sandbox rootfs from a tar archive and restart the instance."""
+        import_path = Path(import_path)
+        if self._started:
+            await self.stop(delete=True)
+        if self._sandbox_rootfs_dir.exists():
+            shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
+        self._sandbox_rootfs_dir.mkdir(parents=True)
+        await asyncio.to_thread(
+            subprocess.run,
+            ["tar", "-xf", str(import_path), "-C", str(self._sandbox_rootfs_dir)],
+            check=True,
+        )
+        await self._start_sandbox_from_rootfs(self._sandbox_rootfs_dir)
+
+    async def capture_runtime_probe(self) -> RuntimeProbeSnapshot:
+        """Capture runtime state snapshot for filesystem-restore risk detection."""
+        probe_script = (
+            'echo "===PROCS===";'
+            'ps -eo comm= --no-headers 2>/dev/null || echo "UNAVAILABLE";'
+            'echo "===MOUNTS===";'
+            'md5sum /proc/self/mountinfo 2>/dev/null || echo "UNAVAILABLE";'
+            'echo "===SOCKETS===";'
+            'ss -lntup --no-header 2>/dev/null || netstat -lntup 2>/dev/null || echo "UNAVAILABLE";'
+            'echo "===STAGING===";'
+            'ls -A /staging 2>/dev/null || echo "UNAVAILABLE"'
+        )
+        try:
+            result = await self._run_apptainer_command(
+                [
+                    self._apptainer,
+                    "exec",
+                    "--cleanenv",
+                    f"instance://{self._instance_name}",
+                    "bash",
+                    "-lc",
+                    probe_script,
+                ],
+                check=False,
+            )
+            return _parse_probe_output(
+                result.stdout, has_pid_namespace=self._pid_namespace
+            )
+        except Exception as exc:
+            return RuntimeProbeSnapshot(
+                process_commands=frozenset(),
+                mount_fingerprint="",
+                listening_ports=frozenset(),
+                staging_has_content=False,
+                probe_failed=True,
+                probe_error=str(exc),
+            )
+
+    def detect_runtime_risk(
+        self, current: RuntimeProbeSnapshot
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Compare current probe against baseline and return risk signals."""
+        if self._probe_baseline is None:
+            return False, ()
+        reasons: list[str] = []
+        if self._pid_namespace:
+            probe_commands = {
+                "bash", "ps", "ss", "md5sum", "ls", "cat", "wc", "netstat",
+            }
+            extra = (
+                current.process_commands
+                - self._probe_baseline.process_commands
+                - probe_commands
+            )
+            if extra:
+                reasons.append(
+                    f"extra_processes:{','.join(sorted(extra))}"
+                )
+        if current.mount_fingerprint != self._probe_baseline.mount_fingerprint:
+            reasons.append("mount_table_changed")
+        new_ports = current.listening_ports - self._probe_baseline.listening_ports
+        if new_ports:
+            reasons.append(
+                f"new_listening_ports:{','.join(str(p) for p in sorted(new_ports))}"
+            )
+        if current.staging_has_content:
+            reasons.append("staging_content_detected")
+        if current.probe_failed and not self._probe_baseline.probe_failed:
+            reasons.append("probe_degraded")
+        return bool(reasons), tuple(reasons)
 
     async def exec(
         self,
@@ -2324,6 +2574,7 @@ class HarborEnvironment:
         snapshot_artifact_root: Path | str | None = None,
         snapshot_options: HarborSnapshotOptions | None = None,
         answer_extractor: AnswerExtractor | None = None,
+        runtime_probing: bool = False,
     ) -> None:
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
@@ -2340,6 +2591,7 @@ class HarborEnvironment:
         )
         self._snapshot_options = snapshot_options or HarborSnapshotOptions()
         self._answer_extractor = answer_extractor
+        self._runtime_probing = runtime_probing
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -2442,6 +2694,9 @@ class HarborEnvironment:
             snapshot_artifact_root=self._snapshot_artifact_root,
             snapshot_options=self._snapshot_options,
         )
+        state = _probe_and_annotate_state(
+            self._harbor_env, state, runtime_probing=self._runtime_probing,
+        )
         self._state_tracker.track(state)
 
         return state, {
@@ -2525,6 +2780,7 @@ class HarborEnvironment:
             episode_step=next_step,
             last_action=cmd_for_env,
             trajectory=state.hidden.trajectory + (cmd_for_env,),
+            fs_restore_risk_ever=state.hidden.fs_restore_risk_ever or state.hidden.fs_restore_risk_now,
         )
 
         # Build messages
@@ -2565,6 +2821,9 @@ class HarborEnvironment:
             state_capture_mode=self._state_capture_mode,
             snapshot_artifact_root=self._snapshot_artifact_root,
             snapshot_options=self._snapshot_options,
+        )
+        next_state = _probe_and_annotate_state(
+            self._harbor_env, next_state, runtime_probing=self._runtime_probing,
         )
 
         rewards = self.compute_rewards(state, action, next_state)
@@ -3121,6 +3380,7 @@ class HarborAdapter:
         snapshot_artifact_root: Path | str | None = None,
         snapshot_options: HarborSnapshotOptions | None = None,
         answer_extractor: AnswerExtractor | None = None,
+        runtime_probing: bool = False,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
         """Create a Harbor environment.
@@ -3150,12 +3410,20 @@ class HarborAdapter:
             snapshot_options: Runtime-specific exact snapshot options.
             answer_extractor: Text mode only — extractor for parsing agent
                 responses (strips reasoning tokens, etc.).
+            runtime_probing: If True, capture runtime probes at each state
+                and annotate with filesystem-restore risk signals.
             **kwargs: Passed to Harbor constructors.
 
         Returns:
             HarborEnvironment or HarborToolEnvironment.
         """
         dataset_name, _version = self._parse_name(name)
+
+        if tool_mode and runtime_probing:
+            raise ValueError(
+                "runtime_probing is not supported in tool mode. "
+                "Use text mode (tool_mode=False) for runtime probing."
+            )
 
         # Load tasks and create factories from Harbor if not provided
         if tasks is None or env_factory is None or verify_factory is None:
@@ -3218,6 +3486,7 @@ class HarborAdapter:
             snapshot_artifact_root=snapshot_artifact_root,
             snapshot_options=snapshot_options,
             answer_extractor=answer_extractor,
+            runtime_probing=runtime_probing,
         )
 
     def get_default_system_prompt(self, name: str) -> str:
