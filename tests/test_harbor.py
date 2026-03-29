@@ -3356,6 +3356,7 @@ class TestApptainerCheckpointRestore:
     def test_pid_namespace_flag_adds_pid_to_start_cmd(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
+        """When runtime supports --pid, use it directly."""
         from llenvs.core.async_utils import run_async
 
         env = self._make_env(tmp_path, pid_namespace=True)
@@ -3364,6 +3365,9 @@ class TestApptainerCheckpointRestore:
 
         async def fake_run(cmd, *, check=True, timeout_sec=None):
             calls.append((cmd, check, timeout_sec))
+            # Return --pid in help output so the probe detects support
+            if "start" in cmd and "--help" in cmd:
+                return MockExecResult(stdout="  --pid   run in PID namespace")
             return MockExecResult(stdout="ok")
 
         def fake_prepare_trial_rootfs() -> Path:
@@ -3379,9 +3383,48 @@ class TestApptainerCheckpointRestore:
         inst_cmds = [
             cmd for cmd, _check, _timeout in calls
             if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
+            and "--help" not in cmd
         ]
         assert len(inst_cmds) >= 1
         assert "--pid" in inst_cmds[0]
+
+    def test_pid_namespace_falls_back_to_containall(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        """When runtime lacks --pid (e.g., SingularityCE 4.3), use --containall."""
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path, pid_namespace=True)
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            # Help output without --pid (simulating SingularityCE 4.3)
+            if "start" in cmd and "--help" in cmd:
+                return MockExecResult(stdout="  --containall   contain PID, IPC, env")
+            return MockExecResult(stdout="ok")
+
+        def fake_prepare_trial_rootfs() -> Path:
+            rootfs_dir = env._sandbox_rootfs_dir
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env._start_sandbox_instance())
+
+        # Find the instance start command (not the help probe)
+        inst_cmds = [
+            cmd for cmd, _check, _timeout in calls
+            if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
+            and "--help" not in cmd
+        ]
+        assert len(inst_cmds) >= 1
+        assert "--containall" in inst_cmds[0]
+        assert "--pid" not in inst_cmds[0]
+        # --contain should be removed (superseded by --containall)
+        assert "--contain" not in inst_cmds[0]
 
     def test_start_sandbox_from_rootfs_reuses_dir(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path

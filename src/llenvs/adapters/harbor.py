@@ -1618,6 +1618,7 @@ class ApptainerHPCEnvironment:
         self._apptainer = apptainer_command
         self._fakeroot = fakeroot
         self._pid_namespace = pid_namespace
+        self._pid_flag: str | None = None  # resolved in start() → _probe_pid_support()
         self._probe_baseline: RuntimeProbeSnapshot | None = None
         self._overlay_size_mb = overlay_size_mb
         self._writable_tmpfs = writable_tmpfs
@@ -2039,6 +2040,29 @@ class ApptainerHPCEnvironment:
             sif_count,
         )
 
+    async def _probe_pid_support(self) -> None:
+        """Detect whether the runtime supports ``--pid`` for PID namespace.
+
+        Older SingularityCE (< 4.4) lacks ``--pid``; the fallback is
+        ``--containall`` which implies PID + IPC + clean-env containment.
+        """
+        if not self._pid_namespace:
+            return
+        try:
+            result = await self._run_apptainer_command(
+                [self._apptainer, "instance", "start", "--help"],
+                check=False,
+            )
+            if "--pid" in result.stdout:
+                self._pid_flag = "--pid"
+            else:
+                self._pid_flag = "--containall"
+                self.logger.info(
+                    "Runtime lacks --pid flag; using --containall for PID namespace"
+                )
+        except Exception:
+            self._pid_flag = "--containall"
+
     async def _probe_root_writability(self) -> bool:
         result = await self._run_apptainer_command(
             [
@@ -2116,6 +2140,10 @@ class ApptainerHPCEnvironment:
 
     async def _start_sandbox_from_rootfs(self, rootfs_dir: Path) -> None:
         """Start sandbox instance from an existing rootfs directory."""
+        # Lazy-probe PID support if not yet resolved (e.g., restore_checkpoint
+        # path that bypasses start())
+        if self._pid_namespace and self._pid_flag is None:
+            await self._probe_pid_support()
         verifier_dir, agent_dir = self._prepare_runtime_dirs()
         for dest in ("staging", "logs/verifier", "logs/agent"):
             (rootfs_dir / dest).mkdir(parents=True, exist_ok=True)
@@ -2123,8 +2151,13 @@ class ApptainerHPCEnvironment:
                "--cleanenv", "--contain", "--no-home"]
         if self._fakeroot:
             cmd.append("--fakeroot")
-        if self._pid_namespace:
-            cmd.append("--pid")
+        if self._pid_namespace and self._pid_flag:
+            if self._pid_flag == "--containall":
+                # --containall supersedes --contain (already in cmd),
+                # so replace it to avoid redundancy
+                if "--contain" in cmd:
+                    cmd.remove("--contain")
+            cmd.append(self._pid_flag)
         cmd.extend([
             "--bind", f"{self._staging_dir}:/staging",
             "--bind", f"{verifier_dir}:/logs/verifier",
@@ -2143,6 +2176,7 @@ class ApptainerHPCEnvironment:
 
     async def start(self, force_build: bool = False) -> None:
         await self._log_runtime_info()
+        await self._probe_pid_support()
 
         allow_internet = getattr(self.task_env_config, "allow_internet", True)
         if not allow_internet:
