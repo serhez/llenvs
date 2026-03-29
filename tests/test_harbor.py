@@ -3400,9 +3400,16 @@ class TestApptainerCheckpointRestore:
 
         async def fake_run(cmd, *, check=True, timeout_sec=None):
             calls.append((cmd, check, timeout_sec))
-            # Help output without --pid (simulating SingularityCE 4.3)
+            # Realistic SingularityCE 4.3 help — contains --pid-file,
+            # --pids-limit, and "--pid" in --no-init description, but
+            # NOT --pid as a standalone flag.
             if "start" in cmd and "--help" in cmd:
-                return MockExecResult(stdout="  --containall   contain PID, IPC, env")
+                return MockExecResult(stdout=(
+                    "  -C, --containall                    contain PID, IPC, env\n"
+                    "      --no-init                       do NOT start shim process with --pid\n"
+                    "      --pid-file string               write instance PID to file\n"
+                    "      --pids-limit int                Limit number of container PIDs\n"
+                ))
             return MockExecResult(stdout="ok")
 
         def fake_prepare_trial_rootfs() -> Path:

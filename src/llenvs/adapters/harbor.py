@@ -2053,7 +2053,25 @@ class ApptainerHPCEnvironment:
                 [self._apptainer, "instance", "start", "--help"],
                 check=False,
             )
-            if "--pid" in result.stdout:
+            # Parse flag names from help output.  Each flag line starts
+            # with optional whitespace then the flag token.  We need the
+            # exact flag ``--pid``, not ``--pid-file`` or ``--pids-limit``
+            # (which share the prefix), nor ``--pid`` mentioned inside
+            # another flag's description text (e.g. ``--no-init``).
+            found_pid = False
+            for line in result.stdout.splitlines():
+                tokens = line.strip().split()
+                if not tokens:
+                    continue
+                # First token may be "-X," (short form) — take the last
+                # comma-separated piece's first word.
+                flag = tokens[0]
+                if "," in flag and len(tokens) > 1:
+                    flag = tokens[1]
+                if flag == "--pid":
+                    found_pid = True
+                    break
+            if found_pid:
                 self._pid_flag = "--pid"
             else:
                 self._pid_flag = "--containall"
