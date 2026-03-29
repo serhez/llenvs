@@ -11,6 +11,7 @@ vLLM provides full feature support including:
 from __future__ import annotations
 
 import base64
+import gc
 import io
 from typing import Any
 
@@ -164,6 +165,7 @@ class VLLMBackend(ModelBackend):
         self._model_path = model_path
         self._VLLMSamplingParams = VLLMSamplingParams
         self._chat_template_kwargs = chat_template_kwargs or {}
+        self._closed = False
 
         # Initialize vLLM engine
         llm_kwargs: dict[str, Any] = {
@@ -220,6 +222,32 @@ class VLLMBackend(ModelBackend):
     def model_name(self) -> str:
         """Get the model path/identifier."""
         return self._model_path
+
+    def close(self) -> None:
+        """Release vLLM engine and cached model references."""
+        if getattr(self, "_closed", False):
+            return
+
+        llm = getattr(self, "_llm", None)
+        if llm is not None and hasattr(llm, "llm_engine"):
+            llm.llm_engine.model_executor.shutdown()
+
+        self._llm = None
+        self._tokenizer = None
+        if hasattr(self, "_scoring_model"):
+            self._scoring_model = None
+
+        gc.collect()
+        try:
+            import torch
+        except ImportError:
+            torch = None
+        if torch is not None:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        self._closed = True
 
     @property
     def tokenizer(self) -> Any:

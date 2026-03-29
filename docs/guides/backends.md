@@ -2,6 +2,21 @@
 
 `llenvs` supports multiple inference backends with a unified interface.
 
+## Lifecycle
+
+Backends are closeable and may be used as context managers:
+
+```python
+from llenvs.inference.backends import OpenAIBackend
+
+with OpenAIBackend(model="gpt-4o") as backend:
+    result = backend.generate_chat(...)
+```
+
+Callers own backend lifecycle. Local backends release heavyweight model
+resources best-effort on `close()`, and API backends close reusable client
+sessions. Repeated `close()` calls are safe.
+
 ## Available Backends
 
 | Backend | Package | Features |

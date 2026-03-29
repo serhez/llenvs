@@ -89,6 +89,18 @@ def _run_concurrent(coro_fn: Any, items: list[Any], max_concurrency: int) -> lis
         return asyncio.run(_run())
 
 
+def _run_async_close(coro: Any) -> None:
+    """Run an async close coroutine from sync code."""
+    try:
+        asyncio.get_running_loop()
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(asyncio.run, coro).result()
+    except RuntimeError:
+        asyncio.run(coro)
+
+
 class OpenAIBackend(ModelBackend):
     """OpenAI API backend.
 
@@ -138,6 +150,7 @@ class OpenAIBackend(ModelBackend):
 
         self._client = OpenAI(**client_args)
         self._async_client = AsyncOpenAI(**client_args)
+        self._closed = False
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -159,6 +172,21 @@ class OpenAIBackend(ModelBackend):
     def model_name(self) -> str:
         """Get the model name."""
         return self._model
+
+    def close(self) -> None:
+        """Close reusable OpenAI clients."""
+        if getattr(self, "_closed", False):
+            return
+
+        client = getattr(self, "_client", None)
+        async_client = getattr(self, "_async_client", None)
+        if client is not None:
+            client.close()
+        if async_client is not None:
+            _run_async_close(async_client.close())
+        self._client = None
+        self._async_client = None
+        self._closed = True
 
     def generate(
         self,
@@ -430,6 +458,7 @@ class AnthropicBackend(ModelBackend):
 
         self._client = Anthropic(**client_args)
         self._async_client = AsyncAnthropic(**client_args)
+        self._closed = False
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -451,6 +480,21 @@ class AnthropicBackend(ModelBackend):
     def model_name(self) -> str:
         """Get the model name."""
         return self._model
+
+    def close(self) -> None:
+        """Close reusable Anthropic clients."""
+        if getattr(self, "_closed", False):
+            return
+
+        client = getattr(self, "_client", None)
+        async_client = getattr(self, "_async_client", None)
+        if client is not None:
+            client.close()
+        if async_client is not None:
+            _run_async_close(async_client.close())
+        self._client = None
+        self._async_client = None
+        self._closed = True
 
     def generate(
         self,
@@ -825,6 +869,7 @@ class OpenRouterBackend(ModelBackend):
             default_headers=headers if headers else None,
             **client_kwargs,
         )
+        self._closed = False
 
     @property
     def capabilities(self) -> BackendCapabilities:
@@ -846,6 +891,21 @@ class OpenRouterBackend(ModelBackend):
     def model_name(self) -> str:
         """Get the model name."""
         return self._model
+
+    def close(self) -> None:
+        """Close reusable OpenRouter clients."""
+        if getattr(self, "_closed", False):
+            return
+
+        client = getattr(self, "_client", None)
+        async_client = getattr(self, "_async_client", None)
+        if client is not None:
+            client.close()
+        if async_client is not None:
+            _run_async_close(async_client.close())
+        self._client = None
+        self._async_client = None
+        self._closed = True
 
     def generate(
         self,

@@ -14,6 +14,7 @@ Features:
 from __future__ import annotations
 
 import base64
+import gc
 import io
 from typing import Any
 
@@ -161,6 +162,7 @@ class HuggingFaceBackend(ModelBackend):
         self._model_path = model_path
         self._torch = torch
         self._chat_template_kwargs = chat_template_kwargs or {}
+        self._closed = False
 
         # Resolve dtype
         dtype_map = {
@@ -254,6 +256,24 @@ class HuggingFaceBackend(ModelBackend):
     def model_name(self) -> str:
         """Get the model path/identifier."""
         return self._model_path
+
+    def close(self) -> None:
+        """Release model and tokenizer resources."""
+        if getattr(self, "_closed", False):
+            return
+
+        self._model = None
+        self._tokenizer = None
+        self._processor = None
+        gc.collect()
+
+        torch = getattr(self, "_torch", None)
+        if torch is not None:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        self._closed = True
 
     @property
     def tokenizer(self) -> Any:

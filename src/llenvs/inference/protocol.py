@@ -351,6 +351,27 @@ class ModelBackend(ABC):
         """Get the model name/identifier."""
         ...
 
+    def close(self) -> None:
+        """Release backend resources best-effort.
+
+        Backends may override this to free heavyweight local state
+        such as models, tokenizers, or API client sessions.
+        """
+        return None
+
+    def __enter__(self) -> ModelBackend:
+        """Allow backends to be used as context managers."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: Any,
+    ) -> None:
+        """Close the backend when leaving a ``with`` block."""
+        self.close()
+
     @abstractmethod
     def generate(
         self,
