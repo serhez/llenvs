@@ -50,11 +50,16 @@ class PromptBudget:
             for a string.
         build_history: Callable that receives ``(entries, available_tokens)``
             and returns chat messages for the history portion.
+        min_current_observation_chars: Floor for current-observation
+            truncation. When set, the runner truncates the current
+            observation (after exhausting history truncation) down to this
+            many characters as a last resort. ``None`` disables truncation.
     """
 
     max_prompt_tokens: int
     estimate_tokens: Callable[[str], int]
     build_history: BudgetHistoryFn
+    min_current_observation_chars: int | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,24 @@ class HistoryEntry:
     observation_text: str
     observation_images: tuple[ImageContent, ...] = ()
     step: int = 0
+
+
+def middle_truncate(text: str, max_chars: int) -> str:
+    """Truncate the middle of *text*, keeping the beginning and end.
+
+    If *text* fits within *max_chars*, returns it unchanged. Otherwise
+    keeps approximately half from the start and half from the end with
+    a ``[... N characters omitted ...]`` marker in between.
+    """
+    if len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    half = max_chars // 2
+    return (
+        text[:half]
+        + f"\n\n[... {omitted} characters omitted ...]\n\n"
+        + text[-half:]
+    )
 
 
 def _entries_to_messages(entries: list[HistoryEntry]) -> list[ChatMessage]:

@@ -667,7 +667,37 @@ class TrajectoryRunner:
                     + self._MSG_OVERHEAD_TOKENS
                 )
             available = max(0, budget.max_prompt_tokens - non_history_tokens)
-            messages.extend(budget.build_history(history_entries, available))
+            history_messages = budget.build_history(history_entries, available)
+            messages.extend(history_messages)
+
+            # Phase 2: truncate current observation if still over budget
+            if (
+                current_state_text is not None
+                and budget.min_current_observation_chars is not None
+            ):
+                total = non_history_tokens
+                for msg in history_messages:
+                    total += (
+                        budget.estimate_tokens(msg.content or "")
+                        + self._MSG_OVERHEAD_TOKENS
+                    )
+                excess = total - budget.max_prompt_tokens
+                if excess > 0:
+                    from llenvs.evaluation.history import middle_truncate
+
+                    cur_tokens = budget.estimate_tokens(current_state_text)
+                    cur_len = len(current_state_text)
+                    # Approximate chars-per-token for this text
+                    cpt = cur_len / cur_tokens if cur_tokens > 0 else 4.0
+                    # Account for middle_truncate marker overhead
+                    _MARKER_OVERHEAD = 45
+                    target_chars = max(
+                        budget.min_current_observation_chars,
+                        int(cur_len - excess * cpt) - _MARKER_OVERHEAD,
+                    )
+                    current_state_text = middle_truncate(
+                        current_state_text, target_chars,
+                    )
         else:
             fn = self.history_fn if self.history_fn is not None else full_history
             messages.extend(fn(history_entries))
@@ -907,7 +937,38 @@ class TrajectoryRunner:
                     + self._MSG_OVERHEAD_TOKENS
                 )
             available = max(0, budget.max_prompt_tokens - non_history_tokens)
-            messages.extend(budget.build_history(history_entries, available))
+            history_messages = budget.build_history(history_entries, available)
+            messages.extend(history_messages)
+
+            # Phase 2: truncate current observation if still over budget
+            if (
+                current_user_message is not None
+                and budget.min_current_observation_chars is not None
+            ):
+                total = non_history_tokens
+                for msg in history_messages:
+                    total += (
+                        budget.estimate_tokens(msg.content or "")
+                        + self._MSG_OVERHEAD_TOKENS
+                    )
+                excess = total - budget.max_prompt_tokens
+                if excess > 0:
+                    from llenvs.evaluation.history import middle_truncate
+
+                    cur_text = current_user_message.content or ""
+                    cur_tokens = budget.estimate_tokens(cur_text)
+                    cur_len = len(cur_text)
+                    cpt = cur_len / cur_tokens if cur_tokens > 0 else 4.0
+                    _MARKER_OVERHEAD = 45
+                    target_chars = max(
+                        budget.min_current_observation_chars,
+                        int(cur_len - excess * cpt) - _MARKER_OVERHEAD,
+                    )
+                    current_user_message = ChatMessage(
+                        role="user",
+                        content=middle_truncate(cur_text, target_chars),
+                        images=current_user_message.images,
+                    )
         else:
             fn = self.history_fn if self.history_fn is not None else full_history
             messages.extend(fn(history_entries))

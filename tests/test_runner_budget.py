@@ -311,3 +311,174 @@ class TestRunnerWithPromptBudget:
         current_cost = len("current observation") + 5
         expected_available = 1000 - system_cost - prompt_cost - current_cost
         assert available == expected_available
+
+
+class TestCurrentObservationTruncation:
+    """Tests for current-observation truncation in structured and legacy modes."""
+
+    def _make_runner(self, system_prompt=None, prompt_budget=None):
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        mock_backend = MagicMock()
+
+        kwargs = dict(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+            system_prompt=system_prompt,
+        )
+        if prompt_budget is not None:
+            kwargs["prompt_budget"] = prompt_budget
+
+        return TrajectoryRunner(**kwargs)
+
+    def test_structured_truncates_current_obs_after_history_exhausted(self) -> None:
+        """When history is empty and current obs exceeds budget, truncate it."""
+        budget = PromptBudget(
+            max_prompt_tokens=100,
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+            min_current_observation_chars=20,
+        )
+        runner = self._make_runner(system_prompt="Sys", prompt_budget=budget)
+
+        task = ObservationContent(text="Task")
+        # Large current state that won't fit in budget of 100 tokens
+        big_state = ObservationContent(text="X" * 200)
+        state = _make_state(task=task, state=big_state, step=0)
+        traj = Trajectory.create(state)
+
+        messages = runner._build_structured_messages(state, traj)
+
+        # Find the current state message (last user message)
+        current_state_msg = [m for m in messages if m.role == "user"][-1]
+        # Should be truncated — shorter than original but at least min floor
+        assert len(current_state_msg.content) < 200
+        assert "omitted" in current_state_msg.content
+
+    def test_structured_no_truncation_when_none(self) -> None:
+        """When min_current_observation_chars is None, current obs is not truncated."""
+        budget = PromptBudget(
+            max_prompt_tokens=100,
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+            min_current_observation_chars=None,
+        )
+        runner = self._make_runner(system_prompt="Sys", prompt_budget=budget)
+
+        task = ObservationContent(text="Task")
+        big_state = ObservationContent(text="X" * 200)
+        state = _make_state(task=task, state=big_state, step=0)
+        traj = Trajectory.create(state)
+
+        messages = runner._build_structured_messages(state, traj)
+
+        current_state_msg = [m for m in messages if m.role == "user"][-1]
+        # Should NOT be truncated
+        assert current_state_msg.content == "X" * 200
+
+    def test_structured_no_truncation_when_budget_sufficient(self) -> None:
+        """Current obs not truncated when budget is ample."""
+        budget = PromptBudget(
+            max_prompt_tokens=10000,
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+            min_current_observation_chars=20,
+        )
+        runner = self._make_runner(prompt_budget=budget)
+
+        task = ObservationContent(text="Task")
+        state_content = ObservationContent(text="X" * 200)
+        state = _make_state(task=task, state=state_content, step=0)
+        traj = Trajectory.create(state)
+
+        messages = runner._build_structured_messages(state, traj)
+
+        current_state_msg = [m for m in messages if m.role == "user"][-1]
+        assert current_state_msg.content == "X" * 200
+
+    def test_structured_respects_floor(self) -> None:
+        """Truncated current observation is at least min_current_observation_chars."""
+        floor = 50
+        budget = PromptBudget(
+            max_prompt_tokens=30,  # Very tight — can't even fit the floor
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+            min_current_observation_chars=floor,
+        )
+        runner = self._make_runner(system_prompt="S", prompt_budget=budget)
+
+        task = ObservationContent(text="T")
+        big_state = ObservationContent(text="X" * 500)
+        state = _make_state(task=task, state=big_state, step=0)
+        traj = Trajectory.create(state)
+
+        messages = runner._build_structured_messages(state, traj)
+
+        current_state_msg = [m for m in messages if m.role == "user"][-1]
+        # The floor is respected even if prompt is still over budget
+        # (vLLM handles the final check)
+        assert len(current_state_msg.content) < 500
+        # The truncated text should preserve at least floor/2 chars from
+        # each end plus the "[... N chars omitted ...]" marker
+        assert "omitted" in current_state_msg.content
+
+    def test_legacy_truncates_current_obs(self) -> None:
+        """Legacy text-chat mode truncates final user message as current obs."""
+        budget = PromptBudget(
+            max_prompt_tokens=80,
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+            min_current_observation_chars=20,
+        )
+        runner = self._make_runner(system_prompt="Sys", prompt_budget=budget)
+
+        state = State(
+            observation=Observation(
+                prompt="Task.",
+                messages=(
+                    {"role": "assistant", "content": "act"},
+                    {"role": "user", "content": "X" * 200},
+                ),
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=1, episode_id="test"),
+        )
+        traj = Trajectory.create(state)
+
+        messages = runner._build_messages(state, trajectory=traj)
+
+        # The last user message should be truncated
+        last_user = [m for m in messages if m.role == "user"][-1]
+        assert len(last_user.content) < 200
+        assert "omitted" in last_user.content
+
+    def test_legacy_no_truncation_when_none(self) -> None:
+        """Legacy mode: no truncation when min_current_observation_chars is None."""
+        budget = PromptBudget(
+            max_prompt_tokens=80,
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+            min_current_observation_chars=None,
+        )
+        runner = self._make_runner(system_prompt="Sys", prompt_budget=budget)
+
+        state = State(
+            observation=Observation(
+                prompt="Task.",
+                messages=(
+                    {"role": "assistant", "content": "act"},
+                    {"role": "user", "content": "X" * 200},
+                ),
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=1, episode_id="test"),
+        )
+        traj = Trajectory.create(state)
+
+        messages = runner._build_messages(state, trajectory=traj)
+
+        last_user = [m for m in messages if m.role == "user"][-1]
+        # Full observation should be present (not truncated)
+        assert "X" * 200 in last_user.content
+        assert "omitted" not in last_user.content

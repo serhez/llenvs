@@ -32,6 +32,7 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     ModelBackend,
+    PromptTooLongError,
     SamplingParams,
     ScoringResult,
     StopReason,
@@ -49,6 +50,7 @@ __all__ = [
     "ChatMessage",
     "ScoringResult",
     "StopReason",
+    "PromptTooLongError",
     "TokenLogprob",
     "TokenScore",
     # Prompting

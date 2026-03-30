@@ -180,4 +180,29 @@ result = run_evaluation(
 
 History control takes effect in structured message building mode and in plain text-only legacy chat mode. It does not rewrite legacy tool-call conversations.
 
+## Current Observation Truncation
+
+`PromptBudget` supports an optional `min_current_observation_chars` field. When set, the runner truncates the current state observation as a last resort if the prompt still exceeds the budget after history truncation. The truncation uses middle-truncation (keeping the beginning and end of the text with a `[... N characters omitted ...]` marker).
+
+The truncation order is:
+
+1. **History** — truncated via the `build_history` callback
+2. **Current observation** — truncated only if `min_current_observation_chars` is set and the prompt still exceeds `max_prompt_tokens` after step 1. Truncated down to the floor but no further. If the prompt is still too long, the backend (e.g., vLLM) handles the final validation.
+
+This applies to both structured mode and plain text-only legacy chat mode. In legacy mode, the final user message is treated as the current observation.
+
+```python
+budget = PromptBudget(
+    max_prompt_tokens=4096,
+    estimate_tokens=my_estimator,
+    build_history=my_history_builder,
+    min_current_observation_chars=1024,  # last-resort truncation floor
+)
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    prompt_budget=budget,
+)
+```
+
 Turn/step counters are injected separately via `TurnInfoConfig` on the runner. History entries are not modified by turn info — only the task description and current state observation are affected. See the [Evaluation guide](evaluation.md#turn-info) for details.

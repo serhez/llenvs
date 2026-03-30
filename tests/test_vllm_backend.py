@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from llenvs.inference import PromptTooLongError
 from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
@@ -306,3 +307,43 @@ class TestVLLMSoftBudgetRatio:
 
         call_kwargs = backend._VLLMSamplingParams.call_args[1]
         assert "logits_processors" not in call_kwargs
+
+
+class TestVLLMPromptTooLong:
+    def _create_mock_backend(self):
+        from llenvs.inference.backends.vllm import VLLMBackend
+
+        backend = VLLMBackend.__new__(VLLMBackend)
+        backend._model_path = "test-model"
+        backend._tokenizer = MagicMock()
+        backend._tokenizer.encode.side_effect = (
+            lambda text, add_special_tokens=False: [0] * (len(text) + (10 if add_special_tokens else 0))
+        )
+        backend._VLLMSamplingParams = MagicMock()
+        backend._llm = MagicMock()
+        backend._max_context_length = 50
+        backend._chat_template_kwargs = {}
+        backend._is_vlm = False
+        backend._has_v1_thinking_processor = False
+        return backend
+
+    def test_prompt_too_long_uses_rendered_prompt_lengths_without_special_tokens(self):
+        backend = self._create_mock_backend()
+        backend._llm.generate.side_effect = ValueError(
+            "The decoder prompt (length 60) is longer than the maximum model length of 50."
+        )
+
+        with pytest.raises(PromptTooLongError) as exc_info:
+            backend.generate(["abcd", "x" * 60], SamplingParams(max_tokens=4))
+
+        err = exc_info.value
+        assert err.prompt_token_lengths == [4, 60]
+        assert err.offending_indices == [1]
+        assert err.offending_prompts == ["x" * 60]
+
+
+class TestInferenceExports:
+    def test_prompt_too_long_error_is_exported(self):
+        from llenvs import inference
+
+        assert "PromptTooLongError" in inference.__all__

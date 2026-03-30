@@ -16,6 +16,41 @@ if TYPE_CHECKING:
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 
+class PromptTooLongError(ValueError):
+    """Raised when a prompt exceeds the model's maximum context length.
+
+    Wraps the backend error with structured diagnostic data for callers
+    that want to format rich error messages.
+
+    Attributes:
+        model_name: Name of the model that rejected the prompt.
+        max_model_len: Maximum context length (tokens).
+        batch_size: Number of prompts in the batch.
+        prompt_token_lengths: Per-prompt token lengths.
+        offending_indices: Indices of prompts that exceeded the limit.
+        offending_prompts: Full text of offending prompts.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        model_name: str = "",
+        max_model_len: int = 0,
+        batch_size: int = 0,
+        prompt_token_lengths: list[int] | None = None,
+        offending_indices: list[int] | None = None,
+        offending_prompts: list[str] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.model_name = model_name
+        self.max_model_len = max_model_len
+        self.batch_size = batch_size
+        self.prompt_token_lengths = prompt_token_lengths or []
+        self.offending_indices = offending_indices or []
+        self.offending_prompts = offending_prompts or []
+
+
 class StopReason(Enum):
     """Reason why generation stopped."""
 

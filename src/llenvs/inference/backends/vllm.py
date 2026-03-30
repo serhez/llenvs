@@ -21,6 +21,7 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     ModelBackend,
+    PromptTooLongError,
     SamplingParams,
     ScoringResult,
     StopReason,
@@ -434,9 +435,35 @@ class VLLMBackend(ModelBackend):
 
         Returns:
             List of GenerationResults.
+
+        Raises:
+            PromptTooLongError: If any prompt exceeds the model's max context.
         """
         vllm_params = self._to_vllm_params(params)
-        outputs = self._llm.generate(prompts, vllm_params, use_tqdm=False)
+        try:
+            outputs = self._llm.generate(prompts, vllm_params, use_tqdm=False)
+        except ValueError as exc:
+            if "longer than the maximum model length" in str(exc):
+                # Compute per-prompt token lengths for diagnostics
+                prompt_lengths = [
+                    len(self._tokenizer.encode(p, add_special_tokens=False))
+                    for p in prompts
+                ]
+                max_len = self._max_context_length or 0
+                offending = [
+                    i for i, length in enumerate(prompt_lengths)
+                    if length > max_len
+                ]
+                raise PromptTooLongError(
+                    str(exc),
+                    model_name=self._model_path,
+                    max_model_len=max_len,
+                    batch_size=len(prompts),
+                    prompt_token_lengths=prompt_lengths,
+                    offending_indices=offending,
+                    offending_prompts=[prompts[i] for i in offending],
+                ) from exc
+            raise
 
         results = []
         for output in outputs:
