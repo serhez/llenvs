@@ -131,7 +131,7 @@ class TestHuggingFaceBackendLifecycle:
 
 
 class TestVLLMBackendLifecycle:
-    def test_close_calls_model_executor_shutdown_and_clears_refs(self):
+    def test_close_prefers_engine_core_shutdown_and_clears_refs(self):
         from llenvs.inference.backends.vllm import VLLMBackend
 
         backend = VLLMBackend.__new__(VLLMBackend)
@@ -139,6 +139,28 @@ class TestVLLMBackendLifecycle:
         backend._tokenizer = MagicMock()
         backend._scoring_model = MagicMock()
         llm = MagicMock()
+        llm.llm_engine.engine_core.shutdown = MagicMock()
+        llm.llm_engine.model_executor.shutdown = MagicMock()
+        backend._llm = llm
+
+        backend.close()
+        backend.close()
+
+        llm.llm_engine.engine_core.shutdown.assert_called_once()
+        llm.llm_engine.model_executor.shutdown.assert_not_called()
+        assert backend._llm is None
+        assert backend._tokenizer is None
+        assert backend._scoring_model is None
+
+    def test_close_falls_back_to_model_executor_shutdown(self):
+        from llenvs.inference.backends.vllm import VLLMBackend
+
+        backend = VLLMBackend.__new__(VLLMBackend)
+        backend._closed = False
+        backend._tokenizer = MagicMock()
+        backend._scoring_model = MagicMock()
+        llm = MagicMock()
+        del llm.llm_engine.engine_core
         llm.llm_engine.model_executor.shutdown = MagicMock()
         backend._llm = llm
 
@@ -146,6 +168,25 @@ class TestVLLMBackendLifecycle:
         backend.close()
 
         llm.llm_engine.model_executor.shutdown.assert_called_once()
+        assert backend._llm is None
+        assert backend._tokenizer is None
+        assert backend._scoring_model is None
+
+    def test_close_without_known_shutdown_path_still_clears_refs(self):
+        from llenvs.inference.backends.vllm import VLLMBackend
+
+        backend = VLLMBackend.__new__(VLLMBackend)
+        backend._closed = False
+        backend._tokenizer = MagicMock()
+        backend._scoring_model = MagicMock()
+        llm = MagicMock()
+        del llm.llm_engine.engine_core
+        del llm.llm_engine.model_executor
+        backend._llm = llm
+
+        backend.close()
+        backend.close()
+
         assert backend._llm is None
         assert backend._tokenizer is None
         assert backend._scoring_model is None
@@ -158,9 +199,11 @@ class TestVLLMBackendLifecycle:
         backend._tokenizer = MagicMock()
         backend._scoring_model = None
         llm = MagicMock()
+        llm.llm_engine.engine_core.shutdown = MagicMock()
         llm.llm_engine.model_executor.shutdown = MagicMock()
         backend._llm = llm
 
         backend.close()
 
+        llm.llm_engine.engine_core.shutdown.assert_called_once()
         llm.sleep.assert_not_called()

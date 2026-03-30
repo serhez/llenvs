@@ -223,14 +223,33 @@ class VLLMBackend(ModelBackend):
         """Get the model path/identifier."""
         return self._model_path
 
+    def _shutdown_engine(self, llm: Any) -> None:
+        """Best-effort shutdown for pinned vLLM engine layouts."""
+        engine = getattr(llm, "llm_engine", None)
+        if engine is None:
+            return
+
+        engine_core = getattr(engine, "engine_core", None)
+        if engine_core is not None:
+            shutdown = getattr(engine_core, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+                return
+
+        model_executor = getattr(engine, "model_executor", None)
+        if model_executor is not None:
+            shutdown = getattr(model_executor, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
+
     def close(self) -> None:
         """Release vLLM engine and cached model references."""
         if getattr(self, "_closed", False):
             return
 
         llm = getattr(self, "_llm", None)
-        if llm is not None and hasattr(llm, "llm_engine"):
-            llm.llm_engine.model_executor.shutdown()
+        if llm is not None:
+            self._shutdown_engine(llm)
 
         self._llm = None
         self._tokenizer = None
