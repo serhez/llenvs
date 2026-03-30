@@ -425,15 +425,28 @@ class TestHistoryFnIntegration:
         assert "Navigate the maze." in messages[1].content
         assert "Room 3" in messages[1].content
 
-    def test_history_fn_not_used_in_legacy_mode(self):
-        """history_fn is ignored when task is None (legacy mode)."""
+    def test_history_fn_applies_in_legacy_mode_for_text_history(self):
+        """Legacy text-only histories should respect history_fn shaping."""
         runner = self._make_runner(history_fn=no_history)
-        state = _make_state(prompt="What is 2+2?")
+        state = _make_state(
+            prompt="What is 2+2?",
+            messages=(
+                {"role": "assistant", "content": "Let me calculate."},
+                {"role": "user", "content": "Still thinking..."},
+                {"role": "assistant", "content": "4"},
+                {"role": "user", "content": "Please provide just the answer."},
+            ),
+            step=2,
+        )
         trajectory = Trajectory.create(state)
 
         messages = runner._build_messages(state, trajectory=trajectory)
         assert len(messages) == 1
-        assert messages[0].content == "What is 2+2?"
+        assert messages[0].role == "user"
+        assert "What is 2+2?" in messages[0].content
+        assert "Please provide just the answer." in messages[0].content
+        assert "Let me calculate." not in messages[0].content
+        assert "Still thinking..." not in messages[0].content
 
 
 class TestIncludeReasoningInHistory:

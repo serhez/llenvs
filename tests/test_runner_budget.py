@@ -263,3 +263,51 @@ class TestRunnerWithPromptBudget:
 
         assert len(received_available) == 1
         assert received_available[0] == 0
+
+    def test_legacy_messages_use_prompt_budget(self) -> None:
+        """Text-only legacy histories should also respect PromptBudget."""
+        received_args: list[tuple[list[HistoryEntry], int]] = []
+
+        def mock_build_history(entries, available_tokens):
+            received_args.append((entries, available_tokens))
+            return []
+
+        budget = PromptBudget(
+            max_prompt_tokens=1000,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build_history,
+        )
+        runner = self._make_runner(system_prompt="System.", prompt_budget=budget)
+
+        state = State(
+            observation=Observation(
+                prompt="Task prompt.",
+                messages=(
+                    {"role": "assistant", "content": "action1"},
+                    {"role": "user", "content": "obs1"},
+                    {"role": "assistant", "content": "action2"},
+                    {"role": "user", "content": "current observation"},
+                ),
+            ),
+            hidden=None,
+            metadata=StateMetadata(
+                step=2,
+                episode_id="test",
+            ),
+        )
+        trajectory = Trajectory.create(state)
+
+        runner._build_messages(state, trajectory=trajectory)
+
+        assert len(received_args) == 1
+        entries, available = received_args[0]
+        assert [(e.action_text, e.observation_text) for e in entries] == [
+            ("action1", "obs1"),
+            ("action2", ""),
+        ]
+
+        system_cost = len("System.") + 5
+        prompt_cost = len("Task prompt.") + 5
+        current_cost = len("current observation") + 5
+        expected_available = 1000 - system_cost - prompt_cost - current_cost
+        assert available == expected_available

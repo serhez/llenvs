@@ -728,76 +728,192 @@ class TrajectoryRunner:
         self,
         state: State[Any],
     ) -> list[ChatMessage]:
-        """Build messages using legacy prompt + messages fields."""
+        """Build messages using legacy prompt + messages fields.
+
+        When ``history_fn`` or ``prompt_budget`` is configured, plain text-only
+        assistant/user histories are reconstructed into history entries so the
+        same history shaping used by structured observations also applies to
+        legacy chat environments. Tool-call histories continue to use the raw
+        legacy path unchanged.
+        """
+        if self.prompt_budget is not None or self.history_fn is not None:
+            budgeted = self._build_budgeted_legacy_messages(state)
+            if budgeted is not None:
+                return budgeted
+        return self._build_raw_legacy_messages(state)
+
+    def _build_raw_legacy_messages(
+        self,
+        state: State[Any],
+    ) -> list[ChatMessage]:
+        """Build legacy messages without history reconstruction."""
         messages: list[ChatMessage] = []
 
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
 
         obs = state.observation
+        messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
 
-        # Add initial prompt as user message
-        if not obs.messages:
-            messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
-        else:
-            # First message should be user with prompt
-            messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
+        for msg in obs.messages:
+            role = msg.get("role", "user")
 
-            # Then add message history
-            for msg in obs.messages:
-                role = msg.get("role", "user")
+            if role == "assistant":
+                tool_calls_data = msg.get("tool_calls", [])
+                if tool_calls_data:
+                    from llenvs.core.tools import ToolCall
 
-                if role == "assistant":
-                    # Check for tool calls
-                    tool_calls_data = msg.get("tool_calls", [])
-                    if tool_calls_data:
-                        from llenvs.core.tools import ToolCall
-
-                        tool_calls = tuple(
-                            ToolCall(
-                                id=tc["id"],
-                                name=tc["name"],
-                                arguments=tc["arguments"],
-                            )
-                            for tc in tool_calls_data
+                    tool_calls = tuple(
+                        ToolCall(
+                            id=tc["id"],
+                            name=tc["name"],
+                            arguments=tc["arguments"],
                         )
-                        messages.append(
-                            ChatMessage(
-                                role="assistant",
-                                content=msg.get("content"),
-                                tool_calls=tool_calls,
-                            )
-                        )
-                    else:
-                        messages.append(
-                            ChatMessage(role="assistant", content=msg.get("content", ""))
-                        )
-
-                elif role == "tool":
+                        for tc in tool_calls_data
+                    )
                     messages.append(
                         ChatMessage(
-                            role="tool",
-                            content=msg.get("content", ""),
-                            tool_call_id=msg.get("tool_call_id"),
-                            name=msg.get("name"),
+                            role="assistant",
+                            content=msg.get("content"),
+                            tool_calls=tool_calls,
                         )
                     )
-
-                elif role == "user":
-                    # Extract images from message dict if present
-                    msg_images: tuple = ()
-                    if "images" in msg:
-                        from llenvs.core.state import ImageContent
-
-                        msg_images = tuple(
-                            ImageContent(
-                                data=im["data"], media_type=im.get("media_type", "image/png")
-                            )
-                            for im in msg["images"]
-                        )
+                else:
                     messages.append(
-                        ChatMessage(role="user", content=msg.get("content", ""), images=msg_images)
+                        ChatMessage(role="assistant", content=msg.get("content", ""))
                     )
+
+            elif role == "tool":
+                messages.append(
+                    ChatMessage(
+                        role="tool",
+                        content=msg.get("content", ""),
+                        tool_call_id=msg.get("tool_call_id"),
+                        name=msg.get("name"),
+                    )
+                )
+
+            elif role == "user":
+                messages.append(
+                    ChatMessage(
+                        role="user",
+                        content=msg.get("content", ""),
+                        images=self._legacy_message_images(msg),
+                    )
+                )
+
+        return messages
+
+    def _legacy_message_images(self, msg: dict[str, Any]) -> tuple[Any, ...]:
+        """Extract image payloads from a legacy message dict."""
+        if "images" not in msg:
+            return ()
+
+        from llenvs.core.state import ImageContent
+
+        return tuple(
+            ImageContent(
+                data=im["data"],
+                media_type=im.get("media_type", "image/png"),
+            )
+            for im in msg["images"]
+        )
+
+    def _build_budgeted_legacy_messages(
+        self,
+        state: State[Any],
+    ) -> list[ChatMessage] | None:
+        """Apply history shaping to plain text-only legacy chats when possible."""
+        from llenvs.evaluation.history import HistoryEntry, full_history
+
+        obs = state.observation
+        messages: list[ChatMessage] = []
+
+        if self.system_prompt:
+            messages.append(ChatMessage(role="system", content=self.system_prompt))
+
+        messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
+
+        if not obs.messages:
+            return messages
+
+        raw_messages = list(obs.messages)
+        current_message: dict[str, Any] | None = None
+        if raw_messages and raw_messages[-1].get("role", "user") == "user":
+            current_message = raw_messages.pop()
+
+        history_entries: list[HistoryEntry] = []
+        pending_action: str | None = None
+
+        for index, msg in enumerate(raw_messages, start=1):
+            role = msg.get("role", "user")
+            if role == "assistant":
+                if msg.get("tool_calls"):
+                    return None
+                if pending_action is not None:
+                    history_entries.append(
+                        HistoryEntry(
+                            action_text=pending_action,
+                            observation_text="",
+                            step=index,
+                        )
+                    )
+                pending_action = msg.get("content", "") or ""
+                continue
+
+            if role != "user":
+                return None
+            if pending_action is None:
+                return None
+
+            history_entries.append(
+                HistoryEntry(
+                    action_text=pending_action,
+                    observation_text=msg.get("content", "") or "",
+                    observation_images=self._legacy_message_images(msg),
+                    step=index,
+                )
+            )
+            pending_action = None
+
+        if pending_action is not None:
+            history_entries.append(
+                HistoryEntry(
+                    action_text=pending_action,
+                    observation_text="",
+                    step=len(raw_messages) + 1,
+                )
+            )
+
+        current_user_message: ChatMessage | None = None
+        if current_message is not None:
+            current_user_message = ChatMessage(
+                role="user",
+                content=current_message.get("content", "") or "",
+                images=self._legacy_message_images(current_message),
+            )
+
+        if self.prompt_budget is not None:
+            budget = self.prompt_budget
+            non_history_tokens = 0
+            for msg in messages:
+                non_history_tokens += (
+                    budget.estimate_tokens(msg.content or "")
+                    + self._MSG_OVERHEAD_TOKENS
+                )
+            if current_user_message is not None:
+                non_history_tokens += (
+                    budget.estimate_tokens(current_user_message.content or "")
+                    + self._MSG_OVERHEAD_TOKENS
+                )
+            available = max(0, budget.max_prompt_tokens - non_history_tokens)
+            messages.extend(budget.build_history(history_entries, available))
+        else:
+            fn = self.history_fn if self.history_fn is not None else full_history
+            messages.extend(fn(history_entries))
+
+        if current_user_message is not None:
+            messages.append(current_user_message)
 
         return messages
 

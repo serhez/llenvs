@@ -2,7 +2,7 @@
 
 Multi-turn environments accumulate conversation history that can grow large over many steps. History control lets you manage what prior turns the model sees, reducing token usage and shaping agent behavior.
 
-History control works with **structured observations** — environments that set `task` and `state` fields on their `Observation`. All text-based multi-turn adapters support this (gymnasium, craftax, webshop, intercode, jericho, agentgym, dialogue, lmrl, openenv, alfworld, gem, iterative). Tool-based environments set `task` for metadata but use legacy message building to preserve tool call structures.
+History control works with **structured observations** and with **plain text-only legacy chat histories**. Environments that set `task` and `state` use structured mode directly. Environments that expose only `prompt + messages` still get history shaping when their legacy history is an ordinary assistant/user chat transcript. Tool-based environments continue to use legacy message building without history shaping so tool call structures are preserved exactly.
 
 ## How It Works
 
@@ -178,6 +178,6 @@ result = run_evaluation(
 )
 ```
 
-History control only takes effect in structured message building mode (when the environment sets `task`/`state` on its `Observation`). In legacy mode, the parameters are ignored.
+History control takes effect in structured message building mode and in plain text-only legacy chat mode. It does not rewrite legacy tool-call conversations.
 
 Turn/step counters are injected separately via `TurnInfoConfig` on the runner. History entries are not modified by turn info — only the task description and current state observation are affected. See the [Evaluation guide](evaluation.md#turn-info) for details.
