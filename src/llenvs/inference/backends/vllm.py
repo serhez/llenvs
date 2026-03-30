@@ -711,18 +711,11 @@ class VLLMBackend(ModelBackend):
                 low_cpu_mem_usage=True,
             )
             logger.info("Scoring model loaded on GPU")
-        except Exception:
-            logger.warning(
-                "Could not load scoring model on GPU (likely insufficient memory). "
-                "Loading on CPU — scoring will be significantly slower. "
-                "To use GPU, lower gpu_memory_utilization on the vLLM backend."
-            )
-            self._scoring_model = AutoModelForCausalLM.from_pretrained(
-                self._model_path,
-                torch_dtype=torch.float32,
-                low_cpu_mem_usage=True,
-            )
-            logger.info("Scoring model loaded on CPU")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load scoring model on GPU. Lower gpu_memory_utilization "
+                f"on the vLLM backend to free GPU memory for the scoring model: {e}"
+            ) from e
 
         self._scoring_model.eval()
         return self._scoring_model
