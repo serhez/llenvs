@@ -2297,27 +2297,33 @@ class ApptainerHPCEnvironment:
         tcp_established: bool = False,
         ignore_volumes: bool = False,
     ) -> None:
-        """Export sandbox rootfs as a tar archive (filesystem checkpoint).
-
-        Only supported in sandbox mode. The host staging directory is flushed
-        before export — ``/staging`` is a bind mount and is explicitly
-        non-semantic for this optimization.
-        """
+        """Export sandbox rootfs as a tar archive (filesystem checkpoint)."""
         if self._active_rootfs_mode != "sandbox":
             raise RuntimeError(
                 "Filesystem checkpoint only supported in sandbox mode"
             )
         export_path = Path(export_path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
-        # Flush host staging dir (belt-and-suspenders)
-        if self._staging_dir.exists():
-            shutil.rmtree(self._staging_dir, ignore_errors=True)
-            self._staging_dir.mkdir(parents=True)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["tar", "-cf", str(export_path), "-C", str(self._sandbox_rootfs_dir), "."],
-            check=True,
+        temp_name = f".{export_path.name}.{uuid.uuid4().hex}.tmp"
+        temp_path = export_path.parent / temp_name
+        command = (
+            f"tar -cf {shlex.quote(f'/.vb_checkpoint_out/{temp_name}')} "
+            f"-C /.vb_checkpoint_src ."
         )
+        try:
+            await self._run_apptainer_checkpoint_command(
+                binds=(
+                    (self._sandbox_rootfs_dir, "/.vb_checkpoint_src"),
+                    (export_path.parent, "/.vb_checkpoint_out"),
+                ),
+                command=command,
+                operation="export",
+            )
+            os.replace(temp_path, export_path)
+        except Exception:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+            raise
 
     async def restore_checkpoint(
         self,
@@ -2330,17 +2336,51 @@ class ApptainerHPCEnvironment:
     ) -> None:
         """Restore sandbox rootfs from a tar archive and restart the instance."""
         import_path = Path(import_path)
+        if not import_path.exists():
+            raise FileNotFoundError(f"Checkpoint artifact not found: {import_path}")
         if self._started:
-            await self.stop(delete=True)
-        if self._sandbox_rootfs_dir.exists():
-            shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
-        self._sandbox_rootfs_dir.mkdir(parents=True)
-        await asyncio.to_thread(
-            subprocess.run,
-            ["tar", "-xf", str(import_path), "-C", str(self._sandbox_rootfs_dir)],
-            check=True,
+            await self.stop(delete=False)
+        self._sandbox_rootfs_dir.mkdir(parents=True, exist_ok=True)
+        command = (
+            "find /.vb_checkpoint_dst -mindepth 1 -maxdepth 1 -exec rm -rf -- {} + "
+            f"&& tar -xf {shlex.quote(f'/.vb_checkpoint_in/{import_path.name}')} "
+            "-C /.vb_checkpoint_dst"
+        )
+        await self._run_apptainer_checkpoint_command(
+            binds=(
+                (import_path.parent, "/.vb_checkpoint_in"),
+                (self._sandbox_rootfs_dir, "/.vb_checkpoint_dst"),
+            ),
+            command=command,
+            operation="restore",
         )
         await self._start_sandbox_from_rootfs(self._sandbox_rootfs_dir)
+
+    async def _run_apptainer_checkpoint_command(
+        self,
+        *,
+        binds: tuple[tuple[Path | str, str], ...],
+        command: str,
+        operation: str,
+    ) -> _CLIResult:
+        cmd = [self._apptainer, "exec", "--cleanenv"]
+        if self._fakeroot:
+            cmd.append("--fakeroot")
+        for host_path, container_path in binds:
+            cmd.extend(["--bind", f"{host_path}:{container_path}"])
+        cmd.extend([str(self._sif_path), "bash", "-lc", command])
+        try:
+            return await self._run_apptainer_command(cmd)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "tar: command not found" in message or "tar: not found" in message:
+                raise RuntimeError(
+                    "apptainer-hpc filesystem checkpointing requires `tar` inside "
+                    "the image used for checkpoint operations"
+                ) from exc
+            raise RuntimeError(
+                f"apptainer-hpc filesystem checkpoint {operation} failed: {message}"
+            ) from exc
 
     async def capture_runtime_probe(self) -> RuntimeProbeSnapshot:
         """Capture runtime state snapshot for filesystem-restore risk detection."""

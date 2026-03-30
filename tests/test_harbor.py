@@ -3237,10 +3237,12 @@ class TestApptainerCheckpointRestore:
         env._sif_path.touch()
         return env
 
-    def test_export_checkpoint_tars_sandbox_rootfs(self, tmp_path):
+    def test_export_checkpoint_uses_helper_exec_and_replaces_temp_tar(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
         from llenvs.core.async_utils import run_async
 
-        env = self._make_env(tmp_path)
+        env = self._make_env(tmp_path, fakeroot=True)
         env._active_rootfs_mode = "sandbox"
         env._started = True
 
@@ -3251,48 +3253,62 @@ class TestApptainerCheckpointRestore:
         sub.mkdir()
         (sub / "file_b.txt").write_text("world")
 
-        env._staging_dir.mkdir(parents=True, exist_ok=True)
+        calls: list[tuple[list[str], bool, int | None]] = []
 
-        export_path = tmp_path / "checkpoint.tar"
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            assert (tmp_path / "exports").exists()
+            shell_cmd = cmd[-1]
+            prefix = "/.vb_checkpoint_out/"
+            start = shell_cmd.index(prefix) + len(prefix)
+            end = shell_cmd.index(" ", start)
+            temp_name = shell_cmd[start:end].strip("'\"")
+            (tmp_path / "exports" / temp_name).write_text("checkpoint-bytes")
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        export_path = tmp_path / "exports" / "checkpoint.tar"
         run_async(env.export_checkpoint(export_path))
 
         assert export_path.exists()
-        assert export_path.stat().st_size > 0
+        assert export_path.read_text() == "checkpoint-bytes"
+        temp_files = list(export_path.parent.glob(".*.tmp"))
+        assert temp_files == []
 
-        # Verify tar contents by extracting to a fresh directory
-        import subprocess
-        verify_dir = tmp_path / "verify"
-        verify_dir.mkdir()
-        subprocess.run(
-            ["tar", "-xf", str(export_path), "-C", str(verify_dir)],
-            check=True,
-        )
-        assert (verify_dir / "file_a.txt").read_text() == "hello"
-        assert (verify_dir / "subdir" / "file_b.txt").read_text() == "world"
+        cmd = calls[0][0]
+        assert cmd[:2] == ["apptainer", "exec"]
+        assert "--cleanenv" in cmd
+        assert "--fakeroot" in cmd
+        bind_specs = [
+            cmd[i + 1]
+            for i, token in enumerate(cmd)
+            if token == "--bind"
+        ]
+        assert f"{env._sandbox_rootfs_dir}:/.vb_checkpoint_src" in bind_specs
+        assert f"{export_path.parent}:/.vb_checkpoint_out" in bind_specs
+        assert str(env._sif_path) in cmd
+        assert cmd[-3] == "bash"
+        assert cmd[-2] == "-lc"
+        assert "tar -cf" in cmd[-1]
+        assert "-C /.vb_checkpoint_src ." in cmd[-1]
+        assert "/.vb_checkpoint_out/" in cmd[-1]
 
     def test_restore_checkpoint_replaces_rootfs_and_restarts(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
-        import subprocess
-
         from llenvs.core.async_utils import run_async
 
-        env = self._make_env(tmp_path)
+        env = self._make_env(tmp_path, fakeroot=True)
         env._started = True
         env._active_rootfs_mode = "sandbox"
 
-        # Create a tar from known content
-        source_dir = tmp_path / "checkpoint_source"
-        source_dir.mkdir()
-        (source_dir / "restored.txt").write_text("restored_content")
         tar_path = tmp_path / "checkpoint.tar"
-        subprocess.run(
-            ["tar", "-cf", str(tar_path), "-C", str(source_dir), "."],
-            check=True,
-        )
+        tar_path.write_text("checkpoint-bytes")
 
         stop_calls: list[dict] = []
         start_sandbox_calls: list[Path] = []
+        calls: list[tuple[list[str], bool, int | None]] = []
 
         async def fake_stop(delete: bool = True):
             stop_calls.append({"delete": delete})
@@ -3306,11 +3322,18 @@ class TestApptainerCheckpointRestore:
         monkeypatch.setattr(env, "stop", fake_stop)
         monkeypatch.setattr(env, "_start_sandbox_from_rootfs", fake_start_sandbox)
 
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            (env._sandbox_rootfs_dir / "restored.txt").write_text("restored_content")
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
         run_async(env.restore_checkpoint(tar_path))
 
-        # Verify stop(delete=True) was called
+        # Verify stop(delete=False) was called so rootfs cleanup happens in-helper.
         assert len(stop_calls) == 1
-        assert stop_calls[0]["delete"] is True
+        assert stop_calls[0]["delete"] is False
 
         # Verify rootfs was replaced with tar contents
         assert (env._sandbox_rootfs_dir / "restored.txt").read_text() == "restored_content"
@@ -3319,7 +3342,26 @@ class TestApptainerCheckpointRestore:
         assert len(start_sandbox_calls) == 1
         assert start_sandbox_calls[0] == env._sandbox_rootfs_dir
 
-    def test_export_flushes_host_staging_dir(self, tmp_path):
+        cmd = calls[0][0]
+        assert cmd[:2] == ["apptainer", "exec"]
+        assert "--cleanenv" in cmd
+        assert "--fakeroot" in cmd
+        bind_specs = [
+            cmd[i + 1]
+            for i, token in enumerate(cmd)
+            if token == "--bind"
+        ]
+        assert f"{tar_path.parent}:/.vb_checkpoint_in" in bind_specs
+        assert f"{env._sandbox_rootfs_dir}:/.vb_checkpoint_dst" in bind_specs
+        assert str(env._sif_path) in cmd
+        assert cmd[-3] == "bash"
+        assert cmd[-2] == "-lc"
+        assert "find /.vb_checkpoint_dst" in cmd[-1]
+        assert f"tar -xf /.vb_checkpoint_in/{tar_path.name} -C /.vb_checkpoint_dst" in cmd[-1]
+
+    def test_export_does_not_modify_host_staging_dir(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
         from llenvs.core.async_utils import run_async
 
         env = self._make_env(tmp_path)
@@ -3336,12 +3378,74 @@ class TestApptainerCheckpointRestore:
         env._sandbox_rootfs_dir.mkdir(parents=True, exist_ok=True)
         (env._sandbox_rootfs_dir / "dummy.txt").write_text("content")
 
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            shell_cmd = cmd[-1]
+            prefix = "/.vb_checkpoint_out/"
+            start = shell_cmd.index(prefix) + len(prefix)
+            end = shell_cmd.index(" ", start)
+            temp_name = shell_cmd[start:end].strip("'\"")
+            (tmp_path / temp_name).write_text("checkpoint-bytes")
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
         export_path = tmp_path / "checkpoint.tar"
         run_async(env.export_checkpoint(export_path))
 
-        # Staging dir should exist but be empty (recreated after flush)
+        # Host staging dir should be left untouched.
         assert env._staging_dir.exists()
-        assert list(env._staging_dir.iterdir()) == []
+        assert (env._staging_dir / "leftover.txt").read_text() == "should be removed"
+        assert (env._staging_dir / "upload" / "data.bin").read_text() == "stale"
+
+    def test_export_checkpoint_cleans_partial_temp_tar_on_failure(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._active_rootfs_mode = "sandbox"
+        env._started = True
+        env._sandbox_rootfs_dir.mkdir(parents=True, exist_ok=True)
+        (env._sandbox_rootfs_dir / "dummy.txt").write_text("content")
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            shell_cmd = cmd[-1]
+            prefix = "/.vb_checkpoint_out/"
+            start = shell_cmd.index(prefix) + len(prefix)
+            end = shell_cmd.index(" ", start)
+            temp_name = shell_cmd[start:end].strip("'\"")
+            partial_path = (tmp_path / "exports" / temp_name)
+            partial_path.parent.mkdir(parents=True, exist_ok=True)
+            partial_path.write_text("partial")
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        export_path = tmp_path / "exports" / "checkpoint.tar"
+        with pytest.raises(RuntimeError, match="filesystem checkpoint export failed"):
+            run_async(env.export_checkpoint(export_path))
+
+        assert not export_path.exists()
+        assert list(export_path.parent.glob(".*.tmp")) == []
+
+    def test_checkpoint_reports_missing_tar(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._active_rootfs_mode = "sandbox"
+        env._started = True
+        env._sandbox_rootfs_dir.mkdir(parents=True, exist_ok=True)
+        (env._sandbox_rootfs_dir / "dummy.txt").write_text("content")
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            raise RuntimeError("stderr: bash: tar: command not found")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        with pytest.raises(RuntimeError, match="requires `tar`"):
+            run_async(env.export_checkpoint(tmp_path / "checkpoint.tar"))
 
     def test_export_requires_sandbox_mode(self, tmp_path):
         from llenvs.core.async_utils import run_async

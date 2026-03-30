@@ -376,9 +376,10 @@ Current v1 behavior:
 
 `ApptainerHPCEnvironment` supports tar-based filesystem checkpoint/restore in sandbox mode. These are filesystem-level snapshots, not process-level snapshots — background processes, in-memory state, and open sockets are not preserved across restore:
 
-- `export_checkpoint(path)` — tars the sandbox rootfs to disk. Flushes the host staging directory first (`/staging` is a bind mount and explicitly non-semantic for this optimization).
-- `restore_checkpoint(path)` — stops the running instance, replaces the rootfs with the tar contents, and restarts the instance. Only on-disk state is restored; any processes running in the original instance must be re-launched by subsequent commands.
+- `export_checkpoint(path)` — runs a one-shot Apptainer helper against the SIF image, bind-mounts the sandbox rootfs and the destination directory, and creates the tar from inside the container context. This avoids host-side permission failures on fakeroot-created paths.
+- `restore_checkpoint(path)` — stops the running instance without deleting the sandbox, runs a one-shot Apptainer helper to clear and untar the checkpoint into the sandbox rootfs, then restarts the instance from that restored rootfs.
 - `pid_namespace=True` enables `--pid` namespace isolation, required for process-level runtime probing.
+- Checkpointing requires `bash` and `tar` inside the image used for the helper commands.
 
 ### Runtime Probing
 
