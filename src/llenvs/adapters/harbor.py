@@ -63,6 +63,16 @@ from llenvs.core.tools import (
 
 logger = logging.getLogger(__name__)
 
+_HARBOR_TASK_CACHE: dict[tuple[Any, ...], tuple[Any, ...]] = {}
+_HARBOR_TASK_CACHE_LOCK = threading.Lock()
+
+_APPTAINER_VERSION_CACHE: dict[str, str] = {}
+_APPTAINER_VERSION_CACHE_LOCK = threading.Lock()
+_APPTAINER_RUNTIME_INFO_LOGGED_KEYS: set[tuple[Any, ...]] = set()
+_APPTAINER_RUNTIME_INFO_LOGGED_KEYS_LOCK = threading.Lock()
+_APPTAINER_PID_FLAG_CACHE: dict[tuple[str, str], str] = {}
+_APPTAINER_PID_FLAG_CACHE_LOCK = threading.Lock()
+_APPTAINER_PID_FLAG_EVENTS: dict[tuple[str, str], threading.Event] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE_LOCK = threading.Lock()
 _APPTAINER_ROOTFS_PROBE_EVENTS: dict[tuple[Any, ...], threading.Event] = {}
@@ -1921,6 +1931,61 @@ class ApptainerHPCEnvironment:
             self._writable_tmpfs,
         )
 
+    async def _get_runtime_version(self) -> str:
+        with _APPTAINER_VERSION_CACHE_LOCK:
+            cached = _APPTAINER_VERSION_CACHE.get(self._apptainer)
+        if cached is not None:
+            return cached
+
+        version_str = "unknown"
+        try:
+            result = await self._run_apptainer_command(
+                [self._apptainer, "--version"], check=False
+            )
+            if result.return_code == 0 and result.stdout:
+                version_str = result.stdout.strip()
+        except Exception:
+            pass
+
+        with _APPTAINER_VERSION_CACHE_LOCK:
+            _APPTAINER_VERSION_CACHE.setdefault(self._apptainer, version_str)
+            return _APPTAINER_VERSION_CACHE[self._apptainer]
+
+    def _runtime_info_cache_key(self, version_str: str) -> tuple[Any, ...]:
+        return (
+            self._apptainer,
+            version_str,
+            self._fakeroot,
+            self._rootfs_mode,
+            self._overlay_size_mb,
+            self._writable_tmpfs,
+            str(self._sif_cache_dir),
+        )
+
+    def _pid_support_cache_key(self, version_str: str) -> tuple[str, str]:
+        return (self._apptainer, version_str)
+
+    def _finish_pid_probe(self, cache_key: tuple[str, str], value: str | None) -> None:
+        with _APPTAINER_PID_FLAG_CACHE_LOCK:
+            if value is not None:
+                _APPTAINER_PID_FLAG_CACHE[cache_key] = value
+            event = _APPTAINER_PID_FLAG_EVENTS.pop(cache_key, None)
+        if event is not None:
+            event.set()
+
+    def _claim_pid_probe(self, cache_key: tuple[str, str]) -> tuple[str | None, bool]:
+        while True:
+            with _APPTAINER_PID_FLAG_CACHE_LOCK:
+                cached = _APPTAINER_PID_FLAG_CACHE.get(cache_key)
+                if cached is not None:
+                    return cached, False
+                event = _APPTAINER_PID_FLAG_EVENTS.get(cache_key)
+                if event is None:
+                    _APPTAINER_PID_FLAG_EVENTS[cache_key] = threading.Event()
+                    return None, True
+
+            event.wait()
+
     def _finish_overlay_probe(self, value: bool | None) -> None:
         key = self._rootfs_probe_cache_key()
         with _APPTAINER_ROOTFS_PROBE_CACHE_LOCK:
@@ -1998,16 +2063,12 @@ class ApptainerHPCEnvironment:
 
     async def _log_runtime_info(self) -> None:
         """Probe and log Apptainer runtime capabilities."""
-        # Version
-        version_str = "unknown"
-        try:
-            result = await self._run_apptainer_command(
-                [self._apptainer, "--version"], check=False
-            )
-            if result.return_code == 0 and result.stdout:
-                version_str = result.stdout.strip()
-        except Exception:
-            pass
+        version_str = await self._get_runtime_version()
+        cache_key = self._runtime_info_cache_key(version_str)
+        with _APPTAINER_RUNTIME_INFO_LOGGED_KEYS_LOCK:
+            if cache_key in _APPTAINER_RUNTIME_INFO_LOGGED_KEYS:
+                return
+            _APPTAINER_RUNTIME_INFO_LOGGED_KEYS.add(cache_key)
 
         # Overlay mode
         if self._writable_tmpfs:
@@ -2048,6 +2109,17 @@ class ApptainerHPCEnvironment:
         """
         if not self._pid_namespace:
             return
+        if self._pid_flag is not None:
+            return
+
+        version_str = await self._get_runtime_version()
+        cache_key = self._pid_support_cache_key(version_str)
+        cached_flag, is_probe_owner = self._claim_pid_probe(cache_key)
+        if cached_flag is not None:
+            self._pid_flag = cached_flag
+            return
+
+        resolved_flag: str | None = None
         try:
             result = await self._run_apptainer_command(
                 [self._apptainer, "instance", "start", "--help"],
@@ -2063,23 +2135,24 @@ class ApptainerHPCEnvironment:
                 tokens = line.strip().split()
                 if not tokens:
                     continue
-                # First token may be "-X," (short form) — take the last
-                # comma-separated piece's first word.
                 flag = tokens[0]
                 if "," in flag and len(tokens) > 1:
                     flag = tokens[1]
                 if flag == "--pid":
                     found_pid = True
                     break
-            if found_pid:
-                self._pid_flag = "--pid"
-            else:
-                self._pid_flag = "--containall"
+            resolved_flag = "--pid" if found_pid else "--containall"
+            self._pid_flag = resolved_flag
+            if resolved_flag == "--containall":
                 self.logger.info(
                     "Runtime lacks --pid flag; using --containall for PID namespace"
                 )
         except Exception:
-            self._pid_flag = "--containall"
+            resolved_flag = "--containall"
+            self._pid_flag = resolved_flag
+        finally:
+            if is_probe_owner:
+                self._finish_pid_probe(cache_key, resolved_flag)
 
     async def _probe_root_writability(self) -> bool:
         result = await self._run_apptainer_command(
@@ -2233,16 +2306,12 @@ class ApptainerHPCEnvironment:
             )
         if self._rootfs_mode == "auto" and cached_probe is False:
             await self._start_sandbox_instance()
-            self.logger.info(
-                "Apptainer rootfs mode selected: sandbox (cached overlay probe failure)"
-            )
             return
 
         probe_result: bool | None = cached_probe
         try:
             await self._start_overlay_instance()
             if cached_probe is True:
-                self.logger.info("Apptainer rootfs mode selected: overlay (cached)")
                 return
 
             overlay_ok = await self._probe_root_writability()
@@ -3411,10 +3480,23 @@ class HarborAdapter:
     ) -> tuple[Any, ...]:
         """Load Harbor tasks without creating environments."""
         dataset_name, version = self._parse_name(name)
-        api = self._get_harbor_api()
         if dataset_path is not None:
-            return self._load_tasks_from_path(api, dataset_path)
-        return self._load_tasks_from_registry(api, dataset_name, version)
+            cache_key = ("path", str(Path(dataset_path).resolve()))
+        else:
+            cache_key = ("registry", dataset_name, version)
+
+        with _HARBOR_TASK_CACHE_LOCK:
+            cached = _HARBOR_TASK_CACHE.get(cache_key)
+            if cached is not None:
+                return cached
+
+            api = self._get_harbor_api()
+            if dataset_path is not None:
+                tasks = self._load_tasks_from_path(api, dataset_path)
+            else:
+                tasks = self._load_tasks_from_registry(api, dataset_name, version)
+            _HARBOR_TASK_CACHE[cache_key] = tasks
+            return tasks
 
     def inspect_snapshot_eligibility(
         self,

@@ -1149,6 +1149,33 @@ class TestHarborAdapter:
         assert dataset == "terminal-bench"
         assert version is None
 
+    def test_load_tasks_reuses_cached_registry_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import HarborAdapter
+
+        harbor_mod._HARBOR_TASK_CACHE.clear()
+        api = object()
+        calls: list[tuple[Any, str, str | None]] = []
+
+        monkeypatch.setattr(HarborAdapter, "_get_harbor_api", lambda self: api)
+
+        def fake_load(api_obj: Any, dataset_name: str, version: str | None) -> tuple[Any, ...]:
+            calls.append((api_obj, dataset_name, version))
+            return ("task-a", "task-b")
+
+        monkeypatch.setattr(
+            HarborAdapter,
+            "_load_tasks_from_registry",
+            staticmethod(fake_load),
+        )
+
+        assert HarborAdapter().load_tasks("terminal-bench@2.0") == ("task-a", "task-b")
+        assert HarborAdapter().load_tasks("terminal-bench@2.0") == ("task-a", "task-b")
+        assert calls == [(api, "terminal-bench", "2.0")]
+
     def test_get_environment_text_mode(self):
         """Should return HarborEnvironment when tool_mode=False."""
         from llenvs.adapters.harbor import HarborAdapter, HarborEnvironment
@@ -2337,8 +2364,12 @@ class TestApptainerHPCEnvironment:
     def test_start_calls_overlay_create_and_instance_start(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
+        import llenvs.adapters.harbor as harbor_mod
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_RUNTIME_INFO_LOGGED_KEYS.clear()
 
         (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
         sif_dir = tmp_path / "sif_cache"
@@ -2368,16 +2399,17 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
-        # First call: --version (runtime info probe)
-        assert calls[0][0] == ["apptainer", "--version"]
+        commands = [cmd for cmd, _check, _timeout in calls]
+        assert ["apptainer", "--version"] in commands
 
-        # Second call: overlay create
-        assert calls[1][0][:3] == ["apptainer", "overlay", "create"]
-        assert "--size" in calls[1][0]
-        assert "256" in calls[1][0]
+        overlay_cmd = next(cmd for cmd in commands if cmd[:3] == ["apptainer", "overlay", "create"])
+        assert "--size" in overlay_cmd
+        assert "256" in overlay_cmd
 
-        # Third call: instance start
-        inst_cmd = calls[2][0]
+        inst_cmd = next(
+            cmd for cmd in commands
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        )
         assert inst_cmd[:3] == ["apptainer", "instance", "start"]
         assert "--overlay" in inst_cmd
         assert "--cleanenv" in inst_cmd
@@ -2389,16 +2421,22 @@ class TestApptainerHPCEnvironment:
         assert f"instance://" not in " ".join(inst_cmd)  # instance start uses plain name
         assert env._instance_name == inst_cmd[-1]
 
-        # Fourth call: bootstrap dirs
-        bootstrap_cmd = calls[3][0]
+        bootstrap_cmd = next(
+            cmd for cmd in commands
+            if cmd[:2] == ["apptainer", "exec"]
+            and "mkdir -p /logs/agent /logs/verifier" in cmd[-1]
+        )
         assert "apptainer" == bootstrap_cmd[0]
         assert "exec" == bootstrap_cmd[1]
         assert "--cleanenv" in bootstrap_cmd
         assert f"instance://{env._instance_name}" in bootstrap_cmd
         assert "mkdir -p /logs/agent /logs/verifier" in bootstrap_cmd
 
-        # Fifth call: overlay writability probe
-        probe_cmd = calls[4][0]
+        probe_cmd = next(
+            cmd for cmd in commands
+            if cmd[:2] == ["apptainer", "exec"]
+            and "touch /.vb_probe && rm /.vb_probe" in cmd[-1]
+        )
         assert probe_cmd[:2] == ["apptainer", "exec"]
         assert f"instance://{env._instance_name}" in probe_cmd
         assert "touch /.vb_probe && rm /.vb_probe" in probe_cmd[-1]
@@ -2487,8 +2525,12 @@ class TestApptainerHPCEnvironment:
     def test_start_with_fakeroot(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
+        import llenvs.adapters.harbor as harbor_mod
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_RUNTIME_INFO_LOGGED_KEYS.clear()
 
         (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
         sif_dir = tmp_path / "sif_cache"
@@ -2517,15 +2559,21 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
-        # calls[0] = --version, calls[1] = overlay create, calls[2] = instance start
-        inst_cmd = calls[2][0]
+        inst_cmd = next(
+            cmd for cmd, _check, _timeout in calls
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        )
         assert "--fakeroot" in inst_cmd
 
     def test_start_sandbox_uses_writable_rootfs_without_app_or_tests_binds(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
+        import llenvs.adapters.harbor as harbor_mod
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_RUNTIME_INFO_LOGGED_KEYS.clear()
 
         (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
         sif_dir = tmp_path / "sif_cache"
@@ -2558,7 +2606,10 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.start())
 
-        inst_cmd = calls[1][0]
+        inst_cmd = next(
+            cmd for cmd, _check, _timeout in calls
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        )
         assert inst_cmd[:3] == ["apptainer", "instance", "start"]
         assert "--writable" in inst_cmd
         assert "--overlay" not in inst_cmd
@@ -2691,6 +2742,218 @@ class TestApptainerHPCEnvironment:
         assert len(inst_cmds_a) == 2
         assert len(inst_cmds_b) == 1
         assert "--writable" in inst_cmds_b[0]
+
+    def test_pid_support_probe_cached_across_instances(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_PID_FLAG_CACHE.clear()
+        harbor_mod._APPTAINER_PID_FLAG_EVENTS.clear()
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+
+        def make_env(name: str) -> ApptainerHPCEnvironment:
+            env = ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id=f"session-{name}",
+                trial_paths=self._make_trial_paths(tmp_path / name),
+                task_env_config=self._make_task_env_config(),
+                sif_cache_dir=str(sif_dir),
+                rootfs_mode="sandbox",
+                pid_namespace=True,
+            )
+            env._sif_path.touch(exist_ok=True)
+            return env
+
+        env_a = make_env("trial-a")
+        env_b = make_env("trial-b")
+
+        help_calls = 0
+
+        async def quiet_runtime_info() -> None:
+            return None
+
+        def prepare_rootfs(env: ApptainerHPCEnvironment) -> Path:
+            rootfs_dir = Path(env.trial_paths.trial_dir) / "rootfs"
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            nonlocal help_calls
+            if cmd == ["apptainer", "--version"]:
+                return MockExecResult(stdout="singularity-ce version 4.2.2-1.el8")
+            if cmd == ["apptainer", "instance", "start", "--help"]:
+                help_calls += 1
+                return MockExecResult(stdout="  --containall\n  --pid-file\n")
+            return MockExecResult(stdout="ok")
+
+        for env in (env_a, env_b):
+            monkeypatch.setattr(env, "_log_runtime_info", quiet_runtime_info)
+            monkeypatch.setattr(env, "_prepare_trial_rootfs", lambda e=env: prepare_rootfs(e))
+            monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        with caplog.at_level("INFO"):
+            run_async(env_a.start())
+            run_async(env_b.start())
+
+        assert help_calls == 1
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if "Runtime lacks --pid flag" in record.getMessage()
+        ] == ["Runtime lacks --pid flag; using --containall for PID namespace"]
+
+    def test_runtime_info_logged_once_per_runtime_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_RUNTIME_INFO_LOGGED_KEYS.clear()
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+
+        def make_env(name: str) -> ApptainerHPCEnvironment:
+            env = ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id=f"session-{name}",
+                trial_paths=self._make_trial_paths(tmp_path / name),
+                task_env_config=self._make_task_env_config(),
+                sif_cache_dir=str(sif_dir),
+            )
+            env._sif_path.touch(exist_ok=True)
+            return env
+
+        env_a = make_env("trial-a")
+        env_b = make_env("trial-b")
+
+        version_calls = 0
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            nonlocal version_calls
+            if cmd == ["apptainer", "--version"]:
+                version_calls += 1
+                return MockExecResult(stdout="singularity-ce version 4.2.2-1.el8")
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env_a, "_run_apptainer_command", fake_run)
+        monkeypatch.setattr(env_b, "_run_apptainer_command", fake_run)
+
+        with caplog.at_level("INFO"):
+            run_async(env_a._log_runtime_info())
+            run_async(env_b._log_runtime_info())
+
+        assert version_calls == 1
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.getMessage().startswith("Harbor runtime:")
+        ] == [
+            "Harbor runtime: apptainer-hpc (apptainer singularity-ce version 4.2.2-1.el8)\n"
+            "  fakeroot: disabled\n"
+            "  rootfs mode request: auto\n"
+            "  overlay mode: disk-backed overlay (512 MB)\n"
+            f"  SIF cache: {sif_dir} (1 images)\n"
+            "  isolation: --cleanenv --contain --no-home"
+        ]
+
+    def test_cached_overlay_probe_failure_is_silent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_ROOTFS_PROBE_CACHE.clear()
+        harbor_mod._APPTAINER_ROOTFS_PROBE_EVENTS.clear()
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        sif_path = sif_dir / "ca0c1413bbd82bab.sif"
+        sif_path.touch()
+
+        def make_env(name: str) -> ApptainerHPCEnvironment:
+            env = ApptainerHPCEnvironment(
+                environment_dir=tmp_path,
+                environment_name="task_01",
+                session_id=f"session-{name}",
+                trial_paths=self._make_trial_paths(tmp_path / name),
+                task_env_config=self._make_task_env_config(),
+                sif_cache_dir=str(sif_dir),
+            )
+            env._sif_path = sif_path
+            return env
+
+        env_a = make_env("trial-a")
+        env_b = make_env("trial-b")
+
+        async def quiet_runtime_info() -> None:
+            return None
+
+        async def quiet_pid_probe() -> None:
+            return None
+
+        async def start_overlay(env: ApptainerHPCEnvironment) -> None:
+            env._started = True
+            env._active_rootfs_mode = "overlay"
+
+        async def start_sandbox(env: ApptainerHPCEnvironment) -> None:
+            env._started = True
+            env._active_rootfs_mode = "sandbox"
+
+        async def fake_probe() -> bool:
+            return False
+
+        async def fake_stop(delete: bool = True) -> None:
+            return None
+
+        for env in (env_a, env_b):
+            monkeypatch.setattr(env, "_log_runtime_info", quiet_runtime_info)
+            monkeypatch.setattr(env, "_probe_pid_support", quiet_pid_probe)
+            monkeypatch.setattr(
+                env,
+                "_start_overlay_instance",
+                lambda e=env: start_overlay(e),
+            )
+            monkeypatch.setattr(
+                env,
+                "_start_sandbox_instance",
+                lambda e=env: start_sandbox(e),
+            )
+            monkeypatch.setattr(env, "stop", fake_stop)
+        monkeypatch.setattr(env_a, "_probe_root_writability", fake_probe)
+
+        with caplog.at_level("INFO"):
+            run_async(env_a.start())
+            run_async(env_b.start())
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert messages.count(
+            "Apptainer overlay probe failed; falling back to writable sandbox"
+        ) == 1
+        assert all("cached overlay probe failure" not in message for message in messages)
 
     def test_overlay_mode_raises_with_remediation_when_probe_fails(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
@@ -3461,7 +3724,12 @@ class TestApptainerCheckpointRestore:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
         """When runtime supports --pid, use it directly."""
+        import llenvs.adapters.harbor as harbor_mod
         from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_PID_FLAG_CACHE.clear()
+        harbor_mod._APPTAINER_PID_FLAG_EVENTS.clear()
 
         env = self._make_env(tmp_path, pid_namespace=True)
 
@@ -3496,7 +3764,12 @@ class TestApptainerCheckpointRestore:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
         """When runtime lacks --pid (e.g., SingularityCE 4.3), use --containall."""
+        import llenvs.adapters.harbor as harbor_mod
         from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_PID_FLAG_CACHE.clear()
+        harbor_mod._APPTAINER_PID_FLAG_EVENTS.clear()
 
         env = self._make_env(tmp_path, pid_namespace=True)
 

@@ -361,6 +361,7 @@ Current v1 behavior:
 - Single-container Harbor tasks are supported.
 - Apptainer-backed single-container tasks default `exec()` to the image workdir, falling back to `/app` when no `WORKDIR` is declared.
 - `apptainer-hpc` supports `rootfs_mode="auto" | "overlay" | "sandbox"`. `auto` probes whether the overlay path yields a writable root filesystem and falls back to writable per-trial sandbox copies when it does not.
+- Harbor task loading is cached per process by dataset source, so repeated `load_tasks()` calls for the same registry dataset or local dataset path reuse the previously loaded task set.
 - Overlay mode keeps `/app` and `/tests` writable with host-backed binds; sandbox mode uses the writable rootfs directly and does not bind those paths.
 - Task-local `docker-compose.yaml` is supported for a constrained subset centered on a required `main` service plus sidecars.
 - `exec()`, upload, and download operations target `main`; sidecars are runtime-only support services.
@@ -382,6 +383,11 @@ Current v1 behavior:
 - Checkpointing requires `bash` and `tar` inside the image used for the helper commands.
 
 ### Runtime Probing
+
+Apptainer runtime discovery is cached per process. The runtime version string,
+PID-namespace flag support, and overlay rootfs probe results are reused across
+environment instances with the same effective runtime key. Cached hits do not
+emit repeated `INFO` logs.
 
 When `runtime_probing=True` is passed to `get_environment()`, each `reset()` and `step()` captures a runtime probe snapshot and annotates the state with risk signals:
 
