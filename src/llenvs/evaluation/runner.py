@@ -232,6 +232,7 @@ class _ActiveTrajectory:
     done: bool = False
     error: str | None = None
     step_count: int = 0
+    failed: bool = False
 
 
 @dataclass
@@ -1929,7 +1930,8 @@ class TrajectoryRunner:
         max_steps: int | None = None,
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[Trajectory[Any]]:
+        on_generation_error: Callable[[Exception], str] | None = None,
+    ) -> list[Trajectory[Any] | None]:
         """Run batched rollouts from arbitrary states.
 
         Uses lockstep batched generation: all active rollouts advance
@@ -1941,9 +1943,17 @@ class TrajectoryRunner:
                 environment spec's ``max_steps``.
             batch_size: If set, processes states in chunks of this size.
             progress_callback: Optional callback(completed, total).
+            on_generation_error: Optional callback invoked when
+                ``generate_chat_batch`` raises during a lockstep step.
+                Must return ``"skip"`` (mark offending trajectories as
+                failed and continue), ``"abort"`` (mark all active as
+                failed, keep completed), or ``"raise"`` (re-raise).
+                When ``None``, errors always propagate.
 
         Returns:
-            List of Trajectory objects, one per input state, in order.
+            List of Trajectory objects (or ``None`` for failed
+            trajectories when *on_generation_error* is used), one per
+            input state, in order.
         """
         if not states:
             return []
@@ -1957,6 +1967,7 @@ class TrajectoryRunner:
                     chunk,
                     max_steps=max_steps,
                     progress_callback=cb,
+                    on_generation_error=on_generation_error,
                 ),
             )
 
@@ -1964,6 +1975,7 @@ class TrajectoryRunner:
             states,
             max_steps=max_steps,
             progress_callback=progress_callback,
+            on_generation_error=on_generation_error,
         )
 
     def run_batch_from_state_actions(
@@ -1973,7 +1985,8 @@ class TrajectoryRunner:
         max_steps: int | None = None,
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[Trajectory[Any]]:
+        on_generation_error: Callable[[Exception], str] | None = None,
+    ) -> list[Trajectory[Any] | None]:
         """Run batched rollouts with forced first actions.
 
         The first step of each rollout uses the corresponding action from
@@ -1987,9 +2000,11 @@ class TrajectoryRunner:
                 environment spec's ``max_steps``.
             batch_size: If set, processes states in chunks of this size.
             progress_callback: Optional callback(completed, total).
+            on_generation_error: Same as ``run_batch_from_states``.
 
         Returns:
-            List of Trajectory objects, one per input state, in order.
+            List of Trajectory objects (or ``None`` for failed
+            trajectories), one per input state, in order.
 
         Raises:
             ValueError: If ``states`` and ``actions`` have different lengths.
@@ -2014,6 +2029,7 @@ class TrajectoryRunner:
                     forced_actions=[action for _state, action in chunk],
                     max_steps=max_steps,
                     progress_callback=cb,
+                    on_generation_error=on_generation_error,
                 ),
             )
 
@@ -2022,6 +2038,7 @@ class TrajectoryRunner:
             forced_actions=actions,
             max_steps=max_steps,
             progress_callback=progress_callback,
+            on_generation_error=on_generation_error,
         )
 
     def _run_batch_from_states_multi_instance(
@@ -2030,7 +2047,8 @@ class TrajectoryRunner:
         max_steps: int | None = None,
         forced_actions: Sequence[Action] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[Trajectory[Any]]:
+        on_generation_error: Callable[[Exception], str] | None = None,
+    ) -> list[Trajectory[Any] | None]:
         """Lockstep batch loop using per-rollout environment instances.
 
         Each rollout gets its own environment instance (via ``env_factory``)
@@ -2137,9 +2155,48 @@ class TrajectoryRunner:
                     messages_batch = [
                         self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
                     ]
-                    gen_results = self.backend.generate_chat_batch(
-                        messages_batch, self.sampling_params
-                    )
+                    try:
+                        gen_results = self.backend.generate_chat_batch(
+                            messages_batch, self.sampling_params
+                        )
+                    except Exception as exc:
+                        if on_generation_error is None:
+                            raise
+                        decision = on_generation_error(exc)
+                        if decision == "raise":
+                            raise
+                        offending = getattr(exc, "offending_indices", None)
+                        if decision == "skip" and offending:
+                            for idx in offending:
+                                remaining[idx].done = True
+                                remaining[idx].failed = True
+                            remaining = [t for t in remaining if not t.failed]
+                            if not remaining:
+                                break
+                            messages_batch = [
+                                self._build_messages(t.state, trajectory=t.trajectory)
+                                for t in remaining
+                            ]
+                            try:
+                                gen_results = self.backend.generate_chat_batch(
+                                    messages_batch, self.sampling_params,
+                                )
+                            except Exception as retry_exc:
+                                # Re-classify: non-recoverable errors must propagate
+                                if on_generation_error is not None:
+                                    retry_decision = on_generation_error(retry_exc)
+                                    if retry_decision == "raise":
+                                        raise
+                                # Recoverable retry failure — abort all remaining
+                                for t in remaining:
+                                    t.done = True
+                                    t.failed = True
+                                break
+                        else:
+                            for t in remaining:
+                                t.done = True
+                                t.failed = True
+                            break
 
                     # Execute steps per-env in parallel
                     actions_for_step = [gen_result.to_agent_action() for gen_result in gen_results]
@@ -2172,11 +2229,16 @@ class TrajectoryRunner:
             # Return trajectories in original order
             result_slots: list[Trajectory[Any] | None] = [None] * total
             for t in active:
-                result_slots[t.position] = t.trajectory
+                if t.failed:
+                    result_slots[t.position] = None
+                else:
+                    result_slots[t.position] = t.trajectory
 
             if progress_callback:
                 progress_callback(total, total)
 
+            if on_generation_error is not None:
+                return result_slots
             return [r for r in result_slots if r is not None]
 
         finally:
@@ -2193,7 +2255,8 @@ class TrajectoryRunner:
         max_steps: int | None = None,
         forced_actions: Sequence[Action] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
-    ) -> list[Trajectory[Any]]:
+        on_generation_error: Callable[[Exception], str] | None = None,
+    ) -> list[Trajectory[Any] | None]:
         """Core lockstep batch loop for run-from-state methods.
 
         Args:
@@ -2209,6 +2272,7 @@ class TrajectoryRunner:
                 max_steps=max_steps,
                 forced_actions=forced_actions,
                 progress_callback=progress_callback,
+                on_generation_error=on_generation_error,
             )
 
         env_max = self.environment.spec.max_steps or 100
@@ -2276,7 +2340,51 @@ class TrajectoryRunner:
                 messages_batch = [
                     self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
                 ]
-                gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
+                try:
+                    gen_results = self.backend.generate_chat_batch(
+                        messages_batch, self.sampling_params,
+                    )
+                except Exception as exc:
+                    if on_generation_error is None:
+                        raise
+                    decision = on_generation_error(exc)
+                    if decision == "raise":
+                        raise
+                    offending = getattr(exc, "offending_indices", None)
+                    if decision == "skip" and offending:
+                        for idx in offending:
+                            remaining[idx].done = True
+                            remaining[idx].failed = True
+                        # Re-filter remaining and continue lockstep
+                        remaining = [t for t in remaining if not t.failed]
+                        if not remaining:
+                            break
+                        # Rebuild messages and retry this step
+                        messages_batch = [
+                            self._build_messages(t.state, trajectory=t.trajectory)
+                            for t in remaining
+                        ]
+                        try:
+                            gen_results = self.backend.generate_chat_batch(
+                                messages_batch, self.sampling_params,
+                            )
+                        except Exception as retry_exc:
+                            # Re-classify: non-recoverable errors must propagate
+                            if on_generation_error is not None:
+                                retry_decision = on_generation_error(retry_exc)
+                                if retry_decision == "raise":
+                                    raise
+                            # Recoverable retry failure — abort all remaining
+                            for t in remaining:
+                                t.done = True
+                                t.failed = True
+                            break
+                    else:
+                        # "abort" or "skip" without offending info
+                        for t in remaining:
+                            t.done = True
+                            t.failed = True
+                        break
 
                 for t, gen_result in zip(remaining, gen_results):
                     action = gen_result.to_agent_action()
@@ -2304,11 +2412,16 @@ class TrajectoryRunner:
         # Return trajectories in original order
         result_slots: list[Trajectory[Any] | None] = [None] * len(states)
         for t in active:
-            result_slots[t.position] = t.trajectory
+            if t.failed:
+                result_slots[t.position] = None
+            else:
+                result_slots[t.position] = t.trajectory
 
         if progress_callback:
             progress_callback(total, total)
 
+        if on_generation_error is not None:
+            return result_slots
         return [r for r in result_slots if r is not None]
 
 
