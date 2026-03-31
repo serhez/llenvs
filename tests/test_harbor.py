@@ -750,6 +750,28 @@ class TestHarborEnvironment:
         assert info["tmux_bootstrapped"] is True
         assert runtime.install_attempts == 1
 
+    def test_bootstrap_tmux_exports_tmpdir_env_vars(self):
+        """TMPDIR/TMP/TEMP are exported before package-manager commands."""
+        runtime = _FakeTmuxRuntime(missing_tmux=True)
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            tmux_bootstrap_if_missing=True,
+        )
+
+        _state, _info = _reset_env(env)
+
+        bootstrap_cmd = next(
+            cmd for cmd in mock_env._exec_history
+            if "apt-get" in cmd or "yum " in cmd or "dnf " in cmd or "apk add" in cmd
+        )
+        # TMPDIR export must appear before any package-manager invocation
+        tmpdir_pos = bootstrap_cmd.find("export TMPDIR=/tmp TMP=/tmp TEMP=/tmp")
+        pkg_pos = bootstrap_cmd.find("apt-get")
+        assert tmpdir_pos != -1, "TMPDIR export not found in bootstrap command"
+        assert tmpdir_pos < pkg_pos, "TMPDIR export must precede package-manager commands"
+
     def test_reset_tmux_session_uses_script_fallback(self):
         runtime = _FakeTmuxRuntime(
             direct_start_error=RuntimeError("open terminal failed: not a terminal")
@@ -3529,6 +3551,173 @@ class TestApptainerHPCEnvironment:
         run_async(env.start())
 
         assert dirs_at_instance_start == [["staging", "logs/verifier", "logs/agent"]]
+
+    def test_overlay_start_binds_tmp_and_var_tmp(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import llenvs.adapters.harbor as harbor_mod
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        harbor_mod._APPTAINER_VERSION_CACHE.clear()
+        harbor_mod._APPTAINER_RUNTIME_INFO_LOGGED_KEYS.clear()
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            overlay_size_mb=256,
+            rootfs_mode="overlay",
+        )
+        env._sif_path.touch()
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        seed_dir = tmp_path / "seed-cache" / "task_01"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(env, "_prepare_app_seed_dir", lambda: seed_dir)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        inst_cmd = next(
+            cmd for cmd, _check, _timeout in calls
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        )
+        assert f"{trial / 'tmp'}:/tmp" in inst_cmd
+        assert f"{trial / 'var_tmp'}:/var/tmp" in inst_cmd
+        assert (trial / "tmp").exists()
+        assert (trial / "var_tmp").exists()
+        assert (trial / "tmp").stat().st_mode & 0o7777 == 0o1777
+        assert (trial / "var_tmp").stat().st_mode & 0o7777 == 0o1777
+
+    def test_sandbox_start_binds_tmp_and_var_tmp(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="sandbox",
+        )
+        env._sif_path.touch()
+
+        rootfs_dir = trial / "rootfs"
+
+        def fake_prepare_trial_rootfs() -> Path:
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            return rootfs_dir
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.start())
+
+        inst_cmd = next(
+            cmd for cmd, _check, _timeout in calls
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        )
+        assert f"{trial / 'tmp'}:/tmp" in inst_cmd
+        assert f"{trial / 'var_tmp'}:/var/tmp" in inst_cmd
+
+    def test_bootstrap_log_dirs_raises_on_unwritable_tmp(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="overlay",
+        )
+        env._instance_name = "test-instance"
+
+        call_count = 0
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            nonlocal call_count
+            call_count += 1
+            # First call is mkdir for log dirs — succeeds.
+            # Second call is tmpdir probe — fails.
+            if call_count == 2:
+                return MockExecResult(
+                    stdout="", stderr="Permission denied", return_code=1
+                )
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        with pytest.raises(RuntimeError, match="/tmp is not writable"):
+            run_async(env._bootstrap_log_dirs())
+
+    def test_stop_cleans_up_tmp_dirs(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+        )
+        env._started = True
+        env._instance_name = "test-instance"
+
+        # Create the tmp dirs as _prepare_runtime_dirs would.
+        env._host_tmp_dir.mkdir(parents=True)
+        env._host_var_tmp_dir.mkdir(parents=True)
+        assert env._host_tmp_dir.exists()
+        assert env._host_var_tmp_dir.exists()
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.stop(delete=True))
+
+        assert not env._host_tmp_dir.exists()
+        assert not env._host_var_tmp_dir.exists()
 
     def test_concurrent_overlay_probe_runs_only_once(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path

@@ -637,6 +637,7 @@ class _HarborTmuxTextSession:
         bootstrap_cmd = "\n".join(
             [
                 "set -e",
+                "export TMPDIR=/tmp TMP=/tmp TEMP=/tmp",
                 "if command -v apt-get >/dev/null 2>&1; then",
                 "  export DEBIAN_FRONTEND=noninteractive",
                 "  apt-get update",
@@ -2028,6 +2029,8 @@ class ApptainerHPCEnvironment:
         self._tests_bind_dir = self._binds_dir / "tests"
         self._overlay_path = self._trial_dir / "overlay.img"
         self._sandbox_rootfs_dir = self._trial_dir / "rootfs"
+        self._host_tmp_dir = self._trial_dir / "tmp"
+        self._host_var_tmp_dir = self._trial_dir / "var_tmp"
         self._dockerfile_path = self.environment_dir / "Dockerfile"
         cache_root_base = (
             Path(os.environ["TMPDIR"]).resolve()
@@ -2550,6 +2553,27 @@ class ApptainerHPCEnvironment:
             "-lc",
             "mkdir -p /logs/agent /logs/verifier",
         ])
+        # Verify /tmp is writable — fail early with a clear message instead
+        # of letting downstream commands (e.g. apt-get) produce cryptic errors.
+        result = await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                "touch /tmp/.llenvs_tmpdir_probe && rm /tmp/.llenvs_tmpdir_probe",
+            ],
+            check=False,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                "/tmp is not writable inside the Apptainer container. "
+                "This usually means the container's tempdir was not "
+                "correctly bind-mounted. "
+                f"stderr: {result.stderr}"
+            )
 
     def _prepare_runtime_dirs(self) -> tuple[Path, Path]:
         self._staging_dir.mkdir(parents=True, exist_ok=True)
@@ -2557,6 +2581,12 @@ class ApptainerHPCEnvironment:
         agent_dir = self._trial_dir / "agent"
         verifier_dir.mkdir(parents=True, exist_ok=True)
         agent_dir.mkdir(parents=True, exist_ok=True)
+        # Create host-backed tempdirs with sticky bit (mode 1777) so that
+        # /tmp and /var/tmp are always writable inside the container,
+        # regardless of --contain / --containall rootfs semantics.
+        for d in (self._host_tmp_dir, self._host_var_tmp_dir):
+            d.mkdir(parents=True, exist_ok=True)
+            d.chmod(0o1777)
         return verifier_dir, agent_dir
 
     async def _start_overlay_instance(self) -> None:
@@ -2587,6 +2617,8 @@ class ApptainerHPCEnvironment:
         if self._fakeroot:
             cmd.append("--fakeroot")
         cmd.extend([
+            "--bind", f"{self._host_tmp_dir}:/tmp",
+            "--bind", f"{self._host_var_tmp_dir}:/var/tmp",
             "--bind", f"{self._staging_dir}:/staging",
             "--bind", f"{self._app_bind_dir}:/app",
             "--bind", f"{self._tests_bind_dir}:/tests",
@@ -2621,6 +2653,8 @@ class ApptainerHPCEnvironment:
                     cmd.remove("--contain")
             cmd.append(self._pid_flag)
         cmd.extend([
+            "--bind", f"{self._host_tmp_dir}:/tmp",
+            "--bind", f"{self._host_var_tmp_dir}:/var/tmp",
             "--bind", f"{self._staging_dir}:/staging",
             "--bind", f"{verifier_dir}:/logs/verifier",
             "--bind", f"{agent_dir}:/logs/agent",
@@ -2728,6 +2762,9 @@ class ApptainerHPCEnvironment:
                     shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
                 if self._staging_dir.exists():
                     shutil.rmtree(self._staging_dir, ignore_errors=True)
+                for tmp_dir in (self._host_tmp_dir, self._host_var_tmp_dir):
+                    if tmp_dir.exists():
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
 
     async def export_checkpoint(
         self,
