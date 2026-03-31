@@ -29,6 +29,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import threading
 import uuid
 from collections.abc import Callable
@@ -365,6 +366,376 @@ def _format_exec_result(result: Any) -> str:
     if stderr:
         parts.append(f"[stderr] {stderr}")
     return "\n".join(parts)
+
+
+def _normalize_text_exec_mode(mode: str) -> str:
+    normalized = mode.strip().lower()
+    if normalized not in {"independent_exec", "tmux_session"}:
+        raise ValueError(
+            f"Unknown Harbor text_exec_mode: {mode!r}. "
+            "Valid values: ['independent_exec', 'tmux_session']"
+        )
+    return normalized
+
+
+def _pick_heredoc_delimiter(text: str) -> str:
+    """Choose a heredoc delimiter that does not collide with command lines."""
+    existing_lines = set(text.splitlines())
+    while True:
+        candidate = f"LLENVS_HARBOR_CMD_{uuid.uuid4().hex}"
+        if candidate not in existing_lines:
+            return candidate
+
+
+def _tmux_wait_channel(prefix: str = "llenvs_harbor") -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+class _HarborTmuxTextSession:
+    """Persistent tmux-backed shell for Harbor text-mode environments."""
+
+    _SESSION_NAME = "llenvs-harbor"
+    _TOKEN_FILE = "/tmp/.llenvs_harbor_tmux_token"
+    _COMMAND_FILE = "/tmp/.llenvs_harbor_tmux_command"
+    _BUFFER_NAME = "llenvs-harbor-buffer"
+    _INLINE_COMMAND_MAX_CHARS = 32768
+    _DIAGNOSTIC_TAIL_LINES = 200
+
+    def __init__(
+        self,
+        harbor_env: Any,
+        *,
+        exec_timeout: int,
+        bootstrap_if_missing: bool,
+    ) -> None:
+        self._harbor_env = harbor_env
+        self._exec_timeout = exec_timeout
+        self._bootstrap_if_missing = bootstrap_if_missing
+        self._previous_full_buffer = ""
+        self.tmux_bootstrapped = False
+        self.tmux_start_method = "direct"
+
+    def start(self) -> None:
+        if not self._probe_tmux():
+            if not self._bootstrap_if_missing:
+                raise RuntimeError(
+                    "tmux is not available inside the Harbor task container. "
+                    "Set tmux_bootstrap_if_missing=True or preinstall tmux in the image."
+                )
+            self._bootstrap_tmux()
+            self.tmux_bootstrapped = True
+            if not self._probe_tmux():
+                raise RuntimeError(
+                    "tmux bootstrap completed but `tmux -V` still failed inside the container"
+                )
+
+        self._start_session()
+        self._exec(
+            f"tmux set-option -t {shlex.quote(self._SESSION_NAME)} history-limit 50000"
+        )
+        self._install_prompt_hook()
+        self._previous_full_buffer = self._capture_full_buffer()
+
+    def resync_after_restore(self) -> None:
+        self._exec(f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}")
+        self._previous_full_buffer = self._capture_full_buffer()
+
+    def run_command(self, command: str) -> str:
+        command_text = command[:-1] if command.endswith("\n") else command
+        step_token = _tmux_wait_channel("llenvs_harbor_step")
+        self._send_command(command_text, step_token=step_token)
+
+        wait_and_capture = (
+            f"tmux wait-for {shlex.quote(step_token)}"
+            f" && tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+        )
+        try:
+            result = self._exec(wait_and_capture, timeout_sec=self._exec_timeout)
+        except Exception as exc:
+            if self._is_timeout_error(exc):
+                raise self._handle_timeout(command_text, step_token, exc) from exc
+            raise
+
+        full_buffer = getattr(result, "stdout", "") or ""
+        observation = self._diff_full_buffer(full_buffer)
+        self._previous_full_buffer = full_buffer
+        return observation
+
+    def _send_command(self, command: str, *, step_token: str) -> None:
+        session_q = shlex.quote(self._SESSION_NAME)
+        token_q = shlex.quote(step_token)
+        token_file_q = shlex.quote(self._TOKEN_FILE)
+        command_file_q = shlex.quote(self._COMMAND_FILE)
+        buffer_q = shlex.quote(self._BUFFER_NAME)
+
+        control_parts = [f"tmux has-session -t {session_q}"]
+        if len(command) <= self._INLINE_COMMAND_MAX_CHARS:
+            delimiter = _pick_heredoc_delimiter(command)
+            control_parts.append(f"printf '%s' {token_q} > {token_file_q}")
+            control_parts.append(
+                "cat > "
+                f"{command_file_q} << '{delimiter}'\n{command}\n{delimiter}"
+            )
+            control_parts.append(
+                f"tmux load-buffer -b {buffer_q} {command_file_q}"
+            )
+        else:
+            self._upload_command_file(command)
+            control_parts.append(f"printf '%s' {token_q} > {token_file_q}")
+            control_parts.append(
+                f"tmux load-buffer -b {buffer_q} {command_file_q}"
+            )
+        control_parts.append(
+            f"tmux paste-buffer -b {buffer_q} -t {session_q}"
+        )
+        control_parts.append(
+            f"tmux send-keys -t {session_q} Enter"
+        )
+        self._exec(" && ".join(control_parts), timeout_sec=self._exec_timeout)
+
+    def _upload_command_file(self, command: str) -> None:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+            handle.write(command)
+            temp_path = Path(handle.name)
+        try:
+            run_async(self._harbor_env.upload_file(str(temp_path), self._COMMAND_FILE))
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    def _capture_full_buffer(self) -> str:
+        result = self._exec(
+            f"tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}",
+            timeout_sec=self._exec_timeout,
+        )
+        return getattr(result, "stdout", "") or ""
+
+    def _capture_visible_screen(self) -> str:
+        result = self._exec(
+            f"tmux capture-pane -p -t {shlex.quote(self._SESSION_NAME)}",
+            timeout_sec=self._exec_timeout,
+        )
+        return getattr(result, "stdout", "") or ""
+
+    def _diff_full_buffer(self, full_buffer: str) -> str:
+        previous = self._previous_full_buffer
+        if not previous:
+            return full_buffer
+        if full_buffer.startswith(previous):
+            return full_buffer[len(previous) :]
+        start = full_buffer.rfind(previous)
+        if start != -1:
+            return full_buffer[start + len(previous) :]
+        return self._capture_visible_screen()
+
+    def _install_prompt_hook(self) -> None:
+        init_token = _tmux_wait_channel("llenvs_harbor_init")
+        token_file_q = shlex.quote(self._TOKEN_FILE)
+        init_script = "\n".join(
+            [
+                "__llenvs_harbor_prompt_hook() {",
+                f"  local token_file={token_file_q}",
+                "  local token=\"\"",
+                "  if [ -r \"$token_file\" ]; then",
+                "    token=$(cat \"$token_file\" 2>/dev/null || true)",
+                "    if [ -n \"$token\" ]; then",
+                "      tmux wait-for -S \"$token\" 2>/dev/null || true",
+                "      : > \"$token_file\"",
+                "    fi",
+                "  fi",
+                "}",
+                "__llenvs_harbor_extend_prompt_command() {",
+                "  local hook=\"__llenvs_harbor_prompt_hook\"",
+                "  local decl=\"\"",
+                "  decl=$(declare -p PROMPT_COMMAND 2>/dev/null || true)",
+                "  case \"$decl\" in",
+                "    \"declare -a \"*)",
+                "      local entry",
+                "      for entry in \"${PROMPT_COMMAND[@]}\"; do",
+                "        if [ \"$entry\" = \"$hook\" ]; then",
+                "          return",
+                "        fi",
+                "      done",
+                "      PROMPT_COMMAND=(\"$hook\" \"${PROMPT_COMMAND[@]}\")",
+                "      ;;",
+                "    *)",
+                "      case \";${PROMPT_COMMAND:-};\" in",
+                "        *\";$hook;\"*) ;;",
+                "        *)",
+                "          if [ -n \"${PROMPT_COMMAND:-}\" ]; then",
+                "            PROMPT_COMMAND=\"$hook;$PROMPT_COMMAND\"",
+                "          else",
+                "            PROMPT_COMMAND=\"$hook\"",
+                "          fi",
+                "          ;;",
+                "      esac",
+                "      ;;",
+                "  esac",
+                "}",
+                "__llenvs_harbor_extend_prompt_command",
+                f": > {token_file_q}",
+                f"tmux wait-for -S {shlex.quote(init_token)}",
+            ]
+        )
+        self._run_internal_session_command(init_script, wait_token=init_token)
+
+    def _run_internal_session_command(self, command_text: str, *, wait_token: str) -> None:
+        command_file_q = shlex.quote(self._COMMAND_FILE)
+        buffer_q = shlex.quote(self._BUFFER_NAME)
+        session_q = shlex.quote(self._SESSION_NAME)
+        delimiter = _pick_heredoc_delimiter(command_text)
+        control_cmd = " && ".join(
+            [
+                f"tmux has-session -t {session_q}",
+                "cat > "
+                f"{command_file_q} << '{delimiter}'\n{command_text}\n{delimiter}",
+                f"tmux load-buffer -b {buffer_q} {command_file_q}",
+                f"tmux paste-buffer -b {buffer_q} -t {session_q}",
+                f"tmux send-keys -t {session_q} Enter",
+            ]
+        )
+        self._exec(control_cmd, timeout_sec=self._exec_timeout)
+        self._exec(
+            f"tmux wait-for {shlex.quote(wait_token)}",
+            timeout_sec=self._exec_timeout,
+        )
+
+    def _handle_timeout(self, command: str, step_token: str, exc: Exception) -> RuntimeError:
+        visible = self._safe_capture(self._capture_visible_screen)
+        full = self._safe_capture(self._capture_full_buffer)
+        self._safe_exec(
+            f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-c",
+            timeout_sec=10,
+        )
+        recovered = True
+        try:
+            self._exec(f"tmux wait-for {shlex.quote(step_token)}", timeout_sec=5)
+        except Exception:
+            recovered = False
+        recovered_buffer = self._safe_capture(self._capture_full_buffer)
+        if recovered_buffer:
+            self._previous_full_buffer = recovered_buffer
+        details: list[str] = [
+            f"Harbor tmux session command timed out after {self._exec_timeout}s: {command}"
+        ]
+        if visible:
+            details.append("Visible screen:\n" + visible)
+        if full:
+            tail_lines = "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
+            details.append("Full buffer tail:\n" + tail_lines)
+        if not recovered:
+            details.append("Session unrecoverable after timeout")
+        return RuntimeError("\n".join(details))
+
+    def _probe_tmux(self) -> bool:
+        try:
+            self._exec("tmux -V", timeout_sec=30)
+        except Exception:
+            return False
+        return True
+
+    def _bootstrap_tmux(self) -> None:
+        bootstrap_cmd = "\n".join(
+            [
+                "set -e",
+                "if command -v apt-get >/dev/null 2>&1; then",
+                "  export DEBIAN_FRONTEND=noninteractive",
+                "  apt-get update",
+                "  apt-get install -y tmux",
+                "  apt-get clean",
+                "  rm -rf /var/lib/apt/lists/*",
+                "elif command -v dnf >/dev/null 2>&1; then",
+                "  dnf install -y tmux",
+                "  dnf clean all",
+                "elif command -v yum >/dev/null 2>&1; then",
+                "  yum install -y tmux",
+                "  yum clean all",
+                "elif command -v apk >/dev/null 2>&1; then",
+                "  apk add --no-cache tmux",
+                "else",
+                "  echo 'No supported package manager found for tmux bootstrap' >&2",
+                "  exit 1",
+                "fi",
+            ]
+        )
+        self._exec(bootstrap_cmd, timeout_sec=max(self._exec_timeout, 120))
+
+    def _start_session(self) -> None:
+        session_q = shlex.quote(self._SESSION_NAME)
+        direct_cmd = (
+            f"tmux new-session -d -s {session_q} "
+            f"{shlex.quote('bash --login')}"
+        )
+        try:
+            self._exec(direct_cmd, timeout_sec=self._exec_timeout)
+            self.tmux_start_method = "direct"
+            return
+        except Exception as exc:
+            if not self._looks_like_pty_error(exc) or not self._script_available():
+                raise
+        script_wrapper = shlex.quote("script -qc 'bash --login' /dev/null")
+        fallback_cmd = (
+            f"tmux new-session -d -s {session_q} "
+            f"{script_wrapper}"
+        )
+        self._exec(fallback_cmd, timeout_sec=self._exec_timeout)
+        self.tmux_start_method = "script_fallback"
+
+    def _script_available(self) -> bool:
+        result = self._exec(
+            "command -v script >/dev/null 2>&1 && printf '%s' yes || printf '%s' no",
+            timeout_sec=10,
+        )
+        stdout = (getattr(result, "stdout", "") or "").strip()
+        return bool(stdout) and stdout != "no"
+
+    @staticmethod
+    def _looks_like_pty_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(
+            needle in text
+            for needle in (
+                "open terminal failed",
+                "not a terminal",
+                "tty",
+                "pseudoterminal",
+                "terminal is required",
+            )
+        )
+
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "timed out" in text or "timeout" in text
+
+    def _safe_exec(self, command: str, *, timeout_sec: int | None = None) -> Any | None:
+        try:
+            return self._exec(command, timeout_sec=timeout_sec)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_capture(capture_fn: Callable[[], str]) -> str:
+        try:
+            return capture_fn()
+        except Exception:
+            return ""
+
+    def _exec(self, command: str, *, timeout_sec: int | None = None) -> Any:
+        result = run_async(
+            self._harbor_env.exec(
+                command,
+                timeout_sec=self._exec_timeout if timeout_sec is None else timeout_sec,
+            )
+        )
+        return_code = getattr(result, "return_code", 0)
+        if return_code != 0:
+            stdout = getattr(result, "stdout", "") or ""
+            stderr = getattr(result, "stderr", "") or ""
+            raise RuntimeError(
+                "Harbor tmux helper command failed "
+                f"(exit {return_code}): {command}\nstdout: {stdout}\nstderr: {stderr}"
+            )
+        return result
 
 
 def _run_verifier(
@@ -2736,6 +3107,8 @@ class HarborEnvironment:
         snapshot_options: HarborSnapshotOptions | None = None,
         answer_extractor: AnswerExtractor | None = None,
         runtime_probing: bool = False,
+        text_exec_mode: str = "independent_exec",
+        tmux_bootstrap_if_missing: bool = False,
     ) -> None:
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
@@ -2753,6 +3126,8 @@ class HarborEnvironment:
         self._snapshot_options = snapshot_options or HarborSnapshotOptions()
         self._answer_extractor = answer_extractor
         self._runtime_probing = runtime_probing
+        self._text_exec_mode = _normalize_text_exec_mode(text_exec_mode)
+        self._tmux_bootstrap_if_missing = tmux_bootstrap_if_missing
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -2760,6 +3135,7 @@ class HarborEnvironment:
 
         self._harbor_env: Any = None
         self._current_task: Any = None
+        self._text_session: _HarborTmuxTextSession | None = None
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -2785,7 +3161,10 @@ class HarborEnvironment:
             supports_len=True,
             supports_seed=False,
             pure_step=False,
-            metadata={"dataset": self._dataset_name},
+            metadata={
+                "dataset": self._dataset_name,
+                "text_exec_mode": self._text_exec_mode,
+            },
         )
 
     @property
@@ -2812,6 +3191,7 @@ class HarborEnvironment:
                 run_async(self._harbor_env.stop(delete=True))
             except Exception:
                 pass
+            self._text_session = None
 
         task = self._tasks[task_index]
         self._current_task = task
@@ -2823,6 +3203,22 @@ class HarborEnvironment:
             self._start_timeout,
             "Harbor container start",
         )
+        session_info = {
+            "text_exec_mode": self._text_exec_mode,
+            "tmux_bootstrapped": False,
+            "tmux_start_method": None,
+        }
+        if self._text_exec_mode == "tmux_session":
+            self._text_session = _HarborTmuxTextSession(
+                self._harbor_env,
+                exec_timeout=self._exec_timeout,
+                bootstrap_if_missing=self._tmux_bootstrap_if_missing,
+            )
+            self._text_session.start()
+            session_info["tmux_bootstrapped"] = self._text_session.tmux_bootstrapped
+            session_info["tmux_start_method"] = self._text_session.tmux_start_method
+        else:
+            self._text_session = None
 
         instruction = getattr(task, "instruction", str(task))
 
@@ -2844,7 +3240,7 @@ class HarborEnvironment:
             step=0,
             episode_id=episode_id,
             is_terminal=False,
-            info={"task_index": task_index},
+            info={"task_index": task_index, **session_info},
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
@@ -2863,6 +3259,7 @@ class HarborEnvironment:
         return state, {
             "task_index": task_index,
             "task_name": hidden.task_name,
+            **session_info,
         }
 
     def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
@@ -2908,10 +3305,15 @@ class HarborEnvironment:
 
         # Execute command in container (even for submit, to maintain trajectory)
         if not terminated:
-            exec_result = run_async(
-                self._harbor_env.exec(cmd_for_env, timeout_sec=self._exec_timeout)
-            )
-            obs_text = _format_exec_result(exec_result)
+            if self._text_exec_mode == "tmux_session":
+                if self._text_session is None:
+                    raise RuntimeError("Harbor tmux text session was not initialized")
+                obs_text = self._text_session.run_command(cmd_for_env)
+            else:
+                exec_result = run_async(
+                    self._harbor_env.exec(cmd_for_env, timeout_sec=self._exec_timeout)
+                )
+                obs_text = _format_exec_result(exec_result)
         else:
             obs_text = "Submitting for verification..."
 
@@ -3023,6 +3425,7 @@ class HarborEnvironment:
             except Exception:
                 pass
             self._harbor_env = None
+            self._text_session = None
 
 
 # ── Tool-mode environment ───────────────────────────────────────
@@ -3555,6 +3958,8 @@ class HarborAdapter:
         snapshot_options: HarborSnapshotOptions | None = None,
         answer_extractor: AnswerExtractor | None = None,
         runtime_probing: bool = False,
+        text_exec_mode: str = "independent_exec",
+        tmux_bootstrap_if_missing: bool = False,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
         """Create a Harbor environment.
@@ -3586,6 +3991,12 @@ class HarborAdapter:
                 responses (strips reasoning tokens, etc.).
             runtime_probing: If True, capture runtime probes at each state
                 and annotate with filesystem-restore risk signals.
+            text_exec_mode: Text mode execution model. ``"independent_exec"``
+                runs each step in a fresh shell. ``"tmux_session"`` keeps a
+                persistent tmux-backed shell inside the container.
+            tmux_bootstrap_if_missing: When ``text_exec_mode="tmux_session"``,
+                attempt a bounded package-manager install of tmux inside the
+                task container if it is missing.
             **kwargs: Passed to Harbor constructors.
 
         Returns:
@@ -3597,6 +4008,11 @@ class HarborAdapter:
             raise ValueError(
                 "runtime_probing is not supported in tool mode. "
                 "Use text mode (tool_mode=False) for runtime probing."
+            )
+        if tool_mode and _normalize_text_exec_mode(text_exec_mode) != "independent_exec":
+            raise ValueError(
+                "tmux_session text execution is not supported in Harbor tool mode. "
+                "Use tool_mode=False when requesting text_exec_mode='tmux_session'."
             )
 
         # Load tasks and create factories from Harbor if not provided
@@ -3661,6 +4077,8 @@ class HarborAdapter:
             snapshot_options=snapshot_options,
             answer_extractor=answer_extractor,
             runtime_probing=runtime_probing,
+            text_exec_mode=text_exec_mode,
+            tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
         )
 
     def get_default_system_prompt(self, name: str) -> str:
@@ -3862,6 +4280,14 @@ def harbor_snapshot_restore(
         raise RuntimeError("Harbor environment reset did not initialize a runtime")
 
     _restore_state_snapshot(harbor_env, snapshot_ref, artifact_root=artifact_root)
+    text_session = getattr(env, "_text_session", None)
+    if text_session is not None:
+        try:
+            text_session.resync_after_restore()
+        except Exception as exc:
+            raise RuntimeError(
+                "Harbor tmux session could not be re-synchronized after snapshot restore"
+            ) from exc
     env._state_tracker.track(state)
     return state
 

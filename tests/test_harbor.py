@@ -47,10 +47,12 @@ class MockHarborEnvironment:
     def __init__(
         self,
         exec_results: list[MockExecResult] | None = None,
+        exec_handler: Any | None = None,
         start_error: bool = False,
         start_delay: float = 0.0,
     ):
         self._exec_results = exec_results or [MockExecResult(stdout="ok")]
+        self._exec_handler = exec_handler
         self._exec_index = 0
         self._started = False
         self._stopped = False
@@ -59,6 +61,7 @@ class MockHarborEnvironment:
         self._start_force_build: bool | None = None
         self._stop_delete: bool | None = None
         self._exec_history: list[str] = []
+        self._uploaded_files: list[tuple[str, str]] = []
         self._checkpoint_exports: list[tuple[Path, dict[str, Any]]] = []
         self._checkpoint_restores: list[tuple[Path, dict[str, Any]]] = []
         self.is_mounted = True
@@ -81,6 +84,8 @@ class MockHarborEnvironment:
 
     async def exec(self, command: str, timeout_sec: int = 120, **kwargs: Any) -> MockExecResult:
         self._exec_history.append(command)
+        if self._exec_handler is not None:
+            return self._exec_handler(command, timeout_sec=timeout_sec, **kwargs)
         if self._exec_index < len(self._exec_results):
             result = self._exec_results[self._exec_index]
             self._exec_index += 1
@@ -88,7 +93,7 @@ class MockHarborEnvironment:
         return MockExecResult(stdout="", stderr="", return_code=0)
 
     async def upload_file(self, local_path: str, remote_path: str) -> None:
-        pass
+        self._uploaded_files.append((local_path, remote_path))
 
     async def upload_dir(self, source_dir: str, target_dir: str) -> None:
         pass
@@ -174,6 +179,8 @@ def _make_env(
     dataset_name: str = "terminal-bench",
     state_capture_mode: str = "replay",
     snapshot_artifact_root: Path | None = None,
+    text_exec_mode: str = "independent_exec",
+    tmux_bootstrap_if_missing: bool = False,
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -196,6 +203,8 @@ def _make_env(
         extra_rewards=extra_rewards,
         state_capture_mode=state_capture_mode,
         snapshot_artifact_root=snapshot_artifact_root,
+        text_exec_mode=text_exec_mode,
+        tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
     )
 
 
@@ -251,6 +260,80 @@ def _make_snapshot_task(tmp_path: Path, name: str, *, dockerfile: str | None = N
     config = SimpleNamespace(environment=SimpleNamespace(docker_image=None, cpus=1, memory_mb=1024))
     paths = SimpleNamespace(environment_dir=env_dir)
     return SimpleNamespace(name=name, paths=paths, config=config)
+
+
+class _FakeTmuxRuntime:
+    def __init__(
+        self,
+        *,
+        initial_buffer: str = "bash$ ",
+        full_buffers: list[str] | None = None,
+        visible_buffers: list[str] | None = None,
+        direct_start_error: Exception | None = None,
+        missing_tmux: bool = False,
+        script_available: bool = True,
+        wait_timeout_once: bool = False,
+    ) -> None:
+        self.tmux_installed = not missing_tmux
+        self.script_available = script_available
+        self.direct_start_error = direct_start_error
+        self.direct_start_attempts = 0
+        self.wait_timeout_once = wait_timeout_once
+        self.full_buffers = [initial_buffer, *(full_buffers or [])]
+        self.visible_buffers = visible_buffers or []
+        self.install_attempts = 0
+
+    def __call__(self, command: str, **_: Any) -> MockExecResult:
+        if "tmux -V" in command:
+            if not self.tmux_installed:
+                raise RuntimeError("tmux: not found")
+            return MockExecResult(stdout="tmux 3.4")
+
+        if "apt-get" in command or "yum " in command or "dnf " in command or "apk add" in command:
+            self.install_attempts += 1
+            self.tmux_installed = True
+            return MockExecResult(stdout="installed")
+
+        if "command -v script" in command:
+            return MockExecResult(stdout="/usr/bin/script" if self.script_available else "")
+
+        if "tmux new-session -d -s" in command:
+            if "script -q" not in command and self.direct_start_error is not None:
+                self.direct_start_attempts += 1
+                raise self.direct_start_error
+            return MockExecResult(stdout="")
+
+        if "tmux wait-for " in command and "capture-pane -p -S -" in command:
+            if self.wait_timeout_once:
+                self.wait_timeout_once = False
+                raise RuntimeError("apptainer command timed out after 120s")
+            if not self.full_buffers:
+                raise AssertionError(f"Unexpected full-buffer capture command: {command}")
+            return MockExecResult(stdout=self.full_buffers.pop(0))
+
+        if "tmux capture-pane -p -S -" in command:
+            if not self.full_buffers:
+                raise AssertionError(f"Unexpected full-buffer capture command: {command}")
+            return MockExecResult(stdout=self.full_buffers.pop(0))
+
+        if "tmux capture-pane -p " in command:
+            if not self.visible_buffers:
+                raise AssertionError(f"Unexpected visible-buffer capture command: {command}")
+            return MockExecResult(stdout=self.visible_buffers.pop(0))
+
+        if "tmux has-session" in command:
+            return MockExecResult(stdout="")
+
+        if "tmux wait-for " in command:
+            return MockExecResult(stdout="")
+
+        if "tmux send-keys" in command or "tmux load-buffer" in command or "tmux paste-buffer" in command:
+            return MockExecResult(stdout="")
+
+        if "tmux set-option" in command:
+            return MockExecResult(stdout="")
+
+        return MockExecResult(stdout="")
 
 
 # ── TestHarborHidden ────────────────────────────────────────────
@@ -536,6 +619,16 @@ class TestFormatExecResult:
         assert "error msg" in formatted
 
 
+class TestTmuxHelpers:
+    def test_pick_heredoc_delimiter_avoids_full_line_collisions(self):
+        from llenvs.adapters.harbor import _pick_heredoc_delimiter
+
+        command = "echo hello\nLLENVS_HARBOR_CMD_deadbeef\npwd"
+        delimiter = _pick_heredoc_delimiter(command)
+
+        assert delimiter not in command.splitlines()
+
+
 # ── TestHarborEnvironment (Text Mode) ───────────────────────────
 
 
@@ -628,6 +721,47 @@ class TestHarborEnvironment:
         state, _ = _reset_env(env)
         assert state.metadata.step == 0
         assert state.metadata.is_terminal is False
+
+    def test_reset_tmux_session_initializes_helper_and_metadata(self):
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+
+        state, info = _reset_env(env)
+
+        assert state.metadata.info["text_exec_mode"] == "tmux_session"
+        assert state.metadata.info["tmux_bootstrapped"] is False
+        assert state.metadata.info["tmux_start_method"] == "direct"
+        assert info["tmux_start_method"] == "direct"
+        assert any("tmux new-session -d -s" in cmd for cmd in mock_env._exec_history)
+        assert any("PROMPT_COMMAND" in cmd for cmd in mock_env._exec_history)
+
+    def test_reset_tmux_session_bootstraps_missing_tmux(self):
+        runtime = _FakeTmuxRuntime(missing_tmux=True)
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            tmux_bootstrap_if_missing=True,
+        )
+
+        _state, info = _reset_env(env)
+
+        assert info["tmux_bootstrapped"] is True
+        assert runtime.install_attempts == 1
+
+    def test_reset_tmux_session_uses_script_fallback(self):
+        runtime = _FakeTmuxRuntime(
+            direct_start_error=RuntimeError("open terminal failed: not a terminal")
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+
+        _state, info = _reset_env(env)
+
+        assert info["tmux_start_method"] == "script_fallback"
+        assert runtime.direct_start_attempts == 1
+        assert any("script -qc" in cmd or "script -q -c" in cmd for cmd in mock_env._exec_history)
 
     def test_reset_runner_messages_do_not_repeat_instruction(self):
         from unittest.mock import MagicMock
@@ -729,6 +863,79 @@ class TestHarborEnvironment:
         assert h.episode_step == 1
         assert h.last_action == "ls"
         assert h.trajectory == ("ls",)
+
+    def test_step_tmux_session_uses_two_exec_success_path(self):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ pwd\n/app\nbash$ ",
+            ]
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        result = env.step(state, Action(text="pwd"))
+
+        after = mock_env._exec_history[before:]
+        assert len(after) == 2
+        assert "tmux paste-buffer" in after[0]
+        assert "tmux wait-for " in after[1]
+        assert "capture-pane -p -S -" in after[1]
+        assert result.next_state.observation.state is not None
+        assert "/app" in result.next_state.observation.state.text
+
+    def test_step_tmux_session_falls_back_to_visible_screen(self):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "totally different buffer",
+            ],
+            visible_buffers=["pwd\n/app\nbash$ "],
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        result = env.step(state, Action(text="pwd"))
+
+        after = mock_env._exec_history[before:]
+        assert len(after) == 3
+        assert "capture-pane -p -t" in after[2]
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == "pwd\n/app\nbash$ "
+
+    def test_step_tmux_session_timeout_recovers_with_ctrl_c(self):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ sleep 999",
+            ],
+            visible_buffers=["sleep 999"],
+            wait_timeout_once=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        with pytest.raises(RuntimeError, match="sleep 999"):
+            env.step(state, Action(text="sleep 999"))
+
+        assert any("C-c" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_uses_upload_fallback_for_large_commands(self):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ python - <<'PY'\n...\nbash$ ",
+            ]
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        large_command = "x" * 70000
+        env.step(state, Action(text=large_command))
+
+        assert mock_env._uploaded_files
 
     def test_step_submit_keyword_terminates(self):
         mock_env = MockHarborEnvironment()
@@ -1232,6 +1439,25 @@ class TestHarborAdapter:
                 verify_factory=verifier_factory,
                 tool_mode=True,
                 runtime_probing=True,
+            )
+
+    def test_tool_mode_rejects_tmux_text_exec_mode(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks()
+        mock_env = MockHarborEnvironment()
+        env_factory = _make_harbor_env_factory(mock_env)
+        verifier_factory = _make_verifier_factory()
+
+        with pytest.raises(ValueError, match="tool mode"):
+            adapter.get_environment(
+                name="test",
+                tasks=tasks,
+                env_factory=env_factory,
+                verify_factory=verifier_factory,
+                tool_mode=True,
+                text_exec_mode="tmux_session",
             )
 
     def test_list_environments_uses_registry_client(self, monkeypatch: pytest.MonkeyPatch):
@@ -1781,6 +2007,49 @@ class TestHarborRestore:
 
         with pytest.raises(ValueError, match="snapshot_ref"):
             harbor_snapshot_restore(env, target_state, artifact_root=tmp_path)
+
+    def test_harbor_snapshot_restore_resyncs_tmux_session_buffer(self, tmp_path):
+        from llenvs.adapters.harbor import (
+            HarborHidden,
+            HarborSnapshotRef,
+            harbor_snapshot_restore,
+        )
+
+        snapshot_root = tmp_path / "dataset_root"
+        snapshot_path = snapshot_root / "snapshots/task_00/episode-1/state_0001.tar"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text("checkpoint-bytes")
+
+        runtime = _FakeTmuxRuntime(full_buffers=["bash$ ", "restored$ "])
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        _reset_env(env)
+
+        target_state = State(
+            observation=MagicMock(),
+            hidden=HarborHidden(
+                task_index=0,
+                task_name="task_00",
+                instruction="Task 0 instruction",
+                episode_step=1,
+                trajectory=("pwd",),
+                snapshot_ref=HarborSnapshotRef(
+                    runtime="podman-hpc",
+                    relative_path="snapshots/task_00/episode-1/state_0001.tar",
+                ),
+            ),
+            metadata=MagicMock(step=1, episode_id="episode-1", is_terminal=False),
+        )
+
+        restored = harbor_snapshot_restore(
+            env,
+            target_state,
+            artifact_root=snapshot_root,
+        )
+
+        assert restored is target_state
+        assert env._text_session is not None
+        assert env._text_session._previous_full_buffer == "restored$ "
 
 
 class TestValidateReplayConsistency:

@@ -201,6 +201,8 @@ Available in tool mode:
 | `snapshot_artifact_root` | `Path \| str \| None` | `None` | Artifact root used when `state_capture_mode="snapshot_exact"` |
 | `snapshot_options` | `HarborSnapshotOptions \| None` | `None` | Exact snapshot options (`file_locks`, `tcp_established`, `tcp_close`, `ignore_volumes`) |
 | `runtime_probing` | `bool` | `False` | Enable runtime probing to annotate states with filesystem-restore risk signals |
+| `text_exec_mode` | `str` | `"independent_exec"` | Text-mode execution model: `independent_exec` runs each step in a fresh shell; `tmux_session` keeps a persistent tmux-backed shell inside the container |
+| `tmux_bootstrap_if_missing` | `bool` | `False` | When `text_exec_mode="tmux_session"`, attempt a bounded package-manager install of `tmux` inside the task image if it is missing |
 
 ### `HarborAdapter.load_tasks()`
 
@@ -333,11 +335,16 @@ Two validation modes:
 
 Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `probe_outputs` (per-trial), and `divergence_details`.
 
-### Independent-Exec Semantics
+### Text Execution Modes
 
-Harbor's `exec()` runs `docker compose exec main bash -c <cmd>` — each step gets a fresh shell. Shell-local state (`cd`, `export`, variables) doesn't persist across steps. This differs from persistent shell models. Results should be described as operating under "independent-exec semantics."
+Harbor text mode supports two execution models:
 
-Since both trajectory collection and MC evaluation use the same adapter, results are internally consistent.
+- `text_exec_mode="independent_exec"` keeps the original Harbor `exec()` behavior. Each step runs in a fresh shell, so shell-local state such as `cd`, `export`, aliases, and background jobs does not persist across steps.
+- `text_exec_mode="tmux_session"` starts a persistent tmux-backed login shell inside the task container. Commands are pasted into that shell, completion is detected through a `PROMPT_COMMAND` hook, and observations come from the tmux pane buffer.
+
+`tmux_session` is the preferred mode for TerminalBench-style terminal tasks because it preserves shell state, allows `cmd &` background jobs to continue across steps, and more closely matches the official TerminalBench execution model.
+
+If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
 See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
 
@@ -408,5 +415,6 @@ Risk signals are stored on `HarborHidden`:
 - **Network-dependent** — Registry queries and image pulls require network access.
 - **Binary rewards** — Native verifiers produce pass/fail only; use `extra_rewards` for finer-grained scoring (e.g., `JudgeReward`).
 - **Text-mode replay only** — `harbor_restore` supports text mode; tool-mode replay requires storing full `Action` objects (deferred).
+- **`PROMPT_COMMAND` clobbering** — `tmux_session` relies on a shell hook installed through `PROMPT_COMMAND`. Commands that explicitly overwrite `PROMPT_COMMAND` are unsupported and can break completion detection.
 - **Exact snapshot runtime coverage** — v1 exact snapshots (process-level CRIU checkpoints) require `podman-hpc`. `inspect_snapshot_eligibility()` only reports eligibility for podman-hpc.
 - **Apptainer filesystem checkpoints** — `apptainer-hpc` supports filesystem-level tar snapshots (sandbox mode only) via `export_checkpoint`/`restore_checkpoint`. These are used by the prediction-time replay cache but are not exact snapshots — background processes, in-memory state, and open sockets are not preserved.
