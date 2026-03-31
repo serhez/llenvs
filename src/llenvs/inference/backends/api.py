@@ -821,6 +821,8 @@ class OpenRouterBackend(ModelBackend):
         site_url: str | None = None,
         app_name: str | None = None,
         max_concurrency: int = 64,
+        rate_limit_wait: float = 0.0,
+        rate_limit_max_retries: int = 60,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenRouter backend.
@@ -831,6 +833,12 @@ class OpenRouterBackend(ModelBackend):
             site_url: Your site URL for rankings.
             app_name: Your app name for rankings.
             max_concurrency: Maximum concurrent requests for batch generation.
+            rate_limit_wait: Seconds to wait before retrying after a rate-limit
+                (429) error.  When set to ``0`` (the default) the SDK's
+                built-in retry/backoff handles 429s.  Set to e.g. ``60`` for
+                free-tier models with strict per-minute caps.
+            rate_limit_max_retries: Maximum number of rate-limit retries before
+                giving up and re-raising the error.
             **client_kwargs: Additional kwargs for OpenAI client.
 
         Raises:
@@ -847,6 +855,8 @@ class OpenRouterBackend(ModelBackend):
 
         self._model = model
         self._max_concurrency = max_concurrency
+        self._rate_limit_wait = rate_limit_wait
+        self._rate_limit_max_retries = rate_limit_max_retries
 
         # OpenRouter uses OpenAI-compatible API
         api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
@@ -920,12 +930,12 @@ class OpenRouterBackend(ModelBackend):
             results.append(result)
         return results
 
-    def generate_chat(
+    def _chat_kwargs(
         self,
         messages: list[ChatMessage],
         params: SamplingParams,
-    ) -> GenerationResult:
-        """Generate a response for a chat conversation."""
+    ) -> dict[str, Any]:
+        """Build kwargs dict for chat completions."""
         message_dicts = [m.to_dict() for m in messages]
 
         kwargs: dict[str, Any] = {
@@ -941,13 +951,15 @@ class OpenRouterBackend(ModelBackend):
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
 
-        # Merge backend-specific extra params
         if params.extra:
             kwargs.update(params.extra)
 
-        response = self._client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
+        return kwargs
 
+    @staticmethod
+    def _chat_result(response: Any) -> GenerationResult:
+        """Convert an OpenAI ChatCompletion to GenerationResult."""
+        choice = response.choices[0]
         return GenerationResult(
             text=choice.message.content or "",
             finish_reason=_openai_stop_reason(choice.finish_reason),
@@ -959,6 +971,36 @@ class OpenRouterBackend(ModelBackend):
                 "id": response.id,
             },
         )
+
+    def generate_chat(
+        self,
+        messages: list[ChatMessage],
+        params: SamplingParams,
+    ) -> GenerationResult:
+        """Generate a response for a chat conversation."""
+        import logging
+        import time
+
+        from openai import RateLimitError
+
+        kwargs = self._chat_kwargs(messages, params)
+        last_exc: RateLimitError | None = None
+
+        for attempt in range(self._rate_limit_max_retries + 1):
+            try:
+                response = self._client.chat.completions.create(**kwargs)
+                return self._chat_result(response)
+            except RateLimitError as exc:
+                if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
+                    raise
+                last_exc = exc
+                logging.getLogger(__name__).warning(
+                    "Rate limited, waiting %.0fs (attempt %d/%d)",
+                    self._rate_limit_wait, attempt + 1, self._rate_limit_max_retries,
+                )
+                time.sleep(self._rate_limit_wait)
+
+        raise last_exc  # unreachable, but satisfies type checker
 
     async def _generate_chat_async(
         self,
@@ -966,38 +1008,29 @@ class OpenRouterBackend(ModelBackend):
         params: SamplingParams,
     ) -> GenerationResult:
         """Async version of generate_chat for concurrent batch execution."""
-        message_dicts = [m.to_dict() for m in messages]
+        import asyncio
+        import logging
 
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": message_dicts,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-        }
+        from openai import RateLimitError
 
-        if params.stop_sequences:
-            kwargs["stop"] = list(params.stop_sequences)
+        kwargs = self._chat_kwargs(messages, params)
+        last_exc: RateLimitError | None = None
 
-        if params.extra:
-            kwargs.update(params.extra)
+        for attempt in range(self._rate_limit_max_retries + 1):
+            try:
+                response = await self._async_client.chat.completions.create(**kwargs)
+                return self._chat_result(response)
+            except RateLimitError as exc:
+                if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
+                    raise
+                last_exc = exc
+                logging.getLogger(__name__).warning(
+                    "Rate limited, waiting %.0fs (attempt %d/%d)",
+                    self._rate_limit_wait, attempt + 1, self._rate_limit_max_retries,
+                )
+                await asyncio.sleep(self._rate_limit_wait)
 
-        response = await self._async_client.chat.completions.create(**kwargs)
-        choice = response.choices[0]
-
-        return GenerationResult(
-            text=choice.message.content or "",
-            finish_reason=_openai_stop_reason(choice.finish_reason),
-            token_logprobs=None,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
-        )
+        raise last_exc  # unreachable, but satisfies type checker
 
     def generate_chat_batch(
         self,
