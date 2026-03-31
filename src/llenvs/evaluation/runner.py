@@ -1360,6 +1360,7 @@ class TrajectoryRunner:
 
         # Phase 1: Reset all tasks
         active: list[_ActiveTrajectory] = []
+        consecutive_reset_errors = 0
         for pos, task_index in enumerate(task_indices):
             try:
                 state, reset_info = self.environment.reset(options={"task_index": task_index})
@@ -1373,7 +1374,10 @@ class TrajectoryRunner:
                         trajectory=trajectory,
                     )
                 )
+                consecutive_reset_errors = 0
             except Exception as e:
+                consecutive_reset_errors += 1
+                logger.error("Error resetting task %d: %s", task_index, e)
                 if eval_logger:
                     eval_logger.on_error(
                         _ErrorEvent(
@@ -1382,7 +1386,24 @@ class TrajectoryRunner:
                             error=str(e),
                         )
                     )
-                _raise_with_context("resetting", task_index, e)
+                result_slots[pos] = TrajectoryResult(
+                    trajectory=Trajectory(
+                        episode_id=f"error_{task_index}",
+                        initial_state=State(
+                            observation=Observation(prompt=""),
+                            hidden=None,
+                            metadata=_error_metadata(task_index),
+                        ),
+                    ),
+                    total_reward=0.0,
+                    success=False,
+                    metadata={"error": str(e), "task_index": task_index},
+                )
+                if consecutive_reset_errors >= 3:
+                    raise RuntimeError(
+                        f"Environment appears broken: {consecutive_reset_errors} "
+                        f"consecutive reset errors (last: task {task_index}: {e})"
+                    ) from e
 
         reset_errors = total - len(active)
 
@@ -1521,6 +1542,10 @@ class TrajectoryRunner:
                                 )
                             )
                 except Exception as e:
+                    logger.error("Error stepping task %d: %s", t.task_index, e)
+                    t.done = True
+                    t.error = str(e)
+                    completed_count += 1
                     if eval_logger:
                         eval_logger.on_error(
                             _ErrorEvent(
@@ -1529,7 +1554,6 @@ class TrajectoryRunner:
                                 error=str(e),
                             )
                         )
-                    _raise_with_context("stepping", t.task_index, e)
 
             if progress_callback:
                 done_count = reset_errors + sum(1 for t in active if t.done)

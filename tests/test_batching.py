@@ -454,6 +454,8 @@ class TestOpenRouterBatchChat:
         backend = object.__new__(OpenRouterBackend)
         backend._model = "anthropic/claude-sonnet-4-20250514"
         backend._max_concurrency = 10
+        backend._rate_limit_wait = 0.0
+        backend._rate_limit_max_retries = 60
 
         call_count = 0
 
@@ -831,8 +833,8 @@ class TestTrajectoryRunnerBatch:
         assert len(result.trajectory_results) == 1
         assert backend.batch_call_sizes == [1]
 
-    def test_reset_error_raises(self):
-        """Reset failure aborts the batch immediately."""
+    def test_reset_error_skips_task(self):
+        """Reset failure on one task skips it; other tasks succeed."""
 
         class FailingResetEnv(MockSingleTurnEnv):
             def reset(self, *, seed=None, options=None):
@@ -845,11 +847,16 @@ class TestTrajectoryRunnerBatch:
         backend = BatchTrackingBackend()
         runner = TrajectoryRunner(environment=env, backend=backend)
 
-        with pytest.raises(ValueError, match="Error resetting task 1: bad task"):
-            runner.run_batch([0, 1, 2])
+        result = runner.run_batch([0, 1, 2])
+        assert len(result.trajectory_results) == 3
+        # Task 0 and 2 succeed
+        assert result.trajectory_results[0].metadata.get("error") is None
+        assert result.trajectory_results[2].metadata.get("error") is None
+        # Task 1 has error
+        assert "bad task" in result.trajectory_results[1].metadata["error"]
 
-    def test_step_error_raises(self):
-        """Unexpected step failure aborts the batch immediately."""
+    def test_step_error_skips_task(self):
+        """Step failure on one task marks it errored; other tasks complete."""
 
         class FailingStepEnv(MockMultiTurnEnv):
             def step(self, state, action):
@@ -861,8 +868,27 @@ class TestTrajectoryRunnerBatch:
         backend = BatchTrackingBackend()
         runner = TrajectoryRunner(environment=env, backend=backend)
 
-        with pytest.raises(RuntimeError, match="Error stepping task 1: step failed"):
-            runner.run_batch([0, 1, 2])
+        result = runner.run_batch([0, 1, 2])
+        assert len(result.trajectory_results) == 3
+        # Task 0 and 2 succeed
+        assert result.trajectory_results[0].metadata.get("error") is None
+        assert result.trajectory_results[2].metadata.get("error") is None
+        # Task 1 has error
+        assert "step failed" in result.trajectory_results[1].metadata["error"]
+
+    def test_consecutive_reset_errors_aborts(self):
+        """3+ consecutive reset failures raise RuntimeError."""
+
+        class AllFailResetEnv(MockSingleTurnEnv):
+            def reset(self, *, seed=None, options=None):
+                raise ValueError("broken env")
+
+        env = AllFailResetEnv(num_tasks=5)
+        backend = BatchTrackingBackend()
+        runner = TrajectoryRunner(environment=env, backend=backend)
+
+        with pytest.raises(RuntimeError, match="Environment appears broken"):
+            runner.run_batch([0, 1, 2, 3, 4])
 
 
 # --- TrajectoryRunner tool batch tests ---
