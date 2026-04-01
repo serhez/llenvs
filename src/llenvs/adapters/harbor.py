@@ -400,8 +400,7 @@ class _HarborTmuxTextSession:
     _COMMAND_FILE = "/tmp/.llenvs_harbor_tmux_command"
     _HOOK_SCRIPT_FILE = "/tmp/.llenvs_harbor_hook_init.sh"
     _READY_FILE = "/tmp/.llenvs_harbor_tmux_ready"
-    _BUFFER_NAME = "llenvs-harbor-buffer"
-    _INLINE_COMMAND_MAX_CHARS = 32768
+    _DIRECT_SEND_KEYS_MAX_CHARS = 4096
     _DIAGNOSTIC_TAIL_LINES = 200
     _STARTUP_DIAGNOSTIC_TAIL_LINES = 50
     _STARTUP_TIMEOUT_CAP_SEC = 30
@@ -475,45 +474,35 @@ class _HarborTmuxTextSession:
         session_q = shlex.quote(self._SESSION_NAME)
         token_q = shlex.quote(step_token)
         token_file_q = shlex.quote(self._TOKEN_FILE)
-        command_file_q = shlex.quote(self._COMMAND_FILE)
-        buffer_q = shlex.quote(self._BUFFER_NAME)
 
         control_parts = [
             f"tmux has-session -t {session_q}",
             f"tmux wait-for -L {token_q}",
+            f"printf '%s' {token_q} > {token_file_q}",
         ]
-        if len(command) <= self._INLINE_COMMAND_MAX_CHARS:
+
+        use_direct = "\n" not in command and len(command) <= self._DIRECT_SEND_KEYS_MAX_CHARS
+
+        if use_direct:
+            # Single-line, short: send-keys -l (literal, preserves terminal echo)
+            control_parts.append(
+                f"tmux send-keys -l -t {session_q} {shlex.quote(command)}"
+            )
+        else:
+            # Multi-line or oversized: stage to file, source it
+            command_file_q = shlex.quote(self._COMMAND_FILE)
             delimiter = _pick_heredoc_delimiter(command)
-            control_parts.append(f"printf '%s' {token_q} > {token_file_q}")
             control_parts.append(
                 "cat > "
                 f"{command_file_q} << '{delimiter}'\n{command}\n{delimiter}"
             )
             control_parts.append(
-                f"tmux load-buffer -b {buffer_q} {command_file_q}"
+                f"tmux send-keys -l -t {session_q}"
+                f" {shlex.quote(f'source {self._COMMAND_FILE}')}"
             )
-        else:
-            self._upload_command_file(command)
-            control_parts.append(f"printf '%s' {token_q} > {token_file_q}")
-            control_parts.append(
-                f"tmux load-buffer -b {buffer_q} {command_file_q}"
-            )
-        control_parts.append(
-            f"tmux paste-buffer -b {buffer_q} -t {session_q}"
-        )
-        control_parts.append(
-            f"tmux send-keys -t {session_q} Enter"
-        )
-        self._exec(" && ".join(control_parts), timeout_sec=self._exec_timeout)
 
-    def _upload_command_file(self, command: str) -> None:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-            handle.write(command)
-            temp_path = Path(handle.name)
-        try:
-            run_async(self._harbor_env.upload_file(str(temp_path), self._COMMAND_FILE))
-        finally:
-            temp_path.unlink(missing_ok=True)
+        control_parts.append(f"tmux send-keys -t {session_q} Enter")
+        self._exec(" && ".join(control_parts), timeout_sec=self._exec_timeout)
 
     def _capture_full_buffer(self) -> str:
         result = self._exec(

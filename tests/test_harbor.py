@@ -347,7 +347,7 @@ class _FakeTmuxRuntime:
                 raise AssertionError(f"Unexpected visible-buffer capture command: {command}")
             return MockExecResult(stdout=self.visible_buffers.pop(0))
 
-        if "tmux send-keys" in command or "tmux load-buffer" in command or "tmux paste-buffer" in command:
+        if "tmux send-keys" in command:
             if "/tmp/.llenvs_harbor_tmux_ready" in command:
                 self.ready_send_attempts += 1
                 if (
@@ -1016,12 +1016,75 @@ class TestHarborEnvironment:
         after = mock_env._exec_history[before:]
         assert len(after) == 2
         assert "tmux wait-for -L " in after[0]
-        assert "tmux paste-buffer" in after[0]
+        assert "tmux send-keys -l " in after[0]
         assert "tmux wait-for -L " in after[1]
         assert "tmux wait-for -U " in after[1]
         assert "capture-pane -p -S -" in after[1]
         assert result.next_state.observation.state is not None
         assert "/app" in result.next_state.observation.state.text
+
+    def test_step_tmux_session_uses_direct_send_keys_for_short_command(self):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ echo hello\nhello\nbash$ ",
+            ]
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        env.step(state, Action(text="echo hello"))
+
+        after = mock_env._exec_history[before:]
+        control_cmd = after[0]
+        # Direct send-keys -l with the literal command payload.
+        assert "tmux send-keys -l " in control_cmd
+        assert "echo hello" in control_cmd
+        # No staged-file / source involved.
+        assert "source " not in control_cmd
+
+    def test_step_tmux_session_uses_staged_file_for_multiline_command(self):
+        multiline_cmd = "echo line1\necho line2"
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ source /tmp/.llenvs_harbor_tmux_command\nline1\nline2\nbash$ ",
+            ]
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        env.step(state, Action(text=multiline_cmd))
+
+        after = mock_env._exec_history[before:]
+        control_cmd = after[0]
+        # Staged-file path: heredoc write + source via send-keys.
+        assert "cat > " in control_cmd
+        assert "source /tmp/.llenvs_harbor_tmux_command" in control_cmd
+
+    def test_step_tmux_session_uses_staged_file_for_oversized_command(self):
+        from llenvs.adapters.harbor import _HarborTmuxTextSession
+
+        long_cmd = "x" * (_HarborTmuxTextSession._DIRECT_SEND_KEYS_MAX_CHARS + 1)
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                f"bash$ source /tmp/.llenvs_harbor_tmux_command\nbash$ ",
+            ]
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        env.step(state, Action(text=long_cmd))
+
+        after = mock_env._exec_history[before:]
+        control_cmd = after[0]
+        # Even though single-line, exceeds threshold — goes to staged-file.
+        assert "cat > " in control_cmd
+        assert "source /tmp/.llenvs_harbor_tmux_command" in control_cmd
 
     def test_step_tmux_session_falls_back_to_visible_screen(self):
         runtime = _FakeTmuxRuntime(
@@ -1065,20 +1128,24 @@ class TestHarborEnvironment:
             for cmd in mock_env._exec_history
         )
 
-    def test_step_tmux_session_uses_upload_fallback_for_large_commands(self):
+    def test_step_tmux_session_stages_file_for_large_commands(self):
         runtime = _FakeTmuxRuntime(
             full_buffers=[
-                "bash$ python - <<'PY'\n...\nbash$ ",
+                "bash$ source /tmp/.llenvs_harbor_tmux_command\nbash$ ",
             ]
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
         state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
 
         large_command = "x" * 70000
         env.step(state, Action(text=large_command))
 
-        assert mock_env._uploaded_files
+        after = mock_env._exec_history[before:]
+        control_cmd = after[0]
+        assert "cat > " in control_cmd
+        assert "source /tmp/.llenvs_harbor_tmux_command" in control_cmd
 
     def test_step_submit_keyword_terminates(self):
         mock_env = MockHarborEnvironment()
