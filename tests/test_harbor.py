@@ -734,7 +734,15 @@ class TestHarborEnvironment:
         assert state.metadata.info["tmux_start_method"] == "direct"
         assert info["tmux_start_method"] == "direct"
         assert any("tmux new-session -d -s" in cmd for cmd in mock_env._exec_history)
-        assert any("PROMPT_COMMAND" in cmd for cmd in mock_env._exec_history)
+        init_cmd = next(cmd for cmd in mock_env._exec_history if "PROMPT_COMMAND" in cmd)
+        assert 'tmux wait-for -U "$token"' in init_cmd
+        assert "tmux wait-for -S llenvs_harbor_init_" not in init_cmd
+        assert ": > /tmp/.llenvs_harbor_tmux_token" not in init_cmd
+        assert any(
+            "tmux wait-for -L llenvs_harbor_init_" in cmd
+            and "printf '%s' llenvs_harbor_init_" in cmd
+            for cmd in mock_env._exec_history
+        )
 
     def test_reset_tmux_session_bootstraps_missing_tmux(self):
         runtime = _FakeTmuxRuntime(missing_tmux=True)
@@ -901,8 +909,10 @@ class TestHarborEnvironment:
 
         after = mock_env._exec_history[before:]
         assert len(after) == 2
+        assert "tmux wait-for -L " in after[0]
         assert "tmux paste-buffer" in after[0]
-        assert "tmux wait-for " in after[1]
+        assert "tmux wait-for -L " in after[1]
+        assert "tmux wait-for -U " in after[1]
         assert "capture-pane -p -S -" in after[1]
         assert result.next_state.observation.state is not None
         assert "/app" in result.next_state.observation.state.text
@@ -943,6 +953,11 @@ class TestHarborEnvironment:
             env.step(state, Action(text="sleep 999"))
 
         assert any("C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(
+            "tmux wait-for -L llenvs_harbor_step_" in cmd
+            and "tmux wait-for -U llenvs_harbor_step_" in cmd
+            for cmd in mock_env._exec_history
+        )
 
     def test_step_tmux_session_uses_upload_fallback_for_large_commands(self):
         runtime = _FakeTmuxRuntime(

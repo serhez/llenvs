@@ -446,7 +446,8 @@ class _HarborTmuxTextSession:
         self._send_command(command_text, step_token=step_token)
 
         wait_and_capture = (
-            f"tmux wait-for {shlex.quote(step_token)}"
+            f"tmux wait-for -L {shlex.quote(step_token)}"
+            f" && tmux wait-for -U {shlex.quote(step_token)}"
             f" && tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}"
         )
         try:
@@ -468,7 +469,10 @@ class _HarborTmuxTextSession:
         command_file_q = shlex.quote(self._COMMAND_FILE)
         buffer_q = shlex.quote(self._BUFFER_NAME)
 
-        control_parts = [f"tmux has-session -t {session_q}"]
+        control_parts = [
+            f"tmux has-session -t {session_q}",
+            f"tmux wait-for -L {token_q}",
+        ]
         if len(command) <= self._INLINE_COMMAND_MAX_CHARS:
             delimiter = _pick_heredoc_delimiter(command)
             control_parts.append(f"printf '%s' {token_q} > {token_file_q}")
@@ -538,7 +542,7 @@ class _HarborTmuxTextSession:
                 "  if [ -r \"$token_file\" ]; then",
                 "    token=$(cat \"$token_file\" 2>/dev/null || true)",
                 "    if [ -n \"$token\" ]; then",
-                "      tmux wait-for -S \"$token\" 2>/dev/null || true",
+                "      tmux wait-for -U \"$token\" 2>/dev/null || true",
                 "      : > \"$token_file\"",
                 "    fi",
                 "  fi",
@@ -572,8 +576,6 @@ class _HarborTmuxTextSession:
                 "  esac",
                 "}",
                 "__llenvs_harbor_extend_prompt_command",
-                f": > {token_file_q}",
-                f"tmux wait-for -S {shlex.quote(init_token)}",
             ]
         )
         self._run_internal_session_command(init_script, wait_token=init_token)
@@ -582,10 +584,14 @@ class _HarborTmuxTextSession:
         command_file_q = shlex.quote(self._COMMAND_FILE)
         buffer_q = shlex.quote(self._BUFFER_NAME)
         session_q = shlex.quote(self._SESSION_NAME)
+        token_q = shlex.quote(wait_token)
+        token_file_q = shlex.quote(self._TOKEN_FILE)
         delimiter = _pick_heredoc_delimiter(command_text)
         control_cmd = " && ".join(
             [
                 f"tmux has-session -t {session_q}",
+                f"tmux wait-for -L {token_q}",
+                f"printf '%s' {token_q} > {token_file_q}",
                 "cat > "
                 f"{command_file_q} << '{delimiter}'\n{command_text}\n{delimiter}",
                 f"tmux load-buffer -b {buffer_q} {command_file_q}",
@@ -595,7 +601,8 @@ class _HarborTmuxTextSession:
         )
         self._exec(control_cmd, timeout_sec=self._exec_timeout)
         self._exec(
-            f"tmux wait-for {shlex.quote(wait_token)}",
+            f"tmux wait-for -L {token_q}"
+            f" && tmux wait-for -U {token_q}",
             timeout_sec=self._exec_timeout,
         )
 
@@ -608,7 +615,12 @@ class _HarborTmuxTextSession:
         )
         recovered = True
         try:
-            self._exec(f"tmux wait-for {shlex.quote(step_token)}", timeout_sec=5)
+            token_q = shlex.quote(step_token)
+            self._exec(
+                f"tmux wait-for -L {token_q}"
+                f" && tmux wait-for -U {token_q}",
+                timeout_sec=5,
+            )
         except Exception:
             recovered = False
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
