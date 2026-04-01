@@ -822,7 +822,7 @@ class OpenRouterBackend(ModelBackend):
         app_name: str | None = None,
         max_concurrency: int = 64,
         rate_limit_wait: float = 0.0,
-        rate_limit_max_retries: int = 60,
+        rate_limit_max_retries: int = 2,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenRouter backend.
