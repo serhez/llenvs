@@ -458,6 +458,42 @@ class TestMultiInstanceRunner:
         # Last call should show all done
         assert progress_calls[-1] == (2, 2)
 
+    def test_run_batch_wall_clock_budget_errors_only_over_budget_trajectory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import llenvs.evaluation.runner as runner_mod
+
+        created, factory = _mock_env_factory(terminate_after=2)
+        primary_env = MockNonPureEnvironment(terminate_after=2)
+        backend = _make_mock_backend()
+
+        tick_values = [0.0, 50.0, 110.0, 120.0]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
+        monkeypatch.setattr(runner_mod, "_runner_now_monotonic", fake_monotonic)
+
+        runner = TrajectoryRunner(
+            environment=primary_env,
+            backend=backend,
+            sampling_params=SamplingParams(),
+            env_factory=factory,
+            restore_fn=_mock_restore_fn,
+            trajectory_wall_clock_budget_sec=100,
+        )
+
+        result = runner.run_batch([0, 1], batch_size=2)
+
+        assert len(result.trajectory_results) == 2
+        first, second = result.trajectory_results
+        assert "wall-clock budget" in (first.metadata.get("error") or "")
+        assert first.success is False
+        assert second.success is True
+
     def test_empty_states_returns_empty(self):
         """Empty states list returns empty results."""
         primary_env = MockNonPureEnvironment()

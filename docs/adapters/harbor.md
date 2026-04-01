@@ -210,6 +210,17 @@ Available in tool mode:
 | `text_exec_mode` | `str` | `"independent_exec"` | Text-mode execution model: `independent_exec` runs each step in a fresh shell; `tmux_session` keeps a persistent tmux-backed shell inside the container |
 | `tmux_bootstrap_if_missing` | `bool` | `False` | When `text_exec_mode="tmux_session"`, attempt a bounded package-manager install of `tmux` inside the task image if it is missing |
 
+When both `command_soft_timeout` and `exec_timeout` are set, they apply to
+different phases:
+
+- `command_soft_timeout` governs live model-issued text commands only and can
+  recover with a timeout observation after a successful `Ctrl-C`.
+- Harbor's extra runtime-probe execs and verifier execution are internally
+  bounded without exposing separate public timeout knobs.
+- `exec_timeout` remains the hard timeout for non-recoverable Harbor runtime
+  operations such as replay/restore and any verifier/probe call that does not
+  override it.
+
 ### `HarborAdapter.load_tasks()`
 
 Loads Harbor task definitions without creating environments. This is useful when another layer wants to inspect or filter the task set before collection.

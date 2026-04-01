@@ -171,6 +171,7 @@ def _make_env(
     tasks: tuple | None = None,
     harbor_env: MockHarborEnvironment | None = None,
     verifier_result: MockVerifierResult | None = None,
+    verifier_factory: Any | None = None,
     max_steps: int = 30,
     submit_keyword: str = "SUBMIT",
     verify_on_truncation: bool = True,
@@ -192,7 +193,7 @@ def _make_env(
     tasks = tasks or _make_tasks()
     mock_env = harbor_env or MockHarborEnvironment()
     env_factory = _make_harbor_env_factory(mock_env)
-    verifier_factory = _make_verifier_factory(verifier_result)
+    verifier_factory = verifier_factory or _make_verifier_factory(verifier_result)
 
     return HarborEnvironment(
         tasks=tasks,
@@ -1448,6 +1449,47 @@ class TestHarborEnvironment:
         assert result.truncated is True
         # No reward should be set
         assert result.next_state.metadata.info.get("reward") is None
+
+    def test_truncation_verifier_timeout_returns_zero_reward(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        class NeverVerifier:
+            async def verify(self) -> MockVerifierResult:
+                import asyncio
+
+                await asyncio.Future()
+                raise AssertionError("unreachable")
+
+        def verifier_factory(task: Any, env: Any) -> NeverVerifier:
+            return NeverVerifier()
+
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="ok")] * 5)
+        env = _make_env(
+            harbor_env=mock_env,
+            max_steps=1,
+            verify_on_truncation=True,
+            verifier_factory=verifier_factory,
+        )
+        state, _ = _reset_env(env)
+
+        original_run_with_timeout = harbor_module._run_with_timeout
+
+        def fake_run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
+            if label == "Harbor verifier":
+                close = getattr(coro, "close", None)
+                if callable(close):
+                    close()
+                raise TimeoutError("Harbor verifier timed out after 120s")
+            return original_run_with_timeout(coro, timeout, label)
+
+        monkeypatch.setattr(harbor_module, "_run_with_timeout", fake_run_with_timeout)
+
+        result = env.step(state, Action(text="cmd"))
+
+        assert result.truncated is True
+        assert result.next_state.metadata.info.get("reward") == 0.0
 
     def test_step_stderr_in_observation(self):
         mock_env = MockHarborEnvironment(
@@ -4817,6 +4859,56 @@ class TestApptainerCheckpointRestore:
         assert len(inst_cmds) == 1
         assert str(rootfs_dir) in inst_cmds[0]
         assert env._active_rootfs_mode == "sandbox"
+
+    def test_capture_runtime_probe_uses_internal_timeout_cap(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._started = True
+
+        calls: list[tuple[list[str], bool, int | None]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append((cmd, check, timeout_sec))
+            return MockExecResult(
+                stdout=(
+                    "===PROCS===\n"
+                    "bash\n"
+                    "===MOUNTS===\n"
+                    "abcdef123456  /proc/self/mountinfo\n"
+                    "===SOCKETS===\n"
+                    "===STAGING===\n"
+                )
+            )
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        probe = run_async(env.capture_runtime_probe())
+
+        assert probe.probe_failed is False
+        assert calls[0][2] == 15
+
+    def test_capture_runtime_probe_timeout_marks_probe_failed(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.core.async_utils import run_async
+
+        env = self._make_env(tmp_path)
+        env._started = True
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            raise RuntimeError(
+                f"apptainer command timed out after {timeout_sec}s: {' '.join(cmd)}"
+            )
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        probe = run_async(env.capture_runtime_probe())
+
+        assert probe.probe_failed is True
+        assert "timed out" in (probe.probe_error or "")
 
 
 class TestRuntimeProbing:

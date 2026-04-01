@@ -79,6 +79,8 @@ _APPTAINER_PID_FLAG_EVENTS: dict[tuple[str, str], threading.Event] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE_LOCK = threading.Lock()
 _APPTAINER_ROOTFS_PROBE_EVENTS: dict[tuple[Any, ...], threading.Event] = {}
+_RUNTIME_PROBE_TIMEOUT_CAP_SEC = 15
+_VERIFIER_TIMEOUT_CAP_SEC = 120
 
 
 def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
@@ -404,6 +406,21 @@ def _looks_like_timeout_error(exc: Exception) -> bool:
 
 def _now_monotonic() -> float:
     return time.monotonic()
+
+
+def _internal_runtime_probe_timeout_sec() -> int:
+    return _RUNTIME_PROBE_TIMEOUT_CAP_SEC
+
+
+def _internal_verifier_timeout_sec(
+    exec_timeout: int,
+    *,
+    command_soft_timeout: int | None = None,
+) -> int:
+    candidates = [exec_timeout, _VERIFIER_TIMEOUT_CAP_SEC]
+    if command_soft_timeout is not None:
+        candidates.append(command_soft_timeout)
+    return max(1, min(candidates))
 
 
 def _normalize_text_exec_mode(mode: str) -> str:
@@ -910,10 +927,16 @@ def _run_verifier(
     verifier_factory: Any,
     task: Any,
     harbor_env: Any,
+    *,
+    timeout_sec: int | None = None,
 ) -> dict[str, float]:
     """Run the verifier and return rewards dict."""
     verifier = verifier_factory(task, harbor_env)
-    result = run_async(verifier.verify())
+    result = _run_with_timeout(
+        verifier.verify(),
+        timeout_sec,
+        "Harbor verifier",
+    )
     return result.rewards
 
 
@@ -2167,6 +2190,7 @@ class ApptainerHPCEnvironment:
         self._apptainer = apptainer_command
         self._fakeroot = fakeroot
         self._pid_namespace = pid_namespace
+        self._runtime_probe_timeout_sec = _internal_runtime_probe_timeout_sec()
         self._pid_flag: str | None = None  # resolved in start() → _probe_pid_support()
         self._probe_baseline: RuntimeProbeSnapshot | None = None
         self._overlay_size_mb = overlay_size_mb
@@ -3054,6 +3078,7 @@ class ApptainerHPCEnvironment:
                     probe_script,
                 ],
                 check=False,
+                timeout_sec=self._runtime_probe_timeout_sec,
             )
             return _parse_probe_output(
                 result.stdout, has_pid_namespace=self._pid_namespace
@@ -3347,6 +3372,10 @@ class HarborEnvironment:
         self._command_soft_timeout = command_soft_timeout
         self._command_timeout_budget = command_timeout_budget
         self._max_consecutive_command_timeouts = max_consecutive_command_timeouts
+        self._verifier_timeout_sec = _internal_verifier_timeout_sec(
+            exec_timeout,
+            command_soft_timeout=command_soft_timeout,
+        )
         self._soft_timeouts_disabled_depth = 0
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
@@ -3629,7 +3658,10 @@ class HarborEnvironment:
             if self._verifier_factory is not None:
                 try:
                     rewards = _run_verifier(
-                        self._verifier_factory, self._current_task, self._harbor_env
+                        self._verifier_factory,
+                        self._current_task,
+                        self._harbor_env,
+                        timeout_sec=self._verifier_timeout_sec,
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:
@@ -3787,6 +3819,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         self._verify_on_truncation = verify_on_truncation
         self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
+        self._verifier_timeout_sec = _internal_verifier_timeout_sec(exec_timeout)
         self._state_capture_mode = _normalize_snapshot_mode(state_capture_mode)
         self._snapshot_artifact_root = (
             None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
@@ -4017,7 +4050,10 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             if self._verifier_factory is not None:
                 try:
                     rewards = _run_verifier(
-                        self._verifier_factory, self._current_task, self._harbor_env
+                        self._verifier_factory,
+                        self._current_task,
+                        self._harbor_env,
+                        timeout_sec=self._verifier_timeout_sec,
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:

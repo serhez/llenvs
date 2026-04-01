@@ -7,6 +7,7 @@ collecting results.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -50,6 +51,10 @@ from llenvs.inference.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _runner_now_monotonic() -> float:
+    return time.monotonic()
 
 
 def _raise_with_context(kind: str, task_index: int, error: Exception) -> None:
@@ -233,6 +238,7 @@ class _ActiveTrajectory:
     error: str | None = None
     step_count: int = 0
     failed: bool = False
+    started_at: float = 0.0
 
 
 @dataclass
@@ -480,6 +486,42 @@ class TrajectoryRunner:
     include_reasoning_in_history: bool = False
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
+    trajectory_wall_clock_budget_sec: float | None = None
+
+    def _enforce_trajectory_wall_clock_budget(
+        self,
+        active: list[_ActiveTrajectory],
+        *,
+        eval_logger: _EvalLogger | None,
+        completed_count: int,
+    ) -> int:
+        if self.trajectory_wall_clock_budget_sec is None:
+            return completed_count
+
+        now = _runner_now_monotonic()
+        for trajectory in active:
+            if trajectory.done:
+                continue
+            elapsed_sec = max(0.0, now - trajectory.started_at)
+            if elapsed_sec < self.trajectory_wall_clock_budget_sec:
+                continue
+            trajectory.done = True
+            trajectory.error = (
+                "Trajectory wall-clock budget exceeded "
+                f"for task {trajectory.task_index} after {elapsed_sec:.1f}s "
+                f"at step {trajectory.step_count} "
+                f"(budget: {self.trajectory_wall_clock_budget_sec:.1f}s)"
+            )
+            completed_count += 1
+            if eval_logger:
+                eval_logger.on_error(
+                    _ErrorEvent(
+                        task_index=trajectory.task_index,
+                        phase="trajectory_budget",
+                        error=trajectory.error,
+                    )
+                )
+        return completed_count
 
     def _build_messages(
         self,
@@ -1372,6 +1414,7 @@ class TrajectoryRunner:
                         state=state,
                         reset_info=reset_info,
                         trajectory=trajectory,
+                        started_at=_runner_now_monotonic(),
                     )
                 )
                 consecutive_reset_errors = 0
@@ -1410,6 +1453,11 @@ class TrajectoryRunner:
         # Phase 2: Lockstep generation
         completed_count = reset_errors
         while True:
+            completed_count = self._enforce_trajectory_wall_clock_budget(
+                active,
+                eval_logger=eval_logger,
+                completed_count=completed_count,
+            )
             remaining = [t for t in active if not t.done]
             if not remaining:
                 break
@@ -1555,6 +1603,11 @@ class TrajectoryRunner:
                             )
                         )
 
+            completed_count = self._enforce_trajectory_wall_clock_budget(
+                active,
+                eval_logger=eval_logger,
+                completed_count=completed_count,
+            )
             if progress_callback:
                 done_count = reset_errors + sum(1 for t in active if t.done)
                 progress_callback(done_count, total)
@@ -1601,6 +1654,7 @@ class TrajectoryRunner:
                             state=state,
                             reset_info=reset_info,
                             trajectory=trajectory,
+                            started_at=_runner_now_monotonic(),
                         )
                     )
                 except Exception as e:
@@ -1632,6 +1686,11 @@ class TrajectoryRunner:
             # Phase 2: Lockstep generation
             completed_count = reset_errors
             while True:
+                completed_count = self._enforce_trajectory_wall_clock_budget(
+                    active,
+                    eval_logger=eval_logger,
+                    completed_count=completed_count,
+                )
                 remaining = [t for t in active if not t.done]
                 if not remaining:
                     break
@@ -1783,15 +1842,20 @@ class TrajectoryRunner:
                             t.done = True
                             t.error = str(e)
                             completed_count += 1
-                            if eval_logger:
-                                eval_logger.on_error(
-                                    _ErrorEvent(
-                                        task_index=t.task_index,
-                                        phase="step",
-                                        error=str(e),
-                                    )
+                        if eval_logger:
+                            eval_logger.on_error(
+                                _ErrorEvent(
+                                    task_index=t.task_index,
+                                    phase="step",
+                                    error=str(e),
                                 )
+                            )
 
+                completed_count = self._enforce_trajectory_wall_clock_budget(
+                    active,
+                    eval_logger=eval_logger,
+                    completed_count=completed_count,
+                )
                 if progress_callback:
                     done_count = reset_errors + sum(1 for t in active if t.done)
                     progress_callback(done_count, total)
