@@ -665,6 +665,7 @@ class WebShopAdapter:
         human_goals: bool = True,
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
+        num_tasks: int | None = None,
         answer_extractor: AnswerExtractor | None = None,
         **kwargs: Any,
     ) -> WebShopEnvironment:
@@ -679,6 +680,7 @@ class WebShopAdapter:
             human_goals: Use human-written goals (True) or templates.
             pure_step: When True, enable state save/restore via
                 pickle for branching from arbitrary states.
+            num_tasks: Number of tasks for ``__len__``.
             answer_extractor: Extractor applied to raw action text before
                 sending to WebShop. Strips reasoning tokens, etc.
             **kwargs: Additional arguments passed to WebAgentTextEnv.
@@ -722,6 +724,7 @@ class WebShopAdapter:
             max_steps=max_steps,
             prompts=prompts,
             pure_step=pure_step,
+            num_tasks=num_tasks,
             answer_extractor=answer_extractor,
         )
 
