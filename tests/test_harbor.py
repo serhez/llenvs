@@ -1,5 +1,6 @@
 """Tests for the Harbor adapter."""
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -186,6 +187,7 @@ def _make_env(
     command_soft_timeout: int | None = None,
     command_timeout_budget: int | None = None,
     max_consecutive_command_timeouts: int | None = None,
+    runtime_probing: bool = False,
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -213,6 +215,7 @@ def _make_env(
         command_soft_timeout=command_soft_timeout,
         command_timeout_budget=command_timeout_budget,
         max_consecutive_command_timeouts=max_consecutive_command_timeouts,
+        runtime_probing=runtime_probing,
     )
 
 
@@ -1434,6 +1437,48 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="cmd"))
         assert result.truncated is True
         assert result.next_state.metadata.info.get("reward") == 0.5
+
+    def test_debug_logs_step_probe_and_verifier(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from llenvs.adapters.harbor import RuntimeProbeSnapshot
+
+        verifier_result = MockVerifierResult(rewards={"reward": 0.5})
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="ok")] * 5)
+
+        async def capture_runtime_probe() -> RuntimeProbeSnapshot:
+            return RuntimeProbeSnapshot(
+                process_commands=frozenset(),
+                mount_fingerprint="abc",
+                listening_ports=frozenset(),
+                staging_has_content=False,
+            )
+
+        mock_env.capture_runtime_probe = capture_runtime_probe  # type: ignore[attr-defined]
+        mock_env.detect_runtime_risk = lambda current: (False, ())  # type: ignore[attr-defined]
+        mock_env._probe_baseline = None  # type: ignore[attr-defined]
+
+        env = _make_env(
+            harbor_env=mock_env,
+            max_steps=1,
+            verifier_result=verifier_result,
+            verify_on_truncation=True,
+            runtime_probing=True,
+        )
+        state, _ = _reset_env(env)
+
+        with caplog.at_level(logging.DEBUG, logger="llenvs.adapters.harbor"):
+            result = env.step(state, Action(text="cmd"))
+
+        assert result.truncated is True
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor step start:" in message for message in messages)
+        assert any("Harbor step command phase done:" in message for message in messages)
+        assert any("Harbor verifier start:" in message for message in messages)
+        assert any("Harbor verifier done:" in message for message in messages)
+        assert any("Harbor runtime probe start:" in message for message in messages)
+        assert any("Harbor runtime probe finished:" in message for message in messages)
 
     def test_truncation_skips_verifier_when_disabled(self):
         verifier_result = MockVerifierResult(rewards={"reward": 0.5})

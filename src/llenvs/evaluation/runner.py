@@ -238,7 +238,33 @@ class _ActiveTrajectory:
     error: str | None = None
     step_count: int = 0
     failed: bool = False
-    started_at: float = 0.0
+
+
+def _summarize_task_indices(task_indices: Sequence[int], *, limit: int = 8) -> str:
+    """Return a compact representation of task indices for debug logs."""
+    if not task_indices:
+        return "[]"
+    shown = ", ".join(str(task_index) for task_index in task_indices[:limit])
+    if len(task_indices) > limit:
+        return f"[{shown}, ...] ({len(task_indices)} total)"
+    return f"[{shown}]"
+
+
+def _summarize_active_trajectories(
+    trajectories: Sequence[_ActiveTrajectory],
+    *,
+    limit: int = 8,
+) -> str:
+    """Return ``task@step`` summaries for active trajectories."""
+    if not trajectories:
+        return "[]"
+    shown = ", ".join(
+        f"{trajectory.task_index}@{trajectory.step_count}"
+        for trajectory in trajectories[:limit]
+    )
+    if len(trajectories) > limit:
+        return f"[{shown}, ...] ({len(trajectories)} total)"
+    return f"[{shown}]"
 
 
 @dataclass
@@ -486,42 +512,6 @@ class TrajectoryRunner:
     include_reasoning_in_history: bool = False
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
-    trajectory_wall_clock_budget_sec: float | None = None
-
-    def _enforce_trajectory_wall_clock_budget(
-        self,
-        active: list[_ActiveTrajectory],
-        *,
-        eval_logger: _EvalLogger | None,
-        completed_count: int,
-    ) -> int:
-        if self.trajectory_wall_clock_budget_sec is None:
-            return completed_count
-
-        now = _runner_now_monotonic()
-        for trajectory in active:
-            if trajectory.done:
-                continue
-            elapsed_sec = max(0.0, now - trajectory.started_at)
-            if elapsed_sec < self.trajectory_wall_clock_budget_sec:
-                continue
-            trajectory.done = True
-            trajectory.error = (
-                "Trajectory wall-clock budget exceeded "
-                f"for task {trajectory.task_index} after {elapsed_sec:.1f}s "
-                f"at step {trajectory.step_count} "
-                f"(budget: {self.trajectory_wall_clock_budget_sec:.1f}s)"
-            )
-            completed_count += 1
-            if eval_logger:
-                eval_logger.on_error(
-                    _ErrorEvent(
-                        task_index=trajectory.task_index,
-                        phase="trajectory_budget",
-                        error=trajectory.error,
-                    )
-                )
-        return completed_count
 
     def _build_messages(
         self,
@@ -1399,11 +1389,24 @@ class TrajectoryRunner:
         max_steps = self.environment.spec.max_steps or 100
         total = len(task_indices)
         result_slots: list[TrajectoryResult | None] = [None] * total
+        logger.debug(
+            "Trajectory batch start: mode=single-instance total=%d max_steps=%d tasks=%s",
+            total,
+            max_steps,
+            _summarize_task_indices(task_indices),
+        )
 
         # Phase 1: Reset all tasks
         active: list[_ActiveTrajectory] = []
         consecutive_reset_errors = 0
+        reset_phase_started_at = _runner_now_monotonic()
         for pos, task_index in enumerate(task_indices):
+            logger.debug(
+                "Trajectory reset start: task=%d position=%d",
+                task_index,
+                pos,
+            )
+            reset_started_at = _runner_now_monotonic()
             try:
                 state, reset_info = self.environment.reset(options={"task_index": task_index})
                 trajectory: Trajectory[Any] = Trajectory.create(state)
@@ -1414,8 +1417,12 @@ class TrajectoryRunner:
                         state=state,
                         reset_info=reset_info,
                         trajectory=trajectory,
-                        started_at=_runner_now_monotonic(),
                     )
+                )
+                logger.debug(
+                    "Trajectory reset done: task=%d duration=%.2fs",
+                    task_index,
+                    max(0.0, _runner_now_monotonic() - reset_started_at),
                 )
                 consecutive_reset_errors = 0
             except Exception as e:
@@ -1449,22 +1456,40 @@ class TrajectoryRunner:
                     ) from e
 
         reset_errors = total - len(active)
+        logger.debug(
+            "Trajectory reset phase complete: ready=%d reset_errors=%d duration=%.2fs",
+            len(active),
+            reset_errors,
+            max(0.0, _runner_now_monotonic() - reset_phase_started_at),
+        )
 
         # Phase 2: Lockstep generation
         completed_count = reset_errors
+        round_index = 0
         while True:
-            completed_count = self._enforce_trajectory_wall_clock_budget(
-                active,
-                eval_logger=eval_logger,
-                completed_count=completed_count,
-            )
             remaining = [t for t in active if not t.done]
             if not remaining:
                 break
+            round_index += 1
+            round_started_at = _runner_now_monotonic()
+            logger.debug(
+                "Trajectory round %d start: active=%d done=%d/%d tasks=%s",
+                round_index,
+                len(remaining),
+                reset_errors + sum(1 for t in active if t.done),
+                total,
+                _summarize_active_trajectories(remaining),
+            )
 
+            prompt_build_started_at = _runner_now_monotonic()
             messages_batch = [
                 self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
             ]
+            logger.debug(
+                "Trajectory round %d prompt build finished in %.2fs",
+                round_index,
+                max(0.0, _runner_now_monotonic() - prompt_build_started_at),
+            )
 
             # Use tool calling if tools available and backend supports it
             first_obs = remaining[0].state.observation
@@ -1472,6 +1497,12 @@ class TrajectoryRunner:
             use_native_tools = tools and self.backend.capabilities.supports_function_calling
             use_text_tools = tools and not use_native_tools and self.tool_call_parser is not None
 
+            logger.debug(
+                "Trajectory round %d generation start: tasks=%s",
+                round_index,
+                _summarize_active_trajectories(remaining),
+            )
+            generation_started_at = _runner_now_monotonic()
             if use_native_tools:
                 gen_results = self.backend.generate_with_tools_batch(
                     messages_batch, tools, self.sampling_params
@@ -1508,6 +1539,12 @@ class TrajectoryRunner:
                     )
                     self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
                 gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
+            logger.debug(
+                "Trajectory round %d generation finished in %.2fs (results=%d)",
+                round_index,
+                max(0.0, _runner_now_monotonic() - generation_started_at),
+                len(gen_results),
+            )
 
             # Second elicitation for truncated outputs in batch
             if self.sampling_params.second_elicitation_suffix is not None:
@@ -1517,6 +1554,12 @@ class TrajectoryRunner:
                     if gen.finish_reason == StopReason.MAX_TOKENS
                 ]
                 if needs_elicitation:
+                    elicitation_started_at = _runner_now_monotonic()
+                    logger.debug(
+                        "Trajectory round %d second elicitation start: count=%d",
+                        round_index,
+                        len(needs_elicitation),
+                    )
                     suffix = self._resolve_elicitation_suffix()
                     elicitation_msgs = [
                         self._build_elicitation_messages(messages_batch[i], gen, suffix)
@@ -1528,11 +1571,34 @@ class TrajectoryRunner:
                     )
                     for (i, first), second in zip(needs_elicitation, elicitation_results):
                         gen_results[i] = self._merge_elicitation(first, second, suffix)
+                    logger.debug(
+                        "Trajectory round %d second elicitation finished in %.2fs (count=%d)",
+                        round_index,
+                        max(0.0, _runner_now_monotonic() - elicitation_started_at),
+                        len(needs_elicitation),
+                    )
 
             for t, gen_result in zip(remaining, gen_results):
+                step_started_at = _runner_now_monotonic()
                 try:
                     action = gen_result.to_agent_action()
+                    logger.debug(
+                        "Trajectory round %d step start: task=%d env_step=%d",
+                        round_index,
+                        t.task_index,
+                        t.step_count + 1,
+                    )
                     step_result = self.environment.step(t.state, action)
+                    step_elapsed_sec = max(0.0, _runner_now_monotonic() - step_started_at)
+                    logger.debug(
+                        "Trajectory round %d step done: task=%d duration=%.2fs done=%s truncated=%s reward=%.4f",
+                        round_index,
+                        t.task_index,
+                        step_elapsed_sec,
+                        step_result.done,
+                        step_result.truncated,
+                        step_result.rewards.total,
+                    )
 
                     gen_info: dict[str, Any] = {
                         "prompt_tokens": gen_result.prompt_tokens,
@@ -1591,6 +1657,12 @@ class TrajectoryRunner:
                             )
                 except Exception as e:
                     logger.error("Error stepping task %d: %s", t.task_index, e)
+                    logger.debug(
+                        "Trajectory round %d step failed: task=%d duration=%.2fs",
+                        round_index,
+                        t.task_index,
+                        max(0.0, _runner_now_monotonic() - step_started_at),
+                    )
                     t.done = True
                     t.error = str(e)
                     completed_count += 1
@@ -1603,14 +1675,19 @@ class TrajectoryRunner:
                             )
                         )
 
-            completed_count = self._enforce_trajectory_wall_clock_budget(
-                active,
-                eval_logger=eval_logger,
-                completed_count=completed_count,
-            )
             if progress_callback:
                 done_count = reset_errors + sum(1 for t in active if t.done)
                 progress_callback(done_count, total)
+            else:
+                done_count = reset_errors + sum(1 for t in active if t.done)
+            logger.debug(
+                "Trajectory round %d complete: duration=%.2fs done=%d/%d remaining=%d",
+                round_index,
+                max(0.0, _runner_now_monotonic() - round_started_at),
+                done_count,
+                total,
+                sum(1 for t in active if not t.done),
+            )
 
         # Phase 3: Build results
         for t in active:
@@ -1636,12 +1713,25 @@ class TrajectoryRunner:
         max_steps = self.environment.spec.max_steps or 100
         total = len(task_indices)
         result_slots: list[TrajectoryResult | None] = [None] * total
+        logger.debug(
+            "Trajectory batch start: mode=multi-instance total=%d max_steps=%d tasks=%s",
+            total,
+            max_steps,
+            _summarize_task_indices(task_indices),
+        )
 
         envs: list[Environment[Any]] = []
         active: list[_ActiveTrajectory] = []
         try:
             # Phase 1: Reset all tasks with dedicated env instances
+            reset_phase_started_at = _runner_now_monotonic()
             for pos, task_index in enumerate(task_indices):
+                logger.debug(
+                    "Trajectory reset start: task=%d position=%d",
+                    task_index,
+                    pos,
+                )
+                reset_started_at = _runner_now_monotonic()
                 env = self.env_factory()
                 envs.append(env)
                 try:
@@ -1654,11 +1744,15 @@ class TrajectoryRunner:
                             state=state,
                             reset_info=reset_info,
                             trajectory=trajectory,
-                            started_at=_runner_now_monotonic(),
                         )
                     )
+                    logger.debug(
+                        "Trajectory reset done: task=%d duration=%.2fs",
+                        task_index,
+                        max(0.0, _runner_now_monotonic() - reset_started_at),
+                    )
                 except Exception as e:
-                    logger.error(f"Error resetting task {task_index}: {e}")
+                    logger.error("Error resetting task %d: %s", task_index, e)
                     if eval_logger:
                         eval_logger.on_error(
                             _ErrorEvent(
@@ -1682,22 +1776,40 @@ class TrajectoryRunner:
                     )
 
             reset_errors = total - len(active)
+            logger.debug(
+                "Trajectory reset phase complete: ready=%d reset_errors=%d duration=%.2fs",
+                len(active),
+                reset_errors,
+                max(0.0, _runner_now_monotonic() - reset_phase_started_at),
+            )
 
             # Phase 2: Lockstep generation
             completed_count = reset_errors
+            round_index = 0
             while True:
-                completed_count = self._enforce_trajectory_wall_clock_budget(
-                    active,
-                    eval_logger=eval_logger,
-                    completed_count=completed_count,
-                )
                 remaining = [t for t in active if not t.done]
                 if not remaining:
                     break
+                round_index += 1
+                round_started_at = _runner_now_monotonic()
+                logger.debug(
+                    "Trajectory round %d start: active=%d done=%d/%d tasks=%s",
+                    round_index,
+                    len(remaining),
+                    reset_errors + sum(1 for t in active if t.done),
+                    total,
+                    _summarize_active_trajectories(remaining),
+                )
 
+                prompt_build_started_at = _runner_now_monotonic()
                 messages_batch = [
                     self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
                 ]
+                logger.debug(
+                    "Trajectory round %d prompt build finished in %.2fs",
+                    round_index,
+                    max(0.0, _runner_now_monotonic() - prompt_build_started_at),
+                )
 
                 # Use tool calling if tools available and backend supports it
                 first_obs = remaining[0].state.observation
@@ -1705,6 +1817,12 @@ class TrajectoryRunner:
                 use_native_tools = tools and self.backend.capabilities.supports_function_calling
                 use_text_tools = tools and not use_native_tools and self.tool_call_parser is not None
 
+                logger.debug(
+                    "Trajectory round %d generation start: tasks=%s",
+                    round_index,
+                    _summarize_active_trajectories(remaining),
+                )
+                generation_started_at = _runner_now_monotonic()
                 if use_native_tools:
                     gen_results = self.backend.generate_with_tools_batch(
                         messages_batch, tools, self.sampling_params
@@ -1746,6 +1864,12 @@ class TrajectoryRunner:
                     gen_results = self.backend.generate_chat_batch(
                         messages_batch, self.sampling_params
                     )
+                logger.debug(
+                    "Trajectory round %d generation finished in %.2fs (results=%d)",
+                    round_index,
+                    max(0.0, _runner_now_monotonic() - generation_started_at),
+                    len(gen_results),
+                )
 
                 # Second elicitation for truncated outputs in batch
                 if self.sampling_params.second_elicitation_suffix is not None:
@@ -1755,6 +1879,12 @@ class TrajectoryRunner:
                         if gen.finish_reason == StopReason.MAX_TOKENS
                     ]
                     if needs_elicitation:
+                        elicitation_started_at = _runner_now_monotonic()
+                        logger.debug(
+                            "Trajectory round %d second elicitation start: count=%d",
+                            round_index,
+                            len(needs_elicitation),
+                        )
                         suffix = self._resolve_elicitation_suffix()
                         elicitation_msgs = [
                             self._build_elicitation_messages(messages_batch[i], gen, suffix)
@@ -1766,21 +1896,55 @@ class TrajectoryRunner:
                         )
                         for (i, first), second in zip(needs_elicitation, elicitation_results):
                             gen_results[i] = self._merge_elicitation(first, second, suffix)
+                        logger.debug(
+                            "Trajectory round %d second elicitation finished in %.2fs (count=%d)",
+                            round_index,
+                            max(0.0, _runner_now_monotonic() - elicitation_started_at),
+                            len(needs_elicitation),
+                        )
 
                 actions_for_step = [gen_result.to_agent_action() for gen_result in gen_results]
                 with ThreadPoolExecutor() as executor:
+                    step_started_at_by_pos: dict[int, float] = {}
                     step_futures = {
                         t.position: executor.submit(envs[t.position].step, t.state, action)
                         for t, action in zip(remaining, actions_for_step)
                     }
+                    for t in remaining:
+                        step_started_at_by_pos[t.position] = _runner_now_monotonic()
+                        logger.debug(
+                            "Trajectory round %d step submitted: task=%d env_step=%d",
+                            round_index,
+                            t.task_index,
+                            t.step_count + 1,
+                        )
 
                     for t, gen_result, action in zip(
                         remaining,
                         gen_results,
                         actions_for_step,
                     ):
+                        step_started_at = step_started_at_by_pos[t.position]
+                        logger.debug(
+                            "Trajectory round %d waiting for step result: task=%d env_step=%d",
+                            round_index,
+                            t.task_index,
+                            t.step_count + 1,
+                        )
                         try:
                             step_result = step_futures[t.position].result()
+                            step_elapsed_sec = max(
+                                0.0, _runner_now_monotonic() - step_started_at
+                            )
+                            logger.debug(
+                                "Trajectory round %d step done: task=%d duration=%.2fs done=%s truncated=%s reward=%.4f",
+                                round_index,
+                                t.task_index,
+                                step_elapsed_sec,
+                                step_result.done,
+                                step_result.truncated,
+                                step_result.rewards.total,
+                            )
 
                             gen_info: dict[str, Any] = {
                                 "prompt_tokens": gen_result.prompt_tokens,
@@ -1838,27 +2002,38 @@ class TrajectoryRunner:
                                         )
                                     )
                         except Exception as e:
-                            logger.error(f"Error stepping task {t.task_index}: {e}")
+                            logger.error("Error stepping task %d: %s", t.task_index, e)
+                            logger.debug(
+                                "Trajectory round %d step failed: task=%d duration=%.2fs",
+                                round_index,
+                                t.task_index,
+                                max(0.0, _runner_now_monotonic() - step_started_at),
+                            )
                             t.done = True
                             t.error = str(e)
                             completed_count += 1
-                        if eval_logger:
-                            eval_logger.on_error(
-                                _ErrorEvent(
-                                    task_index=t.task_index,
-                                    phase="step",
-                                    error=str(e),
+                            if eval_logger:
+                                eval_logger.on_error(
+                                    _ErrorEvent(
+                                        task_index=t.task_index,
+                                        phase="step",
+                                        error=str(e),
+                                    )
                                 )
-                            )
 
-                completed_count = self._enforce_trajectory_wall_clock_budget(
-                    active,
-                    eval_logger=eval_logger,
-                    completed_count=completed_count,
-                )
                 if progress_callback:
                     done_count = reset_errors + sum(1 for t in active if t.done)
                     progress_callback(done_count, total)
+                else:
+                    done_count = reset_errors + sum(1 for t in active if t.done)
+                logger.debug(
+                    "Trajectory round %d complete: duration=%.2fs done=%d/%d remaining=%d",
+                    round_index,
+                    max(0.0, _runner_now_monotonic() - round_started_at),
+                    done_count,
+                    total,
+                    sum(1 for t in active if not t.done),
+                )
 
             # Phase 3: Build results
             for t in active:

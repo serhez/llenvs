@@ -408,6 +408,14 @@ def _now_monotonic() -> float:
     return time.monotonic()
 
 
+def _preview_log_text(text: str, *, limit: int = 120) -> str:
+    """Collapse multi-line text for concise debug logging."""
+    collapsed = " ".join(text.splitlines()).strip()
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3] + "..."
+
+
 def _internal_runtime_probe_timeout_sec() -> int:
     return _RUNTIME_PROBE_TIMEOUT_CAP_SEC
 
@@ -536,8 +544,23 @@ class _HarborTmuxTextSession:
     def run_command(self, command: str, *, timeout_sec: int | None = None) -> str:
         command_text = command[:-1] if command.endswith("\n") else command
         step_token = _tmux_wait_channel("llenvs_harbor_step")
-        self._send_command(command_text, step_token=step_token)
         effective_timeout = self._exec_timeout if timeout_sec is None else timeout_sec
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        if debug_enabled:
+            logger.debug(
+                "Harbor tmux command start: timeout=%ss chars=%d preview=%s",
+                effective_timeout,
+                len(command_text),
+                _preview_log_text(command_text),
+            )
+            dispatch_started_at = _now_monotonic()
+        self._send_command(command_text, step_token=step_token)
+        if debug_enabled:
+            logger.debug(
+                "Harbor tmux command dispatched in %.2fs: preview=%s",
+                max(0.0, _now_monotonic() - dispatch_started_at),
+                _preview_log_text(command_text),
+            )
 
         wait_and_capture = (
             f"tmux wait-for -L {shlex.quote(step_token)}"
@@ -562,6 +585,13 @@ class _HarborTmuxTextSession:
         full_buffer = getattr(result, "stdout", "") or ""
         observation = self._diff_full_buffer(full_buffer)
         self._previous_full_buffer = full_buffer
+        if debug_enabled:
+            logger.debug(
+                "Harbor tmux command done: duration=%.2fs observation_chars=%d preview=%s",
+                max(0.0, _now_monotonic() - started_at),
+                len(observation),
+                _preview_log_text(command_text),
+            )
         return observation
 
     def _send_command(self, command: str, *, step_token: str) -> None:
@@ -579,6 +609,11 @@ class _HarborTmuxTextSession:
 
         if use_direct:
             # Single-line, short: send-keys -l (literal, preserves terminal echo)
+            logger.debug(
+                "Harbor tmux transport: direct send-keys chars=%d preview=%s",
+                len(command),
+                _preview_log_text(command),
+            )
             control_parts.append(
                 f"tmux send-keys -l -t {session_q} {shlex.quote(command)}"
             )
@@ -589,6 +624,12 @@ class _HarborTmuxTextSession:
             # on the same line, preventing heredoc termination.
             command_file_q = shlex.quote(self._COMMAND_FILE)
             delimiter = _pick_heredoc_delimiter(command)
+            logger.debug(
+                "Harbor tmux transport: staged-file chars=%d lines=%d preview=%s",
+                len(command),
+                command.count("\n") + 1,
+                _preview_log_text(command),
+            )
             self._exec(
                 f"cat > {command_file_q} << '{delimiter}'\n{command}\n{delimiter}",
                 timeout_sec=30,
@@ -1132,10 +1173,34 @@ def _probe_and_annotate_state(
     capture_fn = getattr(harbor_env, "capture_runtime_probe", None)
     if not callable(capture_fn):
         return state
+    debug_enabled = logger.isEnabledFor(logging.DEBUG)
+    task_index = getattr(state.hidden, "task_index", None)
+    episode_step = getattr(state.hidden, "episode_step", state.metadata.step)
+    if debug_enabled:
+        logger.debug(
+            "Harbor runtime probe start: task=%s episode_step=%s",
+            task_index,
+            episode_step,
+        )
+        started_at = _now_monotonic()
     probe = run_async(capture_fn())
+    if debug_enabled:
+        logger.debug(
+            "Harbor runtime probe finished: task=%s episode_step=%s duration=%.2fs failed=%s",
+            task_index,
+            episode_step,
+            max(0.0, _now_monotonic() - started_at),
+            probe.probe_failed,
+        )
     if harbor_env._probe_baseline is None:
         harbor_env._probe_baseline = probe
         if probe.probe_failed:
+            if debug_enabled:
+                logger.debug(
+                    "Harbor runtime probe baseline degraded: task=%s episode_step=%s",
+                    task_index,
+                    episode_step,
+                )
             return State(
                 observation=state.observation,
                 hidden=replace(
@@ -1145,8 +1210,22 @@ def _probe_and_annotate_state(
                 ),
                 metadata=state.metadata,
             )
+        if debug_enabled:
+            logger.debug(
+                "Harbor runtime probe baseline stored: task=%s episode_step=%s",
+                task_index,
+                episode_step,
+            )
         return state
     risk_now, reasons = harbor_env.detect_runtime_risk(probe)
+    if debug_enabled:
+        logger.debug(
+            "Harbor runtime probe compared: task=%s episode_step=%s risk_now=%s reasons=%s",
+            task_index,
+            episode_step,
+            risk_now,
+            reasons,
+        )
     return State(
         observation=state.observation,
         hidden=replace(
@@ -3444,20 +3523,41 @@ class HarborEnvironment:
 
         task = self._tasks[task_index]
         self._current_task = task
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        if debug_enabled:
+            reset_started_at = _now_monotonic()
+            logger.debug(
+                "Harbor reset start: task=%d name=%s state_capture=%s runtime_probing=%s text_exec_mode=%s",
+                task_index,
+                getattr(task, "name", str(task_index)),
+                self._state_capture_mode,
+                self._runtime_probing,
+                self._text_exec_mode,
+            )
 
         # Create and start container
         self._harbor_env = self._harbor_env_factory(task)
+        if debug_enabled:
+            container_started_at = _now_monotonic()
         _run_with_timeout(
             self._harbor_env.start(force_build=False),
             self._start_timeout,
             "Harbor container start",
         )
+        if debug_enabled:
+            logger.debug(
+                "Harbor reset container started: task=%d duration=%.2fs",
+                task_index,
+                max(0.0, _now_monotonic() - container_started_at),
+            )
         session_info = {
             "text_exec_mode": self._text_exec_mode,
             "tmux_bootstrapped": False,
             "tmux_start_method": None,
         }
         if self._text_exec_mode == "tmux_session":
+            if debug_enabled:
+                tmux_started_at = _now_monotonic()
             self._text_session = _HarborTmuxTextSession(
                 self._harbor_env,
                 exec_timeout=self._exec_timeout,
@@ -3466,6 +3566,14 @@ class HarborEnvironment:
             self._text_session.start()
             session_info["tmux_bootstrapped"] = self._text_session.tmux_bootstrapped
             session_info["tmux_start_method"] = self._text_session.tmux_start_method
+            if debug_enabled:
+                logger.debug(
+                    "Harbor reset tmux ready: task=%d duration=%.2fs bootstrapped=%s start_method=%s",
+                    task_index,
+                    max(0.0, _now_monotonic() - tmux_started_at),
+                    self._text_session.tmux_bootstrapped,
+                    self._text_session.tmux_start_method,
+                )
         else:
             self._text_session = None
 
@@ -3493,6 +3601,8 @@ class HarborEnvironment:
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
+        if debug_enabled:
+            state_capture_started_at = _now_monotonic()
         state = _capture_state_snapshot(
             self._harbor_env,
             state,
@@ -3500,10 +3610,23 @@ class HarborEnvironment:
             snapshot_artifact_root=self._snapshot_artifact_root,
             snapshot_options=self._snapshot_options,
         )
+        if debug_enabled:
+            logger.debug(
+                "Harbor reset state capture finished: task=%d duration=%.2fs mode=%s",
+                task_index,
+                max(0.0, _now_monotonic() - state_capture_started_at),
+                self._state_capture_mode,
+            )
         state = _probe_and_annotate_state(
             self._harbor_env, state, runtime_probing=self._runtime_probing,
         )
         self._state_tracker.track(state)
+        if debug_enabled:
+            logger.debug(
+                "Harbor reset done: task=%d total_duration=%.2fs",
+                task_index,
+                max(0.0, _now_monotonic() - reset_started_at),
+            )
 
         return state, {
             "task_index": task_index,
@@ -3566,6 +3689,9 @@ class HarborEnvironment:
         action_text = action.text or ""
         terminated = False
         truncated = False
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        if debug_enabled:
+            step_started_at = _now_monotonic()
 
         # Extract clean command (strips reasoning tokens etc.)
         extracted_cmd: str | None = None
@@ -3582,6 +3708,14 @@ class HarborEnvironment:
         # Check for submit keyword on extracted command
         if self._submit_keyword in cmd_for_env:
             terminated = True
+        if debug_enabled:
+            logger.debug(
+                "Harbor step start: task=%d episode_step=%d terminated=%s preview=%s",
+                state.hidden.task_index,
+                next_step,
+                terminated,
+                _preview_log_text(cmd_for_env),
+            )
 
         # Execute command in container (even for submit, to maintain trajectory)
         if not terminated:
@@ -3648,6 +3782,18 @@ class HarborEnvironment:
             obs_text = "Submitting for verification..."
             consecutive_command_timeout_count = 0
 
+        if debug_enabled:
+            command_elapsed_sec = max(0.0, _now_monotonic() - step_started_at)
+            logger.debug(
+                "Harbor step command phase done: task=%d episode_step=%d duration=%.2fs timed_out=%s truncated=%s preview=%s",
+                state.hidden.task_index,
+                next_step,
+                command_elapsed_sec,
+                command_timed_out,
+                timeout_policy_truncated,
+                _preview_log_text(cmd_for_env),
+            )
+
         # Check truncation
         if not terminated and next_step >= self._max_steps:
             truncated = True
@@ -3656,6 +3802,16 @@ class HarborEnvironment:
         reward_value: float | None = None
         if terminated or (truncated and self._verify_on_truncation):
             if self._verifier_factory is not None:
+                if debug_enabled:
+                    verifier_started_at = _now_monotonic()
+                    logger.debug(
+                        "Harbor verifier start: task=%d episode_step=%d terminated=%s truncated=%s timeout=%ss",
+                        state.hidden.task_index,
+                        next_step,
+                        terminated,
+                        truncated,
+                        self._verifier_timeout_sec,
+                    )
                 try:
                     rewards = _run_verifier(
                         self._verifier_factory,
@@ -3664,9 +3820,24 @@ class HarborEnvironment:
                         timeout_sec=self._verifier_timeout_sec,
                     )
                     reward_value = rewards.get("reward", 0.0)
+                    if debug_enabled:
+                        logger.debug(
+                            "Harbor verifier done: task=%d episode_step=%d duration=%.2fs reward=%.4f",
+                            state.hidden.task_index,
+                            next_step,
+                            max(0.0, _now_monotonic() - verifier_started_at),
+                            reward_value,
+                        )
                 except Exception as e:
                     cause = e.__cause__ if e.__cause__ else e
                     logger.warning("Verifier failed: %s (cause: %s)", e, cause)
+                    if debug_enabled:
+                        logger.debug(
+                            "Harbor verifier failed: task=%d episode_step=%d duration=%.2fs",
+                            state.hidden.task_index,
+                            next_step,
+                            max(0.0, _now_monotonic() - verifier_started_at),
+                        )
                     reward_value = 0.0
 
         # Build next hidden
@@ -3721,6 +3892,8 @@ class HarborEnvironment:
             hidden=next_hidden,
             metadata=next_metadata,
         )
+        if debug_enabled:
+            state_capture_started_at = _now_monotonic()
         next_state = _capture_state_snapshot(
             self._harbor_env,
             next_state,
@@ -3728,12 +3901,30 @@ class HarborEnvironment:
             snapshot_artifact_root=self._snapshot_artifact_root,
             snapshot_options=self._snapshot_options,
         )
+        if debug_enabled:
+            logger.debug(
+                "Harbor step state capture finished: task=%d episode_step=%d duration=%.2fs mode=%s",
+                state.hidden.task_index,
+                next_step,
+                max(0.0, _now_monotonic() - state_capture_started_at),
+                self._state_capture_mode,
+            )
         next_state = _probe_and_annotate_state(
             self._harbor_env, next_state, runtime_probing=self._runtime_probing,
         )
 
         rewards = self.compute_rewards(state, action, next_state)
         self._state_tracker.track(next_state)
+        if debug_enabled:
+            logger.debug(
+                "Harbor step done: task=%d episode_step=%d total_duration=%.2fs terminated=%s truncated=%s reward_total=%.4f",
+                state.hidden.task_index,
+                next_step,
+                max(0.0, _now_monotonic() - step_started_at),
+                terminated,
+                truncated,
+                rewards.total,
+            )
 
         return StepResult(
             next_state=next_state,
