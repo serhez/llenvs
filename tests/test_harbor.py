@@ -1059,10 +1059,17 @@ class TestHarborEnvironment:
         env.step(state, Action(text=multiline_cmd))
 
         after = mock_env._exec_history[before:]
-        control_cmd = after[0]
-        # Staged-file path: heredoc write + source via send-keys.
-        assert "cat > " in control_cmd
-        assert "source /tmp/.llenvs_harbor_tmux_command" in control_cmd
+        # Staged-file path uses 3 execs: file write, control, wait+capture
+        assert len(after) == 3
+        # Exec 1: standalone heredoc file staging (NOT in a && chain with send-keys)
+        assert "cat > " in after[0]
+        assert "tmux send-keys" not in after[0]
+        # Exec 2: control exec with send-keys source
+        assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
+        assert "tmux wait-for -L " in after[1]
+        # Exec 3: wait + capture
+        assert "tmux wait-for -L " in after[2]
+        assert "capture-pane" in after[2]
 
     def test_step_tmux_session_uses_staged_file_for_oversized_command(self):
         from llenvs.adapters.harbor import _HarborTmuxTextSession
@@ -1081,10 +1088,10 @@ class TestHarborEnvironment:
         env.step(state, Action(text=long_cmd))
 
         after = mock_env._exec_history[before:]
-        control_cmd = after[0]
-        # Even though single-line, exceeds threshold — goes to staged-file.
-        assert "cat > " in control_cmd
-        assert "source /tmp/.llenvs_harbor_tmux_command" in control_cmd
+        # Even though single-line, exceeds threshold — staged-file with 3 execs.
+        assert len(after) == 3
+        assert "cat > " in after[0]
+        assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
 
     def test_step_tmux_session_falls_back_to_visible_screen(self):
         runtime = _FakeTmuxRuntime(
@@ -1143,9 +1150,9 @@ class TestHarborEnvironment:
         env.step(state, Action(text=large_command))
 
         after = mock_env._exec_history[before:]
-        control_cmd = after[0]
-        assert "cat > " in control_cmd
-        assert "source /tmp/.llenvs_harbor_tmux_command" in control_cmd
+        assert len(after) == 3
+        assert "cat > " in after[0]
+        assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
 
     def test_step_submit_keyword_terminates(self):
         mock_env = MockHarborEnvironment()

@@ -489,12 +489,15 @@ class _HarborTmuxTextSession:
                 f"tmux send-keys -l -t {session_q} {shlex.quote(command)}"
             )
         else:
-            # Multi-line or oversized: stage to file, source it
+            # Multi-line or oversized: stage to file in a separate exec.
+            # Heredocs cannot be embedded in a && chain — the delimiter
+            # line must stand alone, but && join appends the next command
+            # on the same line, preventing heredoc termination.
             command_file_q = shlex.quote(self._COMMAND_FILE)
             delimiter = _pick_heredoc_delimiter(command)
-            control_parts.append(
-                "cat > "
-                f"{command_file_q} << '{delimiter}'\n{command}\n{delimiter}"
+            self._exec(
+                f"cat > {command_file_q} << '{delimiter}'\n{command}\n{delimiter}",
+                timeout_sec=30,
             )
             control_parts.append(
                 f"tmux send-keys -l -t {session_q}"
@@ -2489,6 +2492,10 @@ class ApptainerHPCEnvironment:
                 await asyncio.wait_for(proc.communicate(), timeout=5)
             except (asyncio.TimeoutError, ProcessLookupError):
                 proc.kill()
+                try:
+                    await proc.communicate()
+                except Exception:
+                    pass
             raise RuntimeError(
                 f"apptainer command timed out after {timeout_sec}s: {' '.join(cmd)}"
             )
@@ -4195,7 +4202,7 @@ class HarborAdapter:
             "Execute commands to complete the task described below. "
             "Work step by step, checking the output of each command "
             "before proceeding. When you have completed the task, "
-            "submit your work for verification."
+            "submit your work by sending the SUBMIT command."
         )
 
     def get_native_answer_extractor(self, task_name: str) -> None:
