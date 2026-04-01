@@ -31,6 +31,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -397,9 +398,15 @@ class _HarborTmuxTextSession:
     _SESSION_NAME = "llenvs-harbor"
     _TOKEN_FILE = "/tmp/.llenvs_harbor_tmux_token"
     _COMMAND_FILE = "/tmp/.llenvs_harbor_tmux_command"
+    _HOOK_SCRIPT_FILE = "/tmp/.llenvs_harbor_hook_init.sh"
+    _READY_FILE = "/tmp/.llenvs_harbor_tmux_ready"
     _BUFFER_NAME = "llenvs-harbor-buffer"
     _INLINE_COMMAND_MAX_CHARS = 32768
     _DIAGNOSTIC_TAIL_LINES = 200
+    _STARTUP_DIAGNOSTIC_TAIL_LINES = 50
+    _STARTUP_TIMEOUT_CAP_SEC = 30
+    _READY_POLL_INTERVAL_SEC = 0.5
+    _READY_RESEND_INTERVAL_SEC = 3.0
 
     def __init__(
         self,
@@ -431,8 +438,10 @@ class _HarborTmuxTextSession:
 
         self._start_session()
         self._exec(
-            f"tmux set-option -t {shlex.quote(self._SESSION_NAME)} history-limit 50000"
+            f"tmux set-option -t {shlex.quote(self._SESSION_NAME)} history-limit 50000",
+            timeout_sec=self._startup_timeout_sec(),
         )
+        self._wait_for_shell_ready()
         self._install_prompt_hook()
         self._previous_full_buffer = self._capture_full_buffer()
 
@@ -532,8 +541,10 @@ class _HarborTmuxTextSession:
         return self._capture_visible_screen()
 
     def _install_prompt_hook(self) -> None:
+        startup_timeout = self._startup_timeout_sec()
         init_token = _tmux_wait_channel("llenvs_harbor_init")
         token_file_q = shlex.quote(self._TOKEN_FILE)
+        hook_file_q = shlex.quote(self._HOOK_SCRIPT_FILE)
         init_script = "\n".join(
             [
                 "__llenvs_harbor_prompt_hook() {",
@@ -578,33 +589,31 @@ class _HarborTmuxTextSession:
                 "__llenvs_harbor_extend_prompt_command",
             ]
         )
-        self._run_internal_session_command(init_script, wait_token=init_token)
-
-    def _run_internal_session_command(self, command_text: str, *, wait_token: str) -> None:
-        command_file_q = shlex.quote(self._COMMAND_FILE)
-        buffer_q = shlex.quote(self._BUFFER_NAME)
+        self._stage_hook_script(init_script)
         session_q = shlex.quote(self._SESSION_NAME)
-        token_q = shlex.quote(wait_token)
+        token_q = shlex.quote(init_token)
         token_file_q = shlex.quote(self._TOKEN_FILE)
-        delimiter = _pick_heredoc_delimiter(command_text)
         control_cmd = " && ".join(
             [
                 f"tmux has-session -t {session_q}",
                 f"tmux wait-for -L {token_q}",
                 f"printf '%s' {token_q} > {token_file_q}",
-                "cat > "
-                f"{command_file_q} << '{delimiter}'\n{command_text}\n{delimiter}",
-                f"tmux load-buffer -b {buffer_q} {command_file_q}",
-                f"tmux paste-buffer -b {buffer_q} -t {session_q}",
-                f"tmux send-keys -t {session_q} Enter",
+                f"tmux send-keys -t {session_q} {shlex.quote(f'source {self._HOOK_SCRIPT_FILE}')} Enter",
             ]
         )
-        self._exec(control_cmd, timeout_sec=self._exec_timeout)
-        self._exec(
-            f"tmux wait-for -L {token_q}"
-            f" && tmux wait-for -U {token_q}",
-            timeout_sec=self._exec_timeout,
-        )
+        self._exec(control_cmd, timeout_sec=startup_timeout)
+        try:
+            self._exec(
+                f"tmux wait-for -L {token_q}"
+                f" && tmux wait-for -U {token_q}",
+                timeout_sec=startup_timeout,
+            )
+        except Exception as exc:
+            if self._is_timeout_error(exc):
+                raise self._startup_timeout_error(
+                    f"Prompt hook installation timed out after {startup_timeout}s"
+                ) from exc
+            raise
 
     def _handle_timeout(self, command: str, step_token: str, exc: Exception) -> RuntimeError:
         visible = self._safe_capture(self._capture_visible_screen)
@@ -673,13 +682,14 @@ class _HarborTmuxTextSession:
         self._exec(bootstrap_cmd, timeout_sec=max(self._exec_timeout, 120))
 
     def _start_session(self) -> None:
+        startup_timeout = self._startup_timeout_sec()
         session_q = shlex.quote(self._SESSION_NAME)
         direct_cmd = (
             f"tmux new-session -d -s {session_q} "
             f"{shlex.quote('bash --login')}"
         )
         try:
-            self._exec(direct_cmd, timeout_sec=self._exec_timeout)
+            self._exec(direct_cmd, timeout_sec=startup_timeout)
             self.tmux_start_method = "direct"
             return
         except Exception as exc:
@@ -690,8 +700,51 @@ class _HarborTmuxTextSession:
             f"tmux new-session -d -s {session_q} "
             f"{script_wrapper}"
         )
-        self._exec(fallback_cmd, timeout_sec=self._exec_timeout)
+        self._exec(fallback_cmd, timeout_sec=startup_timeout)
         self.tmux_start_method = "script_fallback"
+
+    def _wait_for_shell_ready(self) -> None:
+        startup_timeout = self._startup_timeout_sec()
+        session_q = shlex.quote(self._SESSION_NAME)
+        ready_file_q = shlex.quote(self._READY_FILE)
+        ready_token = _tmux_wait_channel("llenvs_harbor_ready")
+        ready_cmd = f"printf '%s' {shlex.quote(ready_token)} > {self._READY_FILE}"
+        send_cmd = (
+            f"tmux has-session -t {session_q}"
+            f" && tmux send-keys -t {session_q} {shlex.quote(ready_cmd)} Enter"
+        )
+        poll_cmd = (
+            f"test -r {ready_file_q} && cat {ready_file_q} || true"
+        )
+
+        self._safe_exec(f"rm -f {ready_file_q}", timeout_sec=10)
+        self._exec(send_cmd, timeout_sec=10)
+        deadline = time.monotonic() + startup_timeout
+        next_resend = time.monotonic() + self._READY_RESEND_INTERVAL_SEC
+
+        while time.monotonic() < deadline:
+            result = self._exec(poll_cmd, timeout_sec=10)
+            if (getattr(result, "stdout", "") or "").strip() == ready_token:
+                self._safe_exec(f"rm -f {ready_file_q}", timeout_sec=10)
+                return
+            now = time.monotonic()
+            if now >= next_resend:
+                self._exec(send_cmd, timeout_sec=10)
+                next_resend = now + self._READY_RESEND_INTERVAL_SEC
+            time.sleep(self._READY_POLL_INTERVAL_SEC)
+
+        raise self._startup_timeout_error(
+            f"Harbor tmux shell did not become ready within {startup_timeout}s"
+        )
+
+    def _stage_hook_script(self, script_content: str) -> None:
+        hook_file_q = shlex.quote(self._HOOK_SCRIPT_FILE)
+        delimiter = _pick_heredoc_delimiter(script_content)
+        self._exec(
+            "cat > "
+            f"{hook_file_q} << '{delimiter}'\n{script_content}\n{delimiter}",
+            timeout_sec=self._startup_timeout_sec(),
+        )
 
     def _script_available(self) -> bool:
         result = self._exec(
@@ -719,6 +772,22 @@ class _HarborTmuxTextSession:
     def _is_timeout_error(exc: Exception) -> bool:
         text = str(exc).lower()
         return "timed out" in text or "timeout" in text
+
+    def _startup_timeout_sec(self) -> int:
+        return max(1, min(self._exec_timeout, self._STARTUP_TIMEOUT_CAP_SEC))
+
+    def _startup_timeout_error(self, message: str) -> RuntimeError:
+        visible = self._safe_capture(self._capture_visible_screen)
+        full = self._safe_capture(self._capture_full_buffer)
+        details = [message]
+        if visible:
+            details.append("Visible screen:\n" + visible)
+        if full:
+            tail_lines = "\n".join(
+                full.splitlines()[-self._STARTUP_DIAGNOSTIC_TAIL_LINES :]
+            )
+            details.append("Full buffer tail:\n" + tail_lines)
+        return RuntimeError("\n".join(details))
 
     def _safe_exec(self, command: str, *, timeout_sec: int | None = None) -> Any | None:
         try:

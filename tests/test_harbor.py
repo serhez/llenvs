@@ -1,5 +1,6 @@
 """Tests for the Harbor adapter."""
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -273,15 +274,22 @@ class _FakeTmuxRuntime:
         missing_tmux: bool = False,
         script_available: bool = True,
         wait_timeout_once: bool = False,
+        ready_after_attempts: int | None = 1,
+        hook_wait_timeout_once: bool = False,
     ) -> None:
         self.tmux_installed = not missing_tmux
         self.script_available = script_available
         self.direct_start_error = direct_start_error
         self.direct_start_attempts = 0
         self.wait_timeout_once = wait_timeout_once
+        self.ready_after_attempts = ready_after_attempts
+        self.ready_send_attempts = 0
+        self.hook_wait_timeout_once = hook_wait_timeout_once
         self.full_buffers = [initial_buffer, *(full_buffers or [])]
         self.visible_buffers = visible_buffers or []
         self.install_attempts = 0
+        self.files: dict[str, str] = {}
+        self.staged_hook_script = ""
 
     def __call__(self, command: str, **_: Any) -> MockExecResult:
         if "tmux -V" in command:
@@ -303,6 +311,24 @@ class _FakeTmuxRuntime:
                 raise self.direct_start_error
             return MockExecResult(stdout="")
 
+        if "rm -f /tmp/.llenvs_harbor_tmux_ready" in command:
+            self.files.pop("/tmp/.llenvs_harbor_tmux_ready", None)
+            return MockExecResult(stdout="")
+
+        if "test -r /tmp/.llenvs_harbor_tmux_ready" in command:
+            return MockExecResult(
+                stdout=self.files.get("/tmp/.llenvs_harbor_tmux_ready", "")
+            )
+
+        if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in command:
+            marker = "cat > /tmp/.llenvs_harbor_hook_init.sh << "
+            content = command.split(marker, 1)[1]
+            lines = content.splitlines()
+            if len(lines) >= 2:
+                self.staged_hook_script = "\n".join(lines[1:-1])
+                self.files["/tmp/.llenvs_harbor_hook_init.sh"] = self.staged_hook_script
+            return MockExecResult(stdout="")
+
         if "tmux wait-for " in command and "capture-pane -p -S -" in command:
             if self.wait_timeout_once:
                 self.wait_timeout_once = False
@@ -321,13 +347,28 @@ class _FakeTmuxRuntime:
                 raise AssertionError(f"Unexpected visible-buffer capture command: {command}")
             return MockExecResult(stdout=self.visible_buffers.pop(0))
 
+        if "tmux send-keys" in command or "tmux load-buffer" in command or "tmux paste-buffer" in command:
+            if "/tmp/.llenvs_harbor_tmux_ready" in command:
+                self.ready_send_attempts += 1
+                if (
+                    self.ready_after_attempts is not None
+                    and self.ready_send_attempts >= self.ready_after_attempts
+                ):
+                    match = re.search(
+                        r"(llenvs_harbor_ready_[A-Za-z0-9]+)",
+                        command,
+                    )
+                    if match is not None:
+                        self.files["/tmp/.llenvs_harbor_tmux_ready"] = match.group(1)
+            return MockExecResult(stdout="")
+
         if "tmux has-session" in command:
             return MockExecResult(stdout="")
 
         if "tmux wait-for " in command:
-            return MockExecResult(stdout="")
-
-        if "tmux send-keys" in command or "tmux load-buffer" in command or "tmux paste-buffer" in command:
+            if "llenvs_harbor_init_" in command and self.hook_wait_timeout_once:
+                self.hook_wait_timeout_once = False
+                raise RuntimeError("apptainer command timed out after 120s")
             return MockExecResult(stdout="")
 
         if "tmux set-option" in command:
@@ -733,14 +774,30 @@ class TestHarborEnvironment:
         assert state.metadata.info["tmux_bootstrapped"] is False
         assert state.metadata.info["tmux_start_method"] == "direct"
         assert info["tmux_start_method"] == "direct"
-        assert any("tmux new-session -d -s" in cmd for cmd in mock_env._exec_history)
-        init_cmd = next(cmd for cmd in mock_env._exec_history if "PROMPT_COMMAND" in cmd)
+        assert any(
+            "tmux new-session -d -s" in cmd and "bash --login" in cmd
+            for cmd in mock_env._exec_history
+        )
+        assert any("rm -f /tmp/.llenvs_harbor_tmux_ready" in cmd for cmd in mock_env._exec_history)
+        assert any(
+            "/tmp/.llenvs_harbor_tmux_ready" in cmd and "tmux send-keys" in cmd
+            for cmd in mock_env._exec_history
+        )
+        init_cmd = next(
+            cmd
+            for cmd in mock_env._exec_history
+            if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in cmd
+        )
         assert 'tmux wait-for -U "$token"' in init_cmd
-        assert "tmux wait-for -S llenvs_harbor_init_" not in init_cmd
-        assert ": > /tmp/.llenvs_harbor_tmux_token" not in init_cmd
+        assert "PROMPT_COMMAND" in init_cmd
         assert any(
             "tmux wait-for -L llenvs_harbor_init_" in cmd
             and "printf '%s' llenvs_harbor_init_" in cmd
+            for cmd in mock_env._exec_history
+        )
+        assert any(
+            "tmux send-keys -t" in cmd
+            and "source /tmp/.llenvs_harbor_hook_init.sh" in cmd
             for cmd in mock_env._exec_history
         )
 
@@ -791,7 +848,56 @@ class TestHarborEnvironment:
 
         assert info["tmux_start_method"] == "script_fallback"
         assert runtime.direct_start_attempts == 1
-        assert any("script -qc" in cmd or "script -q -c" in cmd for cmd in mock_env._exec_history)
+        assert any(
+            ("script -qc" in cmd or "script -q -c" in cmd) and "bash --login" in cmd
+            for cmd in mock_env._exec_history
+        )
+
+    def test_reset_tmux_session_readiness_timeout_includes_pane_diagnostics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        runtime = _FakeTmuxRuntime(
+            initial_buffer="full startup buffer",
+            ready_after_attempts=None,
+            visible_buffers=["visible startup buffer"],
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session", exec_timeout=3)
+
+        tick = {"value": 0.0}
+
+        def fake_monotonic() -> float:
+            tick["value"] += 0.6
+            return tick["value"]
+
+        monkeypatch.setattr(harbor_module.time, "monotonic", fake_monotonic)
+        monkeypatch.setattr(harbor_module.time, "sleep", lambda _: None)
+
+        with pytest.raises(RuntimeError, match="did not become ready") as excinfo:
+            _reset_env(env)
+
+        message = str(excinfo.value)
+        assert "visible startup buffer" in message
+        assert "full startup buffer" in message
+        assert runtime.ready_send_attempts >= 1
+
+    def test_reset_tmux_session_hook_install_timeout_includes_pane_diagnostics(self):
+        runtime = _FakeTmuxRuntime(
+            initial_buffer="full hook buffer",
+            hook_wait_timeout_once=True,
+            visible_buffers=["visible hook buffer"],
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+
+        with pytest.raises(RuntimeError, match="Prompt hook installation timed out") as excinfo:
+            _reset_env(env)
+
+        message = str(excinfo.value)
+        assert "visible hook buffer" in message
+        assert "full hook buffer" in message
 
     def test_reset_runner_messages_do_not_repeat_instruction(self):
         from unittest.mock import MagicMock
