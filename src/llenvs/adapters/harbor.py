@@ -27,11 +27,10 @@ import json
 import logging
 import os
 import re
-import signal
 import shlex
 import shutil
+import signal
 import subprocess
-import tempfile
 import threading
 import time
 import uuid
@@ -89,8 +88,9 @@ def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
         return run_async(coro)
     try:
         return run_async(asyncio.wait_for(coro, timeout=timeout))
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise TimeoutError(f"{label} timed out after {timeout}s") from exc
+
 
 # ── Tool definitions (for tool mode) ────────────────────────────
 
@@ -570,9 +570,7 @@ def _run_hpc_cli_command(
                     f"{runtime_label} command timed out after {timeout_sec}s "
                     f"and cleanup failed after SIGKILL: {joined_cmd}"
                 )
-        raise RuntimeError(
-            f"{runtime_label} command timed out after {timeout_sec}s: {joined_cmd}"
-        )
+        raise RuntimeError(f"{runtime_label} command timed out after {timeout_sec}s: {joined_cmd}")
 
     result = _CLIResult(
         stdout=stdout_b.decode("utf-8", errors="replace").rstrip(),
@@ -628,9 +626,7 @@ def _validate_command_timeout_policy(
     if command_soft_timeout <= 0:
         raise ValueError("command_soft_timeout must be > 0")
     if command_timeout_budget < command_soft_timeout:
-        raise ValueError(
-            "command_timeout_budget must be >= command_soft_timeout"
-        )
+        raise ValueError("command_timeout_budget must be >= command_soft_timeout")
     if max_consecutive_command_timeouts < 1:
         raise ValueError("max_consecutive_command_timeouts must be >= 1")
 
@@ -777,9 +773,7 @@ class _HarborTmuxTextSession:
                 len(command),
                 _preview_log_text(command),
             )
-            control_parts.append(
-                f"tmux send-keys -l -t {session_q} {shlex.quote(command)}"
-            )
+            control_parts.append(f"tmux send-keys -l -t {session_q} {shlex.quote(command)}")
         else:
             # Multi-line or oversized: stage to file in a separate exec.
             # Heredocs cannot be embedded in a && chain — the delimiter
@@ -798,8 +792,7 @@ class _HarborTmuxTextSession:
                 timeout_sec=30,
             )
             control_parts.append(
-                f"tmux send-keys -l -t {session_q}"
-                f" {shlex.quote(f'source {self._COMMAND_FILE}')}"
+                f"tmux send-keys -l -t {session_q} {shlex.quote(f'source {self._COMMAND_FILE}')}"
             )
 
         control_parts.append(f"tmux send-keys -t {session_q} Enter")
@@ -840,37 +833,37 @@ class _HarborTmuxTextSession:
                 "set +H",  # Disable history expansion so ! is literal
                 "__llenvs_harbor_prompt_hook() {",
                 f"  local token_file={token_file_q}",
-                "  local token=\"\"",
-                "  if [ -r \"$token_file\" ]; then",
-                "    token=$(cat \"$token_file\" 2>/dev/null || true)",
-                "    if [ -n \"$token\" ]; then",
-                "      tmux wait-for -U \"$token\" 2>/dev/null || true",
-                "      : > \"$token_file\"",
+                '  local token=""',
+                '  if [ -r "$token_file" ]; then',
+                '    token=$(cat "$token_file" 2>/dev/null || true)',
+                '    if [ -n "$token" ]; then',
+                '      tmux wait-for -U "$token" 2>/dev/null || true',
+                '      : > "$token_file"',
                 "    fi",
                 "  fi",
                 "}",
                 "__llenvs_harbor_extend_prompt_command() {",
-                "  local hook=\"__llenvs_harbor_prompt_hook\"",
-                "  local decl=\"\"",
+                '  local hook="__llenvs_harbor_prompt_hook"',
+                '  local decl=""',
                 "  decl=$(declare -p PROMPT_COMMAND 2>/dev/null || true)",
-                "  case \"$decl\" in",
-                "    \"declare -a \"*)",
+                '  case "$decl" in',
+                '    "declare -a "*)',
                 "      local entry",
-                "      for entry in \"${PROMPT_COMMAND[@]}\"; do",
-                "        if [ \"$entry\" = \"$hook\" ]; then",
+                '      for entry in "${PROMPT_COMMAND[@]}"; do',
+                '        if [ "$entry" = "$hook" ]; then',
                 "          return",
                 "        fi",
                 "      done",
-                "      PROMPT_COMMAND=(\"$hook\" \"${PROMPT_COMMAND[@]}\")",
+                '      PROMPT_COMMAND=("$hook" "${PROMPT_COMMAND[@]}")',
                 "      ;;",
                 "    *)",
-                "      case \";${PROMPT_COMMAND:-};\" in",
-                "        *\";$hook;\"*) ;;",
+                '      case ";${PROMPT_COMMAND:-};" in',
+                '        *";$hook;"*) ;;',
                 "        *)",
-                "          if [ -n \"${PROMPT_COMMAND:-}\" ]; then",
-                "            PROMPT_COMMAND=\"$hook;$PROMPT_COMMAND\"",
+                '          if [ -n "${PROMPT_COMMAND:-}" ]; then',
+                '            PROMPT_COMMAND="$hook;$PROMPT_COMMAND"',
                 "          else",
-                "            PROMPT_COMMAND=\"$hook\"",
+                '            PROMPT_COMMAND="$hook"',
                 "          fi",
                 "          ;;",
                 "      esac",
@@ -895,8 +888,7 @@ class _HarborTmuxTextSession:
         self._exec(control_cmd, timeout_sec=startup_timeout)
         try:
             self._exec(
-                f"tmux wait-for -L {token_q}"
-                f" && tmux wait-for -U {token_q}",
+                f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
                 timeout_sec=startup_timeout,
             )
         except Exception as exc:
@@ -920,16 +912,12 @@ class _HarborTmuxTextSession:
         debug_enabled = logger.isEnabledFor(logging.DEBUG)
         if debug_enabled:
             visible_tail = (
-                _preview_log_text(
-                    "\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
-                )
+                _preview_log_text("\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]))
                 if visible
                 else ""
             )
             full_tail = (
-                _preview_log_text(
-                    "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
-                )
+                _preview_log_text("\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]))
                 if full
                 else ""
             )
@@ -954,8 +942,7 @@ class _HarborTmuxTextSession:
         try:
             token_q = shlex.quote(step_token)
             self._exec(
-                f"tmux wait-for -L {token_q}"
-                f" && tmux wait-for -U {token_q}",
+                f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
                 timeout_sec=5,
             )
         except Exception:
@@ -965,11 +952,13 @@ class _HarborTmuxTextSession:
             self._previous_full_buffer = recovered_buffer
         if recovered:
             if debug_enabled:
-                recovered_tail = _preview_log_text(
-                    "\n".join(
-                        recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]
+                recovered_tail = (
+                    _preview_log_text(
+                        "\n".join(recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
                     )
-                ) if recovered_buffer else ""
+                    if recovered_buffer
+                    else ""
+                )
                 logger.debug(
                     "Harbor tmux timeout recovery succeeded: timeout=%ss elapsed=%.2fs preview=%s recovered_tail=%s",
                     timeout_sec,
@@ -977,7 +966,9 @@ class _HarborTmuxTextSession:
                     _preview_log_text(command),
                     recovered_tail,
                 )
-            tail_lines = "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]) if full else ""
+            tail_lines = (
+                "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]) if full else ""
+            )
             return _HarborRecoverableCommandTimeout(
                 command=command,
                 timeout_sec=timeout_sec,
@@ -987,11 +978,13 @@ class _HarborTmuxTextSession:
                 full_buffer_tail=tail_lines,
             )
         if debug_enabled:
-            recovered_tail = _preview_log_text(
-                "\n".join(
-                    recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]
+            recovered_tail = (
+                _preview_log_text(
+                    "\n".join(recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
                 )
-            ) if recovered_buffer else ""
+                if recovered_buffer
+                else ""
+            )
             logger.debug(
                 "Harbor tmux timeout recovery failed: timeout=%ss elapsed=%.2fs preview=%s recovered_tail=%s",
                 timeout_sec,
@@ -1048,10 +1041,7 @@ class _HarborTmuxTextSession:
     def _start_session(self) -> None:
         startup_timeout = self._startup_timeout_sec()
         session_q = shlex.quote(self._SESSION_NAME)
-        direct_cmd = (
-            f"tmux new-session -d -s {session_q} "
-            f"{shlex.quote('bash --login')}"
-        )
+        direct_cmd = f"tmux new-session -d -s {session_q} {shlex.quote('bash --login')}"
         try:
             self._exec(direct_cmd, timeout_sec=startup_timeout)
             self.tmux_start_method = "direct"
@@ -1060,10 +1050,7 @@ class _HarborTmuxTextSession:
             if not self._looks_like_pty_error(exc) or not self._script_available():
                 raise
         script_wrapper = shlex.quote("script -qc 'bash --login' /dev/null")
-        fallback_cmd = (
-            f"tmux new-session -d -s {session_q} "
-            f"{script_wrapper}"
-        )
+        fallback_cmd = f"tmux new-session -d -s {session_q} {script_wrapper}"
         self._exec(fallback_cmd, timeout_sec=startup_timeout)
         self.tmux_start_method = "script_fallback"
 
@@ -1077,9 +1064,7 @@ class _HarborTmuxTextSession:
             f"tmux has-session -t {session_q}"
             f" && tmux send-keys -t {session_q} {shlex.quote(ready_cmd)} Enter"
         )
-        poll_cmd = (
-            f"test -r {ready_file_q} && cat {ready_file_q} || true"
-        )
+        poll_cmd = f"test -r {ready_file_q} && cat {ready_file_q} || true"
 
         self._safe_exec(f"rm -f {ready_file_q}", timeout_sec=10)
         self._exec(send_cmd, timeout_sec=10)
@@ -1105,8 +1090,7 @@ class _HarborTmuxTextSession:
         hook_file_q = shlex.quote(self._HOOK_SCRIPT_FILE)
         delimiter = _pick_heredoc_delimiter(script_content)
         self._exec(
-            "cat > "
-            f"{hook_file_q} << '{delimiter}'\n{script_content}\n{delimiter}",
+            f"cat > {hook_file_q} << '{delimiter}'\n{script_content}\n{delimiter}",
             timeout_sec=self._startup_timeout_sec(),
         )
 
@@ -1146,9 +1130,7 @@ class _HarborTmuxTextSession:
         if visible:
             details.append("Visible screen:\n" + visible)
         if full:
-            tail_lines = "\n".join(
-                full.splitlines()[-self._STARTUP_DIAGNOSTIC_TAIL_LINES :]
-            )
+            tail_lines = "\n".join(full.splitlines()[-self._STARTUP_DIAGNOSTIC_TAIL_LINES :])
             details.append("Full buffer tail:\n" + tail_lines)
         return RuntimeError("\n".join(details))
 
@@ -1231,9 +1213,7 @@ def _snapshot_runtime_name(harbor_env: Any) -> str:
     runtime = getattr(harbor_env, "snapshot_runtime", None)
     if isinstance(runtime, str) and runtime:
         return runtime
-    raise RuntimeError(
-        "Harbor exact snapshots require a runtime that exposes snapshot_runtime"
-    )
+    raise RuntimeError("Harbor exact snapshots require a runtime that exposes snapshot_runtime")
 
 
 def _capture_state_snapshot(
@@ -1316,9 +1296,7 @@ def _restore_state_snapshot(
     )
 
 
-def _parse_probe_output(
-    stdout: str, *, has_pid_namespace: bool
-) -> RuntimeProbeSnapshot:
+def _parse_probe_output(stdout: str, *, has_pid_namespace: bool) -> RuntimeProbeSnapshot:
     """Parse the combined probe script output into a RuntimeProbeSnapshot."""
     sections: dict[str, str] = {}
     current_section: str | None = None
@@ -1373,9 +1351,7 @@ def _parse_probe_output(
         for line in staging_text.splitlines()
         if line.strip() and line.strip() != "UNAVAILABLE"
     )
-    staging_has_content = bool(
-        staging_text and staging_text != "UNAVAILABLE"
-    )
+    staging_has_content = bool(staging_text and staging_text != "UNAVAILABLE")
 
     return RuntimeProbeSnapshot(
         process_commands=process_commands,
@@ -1535,8 +1511,7 @@ def _normalize_compose_environment(raw_env: Any) -> tuple[tuple[str, str], ...]:
         return ()
     if isinstance(raw_env, dict):
         return tuple(
-            (str(key), "" if value is None else str(value))
-            for key, value in raw_env.items()
+            (str(key), "" if value is None else str(value)) for key, value in raw_env.items()
         )
     if isinstance(raw_env, list):
         pairs: list[tuple[str, str]] = []
@@ -1559,9 +1534,7 @@ def _validate_compose_volume_entry(raw_volume: Any) -> None:
     if isinstance(raw_volume, dict):
         volume_type = raw_volume.get("type", "volume")
         if volume_type not in {"bind", "volume"}:
-            raise NotImplementedError(
-                f"Unsupported compose volume type: {volume_type!r}"
-            )
+            raise NotImplementedError(f"Unsupported compose volume type: {volume_type!r}")
         source = raw_volume.get("source")
         target = raw_volume.get("target")
         if not source or not target:
@@ -1675,9 +1648,7 @@ def _analyze_podman_snapshot_definition(
                 f"Compose service {name!r} must be a mapping.",
             )
 
-        present_unsupported = _PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS.intersection(
-            raw_service
-        )
+        present_unsupported = _PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS.intersection(raw_service)
         if present_unsupported:
             return ineligible(
                 "unsupported_compose_service_fields",
@@ -1838,6 +1809,7 @@ class PodmanHPCEnvironment:
 
     def _interpolate_compose_value(self, value: Any) -> Any:
         if isinstance(value, str):
+
             def repl(match: re.Match[str]) -> str:
                 name = match.group(1)
                 default = match.group(2)
@@ -1847,10 +1819,7 @@ class PodmanHPCEnvironment:
         if isinstance(value, list):
             return [self._interpolate_compose_value(item) for item in value]
         if isinstance(value, dict):
-            return {
-                key: self._interpolate_compose_value(item)
-                for key, item in value.items()
-            }
+            return {key: self._interpolate_compose_value(item) for key, item in value.items()}
         return value
 
     def _normalize_environment(self, raw_env: Any) -> tuple[tuple[str, str], ...]:
@@ -1858,8 +1827,7 @@ class PodmanHPCEnvironment:
             return ()
         if isinstance(raw_env, dict):
             return tuple(
-                (str(key), "" if value is None else str(value))
-                for key, value in raw_env.items()
+                (str(key), "" if value is None else str(value)) for key, value in raw_env.items()
             )
         if isinstance(raw_env, list):
             pairs: list[tuple[str, str]] = []
@@ -1899,9 +1867,7 @@ class PodmanHPCEnvironment:
         if isinstance(raw_volume, dict):
             volume_type = raw_volume.get("type", "volume")
             if volume_type not in {"bind", "volume"}:
-                raise NotImplementedError(
-                    f"Unsupported compose volume type: {volume_type!r}"
-                )
+                raise NotImplementedError(f"Unsupported compose volume type: {volume_type!r}")
             source = raw_volume.get("source")
             target = raw_volume.get("target")
             if not source or not target:
@@ -1958,9 +1924,7 @@ class PodmanHPCEnvironment:
             if not isinstance(cfg, dict):
                 raise NotImplementedError("Unsupported top-level compose volume configuration")
             if cfg.get("external"):
-                raise NotImplementedError(
-                    f"External compose volume {name!r} is not supported"
-                )
+                raise NotImplementedError(f"External compose volume {name!r} is not supported")
 
         raw_services = data.get("services")
         if not isinstance(raw_services, dict) or not raw_services:
@@ -1970,9 +1934,7 @@ class PodmanHPCEnvironment:
         for name, raw_service in raw_services.items():
             if not isinstance(raw_service, dict):
                 raise ValueError(f"Compose service {name!r} must be a mapping")
-            present_unsupported = _PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS.intersection(
-                raw_service
-            )
+            present_unsupported = _PODMAN_UNSUPPORTED_COMPOSE_SERVICE_KEYS.intersection(raw_service)
             if present_unsupported:
                 raise NotImplementedError(
                     f"Unsupported compose fields for service {name!r}: "
@@ -2000,9 +1962,7 @@ class PodmanHPCEnvironment:
 
             image = raw_service.get("image")
             if build_context is None and image is None:
-                raise ValueError(
-                    f"Compose service {name!r} must define either image or build"
-                )
+                raise ValueError(f"Compose service {name!r} must define either image or build")
 
             command = raw_service.get("command")
             if isinstance(command, list):
@@ -2044,8 +2004,7 @@ class PodmanHPCEnvironment:
                     else str(raw_service.get("working_dir"))
                 ),
                 volumes=tuple(
-                    self._parse_volume_mount(volume)
-                    for volume in raw_service.get("volumes", ())
+                    self._parse_volume_mount(volume) for volume in raw_service.get("volumes", ())
                 ),
                 depends_on=depends_on,
                 healthcheck=self._parse_healthcheck(raw_service.get("healthcheck")),
@@ -2477,8 +2436,7 @@ class ApptainerHPCEnvironment:
         normalized_rootfs_mode = rootfs_mode.strip().lower()
         if normalized_rootfs_mode not in {"auto", "overlay", "sandbox"}:
             raise ValueError(
-                "rootfs_mode must be one of {'auto', 'overlay', 'sandbox'}, "
-                f"got {rootfs_mode!r}"
+                f"rootfs_mode must be one of {{'auto', 'overlay', 'sandbox'}}, got {rootfs_mode!r}"
             )
         self._rootfs_mode = normalized_rootfs_mode
         self.snapshot_runtime = _APPTAINER_RUNTIME_NAME
@@ -2507,12 +2465,8 @@ class ApptainerHPCEnvironment:
             if "TMPDIR" in os.environ
             else self._sif_cache_dir.parent
         )
-        self._app_seed_cache_dir = (
-            cache_root_base / "llenvs" / "apptainer-app-seeds"
-        )
-        self._sandbox_seed_cache_dir = (
-            cache_root_base / "llenvs" / "apptainer-sandboxes"
-        )
+        self._app_seed_cache_dir = cache_root_base / "llenvs" / "apptainer-app-seeds"
+        self._sandbox_seed_cache_dir = cache_root_base / "llenvs" / "apptainer-sandboxes"
 
         self._validate_definition()
         self._sif_path = self._resolve_sif_path()
@@ -2521,10 +2475,7 @@ class ApptainerHPCEnvironment:
     def _app_seed_cache_key(self) -> str:
         try:
             stat = self._sif_path.stat()
-            material = (
-                f"{self.environment_name}:{self._sif_path}:"
-                f"{stat.st_size}:{stat.st_mtime_ns}"
-            )
+            material = f"{self.environment_name}:{self._sif_path}:{stat.st_size}:{stat.st_mtime_ns}"
         except FileNotFoundError:
             material = f"{self.environment_name}:{self._sif_path}"
         return hashlib.sha256(material.encode()).hexdigest()[:24]
@@ -2604,10 +2555,7 @@ class ApptainerHPCEnvironment:
     def _sandbox_seed_cache_key(self) -> str:
         try:
             stat = self._sif_path.stat()
-            material = (
-                f"{self.environment_name}:{self._sif_path}:"
-                f"{stat.st_size}:{stat.st_mtime_ns}"
-            )
+            material = f"{self.environment_name}:{self._sif_path}:{stat.st_size}:{stat.st_mtime_ns}"
         except FileNotFoundError:
             material = f"{self.environment_name}:{self._sif_path}"
         return hashlib.sha256(material.encode()).hexdigest()[:24]
@@ -2783,9 +2731,7 @@ class ApptainerHPCEnvironment:
 
         version_str = "unknown"
         try:
-            result = await self._run_apptainer_command(
-                [self._apptainer, "--version"], check=False
-            )
+            result = await self._run_apptainer_command([self._apptainer, "--version"], check=False)
             if result.return_code == 0 and result.stdout:
                 version_str = result.stdout.strip()
         except Exception:
@@ -2961,9 +2907,7 @@ class ApptainerHPCEnvironment:
             resolved_flag = "--pid" if found_pid else "--containall"
             self._pid_flag = resolved_flag
             if resolved_flag == "--containall":
-                self.logger.info(
-                    "Runtime lacks --pid flag; using --containall for PID namespace"
-                )
+                self.logger.info("Runtime lacks --pid flag; using --containall for PID namespace")
         except Exception:
             resolved_flag = "--containall"
             self._pid_flag = resolved_flag
@@ -2987,15 +2931,17 @@ class ApptainerHPCEnvironment:
         return result.return_code == 0
 
     async def _bootstrap_log_dirs(self) -> None:
-        await self._run_apptainer_command([
-            self._apptainer,
-            "exec",
-            "--cleanenv",
-            f"instance://{self._instance_name}",
-            "bash",
-            "-lc",
-            "mkdir -p /logs/agent /logs/verifier",
-        ])
+        await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                "mkdir -p /logs/agent /logs/verifier",
+            ]
+        )
         # Verify /tmp is writable — fail early with a clear message instead
         # of letting downstream commands (e.g. apt-get) produce cryptic errors.
         result = await self._run_apptainer_command(
@@ -3038,38 +2984,51 @@ class ApptainerHPCEnvironment:
 
         if not self._writable_tmpfs:
             self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
-            await self._run_apptainer_command([
-                self._apptainer,
-                "overlay",
-                "create",
-                "--size",
-                str(self._overlay_size_mb),
-                str(self._overlay_path),
-            ])
+            await self._run_apptainer_command(
+                [
+                    self._apptainer,
+                    "overlay",
+                    "create",
+                    "--size",
+                    str(self._overlay_size_mb),
+                    str(self._overlay_path),
+                ]
+            )
 
         cmd = [self._apptainer, "instance", "start"]
         if self._writable_tmpfs:
             cmd.append("--writable-tmpfs")
         else:
             cmd.extend(["--overlay", str(self._overlay_path)])
-        cmd.extend([
-            "--cleanenv",
-            "--contain",
-            "--no-home",
-        ])
+        cmd.extend(
+            [
+                "--cleanenv",
+                "--contain",
+                "--no-home",
+            ]
+        )
         if self._fakeroot:
             cmd.append("--fakeroot")
-        cmd.extend([
-            "--bind", f"{self._host_tmp_dir}:/tmp",
-            "--bind", f"{self._host_var_tmp_dir}:/var/tmp",
-            "--bind", f"{self._staging_dir}:/staging",
-            "--bind", f"{self._app_bind_dir}:/app",
-            "--bind", f"{self._tests_bind_dir}:/tests",
-            "--bind", f"{verifier_dir}:/logs/verifier",
-            "--bind", f"{agent_dir}:/logs/agent",
-            str(self._sif_path),
-            self._instance_name,
-        ])
+        cmd.extend(
+            [
+                "--bind",
+                f"{self._host_tmp_dir}:/tmp",
+                "--bind",
+                f"{self._host_var_tmp_dir}:/var/tmp",
+                "--bind",
+                f"{self._staging_dir}:/staging",
+                "--bind",
+                f"{self._app_bind_dir}:/app",
+                "--bind",
+                f"{self._tests_bind_dir}:/tests",
+                "--bind",
+                f"{verifier_dir}:/logs/verifier",
+                "--bind",
+                f"{agent_dir}:/logs/agent",
+                str(self._sif_path),
+                self._instance_name,
+            ]
+        )
         await self._run_apptainer_command(cmd)
         await self._bootstrap_log_dirs()
         self._started = True
@@ -3084,8 +3043,15 @@ class ApptainerHPCEnvironment:
         verifier_dir, agent_dir = self._prepare_runtime_dirs()
         for dest in ("staging", "logs/verifier", "logs/agent"):
             (rootfs_dir / dest).mkdir(parents=True, exist_ok=True)
-        cmd = [self._apptainer, "instance", "start", "--writable",
-               "--cleanenv", "--contain", "--no-home"]
+        cmd = [
+            self._apptainer,
+            "instance",
+            "start",
+            "--writable",
+            "--cleanenv",
+            "--contain",
+            "--no-home",
+        ]
         if self._fakeroot:
             cmd.append("--fakeroot")
         if self._pid_namespace and self._pid_flag:
@@ -3095,15 +3061,22 @@ class ApptainerHPCEnvironment:
                 if "--contain" in cmd:
                     cmd.remove("--contain")
             cmd.append(self._pid_flag)
-        cmd.extend([
-            "--bind", f"{self._host_tmp_dir}:/tmp",
-            "--bind", f"{self._host_var_tmp_dir}:/var/tmp",
-            "--bind", f"{self._staging_dir}:/staging",
-            "--bind", f"{verifier_dir}:/logs/verifier",
-            "--bind", f"{agent_dir}:/logs/agent",
-            str(rootfs_dir),
-            self._instance_name,
-        ])
+        cmd.extend(
+            [
+                "--bind",
+                f"{self._host_tmp_dir}:/tmp",
+                "--bind",
+                f"{self._host_var_tmp_dir}:/var/tmp",
+                "--bind",
+                f"{self._staging_dir}:/staging",
+                "--bind",
+                f"{verifier_dir}:/logs/verifier",
+                "--bind",
+                f"{agent_dir}:/logs/agent",
+                str(rootfs_dir),
+                self._instance_name,
+            ]
+        )
         await self._run_apptainer_command(cmd)
         await self._bootstrap_log_dirs()
         self._started = True
@@ -3176,9 +3149,7 @@ class ApptainerHPCEnvironment:
                     "rootfs_mode: sandbox to use writable sandboxes instead."
                 )
 
-            self.logger.info(
-                "Apptainer overlay probe failed; falling back to writable sandbox"
-            )
+            self.logger.info("Apptainer overlay probe failed; falling back to writable sandbox")
             await self._start_sandbox_instance()
             self.logger.info("Apptainer rootfs mode selected: sandbox")
         finally:
@@ -3219,16 +3190,13 @@ class ApptainerHPCEnvironment:
     ) -> None:
         """Export sandbox rootfs as a tar archive (filesystem checkpoint)."""
         if self._active_rootfs_mode != "sandbox":
-            raise RuntimeError(
-                "Filesystem checkpoint only supported in sandbox mode"
-            )
+            raise RuntimeError("Filesystem checkpoint only supported in sandbox mode")
         export_path = Path(export_path)
         export_path.parent.mkdir(parents=True, exist_ok=True)
         temp_name = f".{export_path.name}.{uuid.uuid4().hex}.tmp"
         temp_path = export_path.parent / temp_name
         command = (
-            f"tar -cf {shlex.quote(f'/.vb_checkpoint_out/{temp_name}')} "
-            f"-C /.vb_checkpoint_src ."
+            f"tar -cf {shlex.quote(f'/.vb_checkpoint_out/{temp_name}')} -C /.vb_checkpoint_src ."
         )
         try:
             await self._run_apptainer_checkpoint_command(
@@ -3328,9 +3296,7 @@ class ApptainerHPCEnvironment:
                 check=False,
                 timeout_sec=self._runtime_probe_timeout_sec,
             )
-            return _parse_probe_output(
-                result.stdout, has_pid_namespace=self._pid_namespace
-            )
+            return _parse_probe_output(result.stdout, has_pid_namespace=self._pid_namespace)
         except Exception as exc:
             return RuntimeProbeSnapshot(
                 process_commands=frozenset(),
@@ -3341,33 +3307,32 @@ class ApptainerHPCEnvironment:
                 probe_error=str(exc),
             )
 
-    def detect_runtime_risk(
-        self, current: RuntimeProbeSnapshot
-    ) -> tuple[bool, tuple[str, ...]]:
+    def detect_runtime_risk(self, current: RuntimeProbeSnapshot) -> tuple[bool, tuple[str, ...]]:
         """Compare current probe against baseline and return risk signals."""
         if self._probe_baseline is None:
             return False, ()
         reasons: list[str] = []
         if self._pid_namespace:
             probe_commands = {
-                "bash", "ps", "ss", "md5sum", "ls", "cat", "wc", "netstat",
+                "bash",
+                "ps",
+                "ss",
+                "md5sum",
+                "ls",
+                "cat",
+                "wc",
+                "netstat",
             }
             extra = (
-                current.process_commands
-                - self._probe_baseline.process_commands
-                - probe_commands
+                current.process_commands - self._probe_baseline.process_commands - probe_commands
             )
             if extra:
-                reasons.append(
-                    f"extra_processes:{','.join(sorted(extra))}"
-                )
+                reasons.append(f"extra_processes:{','.join(sorted(extra))}")
         if current.mount_fingerprint != self._probe_baseline.mount_fingerprint:
             reasons.append("mount_table_changed")
         new_ports = current.listening_ports - self._probe_baseline.listening_ports
         if new_ports:
-            reasons.append(
-                f"new_listening_ports:{','.join(str(p) for p in sorted(new_ports))}"
-            )
+            reasons.append(f"new_listening_ports:{','.join(str(p) for p in sorted(new_ports))}")
         unexpected_staging_entries = current.staging_entries - {"upload", "download"}
         if current.staging_has_content and unexpected_staging_entries:
             reasons.append("staging_content_detected")
@@ -3390,10 +3355,14 @@ class ApptainerHPCEnvironment:
         if env:
             for key, value in env.items():
                 cmd.extend(["--env", f"{key}={value}"])
-        cmd.extend([
-            f"instance://{self._instance_name}",
-            "bash", "-lc", command,
-        ])
+        cmd.extend(
+            [
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                command,
+            ]
+        )
         return await self._run_apptainer_command(cmd, check=False, timeout_sec=timeout_sec)
 
     async def upload_file(self, source_path: Path | str, target_path: str) -> None:
@@ -3408,11 +3377,17 @@ class ApptainerHPCEnvironment:
         src = Path(source_path)
         staged = staging / src.name
         shutil.copy2(str(src), str(staged))
-        await self._run_apptainer_command([
-            self._apptainer, "exec", "--cleanenv",
-            f"instance://{self._instance_name}",
-            "bash", "-lc", f"cp -a /staging/upload/{upload_id}/{src.name} {target_path}",
-        ])
+        await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                f"cp -a /staging/upload/{upload_id}/{src.name} {target_path}",
+            ]
+        )
         shutil.rmtree(str(staging), ignore_errors=True)
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
@@ -3424,11 +3399,17 @@ class ApptainerHPCEnvironment:
         staging = self._staging_dir / "upload" / upload_id
         staging.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(str(source_dir), str(staging))
-        await self._run_apptainer_command([
-            self._apptainer, "exec", "--cleanenv",
-            f"instance://{self._instance_name}",
-            "bash", "-lc", f"mkdir -p {target_dir} && cp -a /staging/upload/{upload_id}/. {target_dir}/",
-        ])
+        await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                f"mkdir -p {target_dir} && cp -a /staging/upload/{upload_id}/. {target_dir}/",
+            ]
+        )
         shutil.rmtree(str(staging), ignore_errors=True)
 
     async def download_file(self, source_path: str, target_path: Path | str) -> None:
@@ -3436,11 +3417,17 @@ class ApptainerHPCEnvironment:
         staging = self._staging_dir / "download" / download_id
         staging.mkdir(parents=True, exist_ok=True)
         basename = Path(source_path).name
-        await self._run_apptainer_command([
-            self._apptainer, "exec", "--cleanenv",
-            f"instance://{self._instance_name}",
-            "bash", "-lc", f"cp -a {source_path} /staging/download/{download_id}/{basename}",
-        ])
+        await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                f"cp -a {source_path} /staging/download/{download_id}/{basename}",
+            ]
+        )
         shutil.copy2(str(staging / basename), str(target_path))
         shutil.rmtree(str(staging), ignore_errors=True)
 
@@ -3448,11 +3435,17 @@ class ApptainerHPCEnvironment:
         download_id = str(uuid.uuid4())[:8]
         staging = self._staging_dir / "download" / download_id
         staging.mkdir(parents=True, exist_ok=True)
-        await self._run_apptainer_command([
-            self._apptainer, "exec", "--cleanenv",
-            f"instance://{self._instance_name}",
-            "bash", "-lc", f"cp -a {source_dir}/. /staging/download/{download_id}/",
-        ])
+        await self._run_apptainer_command(
+            [
+                self._apptainer,
+                "exec",
+                "--cleanenv",
+                f"instance://{self._instance_name}",
+                "bash",
+                "-lc",
+                f"cp -a {source_dir}/. /staging/download/{download_id}/",
+            ]
+        )
         if Path(target_dir).exists():
             shutil.rmtree(str(target_dir))
         shutil.copytree(str(staging), str(target_dir))
@@ -3516,9 +3509,7 @@ def _analyze_apptainer_runtime_eligibility(
             "Apptainer runtime cannot enforce network isolation (allow_internet=False).",
         )
 
-    return RuntimeEligibility(
-        task_index=task_index, task_name=task_name, eligible=True
-    )
+    return RuntimeEligibility(task_index=task_index, task_name=task_name, eligible=True)
 
 
 def inspect_harbor_runtime_eligibility(
@@ -3788,7 +3779,9 @@ class HarborEnvironment:
                 self._state_capture_mode,
             )
         state = _probe_and_annotate_state(
-            self._harbor_env, state, runtime_probing=self._runtime_probing,
+            self._harbor_env,
+            state,
+            runtime_probing=self._runtime_probing,
         )
         self._state_tracker.track(state)
         if debug_enabled:
@@ -3824,10 +3817,7 @@ class HarborEnvironment:
         return raw_text
 
     def _soft_timeouts_enabled(self) -> bool:
-        return (
-            self._command_soft_timeout is not None
-            and self._soft_timeouts_disabled_depth == 0
-        )
+        return self._command_soft_timeout is not None and self._soft_timeouts_disabled_depth == 0
 
     @contextlib.contextmanager
     def _disable_soft_timeouts_temporarily(self):
@@ -3843,9 +3833,7 @@ class HarborEnvironment:
             f"[Command timed out after {timeout_sec} seconds and was cancelled by the evaluation harness.]"
         ]
         if truncated:
-            lines.append(
-                "[Trajectory terminated after exceeding the command-timeout budget.]"
-            )
+            lines.append("[Trajectory terminated after exceeding the command-timeout budget.]")
         return "\n".join(lines)
 
     def step(
@@ -3937,8 +3925,7 @@ class HarborEnvironment:
                 assert self._max_consecutive_command_timeouts is not None
                 timeout_policy_truncated = (
                     command_timeout_total_sec >= self._command_timeout_budget
-                    or consecutive_command_timeout_count
-                    >= self._max_consecutive_command_timeouts
+                    or consecutive_command_timeout_count >= self._max_consecutive_command_timeouts
                 )
                 if timeout_policy_truncated:
                     truncated = True
@@ -4018,7 +4005,8 @@ class HarborEnvironment:
             episode_step=next_step,
             last_action=cmd_for_env,
             trajectory=state.hidden.trajectory + (cmd_for_env,),
-            fs_restore_risk_ever=state.hidden.fs_restore_risk_ever or state.hidden.fs_restore_risk_now,
+            fs_restore_risk_ever=state.hidden.fs_restore_risk_ever
+            or state.hidden.fs_restore_risk_now,
             command_timeout_count=command_timeout_count,
             consecutive_command_timeout_count=consecutive_command_timeout_count,
             command_timeout_total_sec=command_timeout_total_sec,
@@ -4080,7 +4068,9 @@ class HarborEnvironment:
                 self._state_capture_mode,
             )
         next_state = _probe_and_annotate_state(
-            self._harbor_env, next_state, runtime_probing=self._runtime_probing,
+            self._harbor_env,
+            next_state,
+            runtime_probing=self._runtime_probing,
         )
 
         rewards = self.compute_rewards(state, action, next_state)
@@ -4768,8 +4758,12 @@ class HarborAdapter:
 
                 def build_harbor_env(task: Any) -> Any:
                     if environment_type == "podman-hpc" or environment_type in _APPTAINER_ALIASES:
-                        return self._create_local_environment(api, task, environment_type, trials_dir=trials_dir, **kwargs)
-                    return self._create_harbor_environment(api, task, environment_type, trials_dir=trials_dir, **kwargs)
+                        return self._create_local_environment(
+                            api, task, environment_type, trials_dir=trials_dir, **kwargs
+                        )
+                    return self._create_harbor_environment(
+                        api, task, environment_type, trials_dir=trials_dir, **kwargs
+                    )
 
                 env_factory = build_harbor_env
 
@@ -4851,7 +4845,7 @@ class HarborAdapter:
         }
 
     @staticmethod
-    def _load_tasks_from_path(api: "_HarborAPI", dataset_path: str) -> tuple[Any, ...]:
+    def _load_tasks_from_path(api: _HarborAPI, dataset_path: str) -> tuple[Any, ...]:
         tasks_root = Path(dataset_path)
         if not tasks_root.exists():
             raise FileNotFoundError(f"Dataset path does not exist: {dataset_path}")
@@ -4874,7 +4868,7 @@ class HarborAdapter:
 
     @staticmethod
     def _load_tasks_from_registry(
-        api: "_HarborAPI", dataset_name: str, version: str | None
+        api: _HarborAPI, dataset_name: str, version: str | None
     ) -> tuple[Any, ...]:
         client = api.registry_client_factory.create()
         spec = client.get_dataset_spec(dataset_name, version=version)
@@ -4885,7 +4879,12 @@ class HarborAdapter:
 
     @staticmethod
     def _create_harbor_environment(
-        api: "_HarborAPI", task: Any, environment_type: str, *, trials_dir: str | Path | None = None, **kwargs: Any
+        api: _HarborAPI,
+        task: Any,
+        environment_type: str,
+        *,
+        trials_dir: str | Path | None = None,
+        **kwargs: Any,
     ) -> Any:
         trials_base = Path(trials_dir) if trials_dir is not None else Path("trials")
         trial_paths = api.trial_paths_class(trial_dir=trials_base / str(uuid.uuid4()))
@@ -4905,7 +4904,7 @@ class HarborAdapter:
 
     @staticmethod
     def _create_local_environment(
-        api: "_HarborAPI",
+        api: _HarborAPI,
         task: Any,
         environment_type: str,
         *,
