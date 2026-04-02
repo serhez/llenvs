@@ -670,6 +670,7 @@ class _HarborTmuxTextSession:
         self._exec_timeout = exec_timeout
         self._bootstrap_if_missing = bootstrap_if_missing
         self._previous_full_buffer = ""
+        self._prompt_sentinel = f"__LLENVS_PROMPT_{uuid.uuid4().hex[:12]}__> "
         self.tmux_bootstrapped = False
         self.tmux_start_method = "direct"
 
@@ -713,7 +714,7 @@ class _HarborTmuxTextSession:
                 _preview_log_text(command_text),
             )
             dispatch_started_at = _now_monotonic()
-        self._send_command(command_text, step_token=step_token)
+        used_staged_file = self._send_command(command_text, step_token=step_token)
         if debug_enabled:
             logger.debug(
                 "Harbor tmux command dispatched in %.2fs: preview=%s",
@@ -743,6 +744,7 @@ class _HarborTmuxTextSession:
 
         full_buffer = getattr(result, "stdout", "") or ""
         observation = self._diff_full_buffer(full_buffer)
+        observation = self._sanitize_observation(observation, command_text, used_staged_file)
         self._previous_full_buffer = full_buffer
         if debug_enabled:
             logger.debug(
@@ -753,7 +755,49 @@ class _HarborTmuxTextSession:
             )
         return observation
 
-    def _send_command(self, command: str, *, step_token: str) -> None:
+    def _sanitize_observation(
+        self, observation: str, command: str, used_staged_file: bool,
+    ) -> str:
+        """Remove harness artifacts from the model-facing observation.
+
+        Strips only exact known strings — no heuristic pattern matching.
+        The raw pane capture in ``_previous_full_buffer`` is NOT affected.
+        """
+        lines = observation.split("\n")
+
+        if used_staged_file:
+            # Strip the leading staged-file source echo (first line only)
+            source_echo = f"source {self._COMMAND_FILE}"
+            if lines and lines[0].strip() == source_echo:
+                lines = lines[1:]
+        else:
+            # Strip the leading echoed command if content matches
+            # (whitespace-tolerant: the diff often has a leading space
+            # from the previous prompt)
+            if lines and lines[0].strip() == command.strip():
+                lines = lines[1:]
+
+        result = "\n".join(lines)
+
+        # Strip trailing prompt sentinel as a suffix (handles the case
+        # where a command outputs text without a trailing newline and
+        # the prompt is appended to the same line)
+        sentinel = self._prompt_sentinel
+        if result.endswith("\n" + sentinel):
+            result = result[: -len("\n" + sentinel)]
+        elif result.endswith(sentinel):
+            result = result[: -len(sentinel)]
+        else:
+            stripped_sentinel = sentinel.rstrip()
+            if result.endswith("\n" + stripped_sentinel):
+                result = result[: -len("\n" + stripped_sentinel)]
+            elif result.endswith(stripped_sentinel):
+                result = result[: -len(stripped_sentinel)]
+
+        return result
+
+    def _send_command(self, command: str, *, step_token: str) -> bool:
+        """Send command to the tmux session. Returns True if staged-file path was used."""
         session_q = shlex.quote(self._SESSION_NAME)
         token_q = shlex.quote(step_token)
         token_file_q = shlex.quote(self._TOKEN_FILE)
@@ -774,6 +818,7 @@ class _HarborTmuxTextSession:
                 _preview_log_text(command),
             )
             control_parts.append(f"tmux send-keys -l -t {session_q} {shlex.quote(command)}")
+            staged = False
         else:
             # Multi-line or oversized: stage to file in a separate exec.
             # Heredocs cannot be embedded in a && chain — the delimiter
@@ -794,9 +839,11 @@ class _HarborTmuxTextSession:
             control_parts.append(
                 f"tmux send-keys -l -t {session_q} {shlex.quote(f'source {self._COMMAND_FILE}')}"
             )
+            staged = True
 
         control_parts.append(f"tmux send-keys -t {session_q} Enter")
         self._exec(" && ".join(control_parts), timeout_sec=self._exec_timeout)
+        return staged
 
     def _capture_full_buffer(self) -> str:
         result = self._exec(
@@ -828,10 +875,14 @@ class _HarborTmuxTextSession:
         init_token = _tmux_wait_channel("llenvs_harbor_init")
         token_file_q = shlex.quote(self._TOKEN_FILE)
         hook_file_q = shlex.quote(self._HOOK_SCRIPT_FILE)
+        ps1_q = shlex.quote(self._prompt_sentinel)
         init_script = "\n".join(
             [
                 "set +H",  # Disable history expansion so ! is literal
+                f"PS1={ps1_q}",  # Force deterministic prompt sentinel
+                "export VIRTUAL_ENV_DISABLE_PROMPT=1",
                 "__llenvs_harbor_prompt_hook() {",
+                f"  PS1={ps1_q}",  # Reassert on every prompt (survives cd/env changes)
                 f"  local token_file={token_file_q}",
                 '  local token=""',
                 '  if [ -r "$token_file" ]; then',

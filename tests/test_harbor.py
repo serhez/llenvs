@@ -1195,24 +1195,28 @@ class TestHarborEnvironment:
 
         assert result.info["command_timed_out"] is False
         assert result.next_state.observation.state is not None
-        assert "<!DOCTYPE html>" in result.next_state.observation.state.text
-        # Verify the hook script disables history expansion.
+        # The echoed command should be stripped from the observation by sanitization.
+        # echo "..." > file produces no output, so the observation should be minimal.
+        obs_text = result.next_state.observation.state.text
+        assert "source /tmp/.llenvs_harbor_tmux_command" not in obs_text
+        # Verify the hook script disables history expansion and forces prompt sentinel.
         hook_cmd = next(
             cmd for cmd in mock_env._exec_history
             if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in cmd
         )
         assert "set +H" in hook_cmd
+        assert "PS1=" in hook_cmd
+        assert "VIRTUAL_ENV_DISABLE_PROMPT=1" in hook_cmd
 
     def test_step_tmux_session_falls_back_to_visible_screen(self):
-        runtime = _FakeTmuxRuntime(
-            full_buffers=[
-                "totally different buffer",
-            ],
-            visible_buffers=["pwd\n/app\nbash$ "],
-        )
+        runtime = _FakeTmuxRuntime()
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
         state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append("totally different buffer")
+        runtime.visible_buffers.append(f"pwd\n/app\n{text_session._prompt_sentinel}")
         before = len(mock_env._exec_history)
 
         result = env.step(state, Action(text="pwd"))
@@ -1221,7 +1225,44 @@ class TestHarborEnvironment:
         assert len(after) == 3
         assert "capture-pane -p -t" in after[2]
         assert result.next_state.observation.state is not None
-        assert result.next_state.observation.state.text == "pwd\n/app\nbash$ "
+        assert result.next_state.observation.state.text == "/app"
+
+    def test_step_tmux_session_keeps_real_output_that_mentions_command_file(self):
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(
+            "bash$ note: source /tmp/.llenvs_harbor_tmux_command\nline2\nbash$ "
+        )
+
+        result = env.step(
+            state,
+            Action(
+                text="x" * (text_session._DIRECT_SEND_KEYS_MAX_CHARS + 1)
+            ),
+        )
+
+        assert result.next_state.observation.state is not None
+        obs_text = result.next_state.observation.state.text
+        assert obs_text.startswith("note: source /tmp/.llenvs_harbor_tmux_command")
+        assert "line2" in obs_text
+
+    def test_step_tmux_session_preserves_output_whitespace_when_stripping_prompt(self):
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(f"bash$ printf 'x '\nx {text_session._prompt_sentinel}")
+
+        result = env.step(state, Action(text="printf 'x '"))
+
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == "x "
 
     def test_step_tmux_session_soft_timeout_returns_observation(self):
         runtime = _FakeTmuxRuntime(
