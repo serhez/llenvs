@@ -361,6 +361,8 @@ Harbor text mode supports two execution models:
 
 `tmux_session` is the preferred mode for TerminalBench-style terminal tasks because it preserves shell state, allows `cmd &` background jobs to continue across steps, and more closely matches the official TerminalBench execution model.
 
+The tmux-backed bash shell disables history expansion (`set +H`), so `!` in pasted commands (for example `<!DOCTYPE html>`) is treated literally instead of triggering `event not found` errors.
+
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
 When `command_soft_timeout`, `command_timeout_budget`, and `max_consecutive_command_timeouts` are set together, live model-issued text commands become recoverable on timeout: Harbor interrupts the command, appends a standard timeout observation to the trajectory, and only truncates once the cumulative timeout budget or consecutive-timeout cap is exceeded. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects these kwargs entirely.

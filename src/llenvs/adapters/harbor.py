@@ -836,6 +836,7 @@ class _HarborTmuxTextSession:
         hook_file_q = shlex.quote(self._HOOK_SCRIPT_FILE)
         init_script = "\n".join(
             [
+                "set +H",  # Disable history expansion so ! is literal
                 "__llenvs_harbor_prompt_hook() {",
                 f"  local token_file={token_file_q}",
                 "  local token=\"\"",

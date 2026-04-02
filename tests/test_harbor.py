@@ -290,6 +290,7 @@ class _FakeTmuxRuntime:
         wait_recovery_fails: bool = False,
         ready_after_attempts: int | None = 1,
         hook_wait_timeout_once: bool = False,
+        bang_requires_history_disable: bool = False,
     ) -> None:
         self.tmux_installed = not missing_tmux
         self.script_available = script_available
@@ -300,6 +301,10 @@ class _FakeTmuxRuntime:
         self.ready_after_attempts = ready_after_attempts
         self.ready_send_attempts = 0
         self.hook_wait_timeout_once = hook_wait_timeout_once
+        self.bang_requires_history_disable = bang_requires_history_disable
+        self.history_expansion_disabled = False
+        self.pending_bang_timeout = False
+        self.pending_bang_recovery_failure = False
         self.full_buffers = [initial_buffer, *(full_buffers or [])]
         self.visible_buffers = visible_buffers or []
         self.install_attempts = 0
@@ -345,6 +350,14 @@ class _FakeTmuxRuntime:
             return MockExecResult(stdout="")
 
         if "tmux wait-for " in command and "capture-pane -p -S -" in command:
+            if self.pending_bang_timeout:
+                self.pending_bang_timeout = False
+                self.pending_bang_recovery_failure = True
+                if not self.visible_buffers:
+                    self.visible_buffers.append(
+                        "bash: !DOCTYPE: event not found\nbash$ "
+                    )
+                raise RuntimeError("apptainer command timed out after 120s")
             if self.wait_timeout_once:
                 self.wait_timeout_once = False
                 raise RuntimeError("apptainer command timed out after 120s")
@@ -375,12 +388,28 @@ class _FakeTmuxRuntime:
                     )
                     if match is not None:
                         self.files["/tmp/.llenvs_harbor_tmux_ready"] = match.group(1)
+            if "source /tmp/.llenvs_harbor_hook_init.sh" in command:
+                self.history_expansion_disabled = "set +H" in self.staged_hook_script
+            if (
+                self.bang_requires_history_disable
+                and "tmux send-keys -l" in command
+                and "!" in command
+                and not self.history_expansion_disabled
+            ):
+                self.pending_bang_timeout = True
             return MockExecResult(stdout="")
 
         if "tmux has-session" in command:
             return MockExecResult(stdout="")
 
         if "tmux wait-for " in command:
+            if (
+                self.pending_bang_recovery_failure
+                and "llenvs_harbor_step_" in command
+                and "tmux wait-for -U" in command
+            ):
+                self.pending_bang_recovery_failure = False
+                raise RuntimeError("apptainer command timed out after 5s")
             if (
                 self.wait_recovery_fails
                 and "llenvs_harbor_step_" in command
@@ -845,6 +874,7 @@ class TestHarborEnvironment:
         )
         assert 'tmux wait-for -U "$token"' in init_cmd
         assert "PROMPT_COMMAND" in init_cmd
+        assert "set +H" in init_cmd
         assert any(
             "tmux wait-for -L llenvs_harbor_init_" in cmd
             and "printf '%s' llenvs_harbor_init_" in cmd
@@ -1147,6 +1177,31 @@ class TestHarborEnvironment:
         assert len(after) == 3
         assert "cat > " in after[0]
         assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
+
+    def test_step_tmux_session_handles_bang_in_command(self):
+        """Commands with ! (e.g., <!DOCTYPE>) work because set +H disables history expansion."""
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                'bash$ echo "<!DOCTYPE html>" > /app/out.html\nbash$ ',
+            ],
+            bang_requires_history_disable=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        # This command contains ! which would trigger history expansion without set +H.
+        result = env.step(state, Action(text='echo "<!DOCTYPE html>" > /app/out.html'))
+
+        assert result.info["command_timed_out"] is False
+        assert result.next_state.observation.state is not None
+        assert "<!DOCTYPE html>" in result.next_state.observation.state.text
+        # Verify the hook script disables history expansion.
+        hook_cmd = next(
+            cmd for cmd in mock_env._exec_history
+            if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in cmd
+        )
+        assert "set +H" in hook_cmd
 
     def test_step_tmux_session_falls_back_to_visible_screen(self):
         runtime = _FakeTmuxRuntime(
