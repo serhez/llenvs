@@ -1,7 +1,10 @@
 """Tests for the Harbor adapter."""
 
 import logging
+import os
 import re
+import signal
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -388,6 +391,37 @@ class _FakeTmuxRuntime:
                 self.hook_wait_timeout_once = False
                 raise RuntimeError("apptainer command timed out after 120s")
             return MockExecResult(stdout="")
+
+
+class _FakeTimeoutThenExitProcess:
+    def __init__(self) -> None:
+        self.pid = 4321
+        self.returncode: int | None = None
+        self.communicate_timeouts: list[float | int | None] = []
+
+    def communicate(self, timeout: float | int | None = None) -> tuple[bytes, bytes]:
+        self.communicate_timeouts.append(timeout)
+        if len(self.communicate_timeouts) == 1:
+            raise subprocess.TimeoutExpired(cmd=["fake"], timeout=timeout)
+        self.returncode = -signal.SIGTERM
+        return (b"", b"")
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+class _FakeNeverReapProcess:
+    def __init__(self) -> None:
+        self.pid = 8765
+        self.returncode: int | None = None
+        self.communicate_timeouts: list[float | int | None] = []
+
+    def communicate(self, timeout: float | int | None = None) -> tuple[bytes, bytes]:
+        self.communicate_timeouts.append(timeout)
+        raise subprocess.TimeoutExpired(cmd=["fake"], timeout=timeout)
+
+    def poll(self) -> int | None:
+        return self.returncode
 
         if "tmux set-option" in command:
             return MockExecResult(stdout="")
@@ -1479,6 +1513,35 @@ class TestHarborEnvironment:
         assert any("Harbor verifier done:" in message for message in messages)
         assert any("Harbor runtime probe start:" in message for message in messages)
         assert any("Harbor runtime probe finished:" in message for message in messages)
+
+    def test_debug_logs_tmux_timeout_recovery(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=["bash$ "],
+            visible_buffers=["bash$ sleep 999"],
+            wait_timeout_once=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+            command_timeout_budget=20,
+            max_consecutive_command_timeouts=2,
+        )
+        state, _ = _reset_env(env)
+
+        with caplog.at_level(logging.DEBUG, logger="llenvs.adapters.harbor"):
+            result = env.step(state, Action(text="sleep 999"))
+
+        assert result.info["command_timed_out"] is True
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor tmux timeout recovery start:" in message for message in messages)
+        assert any("Harbor tmux timeout recovery sent Ctrl-C:" in message for message in messages)
+        assert any("Harbor tmux timeout recovery succeeded:" in message for message in messages)
 
     def test_truncation_skips_verifier_when_disabled(self):
         verifier_result = MockVerifierResult(rewards={"reward": 0.5})
@@ -2789,6 +2852,98 @@ class TestValidateReplayConsistency:
         assert timeout_values == [17, 17]
 
 
+class TestHarborHpcCliRunner:
+    def test_shared_cli_runner_times_out_and_reaps_after_sigterm(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        process = _FakeTimeoutThenExitProcess()
+        popen_kwargs: dict[str, Any] = {}
+        kill_signals: list[tuple[int, signal.Signals]] = []
+
+        def fake_popen(*args: Any, **kwargs: Any) -> _FakeTimeoutThenExitProcess:
+            del args
+            popen_kwargs.update(kwargs)
+            return process
+
+        def fake_killpg(pid: int, sig: signal.Signals) -> None:
+            kill_signals.append((pid, sig))
+
+        monkeypatch.setattr(harbor_module.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(harbor_module.os, "killpg", fake_killpg)
+
+        with caplog.at_level(logging.DEBUG, logger="llenvs.adapters.harbor"):
+            with pytest.raises(RuntimeError, match=r"apptainer command timed out after 3s"):
+                harbor_module._run_hpc_cli_command(
+                    ["apptainer", "exec", "instance://test", "bash", "-lc", "sleep 999"],
+                    cwd=tmp_path,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    check=False,
+                    timeout_sec=3,
+                    runtime_label="apptainer",
+                    logger=logging.getLogger("llenvs.adapters.harbor"),
+                )
+
+        assert popen_kwargs["cwd"] == str(tmp_path)
+        assert popen_kwargs["start_new_session"] is True
+        assert process.communicate_timeouts == [3, 5]
+        assert kill_signals == [(process.pid, signal.SIGTERM)]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("apptainer cmd[" in message and "timeout after" in message for message in messages)
+        assert any("sent SIGTERM" in message for message in messages)
+        assert any("reaped after SIGTERM" in message for message in messages)
+
+    def test_shared_cli_runner_raises_cleanup_failure_after_sigkill(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        process = _FakeNeverReapProcess()
+        kill_signals: list[tuple[int, signal.Signals]] = []
+
+        def fake_popen(*args: Any, **kwargs: Any) -> _FakeNeverReapProcess:
+            del args, kwargs
+            return process
+
+        def fake_killpg(pid: int, sig: signal.Signals) -> None:
+            kill_signals.append((pid, sig))
+
+        monkeypatch.setattr(harbor_module.subprocess, "Popen", fake_popen)
+        monkeypatch.setattr(harbor_module.os, "killpg", fake_killpg)
+
+        with caplog.at_level(logging.DEBUG, logger="llenvs.adapters.harbor"):
+            with pytest.raises(
+                RuntimeError,
+                match=r"podman-hpc command timed out after 4s and cleanup failed after SIGKILL",
+            ):
+                harbor_module._run_hpc_cli_command(
+                    ["podman-hpc", "exec", "test", "bash", "-lc", "sleep 999"],
+                    cwd=tmp_path,
+                    env={"PATH": os.environ.get("PATH", "")},
+                    check=False,
+                    timeout_sec=4,
+                    runtime_label="podman-hpc",
+                    logger=logging.getLogger("llenvs.adapters.harbor"),
+                )
+
+        assert process.communicate_timeouts == [4, 5, 5]
+        assert kill_signals == [
+            (process.pid, signal.SIGTERM),
+            (process.pid, signal.SIGKILL),
+        ]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("sent SIGTERM" in message for message in messages)
+        assert any("sent SIGKILL" in message for message in messages)
+        assert any("cleanup failed after SIGKILL" in message for message in messages)
+
+
 class TestPodmanHPCEnvironment:
     def _make_trial_paths(self, tmp_path):
         verifier_dir = tmp_path / "verifier"
@@ -3052,6 +3207,66 @@ services:
             "pwd",
         ]
         assert calls[0][2] == 17
+
+    def test_run_podman_command_uses_shared_cli_runner(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import PodmanHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = PodmanHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+
+        recorded: dict[str, Any] = {}
+
+        def fake_helper(
+            cmd: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            check: bool,
+            timeout_sec: int | None,
+            runtime_label: str,
+            logger: logging.Logger,
+        ) -> MockExecResult:
+            recorded.update(
+                {
+                    "cmd": cmd,
+                    "cwd": cwd,
+                    "env": env,
+                    "check": check,
+                    "timeout_sec": timeout_sec,
+                    "runtime_label": runtime_label,
+                    "logger_name": logger.name,
+                }
+            )
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(harbor_module, "_run_hpc_cli_command", fake_helper)
+
+        result = run_async(
+            env._run_podman_command(
+                ["podman-hpc", "exec", "container", "bash", "-lc", "pwd"],
+                check=False,
+                timeout_sec=9,
+            )
+        )
+
+        assert result.stdout == "ok"
+        assert recorded["cmd"] == ["podman-hpc", "exec", "container", "bash", "-lc", "pwd"]
+        assert recorded["cwd"] == tmp_path
+        assert recorded["check"] is False
+        assert recorded["timeout_sec"] == 9
+        assert recorded["runtime_label"] == "podman-hpc"
+        assert recorded["logger_name"] == "llenvs.adapters.harbor"
+        assert "PATH" in recorded["env"]
 
     def test_export_checkpoint_uses_container_checkpoint(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
@@ -3928,6 +4143,66 @@ class TestApptainerHPCEnvironment:
         assert f"instance://{env._instance_name}" in cmd
         assert cmd[-3:] == ["bash", "-lc", "pwd"]
         assert calls[0][2] == 17
+
+    def test_run_apptainer_command_uses_shared_cli_runner(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(tmp_path / "trial"),
+            task_env_config=self._make_task_env_config(),
+        )
+
+        recorded: dict[str, Any] = {}
+
+        def fake_helper(
+            cmd: list[str],
+            *,
+            cwd: Path,
+            env: dict[str, str],
+            check: bool,
+            timeout_sec: int | None,
+            runtime_label: str,
+            logger: logging.Logger,
+        ) -> MockExecResult:
+            recorded.update(
+                {
+                    "cmd": cmd,
+                    "cwd": cwd,
+                    "env": env,
+                    "check": check,
+                    "timeout_sec": timeout_sec,
+                    "runtime_label": runtime_label,
+                    "logger_name": logger.name,
+                }
+            )
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(harbor_module, "_run_hpc_cli_command", fake_helper)
+
+        result = run_async(
+            env._run_apptainer_command(
+                ["apptainer", "exec", "instance://test", "bash", "-lc", "pwd"],
+                check=False,
+                timeout_sec=11,
+            )
+        )
+
+        assert result.stdout == "ok"
+        assert recorded["cmd"] == ["apptainer", "exec", "instance://test", "bash", "-lc", "pwd"]
+        assert recorded["cwd"] == tmp_path
+        assert recorded["check"] is False
+        assert recorded["timeout_sec"] == 11
+        assert recorded["runtime_label"] == "apptainer"
+        assert recorded["logger_name"] == "llenvs.adapters.harbor"
+        assert "PATH" in recorded["env"]
 
     def test_exec_defaults_to_image_workdir_when_cwd_omitted(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path

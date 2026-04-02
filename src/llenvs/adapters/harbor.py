@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
@@ -431,6 +432,167 @@ def _internal_verifier_timeout_sec(
     return max(1, min(candidates))
 
 
+def _signal_name(sig: int) -> str:
+    try:
+        return signal.Signals(sig).name
+    except ValueError:
+        return str(sig)
+
+
+def _signal_hpc_process(
+    proc: subprocess.Popen[bytes],
+    sig: int,
+    *,
+    runtime_label: str,
+    command_id: str,
+    logger: logging.Logger,
+) -> None:
+    pid = proc.pid
+    sig_name = _signal_name(sig)
+    try:
+        if pid is not None and hasattr(os, "killpg"):
+            os.killpg(pid, sig)
+        elif sig == signal.SIGTERM:
+            proc.terminate()
+        elif sig == signal.SIGKILL:
+            proc.kill()
+        else:
+            proc.send_signal(sig)
+        logger.debug(
+            "%s cmd[%s]: sent %s to pid=%s",
+            runtime_label,
+            command_id,
+            sig_name,
+            pid,
+        )
+    except ProcessLookupError:
+        logger.debug(
+            "%s cmd[%s]: pid=%s already exited before %s",
+            runtime_label,
+            command_id,
+            pid,
+            sig_name,
+        )
+    except Exception as exc:
+        logger.debug(
+            "%s cmd[%s]: failed to send %s to pid=%s: %s",
+            runtime_label,
+            command_id,
+            sig_name,
+            pid,
+            exc,
+        )
+
+
+def _run_hpc_cli_command(
+    cmd: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    check: bool = True,
+    timeout_sec: int | None = None,
+    runtime_label: str,
+    logger: logging.Logger,
+) -> _CLIResult:
+    command_id = uuid.uuid4().hex[:8]
+    joined_cmd = " ".join(cmd)
+    started_at = _now_monotonic()
+    logger.debug("%s cmd[%s]: %s", runtime_label, command_id, joined_cmd)
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=str(cwd),
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        if timeout_sec is not None:
+            stdout_b, stderr_b = proc.communicate(timeout=timeout_sec)
+        else:
+            stdout_b, stderr_b = proc.communicate()
+    except subprocess.TimeoutExpired:
+        elapsed_sec = max(0.0, _now_monotonic() - started_at)
+        logger.debug(
+            "%s cmd[%s]: timeout after %.2fs (limit=%ss) pid=%s",
+            runtime_label,
+            command_id,
+            elapsed_sec,
+            timeout_sec,
+            proc.pid,
+        )
+        _signal_hpc_process(
+            proc,
+            signal.SIGTERM,
+            runtime_label=runtime_label,
+            command_id=command_id,
+            logger=logger,
+        )
+        try:
+            proc.communicate(timeout=5)
+            logger.debug(
+                "%s cmd[%s]: reaped after SIGTERM pid=%s",
+                runtime_label,
+                command_id,
+                proc.pid,
+            )
+        except subprocess.TimeoutExpired:
+            logger.debug(
+                "%s cmd[%s]: SIGTERM grace expired after 5.00s pid=%s",
+                runtime_label,
+                command_id,
+                proc.pid,
+            )
+            _signal_hpc_process(
+                proc,
+                signal.SIGKILL,
+                runtime_label=runtime_label,
+                command_id=command_id,
+                logger=logger,
+            )
+            try:
+                proc.communicate(timeout=5)
+                logger.debug(
+                    "%s cmd[%s]: reaped after SIGKILL pid=%s",
+                    runtime_label,
+                    command_id,
+                    proc.pid,
+                )
+            except subprocess.TimeoutExpired:
+                logger.debug(
+                    "%s cmd[%s]: cleanup failed after SIGKILL pid=%s",
+                    runtime_label,
+                    command_id,
+                    proc.pid,
+                )
+                raise RuntimeError(
+                    f"{runtime_label} command timed out after {timeout_sec}s "
+                    f"and cleanup failed after SIGKILL: {joined_cmd}"
+                )
+        raise RuntimeError(
+            f"{runtime_label} command timed out after {timeout_sec}s: {joined_cmd}"
+        )
+
+    result = _CLIResult(
+        stdout=stdout_b.decode("utf-8", errors="replace").rstrip(),
+        stderr=stderr_b.decode("utf-8", errors="replace").rstrip(),
+        return_code=proc.returncode or 0,
+    )
+    logger.debug(
+        "%s cmd[%s]: completed rc=%d duration=%.2fs",
+        runtime_label,
+        command_id,
+        result.return_code,
+        max(0.0, _now_monotonic() - started_at),
+    )
+    if check and result.return_code != 0:
+        raise RuntimeError(
+            f"{runtime_label} command failed (exit {result.return_code}): "
+            f"{joined_cmd}\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+    return result
+
+
 def _normalize_text_exec_mode(mode: str) -> str:
     normalized = mode.strip().lower()
     if normalized not in {"independent_exec", "tmux_session"}:
@@ -753,10 +915,39 @@ class _HarborTmuxTextSession:
     ) -> RuntimeError | _HarborRecoverableCommandTimeout:
         visible = self._safe_capture(self._capture_visible_screen)
         full = self._safe_capture(self._capture_full_buffer)
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        if debug_enabled:
+            visible_tail = (
+                _preview_log_text(
+                    "\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
+                )
+                if visible
+                else ""
+            )
+            full_tail = (
+                _preview_log_text(
+                    "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
+                )
+                if full
+                else ""
+            )
+            logger.debug(
+                "Harbor tmux timeout recovery start: timeout=%ss elapsed=%.2fs preview=%s visible_tail=%s full_tail=%s",
+                timeout_sec,
+                elapsed_sec,
+                _preview_log_text(command),
+                visible_tail,
+                full_tail,
+            )
         self._safe_exec(
             f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-c",
             timeout_sec=10,
         )
+        if debug_enabled:
+            logger.debug(
+                "Harbor tmux timeout recovery sent Ctrl-C: preview=%s",
+                _preview_log_text(command),
+            )
         recovered = True
         try:
             token_q = shlex.quote(step_token)
@@ -771,6 +962,19 @@ class _HarborTmuxTextSession:
         if recovered_buffer:
             self._previous_full_buffer = recovered_buffer
         if recovered:
+            if debug_enabled:
+                recovered_tail = _preview_log_text(
+                    "\n".join(
+                        recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]
+                    )
+                ) if recovered_buffer else ""
+                logger.debug(
+                    "Harbor tmux timeout recovery succeeded: timeout=%ss elapsed=%.2fs preview=%s recovered_tail=%s",
+                    timeout_sec,
+                    elapsed_sec,
+                    _preview_log_text(command),
+                    recovered_tail,
+                )
             tail_lines = "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]) if full else ""
             return _HarborRecoverableCommandTimeout(
                 command=command,
@@ -779,6 +983,19 @@ class _HarborTmuxTextSession:
                 recovered=True,
                 visible_screen=visible,
                 full_buffer_tail=tail_lines,
+            )
+        if debug_enabled:
+            recovered_tail = _preview_log_text(
+                "\n".join(
+                    recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]
+                )
+            ) if recovered_buffer else ""
+            logger.debug(
+                "Harbor tmux timeout recovery failed: timeout=%ss elapsed=%.2fs preview=%s recovered_tail=%s",
+                timeout_sec,
+                elapsed_sec,
+                _preview_log_text(command),
+                recovered_tail,
             )
         details: list[str] = [
             f"Harbor tmux session command timed out after {timeout_sec}s: {command}"
@@ -1571,41 +1788,16 @@ class PodmanHPCEnvironment:
         check: bool = True,
         timeout_sec: int | None = None,
     ) -> _CLIResult:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(self.environment_dir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        return await asyncio.to_thread(
+            _run_hpc_cli_command,
+            cmd,
+            cwd=self.environment_dir,
             env=os.environ.copy(),
+            check=check,
+            timeout_sec=timeout_sec,
+            runtime_label="podman-hpc",
+            logger=self.logger,
         )
-        try:
-            if timeout_sec is not None:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout_sec,
-                )
-            else:
-                stdout_b, stderr_b = await process.communicate()
-        except asyncio.TimeoutError:
-            process.terminate()
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(process.communicate(), timeout=5)
-            except asyncio.TimeoutError:
-                process.kill()
-                stdout_b, stderr_b = await process.communicate()
-            raise RuntimeError(f"podman-hpc command timed out after {timeout_sec}s")
-
-        result = _CLIResult(
-            stdout=stdout_b.decode(errors="replace").strip() if stdout_b else "",
-            stderr=stderr_b.decode(errors="replace").strip() if stderr_b else "",
-            return_code=process.returncode or 0,
-        )
-        if check and result.return_code != 0:
-            raise RuntimeError(
-                f"podman-hpc command failed (exit {result.return_code}): "
-                f"{' '.join(cmd)}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-            )
-        return result
 
     def _docker_image_source(self) -> str:
         image = getattr(self.task_env_config, "docker_image", None)
@@ -2667,47 +2859,16 @@ class ApptainerHPCEnvironment:
         check: bool = True,
         timeout_sec: int | None = None,
     ) -> _CLIResult:
-        self.logger.debug("apptainer cmd: %s", " ".join(cmd))
-        env = os.environ.copy()
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(self.environment_dir),
-            env=env,
+        return await asyncio.to_thread(
+            _run_hpc_cli_command,
+            cmd,
+            cwd=self.environment_dir,
+            env=os.environ.copy(),
+            check=check,
+            timeout_sec=timeout_sec,
+            runtime_label="apptainer",
+            logger=self.logger,
         )
-        try:
-            if timeout_sec is not None:
-                stdout, stderr = await asyncio.wait_for(
-                    proc.communicate(), timeout=timeout_sec
-                )
-            else:
-                stdout, stderr = await proc.communicate()
-        except asyncio.TimeoutError:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.communicate(), timeout=5)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                proc.kill()
-                try:
-                    await proc.communicate()
-                except Exception:
-                    pass
-            raise RuntimeError(
-                f"apptainer command timed out after {timeout_sec}s: {' '.join(cmd)}"
-            )
-
-        result = _CLIResult(
-            stdout=stdout.decode("utf-8", errors="replace").rstrip(),
-            stderr=stderr.decode("utf-8", errors="replace").rstrip(),
-            return_code=proc.returncode or 0,
-        )
-        if check and result.return_code != 0:
-            raise RuntimeError(
-                f"apptainer command failed (exit {result.return_code}): "
-                f"{' '.join(cmd)}\nstdout: {result.stdout}\nstderr: {result.stderr}"
-            )
-        return result
 
     async def _log_runtime_info(self) -> None:
         """Probe and log Apptainer runtime capabilities."""
