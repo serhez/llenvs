@@ -422,7 +422,7 @@ When `runtime_probing=True` is passed to `get_environment()`, each `reset()` and
 - **Processes** (requires `pid_namespace=True`): detects new background processes not in the baseline.
 - **Mounts**: detects mount table changes via `/proc/self/mountinfo` fingerprint.
 - **Listening ports**: detects new listening sockets via `ss`/`netstat`.
-- **Staging content**: detects unexpected files in `/staging`.
+- **Staging content**: detects unexpected top-level content in `/staging`. Harbor-managed helper entries such as `upload` and `download` are ignored.
 
 Risk signals are stored on `HarborHidden`:
 - `fs_restore_risk_now` — resets each step (current probe vs baseline).

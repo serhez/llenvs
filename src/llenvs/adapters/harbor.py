@@ -251,6 +251,7 @@ class RuntimeProbeSnapshot:
     mount_fingerprint: str
     listening_ports: frozenset[int]
     staging_has_content: bool
+    staging_entries: frozenset[str] = frozenset()
     probe_failed: bool = False
     probe_error: str | None = None
 
@@ -1367,6 +1368,11 @@ def _parse_probe_output(
 
     # Staging
     staging_text = sections.get("STAGING", "UNAVAILABLE").strip()
+    staging_entries = frozenset(
+        line.strip()
+        for line in staging_text.splitlines()
+        if line.strip() and line.strip() != "UNAVAILABLE"
+    )
     staging_has_content = bool(
         staging_text and staging_text != "UNAVAILABLE"
     )
@@ -1376,6 +1382,7 @@ def _parse_probe_output(
         mount_fingerprint=mount_fingerprint,
         listening_ports=listening_ports,
         staging_has_content=staging_has_content,
+        staging_entries=staging_entries,
     )
 
 
@@ -3361,7 +3368,8 @@ class ApptainerHPCEnvironment:
             reasons.append(
                 f"new_listening_ports:{','.join(str(p) for p in sorted(new_ports))}"
             )
-        if current.staging_has_content:
+        unexpected_staging_entries = current.staging_entries - {"upload", "download"}
+        if current.staging_has_content and unexpected_staging_entries:
             reasons.append("staging_content_detected")
         if current.probe_failed and not self._probe_baseline.probe_failed:
             reasons.append("probe_degraded")

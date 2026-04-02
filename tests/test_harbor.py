@@ -5312,6 +5312,7 @@ class TestRuntimeProbing:
         assert result.process_commands == frozenset({"bash", "python3", "nginx"})
         assert result.mount_fingerprint == "abcdef123456"
         assert result.listening_ports == frozenset({8080, 443})
+        assert result.staging_entries == frozenset({"upload", "download"})
         assert result.staging_has_content is True
         assert result.probe_failed is False
 
@@ -5333,6 +5334,7 @@ class TestRuntimeProbing:
         assert result.process_commands == frozenset()
         assert result.mount_fingerprint == ""
         assert result.listening_ports == frozenset()
+        assert result.staging_entries == frozenset()
         assert result.staging_has_content is False
 
     def test_probe_skips_process_diff_without_pid_namespace(self):
@@ -5352,6 +5354,50 @@ class TestRuntimeProbing:
 
         # Even though process data is present, it should be ignored
         assert result.process_commands == frozenset()
+
+    def test_detect_risk_ignores_harbor_managed_staging_paths(self, tmp_path):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment, RuntimeProbeSnapshot
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        for name in ("verifier", "agent", "artifacts"):
+            (trial / name).mkdir(parents=True, exist_ok=True)
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=SimpleNamespace(
+                trial_dir=trial,
+                verifier_dir=trial / "verifier",
+                agent_dir=trial / "agent",
+                artifacts_dir=trial / "artifacts",
+            ),
+            task_env_config=SimpleNamespace(
+                docker_image="ubuntu:latest", cpus=1, memory_mb=1024, allow_internet=True
+            ),
+            sif_cache_dir=str(sif_dir),
+        )
+
+        env._probe_baseline = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=False,
+        )
+
+        current = RuntimeProbeSnapshot(
+            process_commands=frozenset(),
+            mount_fingerprint="abc",
+            listening_ports=frozenset(),
+            staging_has_content=True,
+            staging_entries=frozenset({"upload", "download"}),
+        )
+
+        risk, reasons = env.detect_runtime_risk(current)
+        assert risk is False
+        assert reasons == ()
 
     def test_detect_risk_extra_processes(self, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment, RuntimeProbeSnapshot
@@ -5520,6 +5566,7 @@ class TestRuntimeProbing:
             mount_fingerprint="abc",
             listening_ports=frozenset(),
             staging_has_content=True,
+            staging_entries=frozenset({"upload", "scratch"}),
         )
 
         risk, reasons = env.detect_runtime_risk(current)
