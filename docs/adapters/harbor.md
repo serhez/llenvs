@@ -350,6 +350,8 @@ Two validation modes:
 1. **Self-consistency** (`reference_probes=None`): multiple replays produce the same state as each other.
 2. **Live-vs-restored** (`reference_probes` provided): restored state matches probe outputs captured from the live container during data collection. This is the stronger check.
 
+Probe commands are executed out-of-band against the restored Harbor runtime, not through `env.step(...)`, so validation does not consume episode steps or trigger verifier/truncation side effects on near-horizon states.
+
 Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `probe_outputs` (per-trial), and `divergence_details`.
 
 ### Text Execution Modes

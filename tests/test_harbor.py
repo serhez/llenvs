@@ -2770,6 +2770,28 @@ class TestHarborRestore:
 class TestValidateReplayConsistency:
     """Tests for validate_replay_consistency() utility."""
 
+    def test_capture_replay_probe_outputs_returns_probe_stdout(self):
+        from llenvs.adapters.harbor import capture_replay_probe_outputs
+
+        def env_factory():
+            mock_env = MockHarborEnvironment(
+                exec_results=[
+                    MockExecResult(stdout="ok"),  # trajectory command
+                    MockExecResult(stdout="abc123"),  # probe 1
+                    MockExecResult(stdout="def456"),  # probe 2
+                ]
+            )
+            return _make_env(harbor_env=mock_env)
+
+        result = capture_replay_probe_outputs(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo ok",),
+            probe_commands=("probe1", "probe2"),
+        )
+
+        assert result == {"probe1": "abc123", "probe2": "def456"}
+
     def test_consistent_replays(self):
         """Deterministic env produces consistent=True."""
         from llenvs.adapters.harbor import validate_replay_consistency
@@ -2876,6 +2898,45 @@ class TestValidateReplayConsistency:
 
         assert result["matches_reference"] is False
         assert any("Reference mismatch" in d for d in result["divergence_details"])
+
+    def test_replay_probe_capture_does_not_trigger_verifier_on_near_horizon_state(self):
+        from llenvs.adapters.harbor import validate_replay_consistency
+
+        verifier_calls = 0
+
+        class CountingVerifier:
+            async def verify(self):
+                nonlocal verifier_calls
+                verifier_calls += 1
+                return MockVerifierResult()
+
+        def verifier_factory(task: Any, env: Any) -> CountingVerifier:
+            return CountingVerifier()
+
+        def env_factory():
+            mock_env = MockHarborEnvironment(
+                exec_results=[
+                    MockExecResult(stdout="ok"),  # trajectory command
+                    MockExecResult(stdout="probe_hash"),  # probe command
+                ]
+            )
+            return _make_env(
+                harbor_env=mock_env,
+                verifier_factory=verifier_factory,
+                max_steps=2,
+                verify_on_truncation=True,
+            )
+
+        result = validate_replay_consistency(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo ok",),
+            probe_commands=("probe1",),
+            num_trials=1,
+        )
+
+        assert result["consistent"] is True
+        assert verifier_calls == 0
 
     def test_replay_validation_uses_hard_timeout_when_soft_policy_enabled(self):
         from llenvs.adapters.harbor import validate_replay_consistency

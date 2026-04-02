@@ -5035,6 +5035,60 @@ def harbor_snapshot_restore(
     return state
 
 
+def _run_replay_probe_command(
+    env: HarborEnvironment,
+    command: str,
+) -> str:
+    """Run a read-only probe command against a restored Harbor runtime.
+
+    Unlike ``env.step(...)``, this does not advance episode state or trigger
+    verifier execution when the restored state is already at/near ``max_steps``.
+    """
+    with env._disable_soft_timeouts_temporarily():
+        if env._text_exec_mode == "tmux_session":
+            text_session = getattr(env, "_text_session", None)
+            if text_session is None:
+                raise RuntimeError("Harbor tmux text session was not initialized")
+            return text_session.run_command(command)
+
+        harbor_env = getattr(env, "_harbor_env", None)
+        if harbor_env is None:
+            raise RuntimeError("Harbor environment reset did not initialize a runtime")
+        exec_result = run_async(harbor_env.exec(command, timeout_sec=env._exec_timeout))
+        return _format_exec_result(exec_result)
+
+
+def capture_replay_probe_outputs(
+    env_factory: Callable[[], HarborEnvironment],
+    task_index: int,
+    trajectory: tuple[str, ...],
+    probe_commands: tuple[str, ...] = (
+        "find /app /home /etc -type f 2>/dev/null | sort | md5sum",
+        "dpkg -l 2>/dev/null | awk '{print $2, $3}' | md5sum",
+    ),
+) -> dict[str, str]:
+    """Restore a Harbor replay state and capture read-only probe outputs.
+
+    Replays the saved trajectory via ``env.step(...)`` to reach the target
+    state, then runs probe commands directly against the restored runtime so
+    probe capture does not consume additional episode steps.
+    """
+    env = env_factory()
+    try:
+        with env._disable_soft_timeouts_temporarily():
+            current, _info = env.reset(options={"task_index": task_index})
+            for cmd in trajectory:
+                result = env.step(current, Action(text=cmd))
+                current = result.next_state
+
+            return {
+                probe_cmd: _run_replay_probe_command(env, probe_cmd)
+                for probe_cmd in probe_commands
+            }
+    finally:
+        env.close()
+
+
 def validate_replay_consistency(
     env_factory: Callable[[], HarborEnvironment],
     task_index: int,
@@ -5076,26 +5130,14 @@ def validate_replay_consistency(
     trial_outputs: list[dict[str, str]] = []
 
     for _trial in range(num_trials):
-        env = env_factory()
-        try:
-            with env._disable_soft_timeouts_temporarily():
-                # Reset and replay
-                current, _info = env.reset(options={"task_index": task_index})
-                for cmd in trajectory:
-                    result = env.step(current, Action(text=cmd))
-                    current = result.next_state
-
-                # Run probe commands
-                probes: dict[str, str] = {}
-                for probe_cmd in probe_commands:
-                    probe_result = env.step(current, Action(text=probe_cmd))
-                    obs = probe_result.next_state.observation
-                    probes[probe_cmd] = obs.state.text if obs.state else ""
-                    current = probe_result.next_state
-
-            trial_outputs.append(probes)
-        finally:
-            env.close()
+        trial_outputs.append(
+            capture_replay_probe_outputs(
+                env_factory=env_factory,
+                task_index=task_index,
+                trajectory=trajectory,
+                probe_commands=probe_commands,
+            )
+        )
 
     # Self-consistency: all trials must match the first
     divergence_details: list[str] = []
