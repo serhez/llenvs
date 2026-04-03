@@ -331,6 +331,9 @@ class _FakeTmuxRuntime:
                 raise self.direct_start_error
             return MockExecResult(stdout="")
 
+        if "tmux resize-window -t " in command:
+            return MockExecResult(stdout="")
+
         if "rm -f /tmp/.llenvs_harbor_tmux_ready" in command:
             self.files.pop("/tmp/.llenvs_harbor_tmux_ready", None)
             return MockExecResult(stdout="")
@@ -349,7 +352,7 @@ class _FakeTmuxRuntime:
                 self.files["/tmp/.llenvs_harbor_hook_init.sh"] = self.staged_hook_script
             return MockExecResult(stdout="")
 
-        if "tmux wait-for " in command and "capture-pane -p -S -" in command:
+        if "tmux wait-for " in command and "capture-pane" in command and "-S -" in command:
             if self.pending_bang_timeout:
                 self.pending_bang_timeout = False
                 self.pending_bang_recovery_failure = True
@@ -365,12 +368,12 @@ class _FakeTmuxRuntime:
                 raise AssertionError(f"Unexpected full-buffer capture command: {command}")
             return MockExecResult(stdout=self.full_buffers.pop(0))
 
-        if "tmux capture-pane -p -S -" in command:
+        if "tmux capture-pane" in command and "-S -" in command:
             if not self.full_buffers:
                 raise AssertionError(f"Unexpected full-buffer capture command: {command}")
             return MockExecResult(stdout=self.full_buffers.pop(0))
 
-        if "tmux capture-pane -p " in command:
+        if "tmux capture-pane" in command:
             if not self.visible_buffers:
                 raise AssertionError(f"Unexpected visible-buffer capture command: {command}")
             return MockExecResult(stdout=self.visible_buffers.pop(0))
@@ -885,6 +888,10 @@ class TestHarborEnvironment:
             and "source /tmp/.llenvs_harbor_hook_init.sh" in cmd
             for cmd in mock_env._exec_history
         )
+        assert any(
+            "tmux resize-window -t " in cmd and " -x 200" in cmd
+            for cmd in mock_env._exec_history
+        )
 
     def test_reset_tmux_session_bootstraps_missing_tmux(self):
         runtime = _FakeTmuxRuntime(missing_tmux=True)
@@ -937,6 +944,10 @@ class TestHarborEnvironment:
             ("script -qc" in cmd or "script -q -c" in cmd) and "bash --login" in cmd
             for cmd in mock_env._exec_history
         )
+        assert any(
+            "tmux resize-window -t " in cmd and " -x 200" in cmd
+            for cmd in mock_env._exec_history
+        )
 
     def test_reset_tmux_session_readiness_timeout_includes_pane_diagnostics(
         self, monkeypatch: pytest.MonkeyPatch
@@ -967,6 +978,14 @@ class TestHarborEnvironment:
         assert "visible startup buffer" in message
         assert "full startup buffer" in message
         assert runtime.ready_send_attempts >= 1
+        assert any(
+            "tmux capture-pane -p -t " in cmd and "-J" not in cmd
+            for cmd in mock_env._exec_history
+        )
+        assert any(
+            "tmux capture-pane -p -S - -t " in cmd and "-J" not in cmd
+            for cmd in mock_env._exec_history
+        )
 
     def test_reset_tmux_session_hook_install_timeout_includes_pane_diagnostics(self):
         runtime = _FakeTmuxRuntime(
@@ -1104,7 +1123,7 @@ class TestHarborEnvironment:
         assert "tmux send-keys -l " in after[0]
         assert "tmux wait-for -L " in after[1]
         assert "tmux wait-for -U " in after[1]
-        assert "capture-pane -p -S -" in after[1]
+        assert "capture-pane -J -p -S -" in after[1]
         assert result.next_state.observation.state is not None
         assert "/app" in result.next_state.observation.state.text
 
@@ -1277,7 +1296,7 @@ class TestHarborEnvironment:
 
         after = mock_env._exec_history[before:]
         assert len(after) == 3
-        assert "capture-pane -p -t" in after[2]
+        assert "capture-pane -J -p -t" in after[2]
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "/app"
 
@@ -1351,6 +1370,14 @@ class TestHarborEnvironment:
         assert (
             result.next_state.observation.state.text
             == "[Command timed out after 5 seconds and was cancelled by the evaluation harness.]"
+        )
+        assert any(
+            "tmux capture-pane -p -t " in cmd and "-J" not in cmd
+            for cmd in mock_env._exec_history
+        )
+        assert any(
+            "tmux capture-pane -p -S - -t " in cmd and "-J" not in cmd
+            for cmd in mock_env._exec_history
         )
 
     def test_step_tmux_session_unrecoverable_timeout_still_raises(self):

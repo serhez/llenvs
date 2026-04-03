@@ -359,11 +359,13 @@ Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `pro
 Harbor text mode supports two execution models:
 
 - `text_exec_mode="independent_exec"` keeps the original Harbor `exec()` behavior. Each step runs in a fresh shell, so shell-local state such as `cd`, `export`, aliases, and background jobs does not persist across steps.
-- `text_exec_mode="tmux_session"` starts a persistent tmux-backed login shell inside the task container. Commands are pasted into that shell, completion is detected through a `PROMPT_COMMAND` hook, and model-facing observations come from the tmux pane buffer after Harbor strips its own staged-file echo, wrapped direct-command echo, helper-file-path bash prefixes, and prompt sentinel.
+- `text_exec_mode="tmux_session"` starts a persistent tmux-backed login shell inside the task container. Commands are pasted into that shell, completion is detected through a `PROMPT_COMMAND` hook, and model-facing observations come from a joined (`capture-pane -J`) tmux pane capture after Harbor strips its own staged-file echo, direct-command echo, helper-file-path bash prefixes, and prompt sentinel. The session window is resized to 200 columns to reduce visual wrapping at the source.
 
 `tmux_session` is the preferred mode for TerminalBench-style terminal tasks because it preserves shell state, allows `cmd &` background jobs to continue across steps, and more closely matches the official TerminalBench execution model.
 
 The tmux-backed bash shell disables history expansion (`set +H`), so `!` in pasted commands (for example `<!DOCTYPE html>`) is treated literally instead of triggering `event not found` errors.
+
+Timeout and startup diagnostics still use raw (non-joined) pane captures so the debugging surface remains as close as possible to tmux's rendered state.
 
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 

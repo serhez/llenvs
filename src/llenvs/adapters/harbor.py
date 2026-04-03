@@ -658,6 +658,7 @@ class _HarborTmuxTextSession:
     _STARTUP_TIMEOUT_CAP_SEC = 30
     _READY_POLL_INTERVAL_SEC = 0.5
     _READY_RESEND_INTERVAL_SEC = 3.0
+    _WINDOW_WIDTH_COLUMNS = 200
 
     def __init__(
         self,
@@ -725,7 +726,7 @@ class _HarborTmuxTextSession:
         wait_and_capture = (
             f"tmux wait-for -L {shlex.quote(step_token)}"
             f" && tmux wait-for -U {shlex.quote(step_token)}"
-            f" && tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+            f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
         )
         started_at = _now_monotonic()
         try:
@@ -875,12 +876,26 @@ class _HarborTmuxTextSession:
 
     def _capture_full_buffer(self) -> str:
         result = self._exec(
-            f"tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}",
+            f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
         return getattr(result, "stdout", "") or ""
 
     def _capture_visible_screen(self) -> str:
+        result = self._exec(
+            f"tmux capture-pane -J -p -t {shlex.quote(self._SESSION_NAME)}",
+            timeout_sec=self._exec_timeout,
+        )
+        return getattr(result, "stdout", "") or ""
+
+    def _capture_full_buffer_raw(self) -> str:
+        result = self._exec(
+            f"tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}",
+            timeout_sec=self._exec_timeout,
+        )
+        return getattr(result, "stdout", "") or ""
+
+    def _capture_visible_screen_raw(self) -> str:
         result = self._exec(
             f"tmux capture-pane -p -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
@@ -986,8 +1001,8 @@ class _HarborTmuxTextSession:
         timeout_sec: int,
         elapsed_sec: float,
     ) -> RuntimeError | _HarborRecoverableCommandTimeout:
-        visible = self._safe_capture(self._capture_visible_screen)
-        full = self._safe_capture(self._capture_full_buffer)
+        visible = self._safe_capture(self._capture_visible_screen_raw)
+        full = self._safe_capture(self._capture_full_buffer_raw)
         debug_enabled = logger.isEnabledFor(logging.DEBUG)
         if debug_enabled:
             visible_tail = (
@@ -1123,6 +1138,7 @@ class _HarborTmuxTextSession:
         direct_cmd = f"tmux new-session -d -s {session_q} {shlex.quote('bash --login')}"
         try:
             self._exec(direct_cmd, timeout_sec=startup_timeout)
+            self._resize_window(startup_timeout)
             self.tmux_start_method = "direct"
             return
         except Exception as exc:
@@ -1131,7 +1147,15 @@ class _HarborTmuxTextSession:
         script_wrapper = shlex.quote("script -qc 'bash --login' /dev/null")
         fallback_cmd = f"tmux new-session -d -s {session_q} {script_wrapper}"
         self._exec(fallback_cmd, timeout_sec=startup_timeout)
+        self._resize_window(startup_timeout)
         self.tmux_start_method = "script_fallback"
+
+    def _resize_window(self, startup_timeout: int) -> None:
+        window_target = shlex.quote(f"{self._SESSION_NAME}:0")
+        self._exec(
+            f"tmux resize-window -t {window_target} -x {self._WINDOW_WIDTH_COLUMNS}",
+            timeout_sec=startup_timeout,
+        )
 
     def _wait_for_shell_ready(self) -> None:
         startup_timeout = self._startup_timeout_sec()
@@ -1203,8 +1227,8 @@ class _HarborTmuxTextSession:
         return max(1, min(self._exec_timeout, self._STARTUP_TIMEOUT_CAP_SEC))
 
     def _startup_timeout_error(self, message: str) -> RuntimeError:
-        visible = self._safe_capture(self._capture_visible_screen)
-        full = self._safe_capture(self._capture_full_buffer)
+        visible = self._safe_capture(self._capture_visible_screen_raw)
+        full = self._safe_capture(self._capture_full_buffer_raw)
         details = [message]
         if visible:
             details.append("Visible screen:\n" + visible)
