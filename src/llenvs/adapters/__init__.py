@@ -153,6 +153,14 @@ from llenvs.adapters.verifiers import (
     VerifiersToolExecutor,
     VerifiersToolHidden,
 )
+from llenvs.adapters.open_apps import (
+    OPEN_APPS_MODULES,
+    OPEN_APPS_TASKS,
+    OpenAppsAdapter,
+    OpenAppsEnvironment,
+    OpenAppsHidden,
+    OpenAppsReward,
+)
 from llenvs.adapters.webshop import (
     WebShopAdapter,
     WebShopEnvironment,
@@ -188,6 +196,13 @@ __all__ = [
     "GEM_PYTHON_TOOL",
     "GEM_SEARCH_TOOL",
     "GEM_SUBMIT_ANSWER_TOOL",
+    # OpenApps
+    "OpenAppsEnvironment",
+    "OpenAppsHidden",
+    "OpenAppsAdapter",
+    "OpenAppsReward",
+    "OPEN_APPS_TASKS",
+    "OPEN_APPS_MODULES",
     # WebShop
     "WebShopEnvironment",
     "WebShopHidden",
@@ -486,6 +501,16 @@ def _register_adapters() -> None:
         environment_registry.register_adapter(adapter)
     except ImportError:
         pass  # tau2 not installed, skip registration
+    except ValueError:
+        pass  # Already registered (e.g., during testing)
+
+    # Register OpenApps adapter if available
+    try:
+        adapter = OpenAppsAdapter()
+        adapter._get_open_apps()
+        environment_registry.register_adapter(adapter)
+    except ImportError:
+        pass  # open_apps not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
