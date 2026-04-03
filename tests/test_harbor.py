@@ -730,7 +730,7 @@ class TestFormatExecResult:
         from llenvs.adapters.harbor import _format_exec_result
 
         result = MockExecResult(stdout="", stderr="", return_code=0)
-        assert "[exit code: 0]" in _format_exec_result(result)
+        assert _format_exec_result(result) == "[Command completed with no output.]"
 
     def test_both_empty_nonzero_exit(self):
         from llenvs.adapters.harbor import _format_exec_result

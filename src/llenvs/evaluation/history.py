@@ -100,21 +100,21 @@ def middle_truncate(text: str, max_chars: int) -> str:
 def _entries_to_messages(entries: list[HistoryEntry]) -> list[ChatMessage]:
     """Convert history entries to alternating assistant/user messages.
 
-    Entries with empty ``observation_text`` produce only an assistant
-    message (no user message), which is the case for the final action
-    before the current state.
+    Every entry produces both an assistant and a user message so that
+    turn boundaries are always preserved.  Empty observations become
+    empty user messages rather than being dropped, which prevents
+    consecutive assistant turns from being merged by coalescing.
     """
     messages: list[ChatMessage] = []
     for entry in entries:
         messages.append(ChatMessage(role="assistant", content=entry.action_text))
-        if entry.observation_text:
-            messages.append(
-                ChatMessage(
-                    role="user",
-                    content=entry.observation_text,
-                    images=entry.observation_images,
-                )
+        messages.append(
+            ChatMessage(
+                role="user",
+                content=entry.observation_text or "",
+                images=entry.observation_images,
             )
+        )
     return messages
 
 

@@ -367,6 +367,8 @@ The tmux-backed bash shell disables history expansion (`set +H`), so `!` in past
 
 Timeout and startup diagnostics still use raw (non-joined) pane captures so the debugging surface remains as close as possible to tmux's rendered state.
 
+In both text exec modes, commands that complete successfully with no stdout or stderr produce the observation ``[Command completed with no output.]`` instead of an empty string.  This preserves turn boundaries in the message history and gives the actor an explicit signal that the command ran.  Commands with a nonzero exit code and no output still show the exit code.
+
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
 When `command_soft_timeout`, `command_timeout_budget`, and `max_consecutive_command_timeouts` are set together, live model-issued text commands become recoverable on timeout: Harbor interrupts the command, appends a standard timeout observation to the trajectory, and only truncates once the cumulative timeout budget or consecutive-timeout cap is exceeded. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects these kwargs entirely.

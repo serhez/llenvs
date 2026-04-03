@@ -379,18 +379,24 @@ class _PodmanServiceSpec:
 
 # ── Helpers ─────────────────────────────────────────────────────
 
+_SILENT_COMMAND_PLACEHOLDER = "[Command completed with no output.]"
+
 
 def _format_exec_result(result: Any) -> str:
     """Format an exec result as observation text.
 
     Shows stdout always, stderr with [stderr] prefix when non-empty.
-    When both empty, shows exit code.
+    When both empty and exit code is 0, returns the silent-command
+    placeholder.  When both empty and exit code is nonzero, shows
+    the exit code.
     """
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
     return_code = getattr(result, "return_code", 0)
 
     if not stdout and not stderr:
+        if return_code == 0:
+            return _SILENT_COMMAND_PLACEHOLDER
         return f"[exit code: {return_code}]"
 
     parts: list[str] = []
@@ -746,6 +752,8 @@ class _HarborTmuxTextSession:
         full_buffer = getattr(result, "stdout", "") or ""
         observation = self._diff_full_buffer(full_buffer)
         observation = self._sanitize_observation(observation, command_text, used_staged_file)
+        if observation == "":
+            observation = _SILENT_COMMAND_PLACEHOLDER
         self._previous_full_buffer = full_buffer
         if debug_enabled:
             logger.debug(
