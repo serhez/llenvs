@@ -277,6 +277,8 @@ def _make_snapshot_task(tmp_path: Path, name: str, *, dockerfile: str | None = N
 
 
 class _FakeTmuxRuntime:
+    _STATUS_DIR = "/tmp/.llenvs_harbor_tmux_status"
+
     def __init__(
         self,
         *,
@@ -291,6 +293,8 @@ class _FakeTmuxRuntime:
         ready_after_attempts: int | None = 1,
         hook_wait_timeout_once: bool = False,
         bang_requires_history_disable: bool = False,
+        step_exit_codes: list[int | None] | None = None,
+        recovery_exit_code: int | None = None,
     ) -> None:
         self.tmux_installed = not missing_tmux
         self.script_available = script_available
@@ -307,6 +311,9 @@ class _FakeTmuxRuntime:
         self.pending_bang_recovery_failure = False
         self.full_buffers = [initial_buffer, *(full_buffers or [])]
         self.visible_buffers = visible_buffers or []
+        self.step_exit_codes = list(step_exit_codes or [])
+        self.recovery_exit_code = recovery_exit_code
+        self.status_reads: list[str] = []
         self.install_attempts = 0
         self.files: dict[str, str] = {}
         self.staged_hook_script = ""
@@ -332,6 +339,9 @@ class _FakeTmuxRuntime:
             return MockExecResult(stdout="")
 
         if "tmux resize-window -t " in command:
+            return MockExecResult(stdout="")
+
+        if "mkdir -p /tmp/.llenvs_harbor_tmux_status" in command:
             return MockExecResult(stdout="")
 
         if "rm -f /tmp/.llenvs_harbor_tmux_ready" in command:
@@ -364,6 +374,11 @@ class _FakeTmuxRuntime:
             if self.wait_timeout_once:
                 self.wait_timeout_once = False
                 raise RuntimeError("apptainer command timed out after 120s")
+            token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
+            if token_match is not None and self.step_exit_codes:
+                exit_code = self.step_exit_codes.pop(0)
+                if exit_code is not None:
+                    self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(exit_code)
             if not self.full_buffers:
                 raise AssertionError(f"Unexpected full-buffer capture command: {command}")
             return MockExecResult(stdout=self.full_buffers.pop(0))
@@ -402,6 +417,17 @@ class _FakeTmuxRuntime:
                 self.pending_bang_timeout = True
             return MockExecResult(stdout="")
 
+        if self._STATUS_DIR in command:
+            match = re.search(
+                r"/tmp/\.llenvs_harbor_tmux_status/[A-Za-z0-9_]+",
+                command,
+            )
+            if match is None:
+                raise AssertionError(f"Unexpected status-read command: {command}")
+            path = match.group(0)
+            self.status_reads.append(path)
+            return MockExecResult(stdout=self.files.pop(path, ""))
+
         if "tmux has-session" in command:
             return MockExecResult(stdout="")
 
@@ -422,6 +448,16 @@ class _FakeTmuxRuntime:
             if "llenvs_harbor_init_" in command and self.hook_wait_timeout_once:
                 self.hook_wait_timeout_once = False
                 raise RuntimeError("apptainer command timed out after 120s")
+            if (
+                self.recovery_exit_code is not None
+                and "llenvs_harbor_step_" in command
+                and "tmux wait-for -U" in command
+            ):
+                token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
+                if token_match is not None:
+                    self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(
+                        self.recovery_exit_code
+                    )
             return MockExecResult(stdout="")
 
 
@@ -726,11 +762,11 @@ class TestFormatExecResult:
         assert "[stderr]" in formatted
         assert "warning" in formatted
 
-    def test_both_empty_shows_exit_code(self):
+    def test_both_empty_exit_zero_shows_success_placeholder(self):
         from llenvs.adapters.harbor import _format_exec_result
 
         result = MockExecResult(stdout="", stderr="", return_code=0)
-        assert _format_exec_result(result) == "[Command completed with no output.]"
+        assert _format_exec_result(result) == "[Command completed successfully with no output]"
 
     def test_both_empty_nonzero_exit(self):
         from llenvs.adapters.harbor import _format_exec_result
@@ -1118,12 +1154,14 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="pwd"))
 
         after = mock_env._exec_history[before:]
-        assert len(after) == 2
+        # 3 execs: send, wait+capture, read-exit-status
+        assert len(after) == 3
         assert "tmux wait-for -L " in after[0]
         assert "tmux send-keys -l " in after[0]
         assert "tmux wait-for -L " in after[1]
         assert "tmux wait-for -U " in after[1]
         assert "capture-pane -J -p -S -" in after[1]
+        assert "/tmp/.llenvs_harbor_tmux_status/" in after[2]
         assert result.next_state.observation.state is not None
         assert "/app" in result.next_state.observation.state.text
 
@@ -1164,7 +1202,7 @@ class TestHarborEnvironment:
 
         after = mock_env._exec_history[before:]
         # Staged-file path uses 3 execs: file write, control, wait+capture
-        assert len(after) == 3
+        assert len(after) == 4
         # Exec 1: standalone heredoc file staging (NOT in a && chain with send-keys)
         assert "cat > " in after[0]
         assert "tmux send-keys" not in after[0]
@@ -1192,8 +1230,8 @@ class TestHarborEnvironment:
         env.step(state, Action(text=long_cmd))
 
         after = mock_env._exec_history[before:]
-        # Even though single-line, exceeds threshold — staged-file with 3 execs.
-        assert len(after) == 3
+        # Even though single-line, exceeds threshold — staged-file with 4 execs.
+        assert len(after) == 4
         assert "cat > " in after[0]
         assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
 
@@ -1281,6 +1319,54 @@ class TestHarborEnvironment:
             "bash: line 1: `<answer>'"
         )
 
+    def test_step_tmux_session_silent_exit_zero_shows_success_placeholder(self):
+        runtime = _FakeTmuxRuntime(step_exit_codes=[0])
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(f"bash$ true\n{text_session._prompt_sentinel}")
+
+        result = env.step(state, Action(text="true"))
+
+        assert result.next_state.observation.state is not None
+        assert (
+            result.next_state.observation.state.text
+            == "[Command completed successfully with no output]"
+        )
+        assert len(runtime.status_reads) == 1
+
+    def test_step_tmux_session_silent_nonzero_exit_shows_exit_code(self):
+        runtime = _FakeTmuxRuntime(step_exit_codes=[1])
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(f"bash$ false\n{text_session._prompt_sentinel}")
+
+        result = env.step(state, Action(text="false"))
+
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == "[exit code: 1]"
+        assert len(runtime.status_reads) == 1
+
+    def test_step_tmux_session_status_unavailable_falls_back_to_no_output(self):
+        runtime = _FakeTmuxRuntime(step_exit_codes=[None])
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(f"bash$ true\n{text_session._prompt_sentinel}")
+
+        result = env.step(state, Action(text="true"))
+
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == "[No output]"
+        assert len(runtime.status_reads) == 1
+
     def test_step_tmux_session_falls_back_to_visible_screen(self):
         runtime = _FakeTmuxRuntime()
         mock_env = MockHarborEnvironment(exec_handler=runtime)
@@ -1295,7 +1381,8 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="pwd"))
 
         after = mock_env._exec_history[before:]
-        assert len(after) == 3
+        # 3 execs for direct path: send, wait+capture, read-status
+        # Plus 1 extra capture from visible-screen fallback
         assert "capture-pane -J -p -t" in after[2]
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "/app"
@@ -1344,6 +1431,7 @@ class TestHarborEnvironment:
             ],
             visible_buffers=["sleep 999"],
             wait_timeout_once=True,
+            recovery_exit_code=130,
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(
@@ -1379,6 +1467,8 @@ class TestHarborEnvironment:
             "tmux capture-pane -p -S - -t " in cmd and "-J" not in cmd
             for cmd in mock_env._exec_history
         )
+        assert len(runtime.status_reads) == 1
+        assert not any(path.startswith(runtime._STATUS_DIR + "/") for path in runtime.files)
 
     def test_step_tmux_session_unrecoverable_timeout_still_raises(self):
         runtime = _FakeTmuxRuntime(
@@ -1418,7 +1508,7 @@ class TestHarborEnvironment:
         env.step(state, Action(text=large_command))
 
         after = mock_env._exec_history[before:]
-        assert len(after) == 3
+        assert len(after) == 4
         assert "cat > " in after[0]
         assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
 

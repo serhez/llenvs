@@ -379,16 +379,12 @@ class _PodmanServiceSpec:
 
 # ── Helpers ─────────────────────────────────────────────────────
 
-_SILENT_COMMAND_PLACEHOLDER = "[Command completed with no output.]"
-
-
 def _format_exec_result(result: Any) -> str:
     """Format an exec result as observation text.
 
     Shows stdout always, stderr with [stderr] prefix when non-empty.
-    When both empty and exit code is 0, returns the silent-command
-    placeholder.  When both empty and exit code is nonzero, shows
-    the exit code.
+    When both empty and exit code is 0, returns a success placeholder.
+    When both empty and exit code is nonzero, shows the exit code.
     """
     stdout = getattr(result, "stdout", "") or ""
     stderr = getattr(result, "stderr", "") or ""
@@ -396,7 +392,7 @@ def _format_exec_result(result: Any) -> str:
 
     if not stdout and not stderr:
         if return_code == 0:
-            return _SILENT_COMMAND_PLACEHOLDER
+            return "[Command completed successfully with no output]"
         return f"[exit code: {return_code}]"
 
     parts: list[str] = []
@@ -658,6 +654,7 @@ class _HarborTmuxTextSession:
     _COMMAND_FILE = "/tmp/.llenvs_harbor_tmux_command"
     _HOOK_SCRIPT_FILE = "/tmp/.llenvs_harbor_hook_init.sh"
     _READY_FILE = "/tmp/.llenvs_harbor_tmux_ready"
+    _STATUS_DIR = "/tmp/.llenvs_harbor_tmux_status"
     _DIRECT_SEND_KEYS_MAX_CHARS = 4096
     _DIAGNOSTIC_TAIL_LINES = 200
     _STARTUP_DIAGNOSTIC_TAIL_LINES = 50
@@ -753,7 +750,16 @@ class _HarborTmuxTextSession:
         observation = self._diff_full_buffer(full_buffer)
         observation = self._sanitize_observation(observation, command_text, used_staged_file)
         if observation == "":
-            observation = _SILENT_COMMAND_PLACEHOLDER
+            exit_code = self._read_exit_status(step_token)
+            if exit_code is not None and exit_code != 0:
+                observation = f"[exit code: {exit_code}]"
+            elif exit_code == 0:
+                observation = "[Command completed successfully with no output]"
+            else:
+                observation = "[No output]"
+        else:
+            # Still consume the status file to avoid leaking it
+            self._read_exit_status(step_token)
         self._previous_full_buffer = full_buffer
         if debug_enabled:
             logger.debug(
@@ -832,6 +838,21 @@ class _HarborTmuxTextSession:
             line.replace(helper_prefix, "bash: ", 1) if line.startswith(helper_prefix) else line
             for line in observation.split("\n")
         )
+
+    def _read_exit_status(self, token: str) -> int | None:
+        """Read and delete the per-token exit-status file. Always cleans up."""
+        status_file_q = shlex.quote(f"{self._STATUS_DIR}/{token}")
+        try:
+            result = self._exec(
+                f'status="$(cat {status_file_q} 2>/dev/null || true)"; '
+                f"rm -f {status_file_q} 2>/dev/null || true; "
+                f'printf "%s" "$status"',
+                timeout_sec=5,
+            )
+            stdout = (getattr(result, "stdout", "") or "").strip()
+            return int(stdout) if stdout else None
+        except Exception:
+            return None
 
     def _send_command(self, command: str, *, step_token: str) -> bool:
         """Send command to the tmux session. Returns True if staged-file path was used."""
@@ -933,12 +954,17 @@ class _HarborTmuxTextSession:
                 f"PS1={ps1_q}",  # Force deterministic prompt sentinel
                 "export VIRTUAL_ENV_DISABLE_PROMPT=1",
                 "__llenvs_harbor_prompt_hook() {",
-                f"  PS1={ps1_q}",  # Reassert on every prompt (survives cd/env changes)
+                "  local status=$?",  # MUST be first — captures exit code
+                f"  PS1={ps1_q}",  # Reassert on every prompt
                 f"  local token_file={token_file_q}",
+                f"  local status_dir={shlex.quote(self._STATUS_DIR)}",
                 '  local token=""',
                 '  if [ -r "$token_file" ]; then',
                 '    token=$(cat "$token_file" 2>/dev/null || true)',
                 '    if [ -n "$token" ]; then',
+                '      case "$token" in llenvs_harbor_step_*)',
+                '        printf "%s\\n" "$status" > "$status_dir/$token" ;;',
+                "      esac",
                 '      tmux wait-for -U "$token" 2>/dev/null || true',
                 '      : > "$token_file"',
                 "    fi",
@@ -976,6 +1002,11 @@ class _HarborTmuxTextSession:
             ]
         )
         self._stage_hook_script(init_script)
+        # Create per-token status directory for exit-code capture
+        self._exec(
+            f"mkdir -p {shlex.quote(self._STATUS_DIR)}",
+            timeout_sec=10,
+        )
         session_q = shlex.quote(self._SESSION_NAME)
         token_q = shlex.quote(init_token)
         token_file_q = shlex.quote(self._TOKEN_FILE)
@@ -1049,6 +1080,8 @@ class _HarborTmuxTextSession:
             )
         except Exception:
             recovered = False
+        # Discard any stale status file the hook may have written after Ctrl-C
+        self._read_exit_status(step_token)
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
         if recovered_buffer:
             self._previous_full_buffer = recovered_buffer

@@ -367,7 +367,7 @@ The tmux-backed bash shell disables history expansion (`set +H`), so `!` in past
 
 Timeout and startup diagnostics still use raw (non-joined) pane captures so the debugging surface remains as close as possible to tmux's rendered state.
 
-In both text exec modes, commands that complete successfully with no stdout or stderr produce the observation ``[Command completed with no output.]`` instead of an empty string.  This preserves turn boundaries in the message history and gives the actor an explicit signal that the command ran.  Commands with a nonzero exit code and no output still show the exit code.
+In both text exec modes, commands that produce no visible output get an explicit observation instead of an empty string.  In ``tmux_session`` mode, the shell exit code is captured via the ``PROMPT_COMMAND`` hook: silent successful commands show ``[Command completed successfully with no output]``, silent failures show ``[exit code: N]``, and if the exit status is unavailable (e.g. after a timeout) the fallback is ``[No output]``.  ``independent_exec`` mode has the same behaviour using the exec return code directly.
 
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
