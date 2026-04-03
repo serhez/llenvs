@@ -3960,6 +3960,46 @@ class HarborEnvironment:
             return cleaned
         return raw_text
 
+    def _invalid_action_observation(self) -> str:
+        """Return a format-specific invalid-action observation.
+
+        Inspects the configured extractor to produce a message that tells
+        the model exactly which format is expected.
+        """
+        from llenvs.core.extraction import (
+            CleanedExtractor,
+            CompositeExtractor,
+            RegexExtractor,
+            TagBasedExtractor,
+        )
+
+        extractor = self._answer_extractor
+        # Unwrap CleanedExtractor / CompositeExtractor to find the primary extractor type.
+        while True:
+            if isinstance(extractor, CleanedExtractor):
+                extractor = extractor.inner
+                continue
+            if isinstance(extractor, CompositeExtractor) and extractor.extractors:
+                extractor = extractor.extractors[0]
+                continue
+            break
+
+        if isinstance(extractor, TagBasedExtractor):
+            tag = extractor.tag_name
+            return (
+                f"[Invalid action format: provide exactly one command wrapped in "
+                f"<{tag}>...</{tag}>. No command was executed.]"
+            )
+        if isinstance(extractor, RegexExtractor) and "action:" in extractor.pattern.lower():
+            return (
+                "[Invalid action format: provide exactly one action in the form "
+                "'Action: ...'. No command was executed.]"
+            )
+        return (
+            "[Invalid action format: no executable action could be extracted "
+            "from the response. No command was executed.]"
+        )
+
     def _soft_timeouts_enabled(self) -> bool:
         return self._command_soft_timeout is not None and self._soft_timeouts_disabled_depth == 0
 
@@ -3997,9 +4037,17 @@ class HarborEnvironment:
 
         # Extract clean command (strips reasoning tokens etc.)
         extracted_cmd: str | None = None
+        extraction_metadata: dict[str, Any] = {}
+        invalid_action_format = False
         if self._answer_extractor is not None and action_text:
-            extracted_cmd, _ = self._answer_extractor.extract(action_text)
-        cmd_for_env = extracted_cmd or action_text
+            extracted_cmd, extraction_metadata = self._answer_extractor.extract(action_text)
+        # Strict mode: if extractor exists but returned None, don't execute raw text.
+        # Instead, give the model a synthetic invalid-format observation.
+        if self._answer_extractor is not None and extracted_cmd is None:
+            cmd_for_env = None
+            invalid_action_format = True
+        else:
+            cmd_for_env = extracted_cmd or action_text
         command_timed_out = False
         command_timeout_elapsed_sec: float | None = None
         timeout_policy_truncated = False
@@ -4007,20 +4055,24 @@ class HarborEnvironment:
         consecutive_command_timeout_count = state.hidden.consecutive_command_timeout_count
         command_timeout_total_sec = state.hidden.command_timeout_total_sec
 
-        # Check for submit keyword on extracted command
-        if self._submit_keyword in cmd_for_env:
+        # Check for submit keyword on extracted command (not on malformed raw text)
+        if cmd_for_env is not None and self._submit_keyword in cmd_for_env:
             terminated = True
         if debug_enabled:
             logger.debug(
-                "Harbor step start: task=%d episode_step=%d terminated=%s preview=%s",
+                "Harbor step start: task=%d episode_step=%d terminated=%s invalid_format=%s preview=%s",
                 state.hidden.task_index,
                 next_step,
                 terminated,
-                _preview_log_text(cmd_for_env),
+                invalid_action_format,
+                _preview_log_text(cmd_for_env or "(invalid format)"),
             )
 
         # Execute command in container (even for submit, to maintain trajectory)
-        if not terminated:
+        if invalid_action_format:
+            obs_text = self._invalid_action_observation()
+            consecutive_command_timeout_count = 0
+        elif not terminated:
             timeout_exc: _HarborRecoverableCommandTimeout | None = None
             if self._text_exec_mode == "tmux_session":
                 if self._text_session is None:
@@ -4086,13 +4138,14 @@ class HarborEnvironment:
         if debug_enabled:
             command_elapsed_sec = max(0.0, _now_monotonic() - step_started_at)
             logger.debug(
-                "Harbor step command phase done: task=%d episode_step=%d duration=%.2fs timed_out=%s truncated=%s preview=%s",
+                "Harbor step command phase done: task=%d episode_step=%d duration=%.2fs timed_out=%s truncated=%s invalid_format=%s preview=%s",
                 state.hidden.task_index,
                 next_step,
                 command_elapsed_sec,
                 command_timed_out,
                 timeout_policy_truncated,
-                _preview_log_text(cmd_for_env),
+                invalid_action_format,
+                _preview_log_text(cmd_for_env or "(invalid format)"),
             )
 
         # Check truncation
@@ -4147,8 +4200,8 @@ class HarborEnvironment:
             task_name=state.hidden.task_name,
             instruction=state.hidden.instruction,
             episode_step=next_step,
-            last_action=cmd_for_env,
-            trajectory=state.hidden.trajectory + (cmd_for_env,),
+            last_action=cmd_for_env if cmd_for_env is not None else action_text,
+            trajectory=state.hidden.trajectory + ((cmd_for_env,) if cmd_for_env is not None else ()),
             fs_restore_risk_ever=state.hidden.fs_restore_risk_ever
             or state.hidden.fs_restore_risk_now,
             command_timeout_count=command_timeout_count,
@@ -4172,6 +4225,7 @@ class HarborEnvironment:
         info: dict[str, Any] = {
             **state.metadata.info,
             "episode_step": next_step,
+            "invalid_action_format": invalid_action_format,
             "command_timed_out": command_timed_out,
             "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
             "command_timeout_count": command_timeout_count,
@@ -4179,8 +4233,11 @@ class HarborEnvironment:
             "consecutive_command_timeout_count": consecutive_command_timeout_count,
             "timeout_policy_truncated": timeout_policy_truncated,
         }
+        info.pop("extraction_metadata", None)
         if reward_value is not None:
             info["reward"] = reward_value
+        if extraction_metadata:
+            info["extraction_metadata"] = extraction_metadata
 
         next_metadata = StateMetadata(
             step=next_step,
@@ -4240,12 +4297,14 @@ class HarborEnvironment:
             info={
                 "episode_step": next_step,
                 "observation": obs_text,
+                "invalid_action_format": invalid_action_format,
                 "command_timed_out": command_timed_out,
                 "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
                 "command_timeout_count": command_timeout_count,
                 "command_timeout_total_sec": command_timeout_total_sec,
                 "consecutive_command_timeout_count": consecutive_command_timeout_count,
                 "timeout_policy_truncated": timeout_policy_truncated,
+                **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
 

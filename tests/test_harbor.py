@@ -1140,6 +1140,57 @@ class TestHarborEnvironment:
         assert h.last_action == "ls"
         assert h.trajectory == ("ls",)
 
+    def test_step_with_strict_tag_extractor_returns_invalid_action_feedback_without_exec(self):
+        from llenvs.core.extraction import TagBasedExtractor
+
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="should not run")])
+        env = _make_env(harbor_env=mock_env)
+        env._answer_extractor = TagBasedExtractor(tag_name="answer")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        result = env.step(state, Action(text="ls"))
+
+        assert len(mock_env._exec_history) == before
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+        assert result.info["invalid_action_format"] is True
+        assert result.info["extraction_metadata"] == {
+            "found": False,
+            "tag_name": "answer",
+        }
+        assert result.next_state.metadata.info["invalid_action_format"] is True
+        assert result.next_state.metadata.info["extraction_metadata"] == {
+            "found": False,
+            "tag_name": "answer",
+        }
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "[Invalid action format: provide exactly one command wrapped in "
+            "<answer>...</answer>. No command was executed.]"
+        )
+        assert result.next_state.hidden.last_action == "ls"
+        assert result.next_state.hidden.trajectory == ()
+
+    def test_step_with_strict_action_regex_uses_action_specific_feedback(self):
+        from llenvs.core.extraction import RegexExtractor
+
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="should not run")])
+        env = _make_env(harbor_env=mock_env)
+        env._answer_extractor = RegexExtractor(pattern=r"Action:\s*(.+)")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        result = env.step(state, Action(text="think\nls"))
+
+        assert len(mock_env._exec_history) == before
+        assert result.info["invalid_action_format"] is True
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "[Invalid action format: provide exactly one action in the form "
+            "'Action: ...'. No command was executed.]"
+        )
+
     def test_step_tmux_session_uses_two_exec_success_path(self):
         runtime = _FakeTmuxRuntime(
             full_buffers=[
