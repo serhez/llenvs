@@ -314,11 +314,13 @@ class _FakeTmuxRuntime:
         self.step_exit_codes = list(step_exit_codes or [])
         self.recovery_exit_code = recovery_exit_code
         self.status_reads: list[str] = []
+        self.exec_calls: list[tuple[str, Any | None]] = []
         self.install_attempts = 0
         self.files: dict[str, str] = {}
         self.staged_hook_script = ""
 
-    def __call__(self, command: str, **_: Any) -> MockExecResult:
+    def __call__(self, command: str, **kwargs: Any) -> MockExecResult:
+        self.exec_calls.append((command, kwargs.get("timeout_sec")))
         if "tmux -V" in command:
             if not self.tmux_installed:
                 raise RuntimeError("tmux: not found")
@@ -1522,7 +1524,13 @@ class TestHarborEnvironment:
         assert result.next_state.observation.state is not None
         assert (
             result.next_state.observation.state.text
-            == "[Command timed out after 5 seconds and was cancelled by the evaluation harness.]"
+            == "[Command timed out after 5 seconds and was cancelled.]"
+        )
+        assert any(
+            "tmux wait-for -L llenvs_harbor_step_" in cmd
+            and "tmux wait-for -U llenvs_harbor_step_" in cmd
+            and timeout_sec == 30
+            for cmd, timeout_sec in runtime.exec_calls
         )
         assert any(
             "tmux capture-pane -p -t " in cmd and "-J" not in cmd

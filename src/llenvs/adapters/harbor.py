@@ -659,6 +659,7 @@ class _HarborTmuxTextSession:
     _DIAGNOSTIC_TAIL_LINES = 200
     _STARTUP_DIAGNOSTIC_TAIL_LINES = 50
     _STARTUP_TIMEOUT_CAP_SEC = 30
+    _TIMEOUT_RECOVERY_WAIT_SEC = 30
     _READY_POLL_INTERVAL_SEC = 0.5
     _READY_RESEND_INTERVAL_SEC = 3.0
     _WINDOW_WIDTH_COLUMNS = 200
@@ -1076,7 +1077,7 @@ class _HarborTmuxTextSession:
             token_q = shlex.quote(step_token)
             self._exec(
                 f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
-                timeout_sec=5,
+                timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC,
             )
         except Exception:
             recovered = False
@@ -4015,9 +4016,7 @@ class HarborEnvironment:
 
     @staticmethod
     def _timeout_observation_text(timeout_sec: int, *, truncated: bool) -> str:
-        lines = [
-            f"[Command timed out after {timeout_sec} seconds and was cancelled by the evaluation harness.]"
-        ]
+        lines = [f"[Command timed out after {timeout_sec} seconds and was cancelled.]"]
         if truncated:
             lines.append("[Trajectory terminated after exceeding the command-timeout budget.]")
         return "\n".join(lines)
