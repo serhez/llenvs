@@ -3945,7 +3945,9 @@ class HarborEnvironment:
         """Return text for the assistant turn in conversation history.
 
         Uses extracted command when available. On extraction failure, applies
-        the extractor's pre-cleaners to strip reasoning tokens from history.
+        the extractor's pre-cleaners to strip reasoning tokens from history,
+        then trims surrounding whitespace so malformed raw answers do not leave
+        empty padding turns in the transcript.
         """
         if extracted_cmd is not None:
             return extracted_cmd
@@ -3957,8 +3959,8 @@ class HarborEnvironment:
             cleaned = raw_text
             for cleaner in self._answer_extractor.pre_cleaners:
                 cleaned = cleaner(cleaned)
-            return cleaned
-        return raw_text
+            return cleaned.strip()
+        return raw_text.strip()
 
     def _invalid_action_observation(self) -> str:
         """Return a format-specific invalid-action observation.

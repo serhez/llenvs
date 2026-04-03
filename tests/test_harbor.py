@@ -1191,6 +1191,20 @@ class TestHarborEnvironment:
             "'Action: ...'. No command was executed.]"
         )
 
+    def test_step_with_strict_extractor_trims_whitespace_in_assistant_history(self):
+        from llenvs.core.extraction import TagBasedExtractor
+
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="should not run")])
+        env = _make_env(harbor_env=mock_env)
+        env._answer_extractor = TagBasedExtractor(tag_name="answer")
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="\n\napt update && apt install -y python3-pgmpy\n\n"))
+
+        assistant_turn = result.next_state.observation.messages[-2]
+        assert assistant_turn["role"] == "assistant"
+        assert assistant_turn["content"] == "apt update && apt install -y python3-pgmpy"
+
     def test_step_tmux_session_uses_two_exec_success_path(self):
         runtime = _FakeTmuxRuntime(
             full_buffers=[
