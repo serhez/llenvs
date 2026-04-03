@@ -467,13 +467,17 @@ class AnswerExtractor(Protocol):
 | `RawGenerationExtractor` | `raw` | Return full response | - |
 | `NativeExtractor` | - | Wraps a third-party extraction function | - |
 
-All extractors follow the **last match wins** convention when multiple matches exist.
+All extractors follow the **last match wins** convention when multiple matches exist. `TagBasedExtractor` also recovers a final unclosed tag by extracting from the last opening tag to the end of the response, which helps with truncated generations such as `<answer>partial`.
 
 ```python
 # Tag-based (default)
 extractor = TagBasedExtractor(tag_name="answer")
 answer, meta = extractor.extract("The answer is <answer>42</answer>")
 # answer = "42"
+
+answer, meta = extractor.extract("The answer is <answer>42")
+# answer = "42"
+# meta["closed"] = False
 
 # GSM8K format
 extractor = GSM8KExtractor()

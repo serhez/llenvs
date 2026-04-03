@@ -29,6 +29,7 @@ class TestTagBasedExtractor:
         assert answer == "42"
         assert meta["found"] is True
         assert meta["tag_name"] == "answer"
+        assert meta["closed"] is True
 
     def test_custom_tag_name(self):
         """Test extraction with custom tag name."""
@@ -72,6 +73,7 @@ class TestTagBasedExtractor:
         answer, meta = extractor.extract(text)
 
         assert answer == "correct"
+        assert meta["closed"] is True
         assert meta["num_matches"] == 2
 
     def test_case_insensitive(self):
@@ -104,6 +106,25 @@ class TestTagBasedExtractor:
         extractor = TagBasedExtractor(tag_name="my.tag")
         answer, _ = extractor.extract("<my.tag>value</my.tag>")
         assert answer == "value"
+
+    def test_unclosed_trailing_tag_extracts_to_end(self):
+        """Test extraction when the final closing tag is missing."""
+        extractor = TagBasedExtractor()
+        answer, meta = extractor.extract("Reasoning... <answer>echo hello")
+
+        assert answer == "echo hello"
+        assert meta["found"] is True
+        assert meta["closed"] is False
+
+    def test_later_unclosed_tag_overrides_earlier_closed_tag(self):
+        extractor = TagBasedExtractor()
+        answer, meta = extractor.extract(
+            "First: <answer>wrong</answer> trailing <answer>correct"
+        )
+
+        assert answer == "correct"
+        assert meta["found"] is True
+        assert meta["closed"] is False
 
 
 class TestRegexExtractor:

@@ -359,7 +359,7 @@ Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `pro
 Harbor text mode supports two execution models:
 
 - `text_exec_mode="independent_exec"` keeps the original Harbor `exec()` behavior. Each step runs in a fresh shell, so shell-local state such as `cd`, `export`, aliases, and background jobs does not persist across steps.
-- `text_exec_mode="tmux_session"` starts a persistent tmux-backed login shell inside the task container. Commands are pasted into that shell, completion is detected through a `PROMPT_COMMAND` hook, and model-facing observations come from the tmux pane buffer after Harbor strips its own staged-file echo, clean single-line command echo, and prompt sentinel.
+- `text_exec_mode="tmux_session"` starts a persistent tmux-backed login shell inside the task container. Commands are pasted into that shell, completion is detected through a `PROMPT_COMMAND` hook, and model-facing observations come from the tmux pane buffer after Harbor strips its own staged-file echo, wrapped direct-command echo, helper-file-path bash prefixes, and prompt sentinel.
 
 `tmux_session` is the preferred mode for TerminalBench-style terminal tasks because it preserves shell state, allows `cmd &` background jobs to continue across steps, and more closely matches the official TerminalBench execution model.
 

@@ -1208,6 +1208,60 @@ class TestHarborEnvironment:
         assert "PS1=" in hook_cmd
         assert "VIRTUAL_ENV_DISABLE_PROMPT=1" in hook_cmd
 
+    def test_step_tmux_session_strips_wrapped_direct_command_echo(self):
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(
+            "bash$  echo '<!DOCTYPE html><html><body><img src=\"x\" on\n"
+            "error=\"alert(\\'xss\\')\"></body></html>' > /app/out.html\n"
+            "bash: syntax error near unexpected token `)'\n"
+            f"{text_session._prompt_sentinel}"
+        )
+
+        result = env.step(
+            state,
+            Action(
+                text=(
+                    "echo '<!DOCTYPE html><html><body><img src=\"x\" "
+                    "onerror=\"alert(\\'xss\\')\"></body></html>' > /app/out.html"
+                )
+            ),
+        )
+
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "bash: syntax error near unexpected token `)'"
+        )
+
+    def test_step_tmux_session_rewrites_staged_file_bash_errors(self):
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.full_buffers.append(
+            "bash$ source /tmp/.llenvs_harbor_tmux_command\n"
+            "bash: /tmp/.llenvs_harbor_tmux_command: line 1: syntax error near unexpected token `newline'\n"
+            "bash: /tmp/.llenvs_harbor_tmux_command: line 1: `<answer>'\n"
+            f"{text_session._prompt_sentinel}"
+        )
+
+        result = env.step(
+            state,
+            Action(text="x" * (text_session._DIRECT_SEND_KEYS_MAX_CHARS + 1)),
+        )
+
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "bash: line 1: syntax error near unexpected token `newline'\n"
+            "bash: line 1: `<answer>'"
+        )
+
     def test_step_tmux_session_falls_back_to_visible_screen(self):
         runtime = _FakeTmuxRuntime()
         mock_env = MockHarborEnvironment(exec_handler=runtime)

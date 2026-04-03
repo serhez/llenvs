@@ -763,21 +763,16 @@ class _HarborTmuxTextSession:
         Strips only exact known strings — no heuristic pattern matching.
         The raw pane capture in ``_previous_full_buffer`` is NOT affected.
         """
-        lines = observation.split("\n")
-
         if used_staged_file:
+            lines = observation.split("\n")
             # Strip the leading staged-file source echo (first line only)
             source_echo = f"source {self._COMMAND_FILE}"
             if lines and lines[0].strip() == source_echo:
                 lines = lines[1:]
+            result = "\n".join(lines)
+            result = self._rewrite_staged_file_error_prefixes(result)
         else:
-            # Strip the leading echoed command if content matches
-            # (whitespace-tolerant: the diff often has a leading space
-            # from the previous prompt)
-            if lines and lines[0].strip() == command.strip():
-                lines = lines[1:]
-
-        result = "\n".join(lines)
+            result = self._strip_leading_echoed_command(observation, command)
 
         # Strip trailing prompt sentinel as a suffix (handles the case
         # where a command outputs text without a trailing newline and
@@ -795,6 +790,39 @@ class _HarborTmuxTextSession:
                 result = result[: -len(stripped_sentinel)]
 
         return result
+
+    @staticmethod
+    def _strip_leading_echoed_command(observation: str, command: str) -> str:
+        """Strip a leading direct-command echo, tolerating terminal wraps."""
+        obs_idx = 0
+        while obs_idx < len(observation) and observation[obs_idx] == " ":
+            obs_idx += 1
+
+        cmd_idx = 0
+        while cmd_idx < len(command) and obs_idx < len(observation):
+            obs_char = observation[obs_idx]
+            if obs_char == command[cmd_idx]:
+                cmd_idx += 1
+                obs_idx += 1
+                continue
+            if obs_char == "\n":
+                obs_idx += 1
+                continue
+            return observation
+
+        if cmd_idx != len(command):
+            return observation
+        if obs_idx < len(observation) and observation[obs_idx] == "\n":
+            obs_idx += 1
+        return observation[obs_idx:]
+
+    def _rewrite_staged_file_error_prefixes(self, observation: str) -> str:
+        """Remove helper-path leakage from staged-file bash diagnostics."""
+        helper_prefix = f"bash: {self._COMMAND_FILE}: "
+        return "\n".join(
+            line.replace(helper_prefix, "bash: ", 1) if line.startswith(helper_prefix) else line
+            for line in observation.split("\n")
+        )
 
     def _send_command(self, command: str, *, step_token: str) -> bool:
         """Send command to the tmux session. Returns True if staged-file path was used."""

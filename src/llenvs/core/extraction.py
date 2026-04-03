@@ -48,21 +48,41 @@ class TagBasedExtractor:
 
     def __post_init__(self) -> None:
         # Compile pattern for efficiency
+        tag = re.escape(self.tag_name)
         self._pattern = re.compile(
-            rf"<{re.escape(self.tag_name)}>(.*?)</{re.escape(self.tag_name)}>",
+            rf"<{tag}>(.*?)</{tag}>",
             re.DOTALL | re.IGNORECASE,
+        )
+        self._open_pattern = re.compile(
+            rf"<{tag}>",
+            re.IGNORECASE,
         )
 
     def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
         """Extract answer from <tag>...</tag> markers."""
         matches = list(self._pattern.finditer(response))
+        opening_tags = list(self._open_pattern.finditer(response))
 
-        if not matches:
+        if not matches and not opening_tags:
             return None, {"found": False, "tag_name": self.tag_name}
 
-        # Take the last match (in case model wrote multiple)
-        match = matches[-1]
-        content = match.group(1)
+        match = matches[-1] if matches else None
+        last_open = opening_tags[-1] if opening_tags else None
+
+        closed = match is not None and (
+            last_open is None or last_open.start() < match.end()
+        )
+
+        if closed:
+            assert match is not None
+            content = match.group(1)
+            match_start = match.start()
+            match_end = match.end()
+        else:
+            assert last_open is not None
+            content = response[last_open.end() :]
+            match_start = last_open.start()
+            match_end = len(response)
 
         if self.strip_whitespace:
             content = content.strip()
@@ -70,8 +90,9 @@ class TagBasedExtractor:
         return content, {
             "found": True,
             "tag_name": self.tag_name,
-            "match_start": match.start(),
-            "match_end": match.end(),
+            "closed": closed,
+            "match_start": match_start,
+            "match_end": match_end,
             "num_matches": len(matches),
         }
 
