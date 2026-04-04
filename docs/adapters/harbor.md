@@ -178,9 +178,6 @@ Available in tool mode:
 | `fs_restore_risk_now` | `bool` | Whether the current state has filesystem-restore risk signals (resets per step) |
 | `fs_restore_risk_reasons` | `tuple[str, ...]` | Specific risk reasons detected at this step |
 | `fs_restore_risk_ever` | `bool` | Sticky flag — `True` if any prior state in this trajectory had risk |
-| `command_timeout_count` | `int` | Total number of recoverable live-command timeouts seen in this trajectory |
-| `consecutive_command_timeout_count` | `int` | Current consecutive recoverable live-command timeout streak |
-| `command_timeout_total_sec` | `float` | Cumulative wall-clock seconds spent in recoverable live-command timeouts |
 
 ## Parameters
 
@@ -198,9 +195,7 @@ Available in tool mode:
 | `max_steps` | `int` | `30` | Maximum steps per episode |
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
-| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable timeout for live model-issued commands. Disabled when `None` |
-| `command_timeout_budget` | `int \| None` | `None` | Text mode only — cumulative wall-clock budget across recoverable command timeouts |
-| `max_consecutive_command_timeouts` | `int \| None` | `None` | Text mode only — truncate after this many consecutive recoverable command timeouts |
+| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, `Ctrl-C` / `Ctrl-\` recovery is attempted. Disabled when `None`. Trajectory-level limits (`max_steps`, `exec_timeout`) control total episode length |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
 | `extra_rewards` | `tuple` | `()` | Additional reward functions |
 | `state_capture_mode` | `str` | `"replay"` | Harbor state capture mode: `replay` or `snapshot_exact` |
@@ -375,7 +370,7 @@ In ``tmux_session`` mode, Harbor also detects when bash has entered the continua
 
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
-When `command_soft_timeout`, `command_timeout_budget`, and `max_consecutive_command_timeouts` are set together, live model-issued text commands become recoverable on timeout: Harbor interrupts the command, appends a standard timeout observation to the trajectory, and only truncates once the cumulative timeout budget or consecutive-timeout cap is exceeded. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects these kwargs entirely.
+When `command_soft_timeout` is set, live model-issued text commands become recoverable on timeout: Harbor interrupts the command with `Ctrl-C` (escalating to `Ctrl-\` if needed), appends a standard timeout observation to the trajectory, and keeps the session alive. Trajectory-level limits (`max_steps`, `exec_timeout`) control total episode length. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects this kwarg entirely.
 
 See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
 

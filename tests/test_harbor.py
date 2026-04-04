@@ -188,8 +188,6 @@ def _make_env(
     text_exec_mode: str = "independent_exec",
     tmux_bootstrap_if_missing: bool = False,
     command_soft_timeout: int | None = None,
-    command_timeout_budget: int | None = None,
-    max_consecutive_command_timeouts: int | None = None,
     runtime_probing: bool = False,
 ):
     """Create a HarborEnvironment with mocks."""
@@ -216,8 +214,6 @@ def _make_env(
         text_exec_mode=text_exec_mode,
         tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
         command_soft_timeout=command_soft_timeout,
-        command_timeout_budget=command_timeout_budget,
-        max_consecutive_command_timeouts=max_consecutive_command_timeouts,
         runtime_probing=runtime_probing,
     )
 
@@ -296,6 +292,7 @@ class _FakeTmuxRuntime:
         bang_requires_history_disable: bool = False,
         step_exit_codes: list[int | None] | None = None,
         recovery_exit_code: int | None = None,
+        status_file_appears_after_polls: int | None = None,
     ) -> None:
         self.tmux_installed = not missing_tmux
         self.script_available = script_available
@@ -316,7 +313,10 @@ class _FakeTmuxRuntime:
         self.visible_buffers = visible_buffers or []
         self.step_exit_codes = list(step_exit_codes or [])
         self.recovery_exit_code = recovery_exit_code
+        self.status_file_appears_after_polls = status_file_appears_after_polls
+        self._status_poll_count = 0
         self.status_reads: list[str] = []
+        self.status_polls: list[str] = []
         self.exec_calls: list[tuple[str, Any | None]] = []
         self.install_attempts = 0
         self.files: dict[str, str] = {}
@@ -432,6 +432,32 @@ class _FakeTmuxRuntime:
                 and not self.history_expansion_disabled
             ):
                 self.pending_bang_timeout = True
+            return MockExecResult(stdout="")
+
+        if self._STATUS_DIR in command and "test -f " in command:
+            # Phase 1 lock-free status file poll
+            match = re.search(
+                r"/tmp/\.llenvs_harbor_tmux_status/[A-Za-z0-9_]+",
+                command,
+            )
+            if match is None:
+                raise AssertionError(f"Unexpected status-poll command: {command}")
+            path = match.group(0)
+            self.status_polls.append(path)
+            self._status_poll_count += 1
+            if self.status_file_appears_after_polls is not None:
+                # Explicit delay: status file appears after N polls.
+                # Creates the file entry (consumed later by _read_exit_status).
+                if self._status_poll_count >= self.status_file_appears_after_polls:
+                    token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
+                    if token_match is not None and self.step_exit_codes:
+                        exit_code = self.step_exit_codes.pop(0)
+                        self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(exit_code or 0)
+                    return MockExecResult(stdout="found")
+                return MockExecResult(stdout="")
+            # Default: command completed unless a timeout is pending.
+            if not self.wait_timeout_once and not self.pending_command_timeout:
+                return MockExecResult(stdout="found")
             return MockExecResult(stdout="")
 
         if self._STATUS_DIR in command:
@@ -660,9 +686,6 @@ class TestHarborSnapshotEligibility:
         assert h.last_action is None
         assert h.trajectory == ()
         assert h.snapshot_ref is None
-        assert h.command_timeout_count == 0
-        assert h.consecutive_command_timeout_count == 0
-        assert h.command_timeout_total_sec == 0.0
 
 
 # ── TestHarborReward ────────────────────────────────────────────
@@ -1236,14 +1259,15 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="pwd"))
 
         after = mock_env._exec_history[before:]
-        # 3 execs: send, wait+capture, read-exit-status
-        assert len(after) == 3
+        # 4 execs: send, status-file-poll, wait+capture, read-exit-status
+        assert len(after) == 4
         assert "tmux wait-for -L " in after[0]
         assert "tmux send-keys -l " in after[0]
-        assert "tmux wait-for -L " in after[1]
-        assert "tmux wait-for -U " in after[1]
-        assert "capture-pane -J -p -S -" in after[1]
-        assert "/tmp/.llenvs_harbor_tmux_status/" in after[2]
+        assert "test -f /tmp/.llenvs_harbor_tmux_status/" in after[1]
+        assert "tmux wait-for -L " in after[2]
+        assert "tmux wait-for -U " in after[2]
+        assert "capture-pane -J -p -S -" in after[2]
+        assert "/tmp/.llenvs_harbor_tmux_status/" in after[3]
         assert result.next_state.observation.state is not None
         assert "/app" in result.next_state.observation.state.text
 
@@ -1478,9 +1502,9 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="pwd"))
 
         after = mock_env._exec_history[before:]
-        # 3 execs for direct path: send, wait+capture, read-status
+        # 4 execs for direct path: send, status-poll, wait+capture, read-status
         # Plus 1 extra capture from visible-screen fallback
-        assert "capture-pane -J -p -t" in after[2]
+        assert "capture-pane -J -p -t" in after[3]
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "/app"
 
@@ -1546,6 +1570,97 @@ class TestHarborEnvironment:
         )
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
 
+    def test_direct_command_phase1_polls_status_file(self):
+        """Phase 1 should use lock-free status-file polling, not wait-for."""
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ echo hello\nhello\nbash$ ",
+            ],
+            step_exit_codes=[0],
+            status_file_appears_after_polls=2,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="echo hello"))
+
+        # Phase 1 polled the status file (lock-free)
+        assert len(runtime.status_polls) >= 1
+        # Phase 1 did NOT use tmux wait-for -L (the bug we're fixing)
+        phase1_cmds = [
+            cmd for cmd, ts in runtime.exec_calls
+            if "test -f" in cmd and runtime._STATUS_DIR in cmd
+        ]
+        assert len(phase1_cmds) >= 1
+        # Phase 2 used a single wait_and_capture (with wait-for)
+        wait_capture_cmds = [
+            cmd for cmd in mock_env._exec_history
+            if "tmux wait-for -L" in cmd and "capture-pane" in cmd
+        ]
+        assert len(wait_capture_cmds) == 1
+        # Output was captured correctly
+        assert result.next_state.observation.state is not None
+        assert "hello" in result.next_state.observation.state.text
+
+    def test_direct_command_phase1_detects_continuation_without_lock(self):
+        """Phase 1 continuation detection should work without lock-based polling."""
+        runtime = _FakeTmuxRuntime(
+            wait_timeout_once=True,
+            recovery_exit_code=130,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        # Status file never appears (command is incomplete)
+        # Visible screen shows continuation sentinel
+        runtime.visible_buffers.append(
+            f'echo "unterminated\n{text_session._continuation_sentinel}'
+        )
+        runtime.full_buffers.append(
+            f'bash$ echo "unterminated\n{text_session._prompt_sentinel}'
+        )
+
+        result = env.step(state, Action(text='echo "unterminated'))
+
+        assert result.info["shell_continuation_detected"] is True
+        # Phase 1 used status file polls, NOT wait-for -L
+        assert len(runtime.status_polls) >= 1
+        phase1_wait_for_cmds = [
+            cmd for cmd, ts in runtime.exec_calls
+            if "tmux wait-for -L" in cmd
+            and ts is not None
+            and ts <= 2  # short timeout = phase 1 poll
+        ]
+        assert len(phase1_wait_for_cmds) == 0
+
+    def test_direct_command_phase1_propagates_transport_error(self):
+        """Phase 1 should propagate non-timeout errors, not swallow them."""
+        call_count = 0
+        original_call = None
+
+        def error_on_status_poll(command: str, **kwargs: Any) -> MockExecResult:
+            nonlocal call_count
+            if "test -f" in command and "/tmp/.llenvs_harbor_tmux_status/" in command:
+                call_count += 1
+                raise RuntimeError("apptainer instance not found")
+            return original_call(command, **kwargs)
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=["bash$ echo hello\nhello\nbash$ "],
+        )
+        original_call = runtime.__call__
+        mock_env = MockHarborEnvironment(exec_handler=error_on_status_poll)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        with pytest.raises(RuntimeError, match="apptainer instance not found"):
+            env.step(state, Action(text="echo hello"))
+
+        assert call_count == 1  # Failed on first poll, did not retry
+
     def test_step_tmux_session_soft_timeout_returns_observation(self):
         runtime = _FakeTmuxRuntime(
             full_buffers=[
@@ -1561,8 +1676,6 @@ class TestHarborEnvironment:
             text_exec_mode="tmux_session",
             exec_timeout=30,
             command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
         )
         state, _ = _reset_env(env)
 
@@ -1598,6 +1711,83 @@ class TestHarborEnvironment:
         assert len(runtime.status_reads) == 1
         assert not any(path.startswith(runtime._STATUS_DIR + "/") for path in runtime.files)
 
+    def test_run_command_salvages_output_when_prompt_visible_at_timeout(self):
+        """When the prompt is visible at timeout, command completed — salvage real output."""
+        runtime = _FakeTmuxRuntime(
+            wait_timeout_once=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+        )
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        # Visible screen already shows the prompt (command completed, signal lost).
+        runtime.visible_buffers.append(
+            f"done.\n{text_session._prompt_sentinel}"
+        )
+        # Full buffer has the real output (used by salvage capture).
+        runtime.full_buffers.append(
+            f"bash$ apt-get update\napt-get install -y curl\ndone.\n{text_session._prompt_sentinel}"
+        )
+
+        # Multiline → staged-file path → skips phase 1 (avoids visible_buffers exhaustion)
+        result = env.step(state, Action(text="apt-get update\napt-get install -y curl"))
+
+        # Should NOT report a timeout — command completed successfully.
+        assert result.info.get("command_timed_out") is not True
+        # Should return real command output.
+        assert result.next_state.observation.state is not None
+        assert "done." in result.next_state.observation.state.text
+        # Should NOT have sent Ctrl-C (no recovery needed).
+        assert not any(" C-c" in cmd for cmd in mock_env._exec_history)
+        # Should have cleared the orphaned lock.
+        assert any(
+            "tmux wait-for -U" in cmd and "2>/dev/null" in cmd
+            for cmd in mock_env._exec_history
+        )
+
+    def test_handle_timeout_visual_fallback_after_lock_recovery_fails(self):
+        """When lock-based recovery fails but the prompt is visible, declare recovered."""
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ make all\ncompiling...\nbash$ ",
+            ],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        # 1st visible capture (run_command salvage check): prompt NOT visible.
+        runtime.visible_buffers.append("compiling...")
+        # 2nd visible capture (_handle_timeout diagnostic): still running.
+        runtime.visible_buffers.append("compiling...")
+        # 3rd visible capture (visual fallback after Ctrl-C + Ctrl-\):
+        # prompt appeared after the command was interrupted.
+        runtime.visible_buffers.append(f"Interrupted\n{text_session._prompt_sentinel}")
+
+        # Multiline → staged-file path → skips phase 1
+        result = env.step(state, Action(text="make all\necho done"))
+
+        # Should report a timeout (command was interrupted by Ctrl-C).
+        assert result.info["command_timed_out"] is True
+        # Ctrl-C was sent.
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        # Observation is the timeout message.
+        assert result.next_state.observation.state is not None
+        assert "timed out" in result.next_state.observation.state.text
+
     def test_step_tmux_session_unrecoverable_timeout_still_raises(self):
         runtime = _FakeTmuxRuntime(
             full_buffers=[
@@ -1613,8 +1803,6 @@ class TestHarborEnvironment:
             text_exec_mode="tmux_session",
             exec_timeout=30,
             command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
         )
         state, _ = _reset_env(env)
 
@@ -1638,8 +1826,6 @@ class TestHarborEnvironment:
             text_exec_mode="tmux_session",
             exec_timeout=30,
             command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
         )
         state, _ = _reset_env(env)
 
@@ -1678,8 +1864,6 @@ class TestHarborEnvironment:
         env = _make_env(
             harbor_env=mock_env,
             command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
         )
         state, _ = _reset_env(env)
         tick_values = [0.0, 4.5]
@@ -1697,11 +1881,6 @@ class TestHarborEnvironment:
         expected = "[Command timed out after 5 seconds and was cancelled.]"
         assert result.info["command_timed_out"] is True
         assert result.info["command_timeout_elapsed_sec"] == pytest.approx(4.5)
-        assert result.info["command_timeout_total_sec"] == pytest.approx(4.5)
-        assert result.info["timeout_policy_truncated"] is False
-        assert result.next_state.hidden.command_timeout_count == 1
-        assert result.next_state.hidden.consecutive_command_timeout_count == 1
-        assert result.next_state.hidden.command_timeout_total_sec == pytest.approx(4.5)
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == expected
         assert result.next_state.observation.messages[-2] == {
@@ -1713,125 +1892,6 @@ class TestHarborEnvironment:
             "content": expected,
         }
         assert result.next_state.metadata.info["command_timed_out"] is True
-        assert result.next_state.metadata.info["command_timeout_total_sec"] == pytest.approx(4.5)
-
-    def test_step_success_resets_consecutive_timeout_counter(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        import llenvs.adapters.harbor as harbor_module
-
-        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
-            if command == "sleep 999":
-                raise RuntimeError(
-                    f"apptainer command timed out after {timeout_sec}s: {command}"
-                )
-            return MockExecResult(stdout=f"ran {command}")
-
-        mock_env = MockHarborEnvironment(exec_handler=handler)
-        env = _make_env(
-            harbor_env=mock_env,
-            command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
-        )
-        state, _ = _reset_env(env)
-        tick_values = [0.0, 4.0]
-        last_tick = {"value": tick_values[-1]}
-
-        def fake_monotonic() -> float:
-            if tick_values:
-                last_tick["value"] = tick_values.pop(0)
-            return last_tick["value"]
-
-        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
-
-        timeout_result = env.step(state, Action(text="sleep 999"))
-        success_result = env.step(timeout_result.next_state, Action(text="pwd"))
-
-        assert timeout_result.next_state.hidden.consecutive_command_timeout_count == 1
-        assert success_result.info["command_timed_out"] is False
-        assert success_result.next_state.hidden.command_timeout_count == 1
-        assert success_result.next_state.hidden.command_timeout_total_sec == pytest.approx(4.0)
-        assert success_result.next_state.hidden.consecutive_command_timeout_count == 0
-
-    def test_step_timeout_budget_truncates_and_runs_verifier(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        import llenvs.adapters.harbor as harbor_module
-
-        def timeout_handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
-            raise RuntimeError(f"apptainer command timed out after {timeout_sec}s: {command}")
-
-        mock_env = MockHarborEnvironment(exec_handler=timeout_handler)
-        env = _make_env(
-            harbor_env=mock_env,
-            verifier_result=MockVerifierResult(rewards={"reward": 0.75}),
-            command_soft_timeout=5,
-            command_timeout_budget=7,
-            max_consecutive_command_timeouts=3,
-            verify_on_truncation=True,
-        )
-        state, _ = _reset_env(env)
-        tick_values = [0.0, 4.0, 10.0, 14.0]
-        last_tick = {"value": tick_values[-1]}
-
-        def fake_monotonic() -> float:
-            if tick_values:
-                last_tick["value"] = tick_values.pop(0)
-            return last_tick["value"]
-
-        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
-
-        first = env.step(state, Action(text="sleep 999"))
-        second = env.step(first.next_state, Action(text="sleep 999"))
-
-        expected = (
-            "[Command timed out after 5 seconds and was cancelled.]\n"
-            "[Trajectory terminated after exceeding the command-timeout budget.]"
-        )
-        assert first.truncated is False
-        assert second.truncated is True
-        assert second.terminated is False
-        assert second.info["timeout_policy_truncated"] is True
-        assert second.info["command_timeout_total_sec"] == pytest.approx(8.0)
-        assert second.next_state.hidden.command_timeout_total_sec == pytest.approx(8.0)
-        assert second.next_state.observation.state is not None
-        assert second.next_state.observation.state.text == expected
-        assert second.next_state.metadata.info["reward"] == 0.75
-
-    def test_step_consecutive_timeout_cap_truncates(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        import llenvs.adapters.harbor as harbor_module
-
-        def timeout_handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
-            raise RuntimeError(f"apptainer command timed out after {timeout_sec}s: {command}")
-
-        mock_env = MockHarborEnvironment(exec_handler=timeout_handler)
-        env = _make_env(
-            harbor_env=mock_env,
-            command_soft_timeout=5,
-            command_timeout_budget=30,
-            max_consecutive_command_timeouts=2,
-        )
-        state, _ = _reset_env(env)
-        tick_values = [0.0, 3.0, 10.0, 13.0]
-        last_tick = {"value": tick_values[-1]}
-
-        def fake_monotonic() -> float:
-            if tick_values:
-                last_tick["value"] = tick_values.pop(0)
-            return last_tick["value"]
-
-        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
-
-        first = env.step(state, Action(text="sleep 999"))
-        second = env.step(first.next_state, Action(text="sleep 999"))
-
-        assert first.truncated is False
-        assert second.truncated is True
-        assert second.info["timeout_policy_truncated"] is True
-        assert second.info["consecutive_command_timeout_count"] == 2
 
     def test_step_submit_keyword_terminates(self):
         mock_env = MockHarborEnvironment()
@@ -1952,8 +2012,6 @@ class TestHarborEnvironment:
             text_exec_mode="tmux_session",
             exec_timeout=30,
             command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
         )
         state, _ = _reset_env(env)
 
@@ -2485,26 +2543,6 @@ class TestHarborAdapter:
                 verify_factory=verifier_factory,
                 tool_mode=True,
                 command_soft_timeout=120,
-                command_timeout_budget=240,
-                max_consecutive_command_timeouts=2,
-            )
-
-    def test_text_mode_requires_complete_command_soft_timeout_policy(self):
-        from llenvs.adapters.harbor import HarborAdapter
-
-        adapter = HarborAdapter()
-        tasks = _make_tasks()
-        mock_env = MockHarborEnvironment()
-        env_factory = _make_harbor_env_factory(mock_env)
-        verifier_factory = _make_verifier_factory()
-
-        with pytest.raises(ValueError, match="set together"):
-            adapter.get_environment(
-                name="test",
-                tasks=tasks,
-                env_factory=env_factory,
-                verify_factory=verifier_factory,
-                command_soft_timeout=120,
             )
 
     def test_list_environments_uses_registry_client(self, monkeypatch: pytest.MonkeyPatch):
@@ -3023,6 +3061,87 @@ class TestHarborRestore:
         with pytest.raises(RuntimeError, match="No command was executed"):
             harbor_restore(env, target_state)
 
+    def test_harbor_restore_raises_on_replay_command_timeout(self):
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        env = _make_env()
+
+        target_hidden = HarborHidden(
+            task_index=0,
+            task_name="task_00",
+            instruction="Task 0 instruction",
+            episode_step=1,
+            trajectory=("apt-get update",),
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=target_hidden,
+            metadata=MagicMock(step=1, episode_id="episode-1", is_terminal=False),
+        )
+
+        def fake_step(current, action):
+            del current, action
+            obs_text = "[Command timed out after 120 seconds and was cancelled.]"
+            next_state = SimpleNamespace(
+                observation=SimpleNamespace(state=SimpleNamespace(text=obs_text))
+            )
+            return SimpleNamespace(
+                next_state=next_state,
+                info={
+                    "command_timed_out": True,
+                    "observation": obs_text,
+                    "shell_continuation_detected": False,
+                },
+            )
+
+        env.step = fake_step  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="timed out") as exc_info:
+            harbor_restore(env, target_state)
+
+        # Error message contains "timed out" so value-bench's
+        # classify_rollout_error() will treat it as recoverable.
+        assert "timed out" in str(exc_info.value)
+
+    def test_harbor_restore_continues_after_signal_loss_salvage(self):
+        """When a replayed command had its signal lost but was salvaged, replay continues."""
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        env = _make_env()
+
+        target_hidden = HarborHidden(
+            task_index=0,
+            task_name="task_00",
+            instruction="Task 0 instruction",
+            episode_step=2,
+            trajectory=("echo a", "echo b"),
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=target_hidden,
+            metadata=MagicMock(step=2, episode_id="episode-1", is_terminal=False),
+        )
+        steps_called = []
+
+        def fake_step(current, action):
+            steps_called.append(action.text)
+            next_state = SimpleNamespace(
+                observation=SimpleNamespace(state=SimpleNamespace(text="ok"))
+            )
+            return SimpleNamespace(
+                next_state=next_state,
+                info={
+                    "command_timed_out": False,
+                    "shell_continuation_detected": False,
+                },
+            )
+
+        env.step = fake_step  # type: ignore[method-assign]
+
+        harbor_restore(env, target_state)
+
+        assert steps_called == ["echo a", "echo b"]
+
     def test_harbor_restore_uses_hard_timeout_when_soft_policy_enabled(self):
         """Replay should bypass recoverable soft timeouts and use exec_timeout."""
         from llenvs.adapters.harbor import HarborHidden, harbor_restore
@@ -3037,8 +3156,6 @@ class TestHarborRestore:
             harbor_env=MockHarborEnvironment(exec_handler=handler),
             exec_timeout=17,
             command_soft_timeout=5,
-            command_timeout_budget=20,
-            max_consecutive_command_timeouts=2,
         )
 
         target_state = State(
@@ -3360,8 +3477,6 @@ class TestValidateReplayConsistency:
                 harbor_env=MockHarborEnvironment(exec_handler=handler),
                 exec_timeout=17,
                 command_soft_timeout=5,
-                command_timeout_budget=20,
-                max_consecutive_command_timeouts=2,
             )
 
         result = validate_replay_consistency(
