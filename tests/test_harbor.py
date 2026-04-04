@@ -302,6 +302,7 @@ class _FakeTmuxRuntime:
         self.direct_start_error = direct_start_error
         self.direct_start_attempts = 0
         self.wait_timeout_once = wait_timeout_once
+        self.pending_command_timeout = False
         self.wait_recovery_fails = wait_recovery_fails
         self.ctrl_backslash_recovers = ctrl_backslash_recovers
         self.ready_after_attempts = ready_after_attempts
@@ -377,6 +378,9 @@ class _FakeTmuxRuntime:
                 raise RuntimeError("apptainer command timed out after 120s")
             if self.wait_timeout_once:
                 self.wait_timeout_once = False
+                self.pending_command_timeout = True
+                raise RuntimeError("apptainer command timed out after 120s")
+            if self.pending_command_timeout:
                 raise RuntimeError("apptainer command timed out after 120s")
             token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
             if token_match is not None and self.step_exit_codes:
@@ -398,7 +402,11 @@ class _FakeTmuxRuntime:
             return MockExecResult(stdout=self.visible_buffers.pop(0))
 
         if "tmux send-keys" in command:
+            if " C-c" in command:
+                self.pending_command_timeout = False
+                return MockExecResult(stdout="")
             if " C-\\" in command:
+                self.pending_command_timeout = False
                 if self.ctrl_backslash_recovers:
                     self.wait_recovery_fails = False
                     self.pending_bang_recovery_failure = False
@@ -1439,6 +1447,7 @@ class TestHarborEnvironment:
         assert "export APT_LISTCHANGES_FRONTEND=none" in runtime.staged_hook_script
         assert "export NEEDRESTART_MODE=a" in runtime.staged_hook_script
         assert "export GIT_TERMINAL_PROMPT=0" in runtime.staged_hook_script
+        assert "PS2=" in runtime.staged_hook_script
 
     def test_step_tmux_session_status_unavailable_falls_back_to_no_output(self):
         runtime = _FakeTmuxRuntime(step_exit_codes=[None])
@@ -1511,6 +1520,31 @@ class TestHarborEnvironment:
 
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "x "
+
+    def test_step_tmux_session_detects_shell_continuation_prompt(self):
+        runtime = _FakeTmuxRuntime(
+            wait_timeout_once=True,
+            recovery_exit_code=130,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        assert text_session is not None
+        runtime.visible_buffers.append(f'echo "unterminated\n{text_session._continuation_sentinel}')
+        runtime.full_buffers.append(f'bash$ echo "unterminated\n{text_session._prompt_sentinel}')
+
+        result = env.step(state, Action(text='echo "unterminated'))
+
+        assert result.info["shell_continuation_detected"] is True
+        assert result.info["command_timed_out"] is False
+        assert result.next_state.hidden.trajectory == ()
+        assert result.next_state.metadata.info["shell_continuation_detected"] is True
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "[Shell is waiting for more input because the command is syntactically incomplete. No command was executed.]"
+        )
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
 
     def test_step_tmux_session_soft_timeout_returns_observation(self):
         runtime = _FakeTmuxRuntime(
@@ -2948,6 +2982,46 @@ class TestHarborRestore:
         restored = harbor_restore(env, target_state)
         assert restored.hidden.episode_step == 0
         assert restored.hidden.trajectory == ()
+
+    def test_harbor_restore_raises_on_shell_continuation_prompt(self):
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        env = _make_env()
+
+        target_hidden = HarborHidden(
+            task_index=0,
+            task_name="task_00",
+            instruction="Task 0 instruction",
+            episode_step=1,
+            trajectory=('echo "unterminated',),
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=target_hidden,
+            metadata=MagicMock(step=1, episode_id="episode-1", is_terminal=False),
+        )
+
+        def fake_step(current, action):
+            del current, action
+            observation_text = (
+                "[Shell is waiting for more input because the command is syntactically "
+                "incomplete. No command was executed.]"
+            )
+            next_state = SimpleNamespace(
+                observation=SimpleNamespace(state=SimpleNamespace(text=observation_text))
+            )
+            return SimpleNamespace(
+                next_state=next_state,
+                info={
+                    "shell_continuation_detected": True,
+                    "observation": observation_text,
+                },
+            )
+
+        env.step = fake_step  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="No command was executed"):
+            harbor_restore(env, target_state)
 
     def test_harbor_restore_uses_hard_timeout_when_soft_policy_enabled(self):
         """Replay should bypass recoverable soft timeouts and use exec_timeout."""

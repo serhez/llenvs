@@ -346,6 +346,25 @@ class _HarborRecoverableCommandTimeout(RuntimeError):
         )
 
 
+class _HarborRecoverableShellContinuation(RuntimeError):
+    """Recoverable shell continuation prompt for a live model-issued command."""
+
+    def __init__(
+        self,
+        *,
+        command: str,
+        visible_screen: str = "",
+        full_buffer_tail: str = "",
+    ) -> None:
+        self.command = command
+        self.visible_screen = visible_screen
+        self.full_buffer_tail = full_buffer_tail
+        super().__init__(
+            "Harbor shell is waiting for more input because the command is "
+            f"syntactically incomplete: {command}"
+        )
+
+
 @dataclass(frozen=True)
 class _PodmanVolumeMount:
     source: str
@@ -659,6 +678,8 @@ class _HarborTmuxTextSession:
     _DIRECT_SEND_KEYS_MAX_CHARS = 4096
     _DIAGNOSTIC_TAIL_LINES = 200
     _STARTUP_DIAGNOSTIC_TAIL_LINES = 50
+    _DIRECT_WAIT_POLL_SEC = 1.0
+    _DIRECT_CONTINUATION_POLL_WINDOW_SEC = 5.0
     _STARTUP_TIMEOUT_CAP_SEC = 30
     _TIMEOUT_RECOVERY_WAIT_SEC = 30
     _READY_POLL_INTERVAL_SEC = 0.5
@@ -677,6 +698,7 @@ class _HarborTmuxTextSession:
         self._bootstrap_if_missing = bootstrap_if_missing
         self._previous_full_buffer = ""
         self._prompt_sentinel = f"__LLENVS_PROMPT_{uuid.uuid4().hex[:12]}__> "
+        self._continuation_sentinel = f"__LLENVS_CONTINUATION_{uuid.uuid4().hex[:12]}__> "
         self.tmux_bootstrapped = False
         self.tmux_start_method = "direct"
 
@@ -735,7 +757,16 @@ class _HarborTmuxTextSession:
         )
         started_at = _now_monotonic()
         try:
-            result = self._exec(wait_and_capture, timeout_sec=effective_timeout)
+            if used_staged_file:
+                result = self._exec(wait_and_capture, timeout_sec=effective_timeout)
+                full_buffer = getattr(result, "stdout", "") or ""
+            else:
+                full_buffer = self._wait_for_direct_command(
+                    command_text,
+                    step_token,
+                    wait_and_capture,
+                    timeout_sec=effective_timeout,
+                )
         except Exception as exc:
             if self._is_timeout_error(exc):
                 elapsed_sec = max(0.0, _now_monotonic() - started_at)
@@ -748,7 +779,6 @@ class _HarborTmuxTextSession:
                 ) from exc
             raise
 
-        full_buffer = getattr(result, "stdout", "") or ""
         observation = self._diff_full_buffer(full_buffer)
         observation = self._sanitize_observation(observation, command_text, used_staged_file)
         if observation == "":
@@ -950,10 +980,12 @@ class _HarborTmuxTextSession:
         token_file_q = shlex.quote(self._TOKEN_FILE)
         hook_file_q = shlex.quote(self._HOOK_SCRIPT_FILE)
         ps1_q = shlex.quote(self._prompt_sentinel)
+        ps2_q = shlex.quote(self._continuation_sentinel)
         init_script = "\n".join(
             [
                 "set +H",  # Disable history expansion so ! is literal
                 f"PS1={ps1_q}",  # Force deterministic prompt sentinel
+                f"PS2={ps2_q}",  # Force deterministic continuation prompt sentinel
                 "export VIRTUAL_ENV_DISABLE_PROMPT=1",
                 "export DEBIAN_FRONTEND=noninteractive",
                 "export DEBCONF_NONINTERACTIVE_SEEN=true",
@@ -964,6 +996,7 @@ class _HarborTmuxTextSession:
                 "__llenvs_harbor_prompt_hook() {",
                 "  local status=$?",  # MUST be first — captures exit code
                 f"  PS1={ps1_q}",  # Reassert on every prompt
+                f"  PS2={ps2_q}",  # Reassert on every prompt
                 f"  local token_file={token_file_q}",
                 f"  local status_dir={shlex.quote(self._STATUS_DIR)}",
                 '  local token=""',
@@ -1039,6 +1072,76 @@ class _HarborTmuxTextSession:
                 ) from exc
             raise
 
+    def _wait_for_prompt_recovery(self, step_token: str, *, timeout_sec: int) -> None:
+        token_q = shlex.quote(step_token)
+        self._exec(
+            f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
+            timeout_sec=timeout_sec,
+        )
+
+    def _wait_for_direct_command(
+        self,
+        command: str,
+        step_token: str,
+        wait_and_capture: str,
+        *,
+        timeout_sec: int,
+    ) -> str:
+        deadline = _now_monotonic() + timeout_sec
+        continuation_poll_deadline = min(
+            deadline,
+            _now_monotonic() + self._DIRECT_CONTINUATION_POLL_WINDOW_SEC,
+        )
+        while True:
+            now = _now_monotonic()
+            remaining = deadline - now
+            if remaining <= 0:
+                break
+            if now >= continuation_poll_deadline:
+                break
+            poll_timeout = max(
+                0.1,
+                min(self._DIRECT_WAIT_POLL_SEC, continuation_poll_deadline - now, remaining),
+            )
+            try:
+                result = self._exec(
+                    wait_and_capture,
+                    timeout_sec=poll_timeout,
+                )
+                return getattr(result, "stdout", "") or ""
+            except Exception as exc:
+                if not self._is_timeout_error(exc):
+                    raise
+                visible = self._safe_capture(self._capture_visible_screen_raw)
+                if self._continuation_sentinel in visible:
+                    raise self._handle_continuation_prompt(
+                        command,
+                        step_token,
+                        visible_screen=visible,
+                    )
+
+        remaining = deadline - _now_monotonic()
+        if remaining <= 0:
+            # Keep the timeout wording aligned with _run_hpc_cli_command() so
+            # run_command() routes this through the shared timeout recovery path.
+            raise RuntimeError(f"apptainer command timed out after {timeout_sec}s")
+        try:
+            result = self._exec(wait_and_capture, timeout_sec=remaining)
+            return getattr(result, "stdout", "") or ""
+        except Exception as exc:
+            if self._is_timeout_error(exc):
+                visible = self._safe_capture(self._capture_visible_screen_raw)
+                if self._continuation_sentinel in visible:
+                    raise self._handle_continuation_prompt(
+                        command,
+                        step_token,
+                        visible_screen=visible,
+                    )
+                # Keep the timeout wording aligned with _run_hpc_cli_command() so
+                # run_command() routes this through the shared timeout recovery path.
+                raise RuntimeError(f"apptainer command timed out after {timeout_sec}s") from exc
+            raise
+
     def _handle_timeout(
         self,
         command: str,
@@ -1081,11 +1184,7 @@ class _HarborTmuxTextSession:
             )
         recovered = True
         try:
-            token_q = shlex.quote(step_token)
-            self._exec(
-                f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
-                timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC,
-            )
+            self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
         except Exception:
             recovered = False
         if not recovered:
@@ -1099,11 +1198,7 @@ class _HarborTmuxTextSession:
                     _preview_log_text(command),
                 )
             try:
-                token_q = shlex.quote(step_token)
-                self._exec(
-                    f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
-                    timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC,
-                )
+                self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
                 recovered = True
             except Exception:
                 recovered = False
@@ -1164,6 +1259,58 @@ class _HarborTmuxTextSession:
             details.append("Full buffer tail:\n" + tail_lines)
         if not recovered:
             details.append("Session unrecoverable after timeout")
+        return RuntimeError("\n".join(details))
+
+    def _handle_continuation_prompt(
+        self,
+        command: str,
+        step_token: str,
+        *,
+        visible_screen: str,
+    ) -> RuntimeError | _HarborRecoverableShellContinuation:
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        if debug_enabled:
+            logger.debug(
+                "Harbor tmux continuation prompt detected: preview=%s visible_tail=%s",
+                _preview_log_text(command),
+                _preview_log_text(visible_screen),
+            )
+        self._safe_exec(
+            f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-c",
+            timeout_sec=10,
+        )
+        recovered = True
+        try:
+            self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
+        except Exception:
+            recovered = False
+        if not recovered:
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-\\",
+                timeout_sec=10,
+            )
+            try:
+                self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
+                recovered = True
+            except Exception:
+                recovered = False
+        self._read_exit_status(step_token)
+        recovered_buffer = self._safe_capture(self._capture_full_buffer)
+        if recovered_buffer:
+            self._previous_full_buffer = recovered_buffer
+        if recovered:
+            return _HarborRecoverableShellContinuation(
+                command=command,
+                visible_screen=visible_screen,
+            )
+        full = self._safe_capture(self._capture_full_buffer_raw)
+        details = [f"Harbor tmux shell continuation prompt detected for command: {command}"]
+        if visible_screen:
+            details.append("Visible screen:\n" + visible_screen)
+        if full:
+            tail_lines = "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
+            details.append("Full buffer tail:\n" + tail_lines)
+        details.append("Session unrecoverable after continuation prompt")
         return RuntimeError("\n".join(details))
 
     def _probe_tmux(self) -> bool:
@@ -4047,6 +4194,13 @@ class HarborEnvironment:
             lines.append("[Trajectory terminated after exceeding the command-timeout budget.]")
         return "\n".join(lines)
 
+    @staticmethod
+    def _continuation_observation_text() -> str:
+        return (
+            "[Shell is waiting for more input because the command is syntactically "
+            "incomplete. No command was executed.]"
+        )
+
     def step(
         self,
         state: State[HarborHidden],
@@ -4080,6 +4234,7 @@ class HarborEnvironment:
         timeout_policy_truncated = False
         command_timeout_count = state.hidden.command_timeout_count
         consecutive_command_timeout_count = state.hidden.consecutive_command_timeout_count
+        shell_continuation_detected = False
         command_timeout_total_sec = state.hidden.command_timeout_total_sec
 
         # Check for submit keyword on extracted command (not on malformed raw text)
@@ -4099,8 +4254,10 @@ class HarborEnvironment:
         if invalid_action_format:
             obs_text = self._invalid_action_observation()
             consecutive_command_timeout_count = 0
+            continuation_exc = None
         elif not terminated:
             timeout_exc: _HarborRecoverableCommandTimeout | None = None
+            continuation_exc: _HarborRecoverableShellContinuation | None = None
             if self._text_exec_mode == "tmux_session":
                 if self._text_session is None:
                     raise RuntimeError("Harbor tmux text session was not initialized")
@@ -4114,6 +4271,8 @@ class HarborEnvironment:
                         obs_text = self._text_session.run_command(cmd_for_env)
                 except _HarborRecoverableCommandTimeout as exc:
                     timeout_exc = exc
+                except _HarborRecoverableShellContinuation as exc:
+                    continuation_exc = exc
             else:
                 exec_timeout = (
                     self._command_soft_timeout
@@ -4138,7 +4297,11 @@ class HarborEnvironment:
                     else:
                         raise
 
-            if timeout_exc is not None:
+            if continuation_exc is not None:
+                shell_continuation_detected = True
+                obs_text = self._continuation_observation_text()
+                consecutive_command_timeout_count = 0
+            elif timeout_exc is not None:
                 command_timed_out = True
                 command_timeout_elapsed_sec = timeout_exc.elapsed_sec
                 command_timeout_count += 1
@@ -4228,7 +4391,8 @@ class HarborEnvironment:
             instruction=state.hidden.instruction,
             episode_step=next_step,
             last_action=cmd_for_env if cmd_for_env is not None else action_text,
-            trajectory=state.hidden.trajectory + ((cmd_for_env,) if cmd_for_env is not None else ()),
+            trajectory=state.hidden.trajectory
+            + ((cmd_for_env,) if cmd_for_env is not None and not shell_continuation_detected else ()),
             fs_restore_risk_ever=state.hidden.fs_restore_risk_ever
             or state.hidden.fs_restore_risk_now,
             command_timeout_count=command_timeout_count,
@@ -4257,6 +4421,7 @@ class HarborEnvironment:
             "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
             "command_timeout_count": command_timeout_count,
             "command_timeout_total_sec": command_timeout_total_sec,
+            "shell_continuation_detected": shell_continuation_detected,
             "consecutive_command_timeout_count": consecutive_command_timeout_count,
             "timeout_policy_truncated": timeout_policy_truncated,
         }
@@ -4329,6 +4494,7 @@ class HarborEnvironment:
                 "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
                 "command_timeout_count": command_timeout_count,
                 "command_timeout_total_sec": command_timeout_total_sec,
+                "shell_continuation_detected": shell_continuation_detected,
                 "consecutive_command_timeout_count": consecutive_command_timeout_count,
                 "timeout_policy_truncated": timeout_policy_truncated,
                 **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
@@ -5217,6 +5383,12 @@ def harbor_restore(
 
         for cmd in state.hidden.trajectory:
             result = env.step(current, Action(text=cmd))
+            if result.info.get("shell_continuation_detected"):
+                observation = result.info.get("observation", "")
+                raise RuntimeError(
+                    "Harbor replay hit shell continuation prompt: "
+                    f"{cmd}\nObservation: {observation}"
+                )
             current = result.next_state
 
     return current
@@ -5309,6 +5481,12 @@ def capture_replay_probe_outputs(
             current, _info = env.reset(options={"task_index": task_index})
             for cmd in trajectory:
                 result = env.step(current, Action(text=cmd))
+                if result.info.get("shell_continuation_detected"):
+                    observation = result.info.get("observation", "")
+                    raise RuntimeError(
+                        "Harbor replay hit shell continuation prompt: "
+                        f"{cmd}\nObservation: {observation}"
+                    )
                 current = result.next_state
 
             return {

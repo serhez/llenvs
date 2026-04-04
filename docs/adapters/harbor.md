@@ -371,6 +371,8 @@ In both text exec modes, commands that produce no visible output get an explicit
 
 When an ``answer_extractor`` is configured and it cannot extract an action, Harbor does not execute the raw model text. Instead it returns a format-specific invalid-action observation (for example, reminding the model to use ``<answer>...</answer>``) and records the invalid-format flag plus extraction metadata in step info.
 
+In ``tmux_session`` mode, Harbor also detects when bash has entered the continuation prompt because a direct command is syntactically incomplete (for example, unmatched quotes). Live steps are cancelled immediately and receive a synthetic observation explaining that the shell is waiting for more input. Replay and replay-probe restore paths treat the same condition as an immediate restore failure instead of waiting for the full command timeout.
+
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
 When `command_soft_timeout`, `command_timeout_budget`, and `max_consecutive_command_timeouts` are set together, live model-issued text commands become recoverable on timeout: Harbor interrupts the command, appends a standard timeout observation to the trajectory, and only truncates once the cumulative timeout budget or consecutive-timeout cap is exceeded. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects these kwargs entirely.
