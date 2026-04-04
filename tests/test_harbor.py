@@ -290,6 +290,7 @@ class _FakeTmuxRuntime:
         script_available: bool = True,
         wait_timeout_once: bool = False,
         wait_recovery_fails: bool = False,
+        ctrl_backslash_recovers: bool = False,
         ready_after_attempts: int | None = 1,
         hook_wait_timeout_once: bool = False,
         bang_requires_history_disable: bool = False,
@@ -302,6 +303,7 @@ class _FakeTmuxRuntime:
         self.direct_start_attempts = 0
         self.wait_timeout_once = wait_timeout_once
         self.wait_recovery_fails = wait_recovery_fails
+        self.ctrl_backslash_recovers = ctrl_backslash_recovers
         self.ready_after_attempts = ready_after_attempts
         self.ready_send_attempts = 0
         self.hook_wait_timeout_once = hook_wait_timeout_once
@@ -396,6 +398,11 @@ class _FakeTmuxRuntime:
             return MockExecResult(stdout=self.visible_buffers.pop(0))
 
         if "tmux send-keys" in command:
+            if " C-\\" in command:
+                if self.ctrl_backslash_recovers:
+                    self.wait_recovery_fails = False
+                    self.pending_bang_recovery_failure = False
+                return MockExecResult(stdout="")
             if "/tmp/.llenvs_harbor_tmux_ready" in command:
                 self.ready_send_attempts += 1
                 if (
@@ -1419,6 +1426,20 @@ class TestHarborEnvironment:
         assert result.next_state.observation.state.text == "[exit code: 1]"
         assert len(runtime.status_reads) == 1
 
+    def test_tmux_prompt_hook_exports_noninteractive_baseline(self):
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+
+        _reset_env(env)
+
+        assert "export DEBIAN_FRONTEND=noninteractive" in runtime.staged_hook_script
+        assert "export DEBCONF_NONINTERACTIVE_SEEN=true" in runtime.staged_hook_script
+        assert "export TZ=Etc/UTC" in runtime.staged_hook_script
+        assert "export APT_LISTCHANGES_FRONTEND=none" in runtime.staged_hook_script
+        assert "export NEEDRESTART_MODE=a" in runtime.staged_hook_script
+        assert "export GIT_TERMINAL_PROMPT=0" in runtime.staged_hook_script
+
     def test_step_tmux_session_status_unavailable_falls_back_to_no_output(self):
         runtime = _FakeTmuxRuntime(step_exit_codes=[None])
         mock_env = MockHarborEnvironment(exec_handler=runtime)
@@ -1566,6 +1587,34 @@ class TestHarborEnvironment:
         with pytest.raises(RuntimeError, match="sleep 999"):
             env.step(state, Action(text="sleep 999"))
 
+    def test_step_tmux_session_timeout_recovery_escalates_to_ctrl_backslash(self):
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ sleep 999",
+            ],
+            visible_buffers=["sleep 999"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+            ctrl_backslash_recovers=True,
+            recovery_exit_code=131,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+            command_timeout_budget=20,
+            max_consecutive_command_timeouts=2,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="sleep 999"))
+
+        assert result.info["command_timed_out"] is True
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+
     def test_step_tmux_session_stages_file_for_large_commands(self):
         runtime = _FakeTmuxRuntime(
             full_buffers=[
@@ -1611,7 +1660,7 @@ class TestHarborEnvironment:
 
         result = env.step(state, Action(text="sleep 999"))
 
-        expected = "[Command timed out after 5 seconds and was cancelled by the evaluation harness.]"
+        expected = "[Command timed out after 5 seconds and was cancelled.]"
         assert result.info["command_timed_out"] is True
         assert result.info["command_timeout_elapsed_sec"] == pytest.approx(4.5)
         assert result.info["command_timeout_total_sec"] == pytest.approx(4.5)
@@ -1703,7 +1752,7 @@ class TestHarborEnvironment:
         second = env.step(first.next_state, Action(text="sleep 999"))
 
         expected = (
-            "[Command timed out after 5 seconds and was cancelled by the evaluation harness.]\n"
+            "[Command timed out after 5 seconds and was cancelled.]\n"
             "[Trajectory terminated after exceeding the command-timeout budget.]"
         )
         assert first.truncated is False
@@ -3291,6 +3340,7 @@ class TestHarborHpcCliRunner:
 
         assert popen_kwargs["cwd"] == str(tmp_path)
         assert popen_kwargs["start_new_session"] is True
+        assert popen_kwargs["stdin"] is harbor_module.subprocess.DEVNULL
         assert process.communicate_timeouts == [3, 5]
         assert kill_signals == [(process.pid, signal.SIGTERM)]
         messages = [record.getMessage() for record in caplog.records]

@@ -502,3 +502,76 @@ class TestMultiInstanceRunner:
 
         trajectories = runner.run_batch_from_states([])
         assert trajectories == []
+
+    def test_restore_failure_can_be_skipped_per_rollout(self):
+        primary_env = MockNonPureEnvironment()
+        backend = _make_mock_backend()
+        created: list[MockNonPureEnvironment] = []
+
+        def factory():
+            env = MockNonPureEnvironment(terminate_after=1)
+            created.append(env)
+            return env
+
+        def flaky_restore(env, state):
+            del env
+            if state.hidden.task_index == 1:
+                raise RuntimeError("restore timed out")
+            return _mock_restore_fn(created[-1], state)
+
+        runner = TrajectoryRunner(
+            environment=primary_env,
+            backend=backend,
+            sampling_params=SamplingParams(),
+            env_factory=factory,
+            restore_fn=flaky_restore,
+        )
+
+        states = [_make_state(task_index=i) for i in range(3)]
+        trajectories = runner.run_batch_from_states(
+            states,
+            on_environment_error=lambda exc: "skip" if "restore timed out" in str(exc) else "raise",
+        )
+
+        assert len(trajectories) == 3
+        assert trajectories[0] is not None
+        assert trajectories[1] is None
+        assert trajectories[2] is not None
+        assert runner.last_environment_errors[1]["phase"] == "restore"
+
+    def test_step_failure_can_be_skipped_per_rollout(self):
+        primary_env = MockNonPureEnvironment()
+        backend = _make_mock_backend()
+
+        class FlakyStepEnv(MockNonPureEnvironment):
+            def step(self, state: State[Any], action: Action) -> StepResult[Any]:
+                if state.hidden.task_index == 1:
+                    raise RuntimeError("step timed out")
+                return super().step(state, action)
+
+        created: list[FlakyStepEnv] = []
+
+        def factory():
+            env = FlakyStepEnv(terminate_after=1)
+            created.append(env)
+            return env
+
+        runner = TrajectoryRunner(
+            environment=primary_env,
+            backend=backend,
+            sampling_params=SamplingParams(),
+            env_factory=factory,
+            restore_fn=lambda env, state: state,
+        )
+
+        states = [_make_state(task_index=i) for i in range(3)]
+        trajectories = runner.run_batch_from_states(
+            states,
+            on_environment_error=lambda exc: "skip" if "step timed out" in str(exc) else "raise",
+        )
+
+        assert len(trajectories) == 3
+        assert trajectories[0] is not None
+        assert trajectories[1] is None
+        assert trajectories[2] is not None
+        assert runner.last_environment_errors[1]["phase"] == "step"

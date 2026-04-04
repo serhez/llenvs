@@ -512,6 +512,9 @@ class TrajectoryRunner:
     include_reasoning_in_history: bool = False
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
+    last_environment_errors: dict[int, dict[str, Any]] = field(
+        default_factory=dict, init=False,
+    )
 
     def _build_messages(
         self,
@@ -2194,6 +2197,7 @@ class TrajectoryRunner:
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
         on_generation_error: Callable[[Exception], str] | None = None,
+        on_environment_error: Callable[[Exception], str] | None = None,
     ) -> list[Trajectory[Any] | None]:
         """Run batched rollouts from arbitrary states.
 
@@ -2212,6 +2216,11 @@ class TrajectoryRunner:
                 failed and continue), ``"abort"`` (mark all active as
                 failed, keep completed), or ``"raise"`` (re-raise).
                 When ``None``, errors always propagate.
+            on_environment_error: Optional callback invoked when a
+                per-rollout restore or environment step raises in the
+                multi-instance path. Must return ``"skip"`` (mark only
+                the affected rollout as failed and continue) or
+                ``"raise"`` (re-raise). Ignored for single-instance runs.
 
         Returns:
             List of Trajectory objects (or ``None`` for failed
@@ -2219,26 +2228,55 @@ class TrajectoryRunner:
             input state, in order.
         """
         if not states:
+            self.last_environment_errors = {}
             return []
 
         if batch_size is not None and batch_size < len(states):
-            return _run_in_sequence_chunks(
-                states,
-                batch_size=batch_size,
-                progress_callback=progress_callback,
-                run_chunk=lambda chunk, cb: self._run_batch_from_states_inner(
-                    chunk,
-                    max_steps=max_steps,
-                    progress_callback=cb,
-                    on_generation_error=on_generation_error,
-                ),
-            )
+            results: list[Trajectory[Any] | None] = []
+            total = len(states)
+            aggregated_errors: dict[int, dict[str, Any]] = {}
+            for start in range(0, total, batch_size):
+                chunk = states[start : start + batch_size]
+
+                chunk_progress_callback: Callable[[int, int], None] | None = None
+                if progress_callback:
+                    _offset = start
+
+                    def _chunk_progress_callback(
+                        done: int,
+                        chunk_total: int,
+                        _s: int = _offset,
+                    ) -> None:
+                        del chunk_total
+                        progress_callback(_s + done, total)
+
+                    chunk_progress_callback = _chunk_progress_callback
+
+                results.extend(
+                    self._run_batch_from_states_inner(
+                        chunk,
+                        max_steps=max_steps,
+                        progress_callback=chunk_progress_callback,
+                        on_generation_error=on_generation_error,
+                        on_environment_error=on_environment_error,
+                    )
+                )
+                for pos, info in self.last_environment_errors.items():
+                    aggregated_errors[start + pos] = {
+                        **info,
+                        "position": start + pos,
+                    }
+            self.last_environment_errors = aggregated_errors
+            if progress_callback:
+                progress_callback(total, total)
+            return results
 
         return self._run_batch_from_states_inner(
             states,
             max_steps=max_steps,
             progress_callback=progress_callback,
             on_generation_error=on_generation_error,
+            on_environment_error=on_environment_error,
         )
 
     def run_batch_from_state_actions(
@@ -2249,6 +2287,7 @@ class TrajectoryRunner:
         batch_size: int | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
         on_generation_error: Callable[[Exception], str] | None = None,
+        on_environment_error: Callable[[Exception], str] | None = None,
     ) -> list[Trajectory[Any] | None]:
         """Run batched rollouts with forced first actions.
 
@@ -2264,6 +2303,7 @@ class TrajectoryRunner:
             batch_size: If set, processes states in chunks of this size.
             progress_callback: Optional callback(completed, total).
             on_generation_error: Same as ``run_batch_from_states``.
+            on_environment_error: Same as ``run_batch_from_states``.
 
         Returns:
             List of Trajectory objects (or ``None`` for failed
@@ -2279,22 +2319,50 @@ class TrajectoryRunner:
             )
 
         if not states:
+            self.last_environment_errors = {}
             return []
 
         if batch_size is not None and batch_size < len(states):
             indexed = list(zip(states, actions, strict=False))
-            return _run_in_sequence_chunks(
-                indexed,
-                batch_size=batch_size,
-                progress_callback=progress_callback,
-                run_chunk=lambda chunk, cb: self._run_batch_from_states_inner(
-                    [state for state, _action in chunk],
-                    forced_actions=[action for _state, action in chunk],
-                    max_steps=max_steps,
-                    progress_callback=cb,
-                    on_generation_error=on_generation_error,
-                ),
-            )
+            results: list[Trajectory[Any] | None] = []
+            total = len(indexed)
+            aggregated_errors: dict[int, dict[str, Any]] = {}
+            for start in range(0, total, batch_size):
+                chunk = indexed[start : start + batch_size]
+
+                chunk_progress_callback: Callable[[int, int], None] | None = None
+                if progress_callback:
+                    _offset = start
+
+                    def _chunk_progress_callback(
+                        done: int,
+                        chunk_total: int,
+                        _s: int = _offset,
+                    ) -> None:
+                        del chunk_total
+                        progress_callback(_s + done, total)
+
+                    chunk_progress_callback = _chunk_progress_callback
+
+                results.extend(
+                    self._run_batch_from_states_inner(
+                        [state for state, _action in chunk],
+                        forced_actions=[action for _state, action in chunk],
+                        max_steps=max_steps,
+                        progress_callback=chunk_progress_callback,
+                        on_generation_error=on_generation_error,
+                        on_environment_error=on_environment_error,
+                    )
+                )
+                for pos, info in self.last_environment_errors.items():
+                    aggregated_errors[start + pos] = {
+                        **info,
+                        "position": start + pos,
+                    }
+            self.last_environment_errors = aggregated_errors
+            if progress_callback:
+                progress_callback(total, total)
+            return results
 
         return self._run_batch_from_states_inner(
             states,
@@ -2302,6 +2370,7 @@ class TrajectoryRunner:
             max_steps=max_steps,
             progress_callback=progress_callback,
             on_generation_error=on_generation_error,
+            on_environment_error=on_environment_error,
         )
 
     def _run_batch_from_states_multi_instance(
@@ -2311,6 +2380,7 @@ class TrajectoryRunner:
         forced_actions: Sequence[Action] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
         on_generation_error: Callable[[Exception], str] | None = None,
+        on_environment_error: Callable[[Exception], str] | None = None,
     ) -> list[Trajectory[Any] | None]:
         """Lockstep batch loop using per-rollout environment instances.
 
@@ -2328,6 +2398,7 @@ class TrajectoryRunner:
         """
         assert self.env_factory is not None
         assert self.restore_fn is not None
+        self.last_environment_errors = {}
 
         env_max = self.environment.spec.max_steps or 100
 
@@ -2343,35 +2414,101 @@ class TrajectoryRunner:
         # Create and restore environment instances
         envs: list[Environment[Any]] = []
         active: list[_ActiveTrajectory] = []
+
+        def _task_index_for_state(state: State[Any]) -> int:
+            task_index = state.metadata.info.get("task_index")
+            if isinstance(task_index, int):
+                return task_index
+            hidden_task_index = getattr(state.hidden, "task_index", 0)
+            return hidden_task_index if isinstance(hidden_task_index, int) else 0
+
+        def _record_environment_error(
+            *,
+            position: int,
+            task_index: int,
+            phase: str,
+            error: Exception,
+            action: Action | None = None,
+        ) -> None:
+            payload: dict[str, Any] = {
+                "position": position,
+                "task_index": task_index,
+                "phase": phase,
+                "error": str(error),
+                "error_type": type(error).__name__,
+            }
+            if action is not None and action.text is not None:
+                payload["action_text"] = action.text
+            self.last_environment_errors[position] = payload
+
+        def _handle_environment_error(
+            *,
+            trajectory: _ActiveTrajectory,
+            phase: str,
+            error: Exception,
+            action: Action | None = None,
+        ) -> str:
+            _record_environment_error(
+                position=trajectory.position,
+                task_index=trajectory.task_index,
+                phase=phase,
+                error=error,
+                action=action,
+            )
+            if on_environment_error is None:
+                raise error
+            decision = on_environment_error(error)
+            if decision not in {"skip", "raise"}:
+                raise ValueError(
+                    "on_environment_error must return 'skip' or 'raise'"
+                )
+            if decision == "raise":
+                raise error
+            trajectory.done = True
+            trajectory.failed = True
+            trajectory.error = str(error)
+            return decision
+
         try:
             # Create env instances
             for _i in range(total):
                 envs.append(self.env_factory())
 
-            # Restore each env to the target state in parallel (I/O-bound)
-            restored_states: list[State[Any]] = []
-            with ThreadPoolExecutor() as executor:
-                futures = [
-                    executor.submit(self.restore_fn, env, state) for env, state in zip(envs, states)
-                ]
-                for f in futures:
-                    restored_states.append(f.result())
-
-            # Build active trajectories
-            for pos, restored in enumerate(restored_states):
-                trajectory: Trajectory[Any] = Trajectory.create(restored)
+            for pos, state in enumerate(states):
+                trajectory: Trajectory[Any] = Trajectory.create(state)
                 active.append(
                     _ActiveTrajectory(
                         position=pos,
-                        task_index=0,
-                        state=restored,
+                        task_index=_task_index_for_state(state),
+                        state=state,
                         reset_info={},
                         trajectory=trajectory,
                     )
                 )
 
+            # Restore each env to the target state in parallel (I/O-bound)
+            with ThreadPoolExecutor() as executor:
+                futures = {
+                    pos: executor.submit(self.restore_fn, envs[pos], states[pos])
+                    for pos in range(total)
+                }
+                for pos in range(total):
+                    try:
+                        restored = futures[pos].result()
+                    except Exception as exc:
+                        _handle_environment_error(
+                            trajectory=active[pos],
+                            phase="restore",
+                            error=exc,
+                        )
+                        continue
+                    active[pos].state = restored
+                    active[pos].trajectory = Trajectory.create(restored)
+
             # Mark already-terminal states as done
             for t in active:
+                if t.failed:
+                    continue
                 if t.state.metadata.is_terminal or t.state.metadata.step >= env_max:
                     t.done = True
 
@@ -2396,7 +2533,16 @@ class TrajectoryRunner:
                             for t in remaining
                         }
                         for t in remaining:
-                            step_result = step_futures[t.position].result()
+                            try:
+                                step_result = step_futures[t.position].result()
+                            except Exception as exc:
+                                _handle_environment_error(
+                                    trajectory=t,
+                                    phase="step",
+                                    error=exc,
+                                    action=forced_actions[t.position],
+                                )
+                                continue
                             t.trajectory.add_transition(
                                 Transition(
                                     state=t.state,
@@ -2469,7 +2615,16 @@ class TrajectoryRunner:
                             for t, action in zip(remaining, actions_for_step)
                         }
                         for t, action in zip(remaining, actions_for_step):
-                            step_result = step_futures_gen[t.position].result()
+                            try:
+                                step_result = step_futures_gen[t.position].result()
+                            except Exception as exc:
+                                _handle_environment_error(
+                                    trajectory=t,
+                                    phase="step",
+                                    error=exc,
+                                    action=action,
+                                )
+                                continue
                             t.trajectory.add_transition(
                                 Transition(
                                     state=t.state,
@@ -2500,7 +2655,7 @@ class TrajectoryRunner:
             if progress_callback:
                 progress_callback(total, total)
 
-            if on_generation_error is not None:
+            if on_generation_error is not None or on_environment_error is not None:
                 return result_slots
             return [r for r in result_slots if r is not None]
 
@@ -2519,6 +2674,7 @@ class TrajectoryRunner:
         forced_actions: Sequence[Action] | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
         on_generation_error: Callable[[Exception], str] | None = None,
+        on_environment_error: Callable[[Exception], str] | None = None,
     ) -> list[Trajectory[Any] | None]:
         """Core lockstep batch loop for run-from-state methods.
 
@@ -2529,6 +2685,7 @@ class TrajectoryRunner:
                 rollout instead of generating from the backend.
         """
         # Dispatch to multi-instance path for non-pure environments with factory
+        self.last_environment_errors = {}
         if self.env_factory is not None and not self.environment.spec.pure_step:
             return self._run_batch_from_states_multi_instance(
                 states,
@@ -2536,6 +2693,7 @@ class TrajectoryRunner:
                 forced_actions=forced_actions,
                 progress_callback=progress_callback,
                 on_generation_error=on_generation_error,
+                on_environment_error=on_environment_error,
             )
 
         env_max = self.environment.spec.max_steps or 100

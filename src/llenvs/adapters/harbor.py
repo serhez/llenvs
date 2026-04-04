@@ -505,6 +505,7 @@ def _run_hpc_cli_command(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         cwd=str(cwd),
         env=env,
         start_new_session=True,
@@ -954,6 +955,12 @@ class _HarborTmuxTextSession:
                 "set +H",  # Disable history expansion so ! is literal
                 f"PS1={ps1_q}",  # Force deterministic prompt sentinel
                 "export VIRTUAL_ENV_DISABLE_PROMPT=1",
+                "export DEBIAN_FRONTEND=noninteractive",
+                "export DEBCONF_NONINTERACTIVE_SEEN=true",
+                "export TZ=Etc/UTC",
+                "export APT_LISTCHANGES_FRONTEND=none",
+                "export NEEDRESTART_MODE=a",
+                "export GIT_TERMINAL_PROMPT=0",
                 "__llenvs_harbor_prompt_hook() {",
                 "  local status=$?",  # MUST be first — captures exit code
                 f"  PS1={ps1_q}",  # Reassert on every prompt
@@ -1081,6 +1088,25 @@ class _HarborTmuxTextSession:
             )
         except Exception:
             recovered = False
+        if not recovered:
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-\\\\",
+                timeout_sec=10,
+            )
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux timeout recovery sent Ctrl-\\\\ after Ctrl-C failed: preview=%s",
+                    _preview_log_text(command),
+                )
+            try:
+                token_q = shlex.quote(step_token)
+                self._exec(
+                    f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
+                    timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC,
+                )
+                recovered = True
+            except Exception:
+                recovered = False
         # Discard any stale status file the hook may have written after Ctrl-C
         self._read_exit_status(step_token)
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
