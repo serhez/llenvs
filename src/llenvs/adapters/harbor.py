@@ -319,6 +319,10 @@ class _CLIResult:
     return_code: int = 0
 
 
+class _TmuxSessionDead(RuntimeError):
+    """The tmux session (or server) exited during command execution."""
+
+
 class _HarborRecoverableCommandTimeout(RuntimeError):
     """Recoverable timeout for a live model-issued Harbor command."""
 
@@ -1323,13 +1327,25 @@ class _HarborTmuxTextSession:
                     raise
                 # Poll exec timed out (slow apptainer); continue polling.
 
-            visible = self._safe_capture(self._capture_visible_screen_raw)
+            visible = self._capture_visible_or_detect_death()
             if self._continuation_sentinel in visible:
                 raise self._handle_continuation_prompt(
                     command,
                     step_token,
                     visible_screen=visible,
                 )
+
+            # Pace the loop.  The exec-based path has natural pacing from
+            # the _status_file_exists exec timeout (~0.1-1s).  The host-
+            # side path checks Path.is_file() in nanoseconds, so without
+            # an explicit sleep it would spin-loop at full CPU speed.
+            if self._host_status_dir:
+                window_remaining = min(
+                    continuation_poll_deadline - _now_monotonic(),
+                    deadline - _now_monotonic(),
+                )
+                if window_remaining > 0:
+                    _sleep(min(poll_timeout, window_remaining))
 
         # Phase 2: blocking wait for the status file + capture.
         remaining = deadline - _now_monotonic()
@@ -1696,6 +1712,30 @@ class _HarborTmuxTextSession:
         try:
             return capture_fn()
         except Exception:
+            return ""
+
+    def _capture_visible_or_detect_death(self) -> str:
+        """Capture visible screen; raise ``_TmuxSessionDead`` if the session is gone.
+
+        Unlike ``_safe_capture``, this method probes the tmux session when
+        the capture fails.  If the session itself is dead (e.g., the shell
+        exited), it raises immediately so callers don't waste time polling
+        a defunct session.
+        """
+        try:
+            return self._capture_visible_screen_raw()
+        except Exception as cap_exc:
+            # Verify whether the session still exists.
+            try:
+                self._exec(
+                    f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}",
+                    timeout_sec=5,
+                )
+            except Exception:
+                raise _TmuxSessionDead(
+                    "tmux session died during command execution"
+                ) from cap_exc
+            # Session exists; capture failure was transient.
             return ""
 
     def _exec(self, command: str, *, timeout_sec: int | None = None) -> Any:

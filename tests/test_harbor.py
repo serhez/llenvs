@@ -2288,6 +2288,51 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text=""))
         assert result.terminated is False
 
+    def test_tmux_session_death_detected_in_phase1(self):
+        """When the shell exits (e.g., `exit 1`), phase 1 detects tmux death
+        immediately instead of polling for the full continuation window."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=["bash$ exit\n"],
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        # After reset, install a handler that simulates tmux death:
+        # - send-keys dispatches normally (the command is sent)
+        # - status file checks return "not found" (PROMPT_COMMAND never fired)
+        # - tmux capture-pane fails with rc=1 (no server running)
+        # - tmux has-session fails (session dead)
+        baseline = len(mock_env._exec_history)
+        original_handler = mock_env._exec_handler
+
+        def dead_tmux_handler(command, **kwargs):
+            if len(mock_env._exec_history) <= baseline:
+                return original_handler(command, **kwargs)
+            # After the step's send-keys dispatch, simulate dead tmux:
+            # 1. Status file never written (PROMPT_COMMAND didn't fire)
+            if "test -f" in command and "/tmp/.llenvs_harbor_tmux_status/" in command:
+                return MockExecResult(stdout="")
+            # 2. tmux commands fail (no server running)
+            if "tmux capture-pane" in command:
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux capture-pane\nstderr: no server running"
+                )
+            if "tmux has-session" in command and "tmux send-keys" not in command:
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux has-session\nstderr: no server running"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_tmux_handler
+
+        with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+            env.step(state, Action(text="exit 1"))
+
 
 # ── TestHostSideStatusFiles ──────────────────────────────────────
 
@@ -2482,6 +2527,12 @@ class TestHostSideStatusFiles:
         """Health check surfaces transport errors instead of masking as timeout."""
         env, runtime, mock_env = _make_host_side_env(
             tmp_path,
+            runtime_kwargs={
+                # Provide visible buffers so Phase 1 capture succeeds
+                # (no death detection there), letting Phase 2 reach the
+                # health check in _wait_for_status_file.
+                "visible_buffers": ["bash$ "] * 10,
+            },
             env_kwargs={"command_soft_timeout": 10},
         )
         state, _ = _reset_env(env)
