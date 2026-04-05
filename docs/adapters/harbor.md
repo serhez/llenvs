@@ -286,6 +286,8 @@ trajectories = runner.run_batch_from_states(
 
 Restores a Harbor environment to a saved state by replaying the trajectory prefix. Resets to the original task via `task_index`, then replays each command from `state.hidden.trajectory`. Validates task name to guard against index drift across dataset versions.
 
+Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay.
+
 ### `harbor_snapshot_restore()`
 
 For datasets collected with exact checkpoints, `harbor_snapshot_restore()` restores a fresh Harbor environment from `state.hidden.snapshot_ref` instead of replaying the command prefix.

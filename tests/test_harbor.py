@@ -1697,7 +1697,7 @@ class TestHarborEnvironment:
         assert any(
             "tmux wait-for -L llenvs_harbor_step_" in cmd
             and "tmux wait-for -U llenvs_harbor_step_" in cmd
-            and timeout_sec == 30
+            and timeout_sec == 15
             for cmd, timeout_sec in runtime.exec_calls
         )
         assert any(
@@ -3061,7 +3061,8 @@ class TestHarborRestore:
         with pytest.raises(RuntimeError, match="No command was executed"):
             harbor_restore(env, target_state)
 
-    def test_harbor_restore_raises_on_replay_command_timeout(self):
+    def test_harbor_restore_continues_after_replay_command_timeout(self):
+        """Replay continues when a command times out — same behavior as collection."""
         from llenvs.adapters.harbor import HarborHidden, harbor_restore
 
         env = _make_env()
@@ -3083,7 +3084,9 @@ class TestHarborRestore:
             del current, action
             obs_text = "[Command timed out after 120 seconds and was cancelled.]"
             next_state = SimpleNamespace(
-                observation=SimpleNamespace(state=SimpleNamespace(text=obs_text))
+                observation=SimpleNamespace(state=SimpleNamespace(text=obs_text)),
+                hidden=target_hidden,
+                metadata=SimpleNamespace(step=1, episode_id="episode-1", is_terminal=False),
             )
             return SimpleNamespace(
                 next_state=next_state,
@@ -3096,12 +3099,9 @@ class TestHarborRestore:
 
         env.step = fake_step  # type: ignore[method-assign]
 
-        with pytest.raises(RuntimeError, match="timed out") as exc_info:
-            harbor_restore(env, target_state)
-
-        # Error message contains "timed out" so value-bench's
-        # classify_rollout_error() will treat it as recoverable.
-        assert "timed out" in str(exc_info.value)
+        # Should NOT raise — replay continues after recovered timeout
+        restored = harbor_restore(env, target_state)
+        assert restored is not None
 
     def test_harbor_restore_continues_after_signal_loss_salvage(self):
         """When a replayed command had its signal lost but was salvaged, replay continues."""
@@ -3142,8 +3142,8 @@ class TestHarborRestore:
 
         assert steps_called == ["echo a", "echo b"]
 
-    def test_harbor_restore_uses_hard_timeout_when_soft_policy_enabled(self):
-        """Replay should bypass recoverable soft timeouts and use exec_timeout."""
+    def test_harbor_restore_uses_soft_timeout_like_collection(self):
+        """Replay should use command_soft_timeout, same as normal collection."""
         from llenvs.adapters.harbor import HarborHidden, harbor_restore
 
         timeout_values: list[int] = []
@@ -3174,7 +3174,7 @@ class TestHarborRestore:
         restored = harbor_restore(env, target_state)
 
         assert restored.hidden.episode_step == 2
-        assert timeout_values == [17, 17]
+        assert timeout_values == [5, 5]
 
     def test_harbor_snapshot_restore_restores_checkpoint_archive(self, tmp_path):
         """harbor_snapshot_restore uses checkpoint restore instead of replay."""
@@ -3463,7 +3463,7 @@ class TestValidateReplayConsistency:
         assert result["consistent"] is True
         assert verifier_calls == 0
 
-    def test_replay_validation_uses_hard_timeout_when_soft_policy_enabled(self):
+    def test_replay_validation_uses_soft_timeout_for_replay_hard_for_probes(self):
         from llenvs.adapters.harbor import validate_replay_consistency
 
         timeout_values: list[int] = []
@@ -3488,7 +3488,8 @@ class TestValidateReplayConsistency:
         )
 
         assert result["consistent"] is True
-        assert timeout_values == [17, 17]
+        # Replay step uses command_soft_timeout (5), probe uses exec_timeout (17)
+        assert timeout_values == [5, 17]
 
 
 class TestHarborHpcCliRunner:

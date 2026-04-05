@@ -650,7 +650,7 @@ class _HarborTmuxTextSession:
     _DIRECT_WAIT_POLL_SEC = 1.0
     _DIRECT_CONTINUATION_POLL_WINDOW_SEC = 5.0
     _STARTUP_TIMEOUT_CAP_SEC = 30
-    _TIMEOUT_RECOVERY_WAIT_SEC = 30
+    _TIMEOUT_RECOVERY_WAIT_SEC = 15
     _READY_POLL_INTERVAL_SEC = 0.5
     _READY_RESEND_INTERVAL_SEC = 3.0
     _WINDOW_WIDTH_COLUMNS = 200
@@ -5347,38 +5347,31 @@ def harbor_restore(
         ValueError: If the task name at the given index doesn't match
             the expected task name from the saved state.
     """
-    with env._disable_soft_timeouts_temporarily():
-        current, info = env.reset(
-            options={
-                "task_index": state.hidden.task_index,
-                "episode_id": state.metadata.episode_id,
-            }
-        )
+    current, info = env.reset(
+        options={
+            "task_index": state.hidden.task_index,
+            "episode_id": state.metadata.episode_id,
+        }
+    )
 
-        # Validate task identity
-        if state.hidden.task_name and info.get("task_name"):
-            if state.hidden.task_name != info["task_name"]:
-                raise ValueError(
-                    f"Task name mismatch: expected {state.hidden.task_name!r}, "
-                    f"got {info['task_name']!r} at index {state.hidden.task_index}. "
-                    f"Dataset version may have changed."
-                )
+    # Validate task identity
+    if state.hidden.task_name and info.get("task_name"):
+        if state.hidden.task_name != info["task_name"]:
+            raise ValueError(
+                f"Task name mismatch: expected {state.hidden.task_name!r}, "
+                f"got {info['task_name']!r} at index {state.hidden.task_index}. "
+                f"Dataset version may have changed."
+            )
 
-        for cmd in state.hidden.trajectory:
-            result = env.step(current, Action(text=cmd))
-            if result.info.get("shell_continuation_detected"):
-                observation = result.info.get("observation", "")
-                raise RuntimeError(
-                    "Harbor replay hit shell continuation prompt: "
-                    f"{cmd}\nObservation: {observation}"
-                )
-            if result.info.get("command_timed_out"):
-                observation = result.info.get("observation", "")
-                raise RuntimeError(
-                    f"Harbor replay command timed out: {cmd}\n"
-                    f"Observation: {observation}"
-                )
-            current = result.next_state
+    for cmd in state.hidden.trajectory:
+        result = env.step(current, Action(text=cmd))
+        if result.info.get("shell_continuation_detected"):
+            observation = result.info.get("observation", "")
+            raise RuntimeError(
+                "Harbor replay hit shell continuation prompt: "
+                f"{cmd}\nObservation: {observation}"
+            )
+        current = result.next_state
 
     return current
 
@@ -5435,18 +5428,17 @@ def _run_replay_probe_command(
     Unlike ``env.step(...)``, this does not advance episode state or trigger
     verifier execution when the restored state is already at/near ``max_steps``.
     """
-    with env._disable_soft_timeouts_temporarily():
-        if env._text_exec_mode == "tmux_session":
-            text_session = getattr(env, "_text_session", None)
-            if text_session is None:
-                raise RuntimeError("Harbor tmux text session was not initialized")
-            return text_session.run_command(command)
+    if env._text_exec_mode == "tmux_session":
+        text_session = getattr(env, "_text_session", None)
+        if text_session is None:
+            raise RuntimeError("Harbor tmux text session was not initialized")
+        return text_session.run_command(command)
 
-        harbor_env = getattr(env, "_harbor_env", None)
-        if harbor_env is None:
-            raise RuntimeError("Harbor environment reset did not initialize a runtime")
-        exec_result = run_async(harbor_env.exec(command, timeout_sec=env._exec_timeout))
-        return _format_exec_result(exec_result)
+    harbor_env = getattr(env, "_harbor_env", None)
+    if harbor_env is None:
+        raise RuntimeError("Harbor environment reset did not initialize a runtime")
+    exec_result = run_async(harbor_env.exec(command, timeout_sec=env._exec_timeout))
+    return _format_exec_result(exec_result)
 
 
 def capture_replay_probe_outputs(
@@ -5466,28 +5458,21 @@ def capture_replay_probe_outputs(
     """
     env = env_factory()
     try:
-        with env._disable_soft_timeouts_temporarily():
-            current, _info = env.reset(options={"task_index": task_index})
-            for cmd in trajectory:
-                result = env.step(current, Action(text=cmd))
-                if result.info.get("shell_continuation_detected"):
-                    observation = result.info.get("observation", "")
-                    raise RuntimeError(
-                        "Harbor replay hit shell continuation prompt: "
-                        f"{cmd}\nObservation: {observation}"
-                    )
-                if result.info.get("command_timed_out"):
-                    observation = result.info.get("observation", "")
-                    raise RuntimeError(
-                        f"Harbor replay command timed out: {cmd}\n"
-                        f"Observation: {observation}"
-                    )
-                current = result.next_state
+        current, _info = env.reset(options={"task_index": task_index})
+        for cmd in trajectory:
+            result = env.step(current, Action(text=cmd))
+            if result.info.get("shell_continuation_detected"):
+                observation = result.info.get("observation", "")
+                raise RuntimeError(
+                    "Harbor replay hit shell continuation prompt: "
+                    f"{cmd}\nObservation: {observation}"
+                )
+            current = result.next_state
 
-            return {
-                probe_cmd: _run_replay_probe_command(env, probe_cmd)
-                for probe_cmd in probe_commands
-            }
+        return {
+            probe_cmd: _run_replay_probe_command(env, probe_cmd)
+            for probe_cmd in probe_commands
+        }
     finally:
         env.close()
 
