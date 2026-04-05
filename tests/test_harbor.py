@@ -2289,6 +2289,231 @@ class TestHarborEnvironment:
         assert result.terminated is False
 
 
+# ── TestHostSideStatusFiles ──────────────────────────────────────
+
+
+class _HostSideFakeTmuxRuntime(_FakeTmuxRuntime):
+    """_FakeTmuxRuntime that writes real status files to a host-visible temp dir.
+
+    When host-side status file access is active, the session never sends
+    ``test -f ... && echo found`` or ``cat ... rm -f ...`` exec calls.
+    Instead it checks/reads/deletes files directly on the host filesystem.
+    This runtime writes real files to simulate PROMPT_COMMAND behavior.
+    """
+
+    def __init__(self, host_tmp_dir: Path, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._host_tmp_dir = host_tmp_dir
+        self._host_status_dir = host_tmp_dir / ".llenvs_harbor_tmux_status"
+        self._host_status_dir.mkdir(parents=True, exist_ok=True)
+
+    def _write_status_file(self, token: str, exit_code: int = 0) -> None:
+        (self._host_status_dir / token).write_text(f"{exit_code}\n")
+
+    def __call__(self, command: str, **kwargs: Any) -> MockExecResult:
+        # On send-keys dispatch (step command), simulate instant completion
+        # by writing the status file — unless a timeout is pending.
+        if "tmux send-keys" in command and "tmux send-keys -l" in command:
+            token_match = re.search(
+                r"(llenvs_harbor_step_[A-Za-z0-9]+)", command,
+            )
+            if (
+                token_match is not None
+                and not self.pending_command_timeout
+                and not self.wait_timeout_once
+                and not self.pending_bang_timeout
+            ):
+                exit_code = self.step_exit_codes.pop(0) if self.step_exit_codes else 0
+                if exit_code is not None:
+                    self._write_status_file(token_match.group(1), exit_code)
+        # Hook source — write init-token status file for hook install.
+        if (
+            "tmux send-keys" in command
+            and "source /tmp/.llenvs_harbor_hook_init.sh" in command
+        ):
+            token_match = re.search(
+                r"(llenvs_harbor_init_[A-Za-z0-9]+)", command,
+            )
+            if token_match is not None and not self.hook_wait_timeout_once:
+                self._write_status_file(token_match.group(1), 0)
+        return super().__call__(command, **kwargs)
+
+
+def _make_host_side_env(
+    tmp_path: Path,
+    *,
+    runtime_kwargs: dict | None = None,
+    env_kwargs: dict | None = None,
+) -> tuple[Any, _HostSideFakeTmuxRuntime, MockHarborEnvironment]:
+    """Create an env with host-side status file access enabled."""
+    host_tmp_dir = tmp_path / "host_tmp"
+    host_tmp_dir.mkdir()
+    rk = runtime_kwargs or {}
+    runtime = _HostSideFakeTmuxRuntime(host_tmp_dir=host_tmp_dir, **rk)
+    mock_env = MockHarborEnvironment(exec_handler=runtime)
+    mock_env._host_tmp_dir = host_tmp_dir  # type: ignore[attr-defined]
+    ek = env_kwargs or {}
+    ek.setdefault("text_exec_mode", "tmux_session")
+    env = _make_env(harbor_env=mock_env, **ek)
+    return env, runtime, mock_env
+
+
+class TestHostSideStatusFiles:
+    """Tests for host-side status file operations (Phase 3 optimization).
+
+    When the runtime bind-mounts /tmp to a host-visible path, the tmux
+    session checks/reads/deletes status files directly on the host
+    filesystem instead of exec-based polling.
+    """
+
+    def test_happy_path_no_status_poll_execs(self, tmp_path):
+        """Host-side path: no 'test -f' or 'cat' execs for status files."""
+        env, runtime, mock_env = _make_host_side_env(
+            tmp_path,
+            runtime_kwargs={"full_buffers": ["bash$ ls\nfile.txt\nbash$ "]},
+        )
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        result = env.step(state, Action(text="ls"))
+
+        after = mock_env._exec_history[before:]
+        # With host-side: send-keys + capture-pane only (no status poll, no
+        # wait loop, no status read).
+        assert any("tmux send-keys -l" in cmd for cmd in after)
+        assert any("capture-pane -J -p -S -" in cmd for cmd in after)
+        # No exec-based status file operations.
+        for cmd in after:
+            assert "test -f /tmp/.llenvs_harbor_tmux_status/" not in cmd, (
+                f"Unexpected exec-based status check: {cmd}"
+            )
+            assert "while ! test -f" not in cmd, (
+                f"Unexpected in-container wait loop: {cmd}"
+            )
+        assert "file.txt" in result.next_state.observation.state.text
+
+    def test_happy_path_reads_exit_code_from_host(self, tmp_path):
+        """Host-side _read_exit_status reads from the filesystem."""
+        env, runtime, mock_env = _make_host_side_env(
+            tmp_path,
+            runtime_kwargs={"step_exit_codes": [42]},
+        )
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        # Append a buffer that produces empty observation after sanitization
+        # so _read_exit_status is triggered.
+        runtime.full_buffers.append(
+            f"bash$ cmd\n{text_session._prompt_sentinel}"
+        )
+
+        result = env.step(state, Action(text="cmd"))
+
+        # The exit code was read from the host filesystem.
+        assert "[exit code: 42]" in result.next_state.observation.state.text
+
+    def test_host_side_status_dir_created_on_host(self, tmp_path):
+        """Status directory is created on the host (no mkdir exec)."""
+        env, runtime, mock_env = _make_host_side_env(tmp_path)
+        state, _ = _reset_env(env)
+
+        # The status dir should exist on the host filesystem.
+        host_status_dir = tmp_path / "host_tmp" / ".llenvs_harbor_tmux_status"
+        assert host_status_dir.is_dir()
+        # No mkdir exec for status dir.
+        assert not any(
+            "mkdir -p /tmp/.llenvs_harbor_tmux_status" in cmd
+            for cmd in mock_env._exec_history
+        )
+
+    def test_fallback_when_no_host_tmp(self):
+        """Without _host_tmp_dir, exec-based fallback is used."""
+        runtime = _FakeTmuxRuntime(
+            full_buffers=["bash$ pwd\n/app\nbash$ "],
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        # Explicitly no _host_tmp_dir on mock_env.
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        env.step(state, Action(text="pwd"))
+
+        after = mock_env._exec_history[before:]
+        # Exec-based status poll and wait loop should be present.
+        assert any("test -f /tmp/.llenvs_harbor_tmux_status/" in cmd for cmd in after)
+        assert any("while ! test -f" in cmd for cmd in after)
+
+    def test_host_side_staged_file_path(self, tmp_path):
+        """Multi-line commands use staged-file path with host-side wait."""
+        multiline_cmd = "echo line1\necho line2"
+        env, runtime, mock_env = _make_host_side_env(
+            tmp_path,
+            runtime_kwargs={
+                "full_buffers": ["bash$ source ...\nline1\nline2\nbash$ "],
+            },
+        )
+        state, _ = _reset_env(env)
+        before = len(mock_env._exec_history)
+
+        result = env.step(state, Action(text=multiline_cmd))
+
+        after = mock_env._exec_history[before:]
+        # No in-container wait loop for staged-file path.
+        assert not any("while ! test -f" in cmd for cmd in after), (
+            "Staged-file path should not use in-container wait loop with host-side status"
+        )
+        # But there should be a capture-pane call.
+        assert any("capture-pane -J -p -S -" in cmd for cmd in after)
+
+    def test_host_side_hook_install_wait(self, tmp_path):
+        """Hook installation uses host-side polling instead of exec loop."""
+        env, runtime, mock_env = _make_host_side_env(tmp_path)
+
+        # exec history from reset includes the hook install.
+        _reset_env(env)
+
+        # No in-container hook wait loop.
+        assert not any(
+            "while ! test -f" in cmd and "llenvs_harbor_init_" in cmd
+            for cmd in mock_env._exec_history
+        ), "Hook install should not use in-container wait loop with host-side status"
+
+    def test_host_side_wait_detects_dead_container(self, tmp_path):
+        """Health check surfaces transport errors instead of masking as timeout."""
+        env, runtime, mock_env = _make_host_side_env(
+            tmp_path,
+            env_kwargs={"command_soft_timeout": 10},
+        )
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        # Shorten intervals so the health check fires quickly.
+        text_session._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC = 0.05
+        text_session._DIRECT_CONTINUATION_POLL_WINDOW_SEC = 0.1
+
+        # Don't write the status file → forces the wait loop to run.
+        runtime.pending_command_timeout = True
+
+        # After reset, install a handler that fails on standalone
+        # has-session (health check), but passes compound commands
+        # (send-keys dispatch also contains has-session).
+        baseline = len(mock_env._exec_history)
+        original_handler = mock_env._exec_handler
+
+        def dying_handler(command, **kwargs):
+            if (
+                "tmux has-session" in command
+                and "tmux send-keys" not in command
+                and len(mock_env._exec_history) > baseline
+            ):
+                raise RuntimeError("apptainer instance not running")
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dying_handler
+
+        with pytest.raises(RuntimeError, match="apptainer instance not running"):
+            env.step(state, Action(text="slow-command"))
+
+
 # ── TestHarborToolEnvironment (Tool Mode) ───────────────────────
 
 

@@ -675,6 +675,14 @@ class _HarborTmuxTextSession:
         self._continuation_sentinel = f"__LLENVS_CONTINUATION_{uuid.uuid4().hex[:12]}__> "
         self.tmux_bootstrapped = False
         self.tmux_start_method = "direct"
+        # Host-side status directory: when the runtime bind-mounts /tmp to
+        # a host-visible path, status files written by PROMPT_COMMAND inside
+        # the container are accessible from the host.  This eliminates
+        # per-poll apptainer exec overhead for status checks and reads.
+        host_tmp = getattr(harbor_env, "_host_tmp_dir", None)
+        self._host_status_dir: Path | None = (
+            Path(host_tmp) / ".llenvs_harbor_tmux_status" if host_tmp else None
+        )
 
     def start(self) -> None:
         if not self._probe_tmux():
@@ -724,21 +732,40 @@ class _HarborTmuxTextSession:
                 _preview_log_text(command_text),
             )
 
+        # Build the wait+capture command.  When the status directory is
+        # host-visible, waiting is done host-side and only the capture is
+        # sent via exec.  Otherwise, a single in-container loop combines
+        # both waiting and capture.
         status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
-        wait_and_capture = (
-            f"while ! test -f {status_path_q}; do sleep 0.1; done"
-            f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
-        )
+        if self._host_status_dir:
+            capture_cmd = (
+                f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+            )
+        else:
+            capture_cmd = (
+                f"while ! test -f {status_path_q}; do sleep 0.1; done"
+                f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+            )
         started_at = _now_monotonic()
         try:
             if used_staged_file:
-                result = self._exec(wait_and_capture, timeout_sec=effective_timeout)
-                full_buffer = getattr(result, "stdout", "") or ""
+                if self._host_status_dir:
+                    deadline = _now_monotonic() + effective_timeout
+                    if not self._wait_for_status_file(
+                        step_token, timeout_sec=effective_timeout,
+                    ):
+                        raise RuntimeError(
+                            f"apptainer command timed out after {effective_timeout}s"
+                        )
+                    full_buffer = self._capture_after_wait(deadline)
+                else:
+                    result = self._exec(capture_cmd, timeout_sec=effective_timeout)
+                    full_buffer = getattr(result, "stdout", "") or ""
             else:
                 full_buffer = self._wait_for_direct_command(
                     command_text,
                     step_token,
-                    wait_and_capture,
+                    capture_cmd,
                     timeout_sec=effective_timeout,
                 )
         except Exception as exc:
@@ -750,14 +777,9 @@ class _HarborTmuxTextSession:
             # PROMPT_COMMAND writes it before the prompt is rendered, so
             # it catches completions where the prompt scrolled off-screen.
             visible = self._safe_capture(self._capture_visible_screen_raw)
-            status_file_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
             status_found = False
             try:
-                sr = self._exec(
-                    f"test -f {status_file_q} && echo found || true",
-                    timeout_sec=2,
-                )
-                status_found = "found" in (getattr(sr, "stdout", "") or "")
+                status_found = self._status_file_exists(step_token)
             except Exception:
                 pass
             if self._prompt_visible_on_last_line(visible) or status_found:
@@ -882,6 +904,14 @@ class _HarborTmuxTextSession:
 
     def _read_exit_status(self, token: str) -> int | None:
         """Read and delete the per-token exit-status file. Always cleans up."""
+        if self._host_status_dir:
+            path = self._host_status_dir / token
+            try:
+                content = path.read_text().strip()
+                path.unlink(missing_ok=True)
+                return int(content) if content else None
+            except (FileNotFoundError, ValueError, OSError):
+                return None
         status_file_q = shlex.quote(f"{self._STATUS_DIR}/{token}")
         try:
             result = self._exec(
@@ -894,6 +924,98 @@ class _HarborTmuxTextSession:
             return int(stdout) if stdout else None
         except Exception:
             return None
+
+    def _status_file_exists(self, token: str, *, timeout_sec: float = 2) -> bool:
+        """Check whether the per-token status file exists.
+
+        Uses host-side ``Path.is_file()`` when the status directory is
+        host-visible, otherwise falls back to an exec-based ``test -f``.
+        Does not catch exceptions — callers decide how to handle transport
+        errors vs. timeout errors.
+        """
+        if self._host_status_dir:
+            return (self._host_status_dir / token).is_file()
+        result = self._exec(
+            f"test -f {shlex.quote(f'{self._STATUS_DIR}/{token}')} && echo found || true",
+            timeout_sec=timeout_sec,
+        )
+        return "found" in (getattr(result, "stdout", "") or "")
+
+    _HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC = 3.0
+
+    def _wait_for_status_file(
+        self,
+        token: str,
+        *,
+        timeout_sec: float,
+        poll_sec: float = 0.05,
+    ) -> bool:
+        """Block until the per-token status file appears or *timeout_sec* elapses.
+
+        Returns True if the file was found.  Uses a host-side polling loop
+        when the status directory is host-visible, otherwise falls back to
+        an in-container ``while ! test -f`` loop via a single blocking exec.
+
+        The host-side loop periodically probes the tmux session to detect a
+        dead container or broken bind mount early, rather than waiting the
+        full timeout.  A failed health check raises immediately instead of
+        being misclassified as a command timeout.
+        """
+        if self._host_status_dir:
+            deadline = _now_monotonic() + timeout_sec
+            path = self._host_status_dir / token
+            next_health_check = (
+                _now_monotonic() + self._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC
+            )
+            session_q = shlex.quote(self._SESSION_NAME)
+            while _now_monotonic() < deadline:
+                if path.is_file():
+                    return True
+                # Periodic health check: verify the tmux session (and by
+                # extension the container) is still alive.  This surfaces
+                # transport failures promptly instead of waiting the full
+                # timeout.
+                now = _now_monotonic()
+                if now >= next_health_check:
+                    try:
+                        self._exec(
+                            f"tmux has-session -t {session_q}",
+                            timeout_sec=min(5, max(1, deadline - now)),
+                        )
+                    except Exception:
+                        # Container/session died — propagate as transport
+                        # error rather than masking as a timeout.
+                        raise
+                    next_health_check = (
+                        _now_monotonic()
+                        + self._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC
+                    )
+                remaining = deadline - _now_monotonic()
+                if remaining <= 0:
+                    break
+                _sleep(min(poll_sec, remaining))
+            return path.is_file()  # one final check
+        # Exec-based fallback: in-container polling loop.
+        status_path_q = shlex.quote(f"{self._STATUS_DIR}/{token}")
+        try:
+            self._exec(
+                f"while ! test -f {status_path_q}; do sleep 0.1; done",
+                timeout_sec=timeout_sec,
+            )
+            return True
+        except Exception as exc:
+            if self._is_timeout_error(exc):
+                return False
+            raise
+
+    def _capture_after_wait(self, deadline: float) -> str:
+        """Capture the full tmux buffer after a host-side status-file wait."""
+        remaining = max(5.0, deadline - _now_monotonic())
+        result = self._exec(
+            f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
+            timeout_sec=remaining,
+        )
+        return getattr(result, "stdout", "") or ""
 
     def _send_command(self, command: str, *, step_token: str) -> bool:
         """Send command to the tmux session. Returns True if staged-file path was used."""
@@ -1016,7 +1138,8 @@ class _HarborTmuxTextSession:
                 '    token=$(cat "$token_file" 2>/dev/null || true)',
                 '    if [ -n "$token" ]; then',
                 '      case "$token" in llenvs_harbor_step_*|llenvs_harbor_init_*)',
-                '        printf "%s\\n" "$status" > "$status_dir/$token" ;;',
+                '        printf "%s\\n" "$status" > "$status_dir/$token.tmp"'
+                ' && mv "$status_dir/$token.tmp" "$status_dir/$token" ;;',
                 "      esac",
                 '      : > "$token_file"',
                 "    fi",
@@ -1054,11 +1177,16 @@ class _HarborTmuxTextSession:
             ]
         )
         self._stage_hook_script(init_script)
-        # Create per-token status directory for exit-code capture
-        self._exec(
-            f"mkdir -p {shlex.quote(self._STATUS_DIR)}",
-            timeout_sec=10,
-        )
+        # Create per-token status directory for exit-code capture.
+        # When the host-visible path is available, create it directly
+        # (the bind mount makes it visible inside the container too).
+        if self._host_status_dir:
+            self._host_status_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            self._exec(
+                f"mkdir -p {shlex.quote(self._STATUS_DIR)}",
+                timeout_sec=10,
+            )
         session_q = shlex.quote(self._SESSION_NAME)
         token_q = shlex.quote(init_token)
         token_file_q = shlex.quote(self._TOKEN_FILE)
@@ -1070,18 +1198,12 @@ class _HarborTmuxTextSession:
             ]
         )
         self._exec(control_cmd, timeout_sec=startup_timeout)
-        status_path_q = shlex.quote(f"{self._STATUS_DIR}/{init_token}")
-        try:
-            self._exec(
-                f"while ! test -f {status_path_q}; do sleep 0.1; done",
-                timeout_sec=startup_timeout,
+        if not self._wait_for_status_file(
+            init_token, timeout_sec=startup_timeout
+        ):
+            raise self._startup_timeout_error(
+                f"Prompt hook installation timed out after {startup_timeout}s"
             )
-        except Exception as exc:
-            if self._is_timeout_error(exc):
-                raise self._startup_timeout_error(
-                    f"Prompt hook installation timed out after {startup_timeout}s"
-                ) from exc
-            raise
         # Clean up the init-token status file.
         self._read_exit_status(init_token)
 
@@ -1095,8 +1217,6 @@ class _HarborTmuxTextSession:
         written (e.g., PROMPT_COMMAND did not fire).
         """
         deadline = _now_monotonic() + timeout_sec
-        status_path = f"{self._STATUS_DIR}/{step_token}"
-        status_check = f"test -f {shlex.quote(status_path)} && echo found || true"
         capture_cmd = f"tmux capture-pane -p -t {shlex.quote(self._SESSION_NAME)}"
         debug_enabled = logger.isEnabledFor(logging.DEBUG)
         while True:
@@ -1106,8 +1226,7 @@ class _HarborTmuxTextSession:
             exec_cap = min(2, int(remaining))
             # Primary: status file written by PROMPT_COMMAND.
             try:
-                result = self._exec(status_check, timeout_sec=exec_cap)
-                if "found" in (getattr(result, "stdout", "") or ""):
+                if self._status_file_exists(step_token, timeout_sec=exec_cap):
                     if debug_enabled:
                         logger.debug(
                             "Harbor tmux recovery: status file found for %s",
@@ -1168,7 +1287,7 @@ class _HarborTmuxTextSession:
         self,
         command: str,
         step_token: str,
-        wait_and_capture: str,
+        capture_cmd: str,
         *,
         timeout_sec: int,
     ) -> str:
@@ -1177,8 +1296,6 @@ class _HarborTmuxTextSession:
             deadline,
             _now_monotonic() + self._DIRECT_CONTINUATION_POLL_WINDOW_SEC,
         )
-        status_path = f"{self._STATUS_DIR}/{step_token}"
-        status_check_cmd = f"test -f {shlex.quote(status_path)} && echo found || true"
 
         # Phase 1: status-file polling for completion or continuation.
         # Uses the exit-status file written by PROMPT_COMMAND as the
@@ -1196,11 +1313,10 @@ class _HarborTmuxTextSession:
                 min(self._DIRECT_WAIT_POLL_SEC, continuation_poll_deadline - now, remaining),
             )
             try:
-                result = self._exec(status_check_cmd, timeout_sec=poll_timeout)
-                if "found" in (getattr(result, "stdout", "") or ""):
+                if self._status_file_exists(step_token, timeout_sec=poll_timeout):
                     # Command completed — status file already written by
                     # PROMPT_COMMAND.  Fall through to phase 2 where the
-                    # file-polling loop exits immediately.
+                    # file-polling loop / host-side check exits immediately.
                     break
             except Exception as exc:
                 if not self._is_timeout_error(exc):
@@ -1215,14 +1331,26 @@ class _HarborTmuxTextSession:
                     visible_screen=visible,
                 )
 
-        # Phase 2: single blocking wait for the status file + capture.
+        # Phase 2: blocking wait for the status file + capture.
         remaining = deadline - _now_monotonic()
         if remaining <= 0:
             # Keep the timeout wording aligned with _run_hpc_cli_command() so
             # run_command() routes this through the shared timeout recovery path.
             raise RuntimeError(f"apptainer command timed out after {timeout_sec}s")
+        if self._host_status_dir:
+            deadline_phase2 = _now_monotonic() + remaining
+            if not self._wait_for_status_file(step_token, timeout_sec=remaining):
+                visible = self._safe_capture(self._capture_visible_screen_raw)
+                if self._continuation_sentinel in visible:
+                    raise self._handle_continuation_prompt(
+                        command,
+                        step_token,
+                        visible_screen=visible,
+                    )
+                raise RuntimeError(f"apptainer command timed out after {timeout_sec}s")
+            return self._capture_after_wait(deadline_phase2)
         try:
-            result = self._exec(wait_and_capture, timeout_sec=remaining)
+            result = self._exec(capture_cmd, timeout_sec=remaining)
             return getattr(result, "stdout", "") or ""
         except Exception as exc:
             if self._is_timeout_error(exc):
@@ -1277,14 +1405,9 @@ class _HarborTmuxTextSession:
         # full buffer as a str so run_command can fall through to normal
         # observation extraction — the command completed, it is not a
         # timeout.
-        status_file_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
         status_found = False
         try:
-            sr = self._exec(
-                f"test -f {status_file_q} && echo found || true",
-                timeout_sec=2,
-            )
-            status_found = "found" in (getattr(sr, "stdout", "") or "")
+            status_found = self._status_file_exists(step_token)
         except Exception:
             pass
         if self._prompt_visible_on_last_line(visible) or status_found:
