@@ -455,8 +455,10 @@ class _FakeTmuxRuntime:
                         self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(exit_code or 0)
                     return MockExecResult(stdout="found")
                 return MockExecResult(stdout="")
-            # Default: command completed unless a timeout is pending.
-            if not self.wait_timeout_once and not self.pending_command_timeout:
+            # Default: command completed unless a timeout is pending or
+            # recovery is configured to fail (simulates PROMPT_COMMAND not
+            # firing / status file not written).
+            if not self.wait_timeout_once and not self.pending_command_timeout and not self.wait_recovery_fails:
                 return MockExecResult(stdout="found")
             return MockExecResult(stdout="")
 
@@ -1545,17 +1547,29 @@ class TestHarborEnvironment:
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "x "
 
-    def test_step_tmux_session_detects_shell_continuation_prompt(self):
+    def test_step_tmux_session_detects_shell_continuation_prompt(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
             wait_timeout_once=True,
-            recovery_exit_code=130,
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
         state, _ = _reset_env(env)
         text_session = getattr(env, "_text_session")
         assert text_session is not None
+        # Phase 1 continuation detection: shows continuation sentinel.
         runtime.visible_buffers.append(f'echo "unterminated\n{text_session._continuation_sentinel}')
+        # Recovery visual check: shows prompt sentinel (command cancelled).
+        runtime.visible_buffers.append(f"{text_session._prompt_sentinel}")
         runtime.full_buffers.append(f'bash$ echo "unterminated\n{text_session._prompt_sentinel}')
 
         result = env.step(state, Action(text='echo "unterminated'))
@@ -1603,11 +1617,20 @@ class TestHarborEnvironment:
         assert result.next_state.observation.state is not None
         assert "hello" in result.next_state.observation.state.text
 
-    def test_direct_command_phase1_detects_continuation_without_lock(self):
+    def test_direct_command_phase1_detects_continuation_without_lock(self, monkeypatch):
         """Phase 1 continuation detection should work without lock-based polling."""
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
             wait_timeout_once=True,
-            recovery_exit_code=130,
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
@@ -1619,6 +1642,8 @@ class TestHarborEnvironment:
         runtime.visible_buffers.append(
             f'echo "unterminated\n{text_session._continuation_sentinel}'
         )
+        # Recovery visual check: prompt appeared after Ctrl-C cancelled.
+        runtime.visible_buffers.append(f"{text_session._prompt_sentinel}")
         runtime.full_buffers.append(
             f'bash$ echo "unterminated\n{text_session._prompt_sentinel}'
         )
@@ -1661,14 +1686,23 @@ class TestHarborEnvironment:
 
         assert call_count == 1  # Failed on first poll, did not retry
 
-    def test_step_tmux_session_soft_timeout_returns_observation(self):
+    def test_step_tmux_session_soft_timeout_returns_observation(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
             full_buffers=[
-                "bash$ sleep 999",
+                "bash$ sleep 999\necho done",
             ],
             visible_buffers=["sleep 999"],
             wait_timeout_once=True,
-            recovery_exit_code=130,
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(
@@ -1679,14 +1713,10 @@ class TestHarborEnvironment:
         )
         state, _ = _reset_env(env)
 
-        result = env.step(state, Action(text="sleep 999"))
+        # Multiline -> staged-file path -> skips phase 1
+        result = env.step(state, Action(text="sleep 999\necho done"))
 
         assert any("C-c" in cmd for cmd in mock_env._exec_history)
-        assert any(
-            "tmux wait-for -L llenvs_harbor_step_" in cmd
-            and "tmux wait-for -U llenvs_harbor_step_" in cmd
-            for cmd in mock_env._exec_history
-        )
         assert result.info["command_timed_out"] is True
         assert result.info["command_timeout_elapsed_sec"] is not None
         assert result.next_state.observation.state is not None
@@ -1694,12 +1724,8 @@ class TestHarborEnvironment:
             result.next_state.observation.state.text
             == "[Command timed out after 5 seconds and was cancelled.]"
         )
-        assert any(
-            "tmux wait-for -L llenvs_harbor_step_" in cmd
-            and "tmux wait-for -U llenvs_harbor_step_" in cmd
-            and timeout_sec == 15
-            for cmd, timeout_sec in runtime.exec_calls
-        )
+        # Recovery uses status-file polling, not lock-based wait-for.
+        assert len(runtime.status_polls) > 0
         assert any(
             "tmux capture-pane -p -t " in cmd and "-J" not in cmd
             for cmd in mock_env._exec_history
@@ -1710,6 +1736,99 @@ class TestHarborEnvironment:
         )
         assert len(runtime.status_reads) == 1
         assert not any(path.startswith(runtime._STATUS_DIR + "/") for path in runtime.files)
+
+    def test_handle_timeout_recovers_via_status_file(self, monkeypatch):
+        """Primary recovery path: status file appears after Ctrl-C, no escalation needed."""
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=["bash$ sleep 999\necho done"],
+            visible_buffers=["sleep 999"],
+            wait_timeout_once=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        # Multiline -> staged-file path -> skips phase 1
+        result = env.step(state, Action(text="sleep 999\necho done"))
+
+        assert result.info["command_timed_out"] is True
+        # Ctrl-C sent, but NOT Ctrl-\ (first recovery attempt succeeded).
+        assert any("C-c" in cmd for cmd in mock_env._exec_history)
+        assert not any("C-\\" in cmd for cmd in mock_env._exec_history)
+        # Recovery used status-file polling (not lock-based wait-for).
+        recovery_polls = [
+            p for p in runtime.status_polls
+            if "llenvs_harbor_step_" in p
+        ]
+        assert len(recovery_polls) > 0
+        # No lock-based recovery commands after Ctrl-C.
+        ctrl_c_idx = next(
+            i for i, cmd in enumerate(mock_env._exec_history) if "C-c" in cmd
+        )
+        post_ctrl_c = mock_env._exec_history[ctrl_c_idx + 1 :]
+        assert not any(
+            "tmux wait-for -L llenvs_harbor_step_" in cmd
+            and "tmux wait-for -U llenvs_harbor_step_" in cmd
+            for cmd in post_ctrl_c
+        )
+
+    def test_salvages_via_status_file_when_prompt_not_visible(self, monkeypatch):
+        """When the status file exists at timeout but prompt isn't visible, salvage (not timeout)."""
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ make all\ncompiling...\ndone\nbash$ ",
+            ],
+            wait_timeout_once=True,
+            # Status file appears immediately (PROMPT_COMMAND already fired).
+            status_file_appears_after_polls=1,
+            step_exit_codes=[0],
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+        # Visible screen does NOT show the prompt (output pushed it off).
+        runtime.visible_buffers.append("compiling...\ndone")
+
+        # Multiline -> staged-file path -> skips phase 1
+        result = env.step(state, Action(text="make all\necho done"))
+
+        # Command completed — should NOT be reported as timed out.
+        assert result.info.get("command_timed_out") is not True
+        # Ctrl-C was NOT sent (salvaged before recovery).
+        assert not any("C-c" in cmd for cmd in mock_env._exec_history)
+        # Real output was captured.
+        assert result.next_state.observation.state is not None
+        assert "done" in result.next_state.observation.state.text
 
     def test_run_command_salvages_output_when_prompt_visible_at_timeout(self):
         """When the prompt is visible at timeout, command completed — salvage real output."""
@@ -1750,8 +1869,18 @@ class TestHarborEnvironment:
             for cmd in mock_env._exec_history
         )
 
-    def test_handle_timeout_visual_fallback_after_lock_recovery_fails(self):
-        """When lock-based recovery fails but the prompt is visible, declare recovered."""
+    def test_handle_timeout_recovers_via_visual_prompt_polling(self, monkeypatch):
+        """When status-file polling fails but prompt appears visually, declare recovered."""
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
             full_buffers=[
                 "bash$ make all\ncompiling...\nbash$ ",
@@ -1773,7 +1902,7 @@ class TestHarborEnvironment:
         runtime.visible_buffers.append("compiling...")
         # 2nd visible capture (_handle_timeout diagnostic): still running.
         runtime.visible_buffers.append("compiling...")
-        # 3rd visible capture (visual fallback after Ctrl-C + Ctrl-\):
+        # 3rd visible capture (_poll_for_recovery visual check):
         # prompt appeared after the command was interrupted.
         runtime.visible_buffers.append(f"Interrupted\n{text_session._prompt_sentinel}")
 
@@ -1788,10 +1917,20 @@ class TestHarborEnvironment:
         assert result.next_state.observation.state is not None
         assert "timed out" in result.next_state.observation.state.text
 
-    def test_step_tmux_session_unrecoverable_timeout_still_raises(self):
+    def test_step_tmux_session_unrecoverable_timeout_still_raises(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
             full_buffers=[
-                "bash$ sleep 999",
+                "bash$ sleep 999\necho done",
             ],
             visible_buffers=["sleep 999"],
             wait_timeout_once=True,
@@ -1807,18 +1946,27 @@ class TestHarborEnvironment:
         state, _ = _reset_env(env)
 
         with pytest.raises(RuntimeError, match="sleep 999"):
-            env.step(state, Action(text="sleep 999"))
+            env.step(state, Action(text="sleep 999\necho done"))
 
-    def test_step_tmux_session_timeout_recovery_escalates_to_ctrl_backslash(self):
+    def test_step_tmux_session_timeout_recovery_escalates_to_ctrl_backslash(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
             full_buffers=[
-                "bash$ sleep 999",
+                "bash$ sleep 999\necho done",
             ],
             visible_buffers=["sleep 999"],
             wait_timeout_once=True,
             wait_recovery_fails=True,
             ctrl_backslash_recovers=True,
-            recovery_exit_code=131,
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
         env = _make_env(
@@ -1829,7 +1977,7 @@ class TestHarborEnvironment:
         )
         state, _ = _reset_env(env)
 
-        result = env.step(state, Action(text="sleep 999"))
+        result = env.step(state, Action(text="sleep 999\necho done"))
 
         assert result.info["command_timed_out"] is True
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
@@ -2000,10 +2148,21 @@ class TestHarborEnvironment:
     def test_debug_logs_tmux_timeout_recovery(
         self,
         caplog: pytest.LogCaptureFixture,
+        monkeypatch: pytest.MonkeyPatch,
     ):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
         runtime = _FakeTmuxRuntime(
-            full_buffers=["bash$ "],
-            visible_buffers=["bash$ sleep 999"],
+            full_buffers=["bash$ sleep 999\necho done"],
+            visible_buffers=["sleep 999"],
             wait_timeout_once=True,
         )
         mock_env = MockHarborEnvironment(exec_handler=runtime)
@@ -2016,7 +2175,7 @@ class TestHarborEnvironment:
         state, _ = _reset_env(env)
 
         with caplog.at_level(logging.DEBUG, logger="llenvs.adapters.harbor"):
-            result = env.step(state, Action(text="sleep 999"))
+            result = env.step(state, Action(text="sleep 999\necho done"))
 
         assert result.info["command_timed_out"] is True
         messages = [record.getMessage() for record in caplog.records]

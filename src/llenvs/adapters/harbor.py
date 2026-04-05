@@ -428,6 +428,10 @@ def _now_monotonic() -> float:
     return time.monotonic()
 
 
+def _sleep(seconds: float) -> None:
+    time.sleep(seconds)
+
+
 def _preview_log_text(text: str, *, limit: int = 120) -> str:
     """Collapse multi-line text for concise debug logging."""
     collapsed = " ".join(text.splitlines()).strip()
@@ -650,7 +654,8 @@ class _HarborTmuxTextSession:
     _DIRECT_WAIT_POLL_SEC = 1.0
     _DIRECT_CONTINUATION_POLL_WINDOW_SEC = 5.0
     _STARTUP_TIMEOUT_CAP_SEC = 30
-    _TIMEOUT_RECOVERY_WAIT_SEC = 15
+    _RECOVERY_POLL_TIMEOUT_SEC = 5
+    _RECOVERY_POLL_INTERVAL_SEC = 0.5
     _READY_POLL_INTERVAL_SEC = 0.5
     _READY_RESEND_INTERVAL_SEC = 3.0
     _WINDOW_WIDTH_COLUMNS = 200
@@ -740,12 +745,26 @@ class _HarborTmuxTextSession:
             if not self._is_timeout_error(exc):
                 raise
             # Check if the command actually completed (signal lost).
-            # The visible screen is captured BEFORE any recovery attempt.
+            # The visible screen and status file are checked BEFORE any
+            # recovery attempt.  The status file is the stronger signal:
+            # PROMPT_COMMAND writes it before the prompt is rendered, so
+            # it catches completions where the prompt scrolled off-screen.
             visible = self._safe_capture(self._capture_visible_screen_raw)
-            if self._prompt_visible_on_last_line(visible):
+            status_file_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
+            status_found = False
+            try:
+                sr = self._exec(
+                    f"test -f {status_file_q} && echo found || true",
+                    timeout_sec=2,
+                )
+                status_found = "found" in (getattr(sr, "stdout", "") or "")
+            except Exception:
+                pass
+            if self._prompt_visible_on_last_line(visible) or status_found:
                 # Command completed but the wait-for signal was lost.
                 # Clear any orphaned lock — safe because the command is
-                # known to have completed (prompt is on screen).
+                # known to have completed (prompt is on screen or status
+                # file was written by PROMPT_COMMAND).
                 self._safe_exec(
                     f"tmux wait-for -U {shlex.quote(step_token)} 2>/dev/null || true",
                     timeout_sec=10,
@@ -1067,12 +1086,72 @@ class _HarborTmuxTextSession:
                 ) from exc
             raise
 
-    def _wait_for_prompt_recovery(self, step_token: str, *, timeout_sec: int) -> None:
-        token_q = shlex.quote(step_token)
-        self._exec(
-            f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
-            timeout_sec=timeout_sec,
-        )
+    def _poll_for_recovery(self, step_token: str, *, timeout_sec: float) -> bool:
+        """Poll for recovery via status file (primary) or visual prompt (secondary).
+
+        Returns True if the shell returned to its prompt after an interrupt.
+        The status file is written by PROMPT_COMMAND before the prompt is
+        rendered, making it the faster and more reliable signal.  The visual
+        prompt check is a fallback for cases where the status file is not
+        written (e.g., PROMPT_COMMAND did not fire).
+        """
+        deadline = _now_monotonic() + timeout_sec
+        status_path = f"{self._STATUS_DIR}/{step_token}"
+        status_check = f"test -f {shlex.quote(status_path)} && echo found || true"
+        capture_cmd = f"tmux capture-pane -p -t {shlex.quote(self._SESSION_NAME)}"
+        debug_enabled = logger.isEnabledFor(logging.DEBUG)
+        while True:
+            remaining = deadline - _now_monotonic()
+            if remaining < 0.5:
+                break
+            exec_cap = min(2, int(remaining))
+            # Primary: status file written by PROMPT_COMMAND.
+            try:
+                result = self._exec(status_check, timeout_sec=exec_cap)
+                if "found" in (getattr(result, "stdout", "") or ""):
+                    if debug_enabled:
+                        logger.debug(
+                            "Harbor tmux recovery: status file found for %s",
+                            step_token[:30],
+                        )
+                    return True
+            except Exception as exc:
+                if not self._is_timeout_error(exc):
+                    # Transport/runtime failure — no point retrying.
+                    if debug_enabled:
+                        logger.debug(
+                            "Harbor tmux recovery: transport error during status poll: %s",
+                            exc,
+                        )
+                    return False
+            # Secondary: visual prompt detection (bounded capture).
+            remaining = deadline - _now_monotonic()
+            if remaining < 0.5:
+                break
+            exec_cap = min(2, int(remaining))
+            try:
+                result = self._exec(capture_cmd, timeout_sec=exec_cap)
+                visible = getattr(result, "stdout", "") or ""
+            except Exception as exc:
+                if not self._is_timeout_error(exc):
+                    if debug_enabled:
+                        logger.debug(
+                            "Harbor tmux recovery: transport error during capture: %s",
+                            exc,
+                        )
+                    return False
+                visible = ""
+            if self._prompt_visible_on_last_line(visible):
+                if debug_enabled:
+                    logger.debug(
+                        "Harbor tmux recovery: prompt visible for %s",
+                        step_token[:30],
+                    )
+                return True
+            remaining = deadline - _now_monotonic()
+            if remaining > 0:
+                _sleep(min(self._RECOVERY_POLL_INTERVAL_SEC, remaining))
+        return False
 
     def _prompt_visible_on_last_line(self, visible: str) -> bool:
         """Check if the prompt sentinel is on the last non-empty line.
@@ -1175,29 +1254,42 @@ class _HarborTmuxTextSession:
         debug_enabled = logger.isEnabledFor(logging.DEBUG)
         if debug_enabled:
             visible_tail = (
-                _preview_log_text("\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]))
+                "\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
                 if visible
                 else ""
             )
             full_tail = (
-                _preview_log_text("\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]))
+                "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
                 if full
                 else ""
             )
             logger.debug(
-                "Harbor tmux timeout recovery start: timeout=%ss elapsed=%.2fs preview=%s visible_tail=%s full_tail=%s",
+                "Harbor tmux timeout recovery start: timeout=%ss elapsed=%.2fs preview=%s\nvisible_tail:\n%s\nfull_tail:\n%s",
                 timeout_sec,
                 elapsed_sec,
                 _preview_log_text(command),
                 visible_tail,
                 full_tail,
             )
-        # Defense-in-depth: if run_command's salvage check missed the prompt
-        # (e.g., transient capture error), detect it here before sending
-        # Ctrl-C.  Return the salvaged full buffer as a str so run_command
-        # can fall through to normal observation extraction — the command
-        # completed, it is not a timeout.
-        if self._prompt_visible_on_last_line(visible):
+        # Defense-in-depth: if run_command's salvage check missed the
+        # completion (e.g., transient capture error, or prompt scrolled
+        # off-screen), detect it here before sending Ctrl-C.  Check both
+        # the visible prompt and the status file (PROMPT_COMMAND writes
+        # the file before the prompt is rendered).  Return the salvaged
+        # full buffer as a str so run_command can fall through to normal
+        # observation extraction — the command completed, it is not a
+        # timeout.
+        status_file_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
+        status_found = False
+        try:
+            sr = self._exec(
+                f"test -f {status_file_q} && echo found || true",
+                timeout_sec=2,
+            )
+            status_found = "found" in (getattr(sr, "stdout", "") or "")
+        except Exception:
+            pass
+        if self._prompt_visible_on_last_line(visible) or status_found:
             self._safe_exec(
                 f"tmux wait-for -U {shlex.quote(step_token)} 2>/dev/null || true",
                 timeout_sec=10,
@@ -1205,7 +1297,7 @@ class _HarborTmuxTextSession:
             salvaged_buffer = self._safe_capture(self._capture_full_buffer)
             if debug_enabled:
                 logger.debug(
-                    "Harbor tmux timeout recovery skipped — prompt already visible: preview=%s",
+                    "Harbor tmux timeout recovery skipped — command already completed: preview=%s",
                     _preview_log_text(command),
                 )
             return salvaged_buffer
@@ -1218,11 +1310,9 @@ class _HarborTmuxTextSession:
                 "Harbor tmux timeout recovery sent Ctrl-C: preview=%s",
                 _preview_log_text(command),
             )
-        recovered = True
-        try:
-            self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
-        except Exception:
-            recovered = False
+        recovered = self._poll_for_recovery(
+            step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+        )
         if not recovered:
             self._safe_exec(
                 f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-\\\\",
@@ -1233,23 +1323,9 @@ class _HarborTmuxTextSession:
                     "Harbor tmux timeout recovery sent Ctrl-\\\\ after Ctrl-C failed: preview=%s",
                     _preview_log_text(command),
                 )
-            try:
-                self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
-                recovered = True
-            except Exception:
-                recovered = False
-        # Visual prompt fallback: if lock-based recovery failed but the
-        # prompt is visible (e.g., Ctrl-C killed the command and the prompt
-        # appeared, but the lock was orphaned), declare recovered.
-        if not recovered:
-            post_visible = self._safe_capture(self._capture_visible_screen_raw)
-            if self._prompt_visible_on_last_line(post_visible):
-                recovered = True
-                if debug_enabled:
-                    logger.debug(
-                        "Harbor tmux timeout recovery via visual prompt fallback: preview=%s",
-                        _preview_log_text(command),
-                    )
+            recovered = self._poll_for_recovery(
+                step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+            )
         # Discard any stale status file the hook may have written after Ctrl-C
         self._read_exit_status(step_token)
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
@@ -1258,14 +1334,12 @@ class _HarborTmuxTextSession:
         if recovered:
             if debug_enabled:
                 recovered_tail = (
-                    _preview_log_text(
-                        "\n".join(recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
-                    )
+                    "\n".join(recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
                     if recovered_buffer
                     else ""
                 )
                 logger.debug(
-                    "Harbor tmux timeout recovery succeeded: timeout=%ss elapsed=%.2fs preview=%s recovered_tail=%s",
+                    "Harbor tmux timeout recovery succeeded: timeout=%ss elapsed=%.2fs preview=%s\nrecovered_tail:\n%s",
                     timeout_sec,
                     elapsed_sec,
                     _preview_log_text(command),
@@ -1284,14 +1358,12 @@ class _HarborTmuxTextSession:
             )
         if debug_enabled:
             recovered_tail = (
-                _preview_log_text(
-                    "\n".join(recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
-                )
+                "\n".join(recovered_buffer.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
                 if recovered_buffer
                 else ""
             )
             logger.debug(
-                "Harbor tmux timeout recovery failed: timeout=%ss elapsed=%.2fs preview=%s recovered_tail=%s",
+                "Harbor tmux timeout recovery failed: timeout=%ss elapsed=%.2fs preview=%s\nrecovered_tail:\n%s",
                 timeout_sec,
                 elapsed_sec,
                 _preview_log_text(command),
@@ -1327,21 +1399,17 @@ class _HarborTmuxTextSession:
             f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-c",
             timeout_sec=10,
         )
-        recovered = True
-        try:
-            self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
-        except Exception:
-            recovered = False
+        recovered = self._poll_for_recovery(
+            step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+        )
         if not recovered:
             self._safe_exec(
                 f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} C-\\",
                 timeout_sec=10,
             )
-            try:
-                self._wait_for_prompt_recovery(step_token, timeout_sec=self._TIMEOUT_RECOVERY_WAIT_SEC)
-                recovered = True
-            except Exception:
-                recovered = False
+            recovered = self._poll_for_recovery(
+                step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+            )
         self._read_exit_status(step_token)
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
         if recovered_buffer:
