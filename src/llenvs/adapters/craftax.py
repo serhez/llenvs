@@ -152,105 +152,166 @@ class CraftaxActionMapper:
 
 
 def _render_symbolic(obs: np.ndarray, is_classic: bool) -> str:
-    """Parse the flat symbolic observation array into structured text."""
+    """Parse the flat symbolic observation array into structured text.
+
+    The observation is a flat array produced by Craftax's ``render_craftax_symbolic``.
+    Layout verified against ``craftax/craftax_classic/renderer.py`` (Classic) and
+    ``craftax/craftax/renderer.py`` (Full).
+    """
     obs = np.asarray(obs).flatten()
 
-    parts = []
+    parts: list[str] = []
     parts.append("=== Craftax Observation ===")
 
-    # The symbolic observation is a flat array encoding the visible map,
-    # inventory, intrinsics, etc. Layout differs between Classic and Full.
     if is_classic:
-        # Classic: 1345-dim
-        # Rough layout: map (9*11*7=693), inventory (12), intrinsics (5+),
-        # direction (4), misc
-        map_end = 693
-        if len(obs) > map_end:
-            inv_start = map_end
-            inv_end = inv_start + 12
-            if inv_end <= len(obs):
-                inv = obs[inv_start:inv_end].astype(int)
-                inv_labels = [
-                    "wood",
-                    "stone",
-                    "coal",
-                    "iron",
-                    "diamond",
-                    "sapling",
-                    "wood_pickaxe",
-                    "stone_pickaxe",
-                    "iron_pickaxe",
-                    "wood_sword",
-                    "stone_sword",
-                    "iron_sword",
-                ]
-                inv_parts = [
-                    f"  {inv_labels[i]}: {inv[i]}" for i in range(len(inv_labels)) if i < len(inv)
-                ]
-                parts.append("Inventory:")
-                parts.extend(inv_parts)
-
-            # Intrinsics after inventory
-            intr_start = inv_end
-            intr_end = intr_start + 5
-            if intr_end <= len(obs):
-                intr = obs[intr_start:intr_end]
-                parts.append(f"Health: {intr[0]:.1f}")
-                parts.append(f"Food: {intr[1]:.1f}")
-                parts.append(f"Drink: {intr[2]:.1f}")
-                parts.append(f"Energy: {intr[3]:.1f}")
-                parts.append(f"Mana: {intr[4]:.1f}")
+        _render_symbolic_classic(obs, parts)
     else:
-        # Full: 8268-dim — similar but larger map and more inventory slots
-        map_end = 7623  # 9*11*77
-        if len(obs) > map_end:
-            inv_start = map_end
-            inv_end = inv_start + 24
-            if inv_end <= len(obs):
-                inv = obs[inv_start:inv_end].astype(int)
-                inv_labels = [
-                    "wood",
-                    "stone",
-                    "coal",
-                    "iron",
-                    "diamond",
-                    "sapling",
-                    "wood_pickaxe",
-                    "stone_pickaxe",
-                    "iron_pickaxe",
-                    "diamond_pickaxe",
-                    "wood_sword",
-                    "stone_sword",
-                    "iron_sword",
-                    "diamond_sword",
-                    "arrow",
-                    "torch",
-                    "ruby",
-                    "sapphire",
-                    "bow",
-                    "iron_armour",
-                    "diamond_armour",
-                    "book",
-                    "potion",
-                    "wand",
-                ]
-                inv_parts = [
-                    f"  {inv_labels[i]}: {inv[i]}" for i in range(min(len(inv_labels), len(inv)))
-                ]
-                parts.append("Inventory:")
-                parts.extend(inv_parts)
-
-            intr_start = inv_end if len(obs) > map_end + 24 else map_end + 24
-            intr_end = intr_start + 5
-            if intr_end <= len(obs):
-                intr = obs[intr_start:intr_end]
-                parts.append(f"Health: {intr[0]:.1f}")
-                parts.append(f"Food: {intr[1]:.1f}")
-                parts.append(f"Drink: {intr[2]:.1f}")
-                parts.append(f"Energy: {intr[3]:.1f}")
-                parts.append(f"Mana: {intr[4]:.1f}")
+        _render_symbolic_full(obs, parts)
 
     return "\n".join(parts)
+
+
+def _render_symbolic_classic(obs: np.ndarray, parts: list[str]) -> None:
+    """Classic: 1345-dim.
+
+    Layout: map (7*9*21=1323) | inventory (12) | intrinsics (4) |
+            direction (4) | misc (2).
+    Normalization: inventory = count/10, intrinsics = value/10.
+    """
+    map_end = 1323  # 7 * 9 * (17 BlockTypes + 4 mob channels)
+
+    if len(obs) <= map_end:
+        return
+
+    # Inventory: 12 items, each normalized as count / 10.
+    inv_start = map_end
+    inv_end = inv_start + 12
+    if inv_end <= len(obs):
+        inv = obs[inv_start:inv_end]
+        inv_labels = [
+            "wood",
+            "stone",
+            "coal",
+            "iron",
+            "diamond",
+            "sapling",
+            "wood_pickaxe",
+            "stone_pickaxe",
+            "iron_pickaxe",
+            "wood_sword",
+            "stone_sword",
+            "iron_sword",
+        ]
+        parts.append("Inventory:")
+        for i, label in enumerate(inv_labels):
+            parts.append(f"  {label}: {round(inv[i] * 10)}")
+
+    # Intrinsics: 4 values (health, food, drink, energy). No mana in Classic.
+    # Each normalized as value / 10.
+    intr_start = inv_end
+    intr_end = intr_start + 4
+    if intr_end <= len(obs):
+        intr = obs[intr_start:intr_end]
+        parts.append(f"Health: {round(intr[0] * 10)}")
+        parts.append(f"Food: {round(intr[1] * 10)}")
+        parts.append(f"Drink: {round(intr[2] * 10)}")
+        parts.append(f"Energy: {round(intr[3] * 10)}")
+
+
+def _render_symbolic_full(obs: np.ndarray, parts: list[str]) -> None:
+    """Full: 8268-dim.
+
+    Layout: map (9*11*83=8217) | inventory (16) | potions (6) |
+            intrinsics (9) | direction (4) | armour (4) |
+            armour_enchantments (4) | special (8).
+    """
+    map_end = 8217  # 9 * 11 * (37 BlockTypes + 5 ItemTypes + 40 mob channels + 1 light)
+
+    if len(obs) <= map_end:
+        return
+
+    # --- Inventory: 16 items with mixed normalization ---
+    inv_start = map_end
+    inv_end = inv_start + 16
+    if inv_end <= len(obs):
+        inv = obs[inv_start:inv_end]
+        # Items 0-9: sqrt(count)/10  → count = round((val*10)^2)
+        # Item 10 (books): count/2   → count = round(val*2)
+        # Items 11-12 (pickaxe, sword): level/4 → level = round(val*4)
+        # Items 13-15 (sword_ench, bow_ench, bow): raw → round(val)
+        sqrt_labels = [
+            "wood", "stone", "coal", "iron", "diamond",
+            "sapphire", "ruby", "sapling", "torches", "arrows",
+        ]
+        parts.append("Inventory:")
+        for i, label in enumerate(sqrt_labels):
+            parts.append(f"  {label}: {round((inv[i] * 10) ** 2)}")
+        parts.append(f"  books: {round(inv[10] * 2)}")
+        parts.append(f"  pickaxe: {round(inv[11] * 4)}")
+        parts.append(f"  sword: {round(inv[12] * 4)}")
+        parts.append(f"  sword_enchantment: {round(inv[13])}")
+        parts.append(f"  bow_enchantment: {round(inv[14])}")
+        parts.append(f"  bow: {round(inv[15])}")
+
+    # --- Potions: 6 types, each sqrt(count)/10 ---
+    pot_start = inv_end
+    pot_end = pot_start + 6
+    if pot_end <= len(obs):
+        pot = obs[pot_start:pot_end]
+        pot_labels = [
+            "red_potion", "green_potion", "blue_potion",
+            "pink_potion", "cyan_potion", "yellow_potion",
+        ]
+        parts.append("Potions:")
+        for i, label in enumerate(pot_labels):
+            parts.append(f"  {label}: {round((pot[i] * 10) ** 2)}")
+
+    # --- Intrinsics: 9 values, each value/10 ---
+    intr_start = pot_end
+    intr_end = intr_start + 9
+    if intr_end <= len(obs):
+        intr = obs[intr_start:intr_end]
+        intr_labels = [
+            "Health", "Food", "Drink", "Energy", "Mana",
+            "XP", "Dexterity", "Strength", "Intelligence",
+        ]
+        for i, label in enumerate(intr_labels):
+            parts.append(f"{label}: {round(intr[i] * 10)}")
+
+    # --- Direction (4), then Armour (4), Armour enchantments (4), Special (8) ---
+    dir_start = intr_end
+    dir_end = dir_start + 4
+
+    armour_start = dir_end
+    armour_end = armour_start + 4
+    ench_start = armour_end
+    ench_end = ench_start + 4
+
+    if armour_end <= len(obs):
+        armour = obs[armour_start:armour_end]
+        armour_labels = ["helmet", "chestplate", "leggings", "boots"]
+        ench = obs[ench_start:ench_end] if ench_end <= len(obs) else np.zeros(4)
+        ench_names = {0: "none", 1: "fire", 2: "ice"}
+        parts.append("Armour:")
+        for i, label in enumerate(armour_labels):
+            level = round(armour[i] * 2)
+            ench_val = round(ench[i]) if i < len(ench) else 0
+            ench_name = ench_names.get(ench_val, "none")
+            parts.append(f"  {label}: {level} (enchantment: {ench_name})")
+
+    special_start = ench_end
+    special_end = special_start + 8
+    if special_end <= len(obs):
+        sp = obs[special_start:special_end]
+        parts.append(f"Floor: {round(sp[5] * 10)}")
+        if sp[6] > 0.5:
+            parts.append("Ladder: open")
+        if sp[7] > 0.5:
+            parts.append("Boss: vulnerable")
+        if sp[3] > 0.5:
+            parts.append("Learned: fireball")
+        if sp[4] > 0.5:
+            parts.append("Learned: iceball")
 
 
 def _render_pixels_to_image(obs: np.ndarray) -> ImageContent:

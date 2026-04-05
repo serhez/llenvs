@@ -342,6 +342,165 @@ class TestCraftaxAchievementReward:
 
 
 # ---------------------------------------------------------------------------
+# _render_symbolic tests
+# ---------------------------------------------------------------------------
+
+
+class TestRenderSymbolicClassic:
+    """Test symbolic observation parsing for Craftax Classic."""
+
+    # Classic layout: map(1323) + inv(12) + intr(4) + dir(4) + misc(2) = 1345
+    OBS_SIZE = 1345
+    MAP_END = 1323
+    INV_START = 1323
+    INV_END = 1335
+    INTR_START = 1335
+    INTR_END = 1339
+
+    def _render(self, obs):
+        from llenvs.adapters.craftax import _render_symbolic
+
+        return _render_symbolic(obs, is_classic=True)
+
+    def test_header(self):
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        assert "=== Craftax Observation ===" in text
+
+    def test_inventory_labels(self):
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        for label in [
+            "wood",
+            "stone",
+            "coal",
+            "iron",
+            "diamond",
+            "sapling",
+            "wood_pickaxe",
+            "stone_pickaxe",
+            "iron_pickaxe",
+            "wood_sword",
+            "stone_sword",
+            "iron_sword",
+        ]:
+            assert label in text
+
+    def test_inventory_values_denormalized(self):
+        """Inventory values are stored as count/10; display should show actual counts."""
+        obs = np.zeros(self.OBS_SIZE)
+        # Set wood = 5 (normalized: 5/10 = 0.5)
+        obs[self.INV_START] = 0.5
+        # Set coal = 3 (normalized: 3/10 = 0.3)
+        obs[self.INV_START + 2] = 0.3
+        text = self._render(obs)
+        assert "wood: 5" in text
+        assert "coal: 3" in text
+
+    def test_intrinsics_correct_indices(self):
+        """Health/food/drink/energy read from correct indices (1335-1339)."""
+        obs = np.zeros(self.OBS_SIZE)
+        # Full health = 10, normalized = 10/10 = 1.0
+        obs[self.INTR_START] = 1.0
+        # Food = 9, normalized = 0.9
+        obs[self.INTR_START + 1] = 0.9
+        # Drink = 8, normalized = 0.8
+        obs[self.INTR_START + 2] = 0.8
+        # Energy = 7, normalized = 0.7
+        obs[self.INTR_START + 3] = 0.7
+        text = self._render(obs)
+        assert "Health: 10" in text
+        assert "Food: 9" in text
+        assert "Drink: 8" in text
+        assert "Energy: 7" in text
+
+    def test_no_mana_in_classic(self):
+        """Classic has only 4 intrinsics — no mana."""
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        assert "Mana" not in text
+
+    def test_zero_obs_shows_zero_health(self):
+        """All-zeros obs → Health: 0 (not garbage from wrong index)."""
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        assert "Health: 0" in text
+
+
+class TestRenderSymbolicFull:
+    """Test symbolic observation parsing for Craftax Full."""
+
+    # Full layout: map(8217) + inv(16) + pot(6) + intr(9) + dir(4) +
+    #              armour(4) + armour_ench(4) + special(8) = 8268
+    OBS_SIZE = 8268
+    MAP_END = 8217
+    INV_START = 8217
+    INV_END = 8233
+    POT_START = 8233
+    POT_END = 8239
+    INTR_START = 8239
+    INTR_END = 8248
+
+    def _render(self, obs):
+        from llenvs.adapters.craftax import _render_symbolic
+
+        return _render_symbolic(obs, is_classic=False)
+
+    def test_header(self):
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        assert "=== Craftax Observation ===" in text
+
+    def test_inventory_has_16_items(self):
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        for label in [
+            "wood",
+            "stone",
+            "coal",
+            "iron",
+            "diamond",
+            "sapphire",
+            "ruby",
+            "sapling",
+            "torches",
+            "arrows",
+        ]:
+            assert label in text
+
+    def test_potions_section(self):
+        obs = np.zeros(self.OBS_SIZE)
+        text = self._render(obs)
+        # Potions section should exist with 6 potion types
+        for potion in ["red_potion", "green_potion", "blue_potion",
+                       "pink_potion", "cyan_potion", "yellow_potion"]:
+            assert potion in text
+
+    def test_intrinsics_all_nine(self):
+        """Full has 9 intrinsics including mana, xp, dex, str, int."""
+        obs = np.zeros(self.OBS_SIZE)
+        # Set all intrinsics to known values (each / 10.0)
+        obs[self.INTR_START] = 1.0      # health = 10
+        obs[self.INTR_START + 4] = 0.5  # mana = 5
+        obs[self.INTR_START + 5] = 0.3  # xp = 3
+        text = self._render(obs)
+        assert "Health: 10" in text
+        assert "Mana: 5" in text
+        assert "XP: 3" in text
+        # All 9 should be present
+        for label in ["Health", "Food", "Drink", "Energy", "Mana",
+                       "XP", "Dexterity", "Strength", "Intelligence"]:
+            assert label in text
+
+    def test_full_health_not_zero(self):
+        """With health at index 8239 set to 1.0, should show 10 not 0."""
+        obs = np.zeros(self.OBS_SIZE)
+        obs[self.INTR_START] = 1.0
+        text = self._render(obs)
+        assert "Health: 10" in text
+
+
+# ---------------------------------------------------------------------------
 # CraftaxEnvironment tests
 # ---------------------------------------------------------------------------
 
