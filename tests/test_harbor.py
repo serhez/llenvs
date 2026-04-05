@@ -291,7 +291,6 @@ class _FakeTmuxRuntime:
         hook_wait_timeout_once: bool = False,
         bang_requires_history_disable: bool = False,
         step_exit_codes: list[int | None] | None = None,
-        recovery_exit_code: int | None = None,
         status_file_appears_after_polls: int | None = None,
     ) -> None:
         self.tmux_installed = not missing_tmux
@@ -312,7 +311,6 @@ class _FakeTmuxRuntime:
         self.full_buffers = [initial_buffer, *(full_buffers or [])]
         self.visible_buffers = visible_buffers or []
         self.step_exit_codes = list(step_exit_codes or [])
-        self.recovery_exit_code = recovery_exit_code
         self.status_file_appears_after_polls = status_file_appears_after_polls
         self._status_poll_count = 0
         self.status_reads: list[str] = []
@@ -367,29 +365,39 @@ class _FakeTmuxRuntime:
                 self.files["/tmp/.llenvs_harbor_hook_init.sh"] = self.staged_hook_script
             return MockExecResult(stdout="")
 
-        if "tmux wait-for " in command and "capture-pane" in command and "-S -" in command:
-            if self.pending_bang_timeout:
-                self.pending_bang_timeout = False
-                self.pending_bang_recovery_failure = True
-                if not self.visible_buffers:
-                    self.visible_buffers.append(
-                        "bash: !DOCTYPE: event not found\nbash$ "
-                    )
-                raise RuntimeError("apptainer command timed out after 120s")
-            if self.wait_timeout_once:
-                self.wait_timeout_once = False
-                self.pending_command_timeout = True
-                raise RuntimeError("apptainer command timed out after 120s")
-            if self.pending_command_timeout:
-                raise RuntimeError("apptainer command timed out after 120s")
-            token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
-            if token_match is not None and self.step_exit_codes:
-                exit_code = self.step_exit_codes.pop(0)
-                if exit_code is not None:
-                    self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(exit_code)
-            if not self.full_buffers:
-                raise AssertionError(f"Unexpected full-buffer capture command: {command}")
-            return MockExecResult(stdout=self.full_buffers.pop(0))
+        if self._STATUS_DIR in command and "while ! test -f" in command:
+            # In-container wait: wait_and_capture (has capture-pane) or
+            # hook init (no capture-pane).
+            if "capture-pane" in command and "-S -" in command:
+                # wait_and_capture for normal commands.
+                if self.pending_bang_timeout:
+                    self.pending_bang_timeout = False
+                    self.pending_bang_recovery_failure = True
+                    if not self.visible_buffers:
+                        self.visible_buffers.append(
+                            "bash: !DOCTYPE: event not found\nbash$ "
+                        )
+                    raise RuntimeError("apptainer command timed out after 120s")
+                if self.wait_timeout_once:
+                    self.wait_timeout_once = False
+                    self.pending_command_timeout = True
+                    raise RuntimeError("apptainer command timed out after 120s")
+                if self.pending_command_timeout:
+                    raise RuntimeError("apptainer command timed out after 120s")
+                token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
+                if token_match is not None and self.step_exit_codes:
+                    exit_code = self.step_exit_codes.pop(0)
+                    if exit_code is not None:
+                        self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(exit_code)
+                if not self.full_buffers:
+                    raise AssertionError(f"Unexpected full-buffer capture command: {command}")
+                return MockExecResult(stdout=self.full_buffers.pop(0))
+            else:
+                # Hook init wait (no capture-pane).
+                if "llenvs_harbor_init_" in command and self.hook_wait_timeout_once:
+                    self.hook_wait_timeout_once = False
+                    raise RuntimeError("apptainer command timed out after 120s")
+                return MockExecResult(stdout="")
 
         if "tmux capture-pane" in command and "-S -" in command:
             if not self.full_buffers:
@@ -476,34 +484,6 @@ class _FakeTmuxRuntime:
         if "tmux has-session" in command:
             return MockExecResult(stdout="")
 
-        if "tmux wait-for " in command:
-            if (
-                self.pending_bang_recovery_failure
-                and "llenvs_harbor_step_" in command
-                and "tmux wait-for -U" in command
-            ):
-                self.pending_bang_recovery_failure = False
-                raise RuntimeError("apptainer command timed out after 5s")
-            if (
-                self.wait_recovery_fails
-                and "llenvs_harbor_step_" in command
-                and "tmux wait-for -U" in command
-            ):
-                raise RuntimeError("apptainer command timed out after 5s")
-            if "llenvs_harbor_init_" in command and self.hook_wait_timeout_once:
-                self.hook_wait_timeout_once = False
-                raise RuntimeError("apptainer command timed out after 120s")
-            if (
-                self.recovery_exit_code is not None
-                and "llenvs_harbor_step_" in command
-                and "tmux wait-for -U" in command
-            ):
-                token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
-                if token_match is not None:
-                    self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(
-                        self.recovery_exit_code
-                    )
-            return MockExecResult(stdout="")
 
 
 class _FakeTimeoutThenExitProcess:
@@ -953,13 +933,24 @@ class TestHarborEnvironment:
             for cmd in mock_env._exec_history
             if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in cmd
         )
-        assert 'tmux wait-for -U "$token"' in init_cmd
+        assert "tmux wait-for" not in init_cmd
+        assert "llenvs_harbor_init_*" in init_cmd  # case pattern covers init tokens
         assert "PROMPT_COMMAND" in init_cmd
         assert "set +H" in init_cmd
         assert any(
-            "tmux wait-for -L llenvs_harbor_init_" in cmd
-            and "printf '%s' llenvs_harbor_init_" in cmd
+            "printf '%s' llenvs_harbor_init_" in cmd
+            and "tmux send-keys" in cmd
             for cmd in mock_env._exec_history
+        )
+        # Hook init waits for status file, not lock.
+        assert any(
+            "while ! test -f" in cmd and "llenvs_harbor_init_" in cmd
+            for cmd in mock_env._exec_history
+        )
+        # Init-token status file cleaned up after install.
+        assert any(
+            "llenvs_harbor_init_" in path
+            for path in runtime.status_reads
         )
         assert any(
             "tmux send-keys -t" in cmd
@@ -1263,11 +1254,10 @@ class TestHarborEnvironment:
         after = mock_env._exec_history[before:]
         # 4 execs: send, status-file-poll, wait+capture, read-exit-status
         assert len(after) == 4
-        assert "tmux wait-for -L " in after[0]
         assert "tmux send-keys -l " in after[0]
+        assert "tmux wait-for" not in after[0]
         assert "test -f /tmp/.llenvs_harbor_tmux_status/" in after[1]
-        assert "tmux wait-for -L " in after[2]
-        assert "tmux wait-for -U " in after[2]
+        assert "while ! test -f" in after[2]
         assert "capture-pane -J -p -S -" in after[2]
         assert "/tmp/.llenvs_harbor_tmux_status/" in after[3]
         assert result.next_state.observation.state is not None
@@ -1316,9 +1306,9 @@ class TestHarborEnvironment:
         assert "tmux send-keys" not in after[0]
         # Exec 2: control exec with send-keys source
         assert "source /tmp/.llenvs_harbor_tmux_command" in after[1]
-        assert "tmux wait-for -L " in after[1]
-        # Exec 3: wait + capture
-        assert "tmux wait-for -L " in after[2]
+        assert "tmux wait-for" not in after[1]
+        # Exec 3: wait + capture (status-file polling)
+        assert "while ! test -f" in after[2]
         assert "capture-pane" in after[2]
 
     def test_step_tmux_session_uses_staged_file_for_oversized_command(self):
@@ -1443,7 +1433,8 @@ class TestHarborEnvironment:
             result.next_state.observation.state.text
             == "[Command completed successfully with no output]"
         )
-        assert len(runtime.status_reads) == 1
+        step_reads = [r for r in runtime.status_reads if "llenvs_harbor_step_" in r]
+        assert len(step_reads) == 1
 
     def test_step_tmux_session_silent_nonzero_exit_shows_exit_code(self):
         runtime = _FakeTmuxRuntime(step_exit_codes=[1])
@@ -1458,7 +1449,8 @@ class TestHarborEnvironment:
 
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "[exit code: 1]"
-        assert len(runtime.status_reads) == 1
+        step_reads = [r for r in runtime.status_reads if "llenvs_harbor_step_" in r]
+        assert len(step_reads) == 1
 
     def test_tmux_prompt_hook_exports_noninteractive_baseline(self):
         runtime = _FakeTmuxRuntime()
@@ -1488,7 +1480,8 @@ class TestHarborEnvironment:
 
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == "[No output]"
-        assert len(runtime.status_reads) == 1
+        step_reads = [r for r in runtime.status_reads if "llenvs_harbor_step_" in r]
+        assert len(step_reads) == 1
 
     def test_step_tmux_session_falls_back_to_visible_screen(self):
         runtime = _FakeTmuxRuntime()
@@ -1607,10 +1600,10 @@ class TestHarborEnvironment:
             if "test -f" in cmd and runtime._STATUS_DIR in cmd
         ]
         assert len(phase1_cmds) >= 1
-        # Phase 2 used a single wait_and_capture (with wait-for)
+        # Phase 2 used a single wait_and_capture (status-file polling)
         wait_capture_cmds = [
             cmd for cmd in mock_env._exec_history
-            if "tmux wait-for -L" in cmd and "capture-pane" in cmd
+            if "while ! test -f" in cmd and "capture-pane" in cmd
         ]
         assert len(wait_capture_cmds) == 1
         # Output was captured correctly
@@ -1651,15 +1644,10 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text='echo "unterminated'))
 
         assert result.info["shell_continuation_detected"] is True
-        # Phase 1 used status file polls, NOT wait-for -L
+        # Phase 1 used status file polls
         assert len(runtime.status_polls) >= 1
-        phase1_wait_for_cmds = [
-            cmd for cmd, ts in runtime.exec_calls
-            if "tmux wait-for -L" in cmd
-            and ts is not None
-            and ts <= 2  # short timeout = phase 1 poll
-        ]
-        assert len(phase1_wait_for_cmds) == 0
+        # No tmux wait-for commands at all (lock fully eliminated)
+        assert not any("tmux wait-for" in cmd for cmd in mock_env._exec_history)
 
     def test_direct_command_phase1_propagates_transport_error(self):
         """Phase 1 should propagate non-timeout errors, not swallow them."""
@@ -1668,7 +1656,12 @@ class TestHarborEnvironment:
 
         def error_on_status_poll(command: str, **kwargs: Any) -> MockExecResult:
             nonlocal call_count
-            if "test -f" in command and "/tmp/.llenvs_harbor_tmux_status/" in command:
+            if (
+                "test -f" in command
+                and "/tmp/.llenvs_harbor_tmux_status/" in command
+                and "llenvs_harbor_step_" in command
+                and "while ! test -f" not in command
+            ):
                 call_count += 1
                 raise RuntimeError("apptainer instance not found")
             return original_call(command, **kwargs)
@@ -1734,7 +1727,8 @@ class TestHarborEnvironment:
             "tmux capture-pane -p -S - -t " in cmd and "-J" not in cmd
             for cmd in mock_env._exec_history
         )
-        assert len(runtime.status_reads) == 1
+        step_reads = [r for r in runtime.status_reads if "llenvs_harbor_step_" in r]
+        assert len(step_reads) == 1
         assert not any(path.startswith(runtime._STATUS_DIR + "/") for path in runtime.files)
 
     def test_handle_timeout_recovers_via_status_file(self, monkeypatch):
@@ -1776,16 +1770,8 @@ class TestHarborEnvironment:
             if "llenvs_harbor_step_" in p
         ]
         assert len(recovery_polls) > 0
-        # No lock-based recovery commands after Ctrl-C.
-        ctrl_c_idx = next(
-            i for i, cmd in enumerate(mock_env._exec_history) if "C-c" in cmd
-        )
-        post_ctrl_c = mock_env._exec_history[ctrl_c_idx + 1 :]
-        assert not any(
-            "tmux wait-for -L llenvs_harbor_step_" in cmd
-            and "tmux wait-for -U llenvs_harbor_step_" in cmd
-            for cmd in post_ctrl_c
-        )
+        # No tmux wait-for commands anywhere (lock fully eliminated).
+        assert not any("tmux wait-for" in cmd for cmd in mock_env._exec_history)
 
     def test_salvages_via_status_file_when_prompt_not_visible(self, monkeypatch):
         """When the status file exists at timeout but prompt isn't visible, salvage (not timeout)."""
@@ -1863,11 +1849,6 @@ class TestHarborEnvironment:
         assert "done." in result.next_state.observation.state.text
         # Should NOT have sent Ctrl-C (no recovery needed).
         assert not any(" C-c" in cmd for cmd in mock_env._exec_history)
-        # Should have cleared the orphaned lock.
-        assert any(
-            "tmux wait-for -U" in cmd and "2>/dev/null" in cmd
-            for cmd in mock_env._exec_history
-        )
 
     def test_handle_timeout_recovers_via_visual_prompt_polling(self, monkeypatch):
         """When status-file polling fails but prompt appears visually, declare recovered."""

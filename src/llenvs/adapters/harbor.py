@@ -724,9 +724,9 @@ class _HarborTmuxTextSession:
                 _preview_log_text(command_text),
             )
 
+        status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
         wait_and_capture = (
-            f"tmux wait-for -L {shlex.quote(step_token)}"
-            f" && tmux wait-for -U {shlex.quote(step_token)}"
+            f"while ! test -f {status_path_q}; do sleep 0.1; done"
             f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
         )
         started_at = _now_monotonic()
@@ -761,14 +761,9 @@ class _HarborTmuxTextSession:
             except Exception:
                 pass
             if self._prompt_visible_on_last_line(visible) or status_found:
-                # Command completed but the wait-for signal was lost.
-                # Clear any orphaned lock — safe because the command is
-                # known to have completed (prompt is on screen or status
-                # file was written by PROMPT_COMMAND).
-                self._safe_exec(
-                    f"tmux wait-for -U {shlex.quote(step_token)} 2>/dev/null || true",
-                    timeout_sec=10,
-                )
+                # Command completed but the wait signal was lost (the
+                # in-container polling loop was killed before it noticed
+                # the status file).  Capture the buffer directly.
                 full_buffer = self._safe_capture(self._capture_full_buffer)
                 logger.debug(
                     "Harbor tmux signal lost — salvaged completed command: preview=%s",
@@ -906,9 +901,12 @@ class _HarborTmuxTextSession:
         token_q = shlex.quote(step_token)
         token_file_q = shlex.quote(self._TOKEN_FILE)
 
+        # No lock needed: run_command() is synchronous — one in-flight
+        # command per tmux session.  If the adapter ever supports
+        # concurrent callers against the same session, a serialization
+        # mechanism would be needed here.
         control_parts = [
             f"tmux has-session -t {session_q}",
-            f"tmux wait-for -L {token_q}",
             f"printf '%s' {token_q} > {token_file_q}",
         ]
 
@@ -1017,10 +1015,9 @@ class _HarborTmuxTextSession:
                 '  if [ -r "$token_file" ]; then',
                 '    token=$(cat "$token_file" 2>/dev/null || true)',
                 '    if [ -n "$token" ]; then',
-                '      case "$token" in llenvs_harbor_step_*)',
+                '      case "$token" in llenvs_harbor_step_*|llenvs_harbor_init_*)',
                 '        printf "%s\\n" "$status" > "$status_dir/$token" ;;',
                 "      esac",
-                '      tmux wait-for -U "$token" 2>/dev/null || true',
                 '      : > "$token_file"',
                 "    fi",
                 "  fi",
@@ -1068,15 +1065,15 @@ class _HarborTmuxTextSession:
         control_cmd = " && ".join(
             [
                 f"tmux has-session -t {session_q}",
-                f"tmux wait-for -L {token_q}",
                 f"printf '%s' {token_q} > {token_file_q}",
                 f"tmux send-keys -t {session_q} {shlex.quote(f'source {self._HOOK_SCRIPT_FILE}')} Enter",
             ]
         )
         self._exec(control_cmd, timeout_sec=startup_timeout)
+        status_path_q = shlex.quote(f"{self._STATUS_DIR}/{init_token}")
         try:
             self._exec(
-                f"tmux wait-for -L {token_q} && tmux wait-for -U {token_q}",
+                f"while ! test -f {status_path_q}; do sleep 0.1; done",
                 timeout_sec=startup_timeout,
             )
         except Exception as exc:
@@ -1085,6 +1082,8 @@ class _HarborTmuxTextSession:
                     f"Prompt hook installation timed out after {startup_timeout}s"
                 ) from exc
             raise
+        # Clean up the init-token status file.
+        self._read_exit_status(init_token)
 
     def _poll_for_recovery(self, step_token: str, *, timeout_sec: float) -> bool:
         """Poll for recovery via status file (primary) or visual prompt (secondary).
@@ -1181,11 +1180,10 @@ class _HarborTmuxTextSession:
         status_path = f"{self._STATUS_DIR}/{step_token}"
         status_check_cmd = f"test -f {shlex.quote(status_path)} && echo found || true"
 
-        # Phase 1: lock-free polling for completion or continuation.
-        # Uses the exit-status file written by PROMPT_COMMAND (before the
-        # lock release) as a lock-free completion signal.  This avoids
-        # repeated short-timeout wait-for -L/-U execs whose process kills
-        # can orphan the tmux channel lock.
+        # Phase 1: status-file polling for completion or continuation.
+        # Uses the exit-status file written by PROMPT_COMMAND as the
+        # completion signal.  Also checks for the PS2 continuation
+        # sentinel between polls.
         while True:
             now = _now_monotonic()
             remaining = deadline - now
@@ -1200,9 +1198,9 @@ class _HarborTmuxTextSession:
             try:
                 result = self._exec(status_check_cmd, timeout_sec=poll_timeout)
                 if "found" in (getattr(result, "stdout", "") or ""):
-                    # Command completed — lock already released by
-                    # PROMPT_COMMAND.  Fall through to phase 2 where
-                    # wait-for -L will acquire immediately.
+                    # Command completed — status file already written by
+                    # PROMPT_COMMAND.  Fall through to phase 2 where the
+                    # file-polling loop exits immediately.
                     break
             except Exception as exc:
                 if not self._is_timeout_error(exc):
@@ -1217,7 +1215,7 @@ class _HarborTmuxTextSession:
                     visible_screen=visible,
                 )
 
-        # Phase 2: single blocking wait for the lock + capture.
+        # Phase 2: single blocking wait for the status file + capture.
         remaining = deadline - _now_monotonic()
         if remaining <= 0:
             # Keep the timeout wording aligned with _run_hpc_cli_command() so
@@ -1290,10 +1288,6 @@ class _HarborTmuxTextSession:
         except Exception:
             pass
         if self._prompt_visible_on_last_line(visible) or status_found:
-            self._safe_exec(
-                f"tmux wait-for -U {shlex.quote(step_token)} 2>/dev/null || true",
-                timeout_sec=10,
-            )
             salvaged_buffer = self._safe_capture(self._capture_full_buffer)
             if debug_enabled:
                 logger.debug(
