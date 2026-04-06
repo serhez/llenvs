@@ -48,7 +48,7 @@ CLASSIC_ACTIONS: dict[int, str] = {
     2: "right",
     3: "up",
     4: "down",
-    5: "do",
+    5: "interact",
     6: "sleep",
     7: "place_stone",
     8: "place_table",
