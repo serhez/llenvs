@@ -102,11 +102,12 @@ class TestRunnerWithPromptBudget:
         assert len(entries) == 1
         assert entries[0].action_text == "action1"
 
-        # available should be: max_prompt_tokens - (system + task + state + overheads)
+        # available should be: max_prompt_tokens - (system + task + state + initial_obs + overheads)
         system_cost = len("System.") + 5  # content + overhead
         task_cost = len("Task description.") + 5
         state_cost = len("Current state.") + 5
-        expected_available = 1000 - system_cost - task_cost - state_cost
+        initial_obs_cost = len("Prev.") + 5  # initial obs != task → reserved
+        expected_available = 1000 - system_cost - task_cost - state_cost - initial_obs_cost
         assert available == expected_available
 
     def test_ample_budget_large_available(self) -> None:
@@ -482,3 +483,115 @@ class TestCurrentObservationTruncation:
         # Full observation should be present (not truncated)
         assert "X" * 200 in last_user.content
         assert "omitted" not in last_user.content
+
+
+# =============================================================================
+# Initial observation injection with PromptBudget
+# =============================================================================
+
+
+class TestBudgetInitialObservation:
+    """Tests for initial observation injection in the prompt_budget path."""
+
+    def _make_runner(self, system_prompt=None, prompt_budget=None):
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        mock_backend = MagicMock()
+
+        return TrajectoryRunner(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+            system_prompt=system_prompt,
+            prompt_budget=prompt_budget,
+        )
+
+    def test_budget_initial_obs_injected_when_history_nonempty(self) -> None:
+        """Initial obs appears in output when build_history returns content."""
+        def mock_build(entries, available):
+            return [
+                ChatMessage(role="assistant", content="act"),
+                ChatMessage(role="user", content="obs"),
+            ]
+
+        budget = PromptBudget(
+            max_prompt_tokens=10000,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build,
+        )
+        runner = self._make_runner(prompt_budget=budget)
+
+        task = ObservationContent(text="Task.")
+        s0 = _make_state(task=task, state=ObservationContent(text="Initial."), step=0)
+        s1 = _make_state(task=task, state=ObservationContent(text="Current."), step=1)
+
+        traj = Trajectory.create(s0)
+        traj.add_transition(Transition(
+            state=s0, action=Action(text="act"), next_state=s1,
+            rewards=SignalBundle(()),
+        ))
+
+        # Use _build_messages to get coalesced output
+        messages = runner._build_messages(s1, trajectory=traj)
+        first_user = messages[0]
+        assert first_user.role == "user"
+        assert "Task." in first_user.content
+        assert "Initial." in first_user.content
+
+    def test_budget_initial_obs_skipped_when_history_empty(self) -> None:
+        """Initial obs NOT injected when build_history returns empty."""
+        budget = PromptBudget(
+            max_prompt_tokens=10000,
+            estimate_tokens=_simple_estimator,
+            build_history=lambda entries, available: [],
+        )
+        runner = self._make_runner(prompt_budget=budget)
+
+        task = ObservationContent(text="Task.")
+        s0 = _make_state(task=task, state=ObservationContent(text="Initial."), step=0)
+        s1 = _make_state(task=task, state=ObservationContent(text="Current."), step=1)
+
+        traj = Trajectory.create(s0)
+        traj.add_transition(Transition(
+            state=s0, action=Action(text="act"), next_state=s1,
+            rewards=SignalBundle(()),
+        ))
+
+        messages = runner._build_structured_messages(s1, traj)
+        first_user = messages[0]
+        assert "Initial." not in first_user.content
+
+    def test_budget_reserves_space_for_initial_obs(self) -> None:
+        """Available tokens passed to build_history account for initial obs."""
+        received: list[int] = []
+
+        def mock_build(entries, available):
+            received.append(available)
+            return []
+
+        budget = PromptBudget(
+            max_prompt_tokens=1000,
+            estimate_tokens=_simple_estimator,
+            build_history=mock_build,
+        )
+        runner = self._make_runner(system_prompt="Sys.", prompt_budget=budget)
+
+        task = ObservationContent(text="Task.")
+        s0 = _make_state(task=task, state=ObservationContent(text="Init."), step=0)
+        s1 = _make_state(task=task, state=ObservationContent(text="Curr."), step=1)
+
+        traj = Trajectory.create(s0)
+        traj.add_transition(Transition(
+            state=s0, action=Action(text="a"), next_state=s1,
+            rewards=SignalBundle(()),
+        ))
+
+        runner._build_structured_messages(s1, traj)
+
+        # Budget: 1000 - sys("Sys." + 5) - task("Task." + 5) - state("Curr." + 5) - init("Init." + 5)
+        sys_cost = len("Sys.") + 5
+        task_cost = len("Task.") + 5
+        state_cost = len("Curr.") + 5
+        init_cost = len("Init.") + 5
+        expected = 1000 - sys_cost - task_cost - state_cost - init_cost
+        assert received[0] == expected

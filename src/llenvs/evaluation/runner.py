@@ -632,6 +632,41 @@ class TrajectoryRunner:
             )
         )
 
+        # The initial state's observation is not the result of any action,
+        # so it never appears in a history entry.  At step 1+, inject it
+        # before history so the model retains context for the first action.
+        initial_obs_msg: ChatMessage | None = None
+        if state.metadata.step > 0:
+            init_obs = trajectory.initial_state.observation
+            init_state = init_obs.state
+            init_task = init_obs.task
+            if init_state is not None:
+                skip_initial = (
+                    init_task is not None
+                    and _normalize_text_for_comparison(init_state.text)
+                    == _normalize_text_for_comparison(init_task.text)
+                    and init_state.images == init_task.images
+                )
+                if not skip_initial and init_state.text:
+                    init_text = init_state.text
+                    if tic is not None:
+                        if max_steps is not None:
+                            init_text = tic.state_prefix.format(
+                                max_steps=max_steps,
+                                turn=1,
+                                turns_remaining=max_steps - 1,
+                            ) + init_text
+                        else:
+                            init_text = (
+                                tic.state_prefix_no_max.format(turn=1)
+                                + init_text
+                            )
+                    initial_obs_msg = ChatMessage(
+                        role="user",
+                        content=init_text,
+                        images=init_state.images,
+                    )
+
         # Build history entries from prior transitions.
         # The last transition's next_state IS the current state, so we
         # exclude its observation from the history (it's added separately).
@@ -702,8 +737,15 @@ class TrajectoryRunner:
                     budget.estimate_tokens(current_state_text)
                     + self._MSG_OVERHEAD_TOKENS
                 )
+            if initial_obs_msg is not None:
+                non_history_tokens += (
+                    budget.estimate_tokens(initial_obs_msg.content or "")
+                    + self._MSG_OVERHEAD_TOKENS
+                )
             available = max(0, budget.max_prompt_tokens - non_history_tokens)
             history_messages = budget.build_history(history_entries, available)
+            if initial_obs_msg is not None and history_messages:
+                messages.append(initial_obs_msg)
             messages.extend(history_messages)
 
             # Phase 2: truncate current observation if still over budget
@@ -736,7 +778,10 @@ class TrajectoryRunner:
                     )
         else:
             fn = self.history_fn if self.history_fn is not None else full_history
-            messages.extend(fn(history_entries))
+            history_messages = fn(history_entries)
+            if initial_obs_msg is not None and history_messages:
+                messages.append(initial_obs_msg)
+            messages.extend(history_messages)
 
         # Add current state observation
         if current_state_text is not None:

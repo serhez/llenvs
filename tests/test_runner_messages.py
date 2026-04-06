@@ -215,9 +215,11 @@ class TestStructuredMessageBuilding:
         )
 
         messages = runner._build_messages(s1, trajectory=trajectory)
-        # system(0) + user(task) + assistant(go north) + user(state1) -> coalesced
+        # user(task + initial_obs coalesced) + assistant(go north) + user(state1)
         assert len(messages) == 3
-        assert messages[0].role == "user"  # task (coalesced with nothing since next is assistant)
+        assert messages[0].role == "user"
+        assert "Navigate the maze." in messages[0].content
+        assert "Start" in messages[0].content
         assert messages[1].role == "assistant"
         assert messages[1].content == "go north"
         assert messages[2].role == "user"
@@ -361,10 +363,11 @@ class TestHistoryFnIntegration:
         trajectory, current_state = self._build_trajectory_with_transitions()
 
         messages = runner._build_messages(current_state, trajectory=trajectory)
-        # task + (assistant + user) * 2 transitions = 5, coalesced task+step0
-        # task(user) + go_north(assistant) + step1(user) + go_east(assistant) + step2(user)
+        # user(task + initial_obs) + assistant + user + assistant + user = 5
         assert len(messages) == 5
-        assert messages[0].role == "user"  # task (step0 coalesced)
+        assert messages[0].role == "user"
+        assert "Navigate the maze." in messages[0].content
+        assert "Start" in messages[0].content
         assert messages[1].role == "assistant"
         assert messages[1].content == "go north"
         assert messages[2].role == "user"
@@ -402,11 +405,11 @@ class TestHistoryFnIntegration:
         trajectory, current_state = self._build_trajectory_with_transitions()
 
         messages = runner._build_messages(current_state, trajectory=trajectory)
-        # task(user) + go_east(assistant) + step1(user from history_fn) + step2(user) = 4
-        # But step1 and step2 are both user, so coalesced to 3
+        # user(task + initial_obs) + assistant(go east) + user(coalesced empty + Room 3) = 3
         assert len(messages) == 3
         assert messages[0].role == "user"
         assert "Navigate the maze." in messages[0].content
+        assert "Start" in messages[0].content
         assert messages[1].role == "assistant"
         assert messages[1].content == "go east"
         assert messages[2].role == "user"
@@ -820,7 +823,10 @@ class TestTurnInfoInjection:
         )
 
         messages = runner._build_messages(s1, trajectory=trajectory)
-        # Current state (step=1) should show Turn 2/10
+        # Initial obs gets [Turn 1/10], current state gets [Turn 2/10]
+        first_user = messages[0].content
+        assert "[Turn 1/10]" in first_user
+        assert "Start" in first_user
         user_msgs = [m for m in messages if m.role == "user"]
         last_user = user_msgs[-1].content
         assert "[Turn 2/10]" in last_user
@@ -871,9 +877,11 @@ class TestTurnInfoInjection:
         )
 
         messages = runner._build_messages(s2, trajectory=trajectory)
-        # History user messages (intermediate) should NOT have turn prefix
-        # Messages: task(user) + go_north(assistant) + room2(user) + go_east(assistant) + room3(user)
+        # Messages: user(task + [Turn 1/10] initial_obs) + assistant + user(Room 2) + assistant + user([Turn 3/10] Room 3)
         assert len(messages) == 5
+        # First user message has task + initial obs with turn prefix
+        assert "Start" in messages[0].content
+        assert "[Turn 1/10]" in messages[0].content
         # The intermediate history observation at messages[2] should be raw
         assert messages[2].content == "Room 2"
         # Only the current state (last user) gets the prefix
@@ -903,3 +911,229 @@ class TestTurnInfoInjection:
         assert len(messages) == 1
         assert messages[0].content == "What is 2+2?"
         assert "[Turn" not in messages[0].content
+
+
+# =============================================================================
+# Initial observation injection tests
+# =============================================================================
+
+
+class TestInitialObservation:
+    """Tests for injecting the initial observation into the prompt at step 1+."""
+
+    def _make_runner(self, system_prompt=None, history_fn=None, turn_info=None, max_steps=10):
+        from unittest.mock import MagicMock
+
+        from llenvs.evaluation.runner import TrajectoryRunner
+        from llenvs.inference.protocol import SamplingParams
+
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = max_steps
+        mock_backend = MagicMock()
+
+        kwargs = dict(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+            system_prompt=system_prompt,
+        )
+        if history_fn is not None:
+            kwargs["history_fn"] = history_fn
+        if turn_info is not None:
+            kwargs["turn_info"] = turn_info
+        return TrajectoryRunner(**kwargs)
+
+    def _build_one_transition(self, task_text="Task.", state0_text="Initial room.",
+                               state1_text="Room 2.", task_images=(), state0_images=()):
+        """Build a trajectory with 1 transition (step 0 → step 1)."""
+        task = ObservationContent(text=task_text, images=task_images)
+        s0_content = ObservationContent(text=state0_text, images=state0_images)
+        s1_content = ObservationContent(text=state1_text)
+
+        s0 = _make_state(prompt=task_text, task=task, state=s0_content, step=0)
+        s1 = _make_state(prompt=task_text, task=task, state=s1_content, step=1)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0, action=Action(text="go north"), next_state=s1,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+        return trajectory, s1
+
+    def test_initial_obs_visible_with_full_history(self):
+        """At step 1 with full history, initial observation is in first user message."""
+        runner = self._make_runner()
+        trajectory, current = self._build_one_transition(
+            task_text="Objective: find key.", state0_text="Kitchen.", state1_text="Hallway.",
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        # user(task + initial_obs) + assistant(go north) + user(current)
+        assert len(messages) == 3
+        assert "Objective: find key." in messages[0].content
+        assert "Kitchen." in messages[0].content
+        assert messages[1].content == "go north"
+        assert "Hallway." in messages[2].content
+
+    def test_initial_obs_not_shown_at_step0(self):
+        """At step 0, no injection — initial obs IS the current state."""
+        runner = self._make_runner()
+        task = ObservationContent(text="Task.")
+        state0 = ObservationContent(text="Initial room.")
+        s0 = _make_state(prompt="Task.", task=task, state=state0, step=0)
+        trajectory = Trajectory.create(s0)
+
+        messages = runner._build_messages(s0, trajectory=trajectory)
+        assert len(messages) == 1
+        assert "Task." in messages[0].content
+        assert "Initial room." in messages[0].content
+        # Should appear only once
+        assert messages[0].content.count("Initial room.") == 1
+
+    def test_initial_obs_not_shown_with_no_history(self):
+        """With no_history, initial observation is NOT injected."""
+        runner = self._make_runner(history_fn=no_history)
+        trajectory, current = self._build_one_transition(
+            task_text="Task.", state0_text="Initial room.", state1_text="Room 2.",
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        # Only task + current state (coalesced)
+        assert len(messages) == 1
+        assert "Task." in messages[0].content
+        assert "Room 2." in messages[0].content
+        assert "Initial room." not in messages[0].content
+
+    def test_initial_obs_dedup_when_same_as_task(self):
+        """Harbor scenario: task == state at step 0 → no duplication at step 1."""
+        runner = self._make_runner()
+        trajectory, current = self._build_one_transition(
+            task_text="Install flask.", state0_text="Install flask.", state1_text="Output.",
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        assert len(messages) == 3
+        # First user message should contain task only once
+        assert messages[0].content.count("Install flask.") == 1
+
+    def test_initial_obs_dedup_with_whitespace(self):
+        """Dedup works with whitespace differences."""
+        runner = self._make_runner()
+        trajectory, current = self._build_one_transition(
+            task_text="Install flask.\n", state0_text="Install flask. ", state1_text="Out.",
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        # Should dedup despite trailing whitespace differences
+        assert messages[0].content.count("Install flask.") == 1
+
+    def test_initial_obs_with_turn_info_prefix(self):
+        """When TurnInfoConfig is active, initial obs gets [Turn 1/N] prefix."""
+        runner = self._make_runner(turn_info=True, max_steps=10)
+        trajectory, current = self._build_one_transition(
+            task_text="Task.", state0_text="Start.", state1_text="Room 2.",
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        first_user = messages[0].content
+        assert "[Turn 1/10]" in first_user
+        assert "Start." in first_user
+
+    def test_initial_obs_with_images(self):
+        """Images from initial state are carried into the injected message."""
+        img = ImageContent(data="abc", media_type="image/png")
+        runner = self._make_runner()
+        trajectory, current = self._build_one_transition(
+            task_text="Task.", state0_text="Visual.", state1_text="Next.",
+            state0_images=(img,),
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        assert img in messages[0].images
+
+    def test_initial_obs_with_empty_state_text(self):
+        """When initial state text is empty, no injection occurs."""
+        runner = self._make_runner()
+        task = ObservationContent(text="Task.")
+        s0_content = ObservationContent(text="")
+        s1_content = ObservationContent(text="Room 2.")
+
+        s0 = _make_state(prompt="Task.", task=task, state=s0_content, step=0)
+        s1 = _make_state(prompt="Task.", task=task, state=s1_content, step=1)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0, action=Action(text="go"), next_state=s1,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        # Only task + go + current
+        assert len(messages) == 3
+        assert messages[0].content == "Task."
+
+    def test_initial_obs_when_no_state_field(self):
+        """When initial observation has no state field, no injection."""
+        runner = self._make_runner()
+        task = ObservationContent(text="Task.")
+        s1_content = ObservationContent(text="Room 2.")
+
+        s0 = _make_state(prompt="Task.", task=task, state=None, step=0)
+        s1 = _make_state(prompt="Task.", task=task, state=s1_content, step=1)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0, action=Action(text="go"), next_state=s1,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        assert messages[0].content == "Task."
+
+    def test_initial_obs_shown_with_last_n_history(self):
+        """Initial obs appears even when last_n_history drops early turns."""
+        from llenvs.evaluation.history import last_n_history
+
+        runner = self._make_runner(history_fn=last_n_history(1))
+
+        task = ObservationContent(text="Task.")
+        s0 = ObservationContent(text="Initial.")
+        s1 = ObservationContent(text="Mid.")
+        s2 = ObservationContent(text="Current.")
+
+        st0 = _make_state(prompt="Task.", task=task, state=s0, step=0)
+        st1 = _make_state(prompt="Task.", task=task, state=s1, step=1)
+        st2 = _make_state(prompt="Task.", task=task, state=s2, step=2)
+
+        trajectory = Trajectory.create(st0)
+        trajectory.add_transition(Transition(
+            state=st0, action=Action(text="a1"), next_state=st1,
+            rewards=SignalBundle(signals=()),
+        ))
+        trajectory.add_transition(Transition(
+            state=st1, action=Action(text="a2"), next_state=st2,
+            rewards=SignalBundle(signals=()),
+        ))
+
+        messages = runner._build_messages(st2, trajectory=trajectory)
+        # last_n_history(1) keeps only last entry (a2), but initial obs
+        # is injected because history is non-empty.
+        assert "Initial." in messages[0].content
+        assert "Task." in messages[0].content
+
+    def test_initial_obs_with_empty_task_text(self):
+        """Jericho/Craftax scenario: task.text="" but state has content."""
+        runner = self._make_runner()
+        trajectory, current = self._build_one_transition(
+            task_text="", state0_text="Game opening.", state1_text="Room 2.",
+        )
+
+        messages = runner._build_messages(current, trajectory=trajectory)
+        # Empty task coalesced with initial obs
+        assert "Game opening." in messages[0].content
