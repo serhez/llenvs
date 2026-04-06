@@ -150,6 +150,155 @@ class CraftaxActionMapper:
 # Observation rendering
 # =============================================================================
 
+# Classic BlockType value → single-character grid symbol.
+# All terrain is lowercase/symbols; entities (mobs, player) are uppercase.
+# Source: craftax/craftax_classic/constants.py:25-42
+_CLASSIC_BLOCK_CHARS: dict[int, str] = {
+    0: "?",   # INVALID
+    1: "#",   # OUT_OF_BOUNDS
+    2: ".",   # GRASS
+    3: "~",   # WATER
+    4: "s",   # STONE
+    5: "t",   # TREE
+    6: "w",   # WOOD
+    7: "=",   # PATH
+    8: "c",   # COAL
+    9: "i",   # IRON
+    10: "d",  # DIAMOND
+    11: "&",  # CRAFTING_TABLE
+    12: "f",  # FURNACE
+    13: ":",  # SAND
+    14: "!",  # LAVA
+    15: "p",  # PLANT
+    16: "r",  # RIPE_PLANT
+}
+
+# Classic direction value → name.
+# Source: craftax/craftax_classic/constants.py:66-72, values 1-4
+_CLASSIC_DIRECTION_NAMES: dict[int, str] = {
+    1: "left",
+    2: "right",
+    3: "up",
+    4: "down",
+}
+
+# Classic OBS_DIM.
+# Source: craftax/craftax_classic/constants.py:13
+_CLASSIC_OBS_ROWS = 7
+_CLASSIC_OBS_COLS = 9
+
+
+def render_craftax_classic_text(state: Any) -> str:
+    """Render a Craftax Classic state as a compact ASCII-grid observation.
+
+    Reads directly from the Classic ``EnvState`` (not the flat symbolic array).
+    Produces a human-/LLM-readable grid with terrain, mobs, inventory, and vitals.
+
+    Source layout: ``craftax/craftax_classic/renderer.py`` (symbolic renderer)
+    and ``craftax/craftax_classic/envs/craftax_state.py`` (state fields).
+    """
+    game_map = np.asarray(state.map)
+    pr, pc = int(state.player_position[0]), int(state.player_position[1])
+
+    # Pad the map so edge players see OUT_OF_BOUNDS (#) beyond map borders.
+    pad = max(_CLASSIC_OBS_ROWS, _CLASSIC_OBS_COLS)
+    padded = np.pad(game_map, pad, constant_values=1)  # 1 = OUT_OF_BOUNDS
+
+    # Extract visible 7×9 window centered on player (in padded coordinates).
+    r0 = pr + pad - _CLASSIC_OBS_ROWS // 2
+    c0 = pc + pad - _CLASSIC_OBS_COLS // 2
+    view = padded[r0:r0 + _CLASSIC_OBS_ROWS, c0:c0 + _CLASSIC_OBS_COLS]
+
+    # Build character grid from block types.
+    grid = [[_CLASSIC_BLOCK_CHARS.get(int(view[r, c]), "?")
+             for c in range(_CLASSIC_OBS_COLS)]
+            for r in range(_CLASSIC_OBS_ROWS)]
+
+    # Overlay mobs. Each mob group has .position (N×2) and .mask (N,).
+    mob_groups = [
+        (state.zombies, "Z"),
+        (state.cows, "C"),
+        (state.skeletons, "K"),
+        (state.arrows, "A"),
+    ]
+    for mobs, char in mob_groups:
+        positions = np.asarray(mobs.position)
+        masks = np.asarray(mobs.mask)
+        for idx in range(len(masks)):
+            if not masks[idx]:
+                continue
+            mr, mc = int(positions[idx, 0]), int(positions[idx, 1])
+            # Convert to grid-local coordinates.
+            gr = mr - pr + _CLASSIC_OBS_ROWS // 2
+            gc = mc - pc + _CLASSIC_OBS_COLS // 2
+            if 0 <= gr < _CLASSIC_OBS_ROWS and 0 <= gc < _CLASSIC_OBS_COLS:
+                grid[gr][gc] = char
+
+    # Place player at center.
+    grid[_CLASSIC_OBS_ROWS // 2][_CLASSIC_OBS_COLS // 2] = "@"
+
+    # --- Format output ---
+    parts: list[str] = []
+
+    # Direction header.
+    direction = _CLASSIC_DIRECTION_NAMES.get(int(state.player_direction), "unknown")
+    parts.append(f"Map (7x9, you=@ facing {direction}):")
+
+    # Grid rows — 2-char-wide columns for uniform spacing.
+    for row in grid:
+        parts.append("  " + " ".join(row))
+
+    # Legend (always shown).
+    parts.append("")
+    parts.append(
+        "Terrain: .=grass ~=water t=tree c=coal s=stone"
+    )
+    parts.append(
+        "         d=diamond i=iron w=wood ==path :=sand"
+    )
+    parts.append(
+        "         !=lava f=furnace &=table p=plant r=ripe"
+    )
+    parts.append(
+        "         #=border"
+    )
+    parts.append("Entities: Z=zombie C=cow K=skeleton A=arrow")
+
+    # Inventory — only non-zero items.
+    inv = state.inventory
+    inv_fields = [
+        ("wood", inv.wood), ("stone", inv.stone), ("coal", inv.coal),
+        ("iron", inv.iron), ("diamond", inv.diamond), ("sapling", inv.sapling),
+        ("wood_pickaxe", inv.wood_pickaxe), ("stone_pickaxe", inv.stone_pickaxe),
+        ("iron_pickaxe", inv.iron_pickaxe), ("wood_sword", inv.wood_sword),
+        ("stone_sword", inv.stone_sword), ("iron_sword", inv.iron_sword),
+    ]
+    non_zero = [(name, int(val)) for name, val in inv_fields if int(val) > 0]
+    parts.append("")
+    if non_zero:
+        items_str = ", ".join(f"{name} {val}" for name, val in non_zero)
+        parts.append(f"Inventory: {items_str}")
+    else:
+        parts.append("Inventory: (empty)")
+
+    # Vitals.
+    parts.append(
+        f"Health: {int(state.player_health)}  "
+        f"Food: {int(state.player_food)}  "
+        f"Drink: {int(state.player_drink)}  "
+        f"Energy: {int(state.player_energy)}"
+    )
+
+    # Light.
+    light = "day" if float(state.light_level) > 0.5 else "night"
+    parts.append(f"Light: {light}")
+
+    # Sleeping (only shown when true).
+    if bool(state.is_sleeping):
+        parts.append("Status: sleeping")
+
+    return "\n".join(parts)
+
 
 def _render_symbolic(obs: np.ndarray, is_classic: bool) -> str:
     """Parse the flat symbolic observation array into structured text.
@@ -930,7 +1079,7 @@ CRAFTAX_PRESETS: dict[str, dict[str, Any]] = {
     },
     "craftax-classic": {
         "is_classic": True,
-        "observation_mode": "symbolic",
+        "observation_mode": "text",
         "description": "Craftax Classic — streamlined survival with crafting and combat.",
     },
     "craftax-pixels": {
@@ -1046,15 +1195,18 @@ class CraftaxAdapter:
 
                 craftax_env = CraftaxSymbolicEnv()
 
-        # Get text renderer for Full text mode
+        # Get text renderer for text mode
         text_renderer = None
-        if obs_mode == "text" and not is_classic:
-            try:
-                from craftax.craftax.renderer import render_craftax_text
+        if obs_mode == "text":
+            if is_classic:
+                text_renderer = render_craftax_classic_text
+            else:
+                try:
+                    from craftax.craftax.renderer import render_craftax_text
 
-                text_renderer = render_craftax_text
-            except ImportError:
-                pass
+                    text_renderer = render_craftax_text
+                except ImportError:
+                    pass
 
         return CraftaxEnvironment(
             craftax_env=craftax_env,

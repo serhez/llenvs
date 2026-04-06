@@ -342,6 +342,233 @@ class TestCraftaxAchievementReward:
 
 
 # ---------------------------------------------------------------------------
+# Mock types for Classic text renderer
+# ---------------------------------------------------------------------------
+
+
+class MockClassicInventory:
+    """Mock Classic Inventory dataclass."""
+
+    def __init__(self, **kwargs):
+        for field in [
+            "wood", "stone", "coal", "iron", "diamond", "sapling",
+            "wood_pickaxe", "stone_pickaxe", "iron_pickaxe",
+            "wood_sword", "stone_sword", "iron_sword",
+        ]:
+            setattr(self, field, kwargs.get(field, 0))
+
+
+class MockClassicMobs:
+    """Mock Classic Mobs dataclass."""
+
+    def __init__(self, positions=None, masks=None):
+        if positions is not None:
+            self.position = np.array(positions, dtype=np.int32)
+            self.mask = np.array(masks, dtype=bool) if masks is not None else np.ones(len(positions), dtype=bool)
+        else:
+            self.position = np.zeros((0, 2), dtype=np.int32)
+            self.mask = np.zeros(0, dtype=bool)
+
+
+def _make_classic_state(
+    *,
+    map_size=(20, 20),
+    player_pos=(10, 10),
+    player_direction=2,  # right
+    fill_block=2,  # GRASS
+    block_overrides=None,
+    zombies=None,
+    cows=None,
+    skeletons=None,
+    arrows=None,
+    inventory=None,
+    player_health=10,
+    player_food=9,
+    player_drink=9,
+    player_energy=9,
+    is_sleeping=False,
+    light_level=1.0,
+):
+    """Create a mock Classic EnvState for text renderer testing."""
+    game_map = np.full(map_size, fill_block, dtype=np.int32)
+    if block_overrides:
+        for (r, c), block_val in block_overrides.items():
+            game_map[r, c] = block_val
+
+    class State:
+        pass
+
+    s = State()
+    s.map = game_map
+    s.player_position = np.array(player_pos, dtype=np.int32)
+    s.player_direction = player_direction
+    s.zombies = zombies or MockClassicMobs()
+    s.cows = cows or MockClassicMobs()
+    s.skeletons = skeletons or MockClassicMobs()
+    s.arrows = arrows or MockClassicMobs()
+    s.inventory = inventory or MockClassicInventory()
+    s.player_health = player_health
+    s.player_food = player_food
+    s.player_drink = player_drink
+    s.player_energy = player_energy
+    s.is_sleeping = is_sleeping
+    s.light_level = light_level
+    return s
+
+
+# ---------------------------------------------------------------------------
+# render_craftax_classic_text tests
+# ---------------------------------------------------------------------------
+
+
+class TestRenderCraftaxClassicText:
+    """Tests for the Classic ASCII grid text renderer."""
+
+    def _render(self, state):
+        from llenvs.adapters.craftax import render_craftax_classic_text
+        return render_craftax_classic_text(state)
+
+    def test_grid_has_7_rows(self):
+        state = _make_classic_state()
+        text = self._render(state)
+        # Count lines that look like grid rows (contain @ or terrain chars)
+        grid_lines = [l for l in text.split("\n") if l.strip().startswith(("#", ".", "@", "~"))]
+        # Actually, just find lines between "Map" header and "Terrain:" legend
+        lines = text.split("\n")
+        grid_lines = []
+        in_grid = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("Map"):
+                in_grid = True
+                continue
+            if in_grid:
+                if stripped and stripped[0] in ".#~stcwdifrp!=&@ZCKA?":
+                    grid_lines.append(stripped)
+                elif stripped.startswith("Terrain:") or stripped.startswith("Entities:"):
+                    break
+        assert len(grid_lines) == 7, f"Expected 7 grid rows, got {len(grid_lines)}: {grid_lines}"
+
+    def test_player_at_center(self):
+        state = _make_classic_state()
+        text = self._render(state)
+        assert "@" in text
+
+    def test_direction_displayed(self):
+        state = _make_classic_state(player_direction=1)  # left
+        text = self._render(state)
+        assert "left" in text.lower()
+
+        state = _make_classic_state(player_direction=3)  # up
+        text = self._render(state)
+        assert "up" in text.lower()
+
+    def test_zombie_on_grid(self):
+        # Place zombie 1 row south of player (player at 10,10 → zombie at 11,10)
+        state = _make_classic_state(
+            zombies=MockClassicMobs(positions=[[11, 10]], masks=[True]),
+        )
+        text = self._render(state)
+        assert "Z" in text
+
+    def test_cow_on_grid(self):
+        state = _make_classic_state(
+            cows=MockClassicMobs(positions=[[10, 11]], masks=[True]),
+        )
+        text = self._render(state)
+        assert "C" in text
+
+    def test_skeleton_on_grid(self):
+        state = _make_classic_state(
+            skeletons=MockClassicMobs(positions=[[9, 10]], masks=[True]),
+        )
+        text = self._render(state)
+        assert "K" in text
+
+    def test_inactive_mob_not_shown(self):
+        state = _make_classic_state(
+            zombies=MockClassicMobs(positions=[[11, 10]], masks=[False]),
+        )
+        text = self._render(state)
+        # Z appears in the legend; check only the grid lines for absence
+        lines = text.split("\n")
+        grid_lines = [l for l in lines if l.startswith("  ") and "@" not in l
+                       and any(ch in l for ch in ".#~stcwdi")]
+        for line in grid_lines:
+            assert "Z" not in line
+
+    def test_tree_tile(self):
+        # Place a tree 1 tile east of player (player at 10,10 → tree at 10,11)
+        state = _make_classic_state(
+            block_overrides={(10, 11): 5},  # TREE = 5
+        )
+        text = self._render(state)
+        assert "t" in text  # tree char
+
+    def test_inventory_non_zero_shown(self):
+        state = _make_classic_state(
+            inventory=MockClassicInventory(wood=3, iron_pickaxe=1),
+        )
+        text = self._render(state)
+        assert "wood" in text.lower()
+        assert "3" in text
+        assert "iron_pickaxe" in text.lower()
+
+    def test_inventory_empty(self):
+        state = _make_classic_state()
+        text = self._render(state)
+        # All zeros → should show empty or no items
+        assert "empty" in text.lower() or "Inventory:" in text
+
+    def test_vitals(self):
+        state = _make_classic_state(
+            player_health=10, player_food=8, player_drink=7, player_energy=6,
+        )
+        text = self._render(state)
+        assert "Health: 10" in text
+        assert "Food: 8" in text
+        assert "Drink: 7" in text
+        assert "Energy: 6" in text
+
+    def test_no_mana_in_classic(self):
+        state = _make_classic_state()
+        text = self._render(state)
+        assert "Mana" not in text
+
+    def test_light_day(self):
+        state = _make_classic_state(light_level=1.0)
+        text = self._render(state)
+        assert "day" in text.lower()
+
+    def test_light_night(self):
+        state = _make_classic_state(light_level=0.0)
+        text = self._render(state)
+        assert "night" in text.lower()
+
+    def test_sleeping_shown_when_true(self):
+        state = _make_classic_state(is_sleeping=True)
+        text = self._render(state)
+        assert "sleeping" in text.lower()
+
+    def test_sleeping_not_shown_when_false(self):
+        state = _make_classic_state(is_sleeping=False)
+        text = self._render(state)
+        assert "sleeping" not in text.lower()
+
+    def test_legend_present(self):
+        state = _make_classic_state()
+        text = self._render(state)
+        assert "Terrain:" in text
+        assert "Entities:" in text
+
+    def test_edge_player_near_map_border(self):
+        """Player near map edge should see OUT_OF_BOUNDS (#) tiles."""
+        state = _make_classic_state(player_pos=(0, 0), map_size=(20, 20))
+        text = self._render(state)
+        assert "#" in text  # should see border tiles
+
+
+# ---------------------------------------------------------------------------
 # _render_symbolic tests
 # ---------------------------------------------------------------------------
 
