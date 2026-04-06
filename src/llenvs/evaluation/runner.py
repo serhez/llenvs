@@ -93,7 +93,7 @@ class TurnInfoConfig:
         state_prefix_no_max: Prepended to each state observation when ``max_steps`` is None.
     """
 
-    task_suffix: str = "\n\nYou have a maximum of {max_steps} turns to complete this task."
+    task_suffix: str = "\n\nYou have a maximum of {max_steps} turns."
     state_prefix: str = "[Turn {turn}/{max_steps}]\n"
     task_suffix_no_max: str = ""
     state_prefix_no_max: str = "[Turn {turn}]\n"

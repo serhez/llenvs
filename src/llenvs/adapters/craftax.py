@@ -875,19 +875,23 @@ class CraftaxEnvironment:
         # Render observation
         obs_text, images = self._render_observation(raw_obs, craftax_state)
 
-        # Build structured observation components
+        # Build structured observation components.
+        # The task content includes BOTH the task description AND the initial
+        # observation so the agent sees the game state before its first action.
+        # The pipeline uses task_content as the first user message — if the
+        # initial observation were only in state_content, it would appear after
+        # the agent's first (blind) action.
         task_desc = self._build_task_description()
-        task_content = ObservationContent(text=task_desc)
         state_text = obs_text
+        combined_text = task_desc + "\n\n" + state_text
+        task_content = ObservationContent(text=combined_text, images=images)
         state_content = ObservationContent(
-            text=state_text,
+            text=combined_text,
             images=images,
             data={"episode_step": 0, "cumulative_reward": 0.0},
         )
 
-        # Combine task description and initial observation into a single first
-        # user message so the agent sees the game state before its first action.
-        prompt = task_desc + "\n\n" + state_text
+        prompt = combined_text
 
         step_msg: dict[str, Any] = {"role": "user", "content": prompt}
         if images:
