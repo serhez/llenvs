@@ -902,11 +902,7 @@ class CraftaxEnvironment:
         # At step 0 both are emitted as separate user messages and coalesced
         # by the runner into one; on later steps the task message carries only
         # the max-turns text while the state message has the current observation.
-        if self._max_steps is not None:
-            task_text = f"You have a maximum of {self._max_steps} turns."
-        else:
-            task_text = ""
-        task_content = ObservationContent(text=task_text)
+        task_content = ObservationContent(text="")
         state_content = ObservationContent(
             text=obs_text,
             images=images,
