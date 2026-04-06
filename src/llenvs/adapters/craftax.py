@@ -242,7 +242,7 @@ def render_craftax_classic_text(state: Any) -> str:
 
     # Direction header.
     direction = _CLASSIC_DIRECTION_NAMES.get(int(state.player_direction), "unknown")
-    parts.append(f"Map (7x9, you=@ facing {direction}):")
+    parts.append(f"Nearby (7x9 view, you=@ facing {direction}):")
 
     # Grid rows — 2-char-wide columns for uniform spacing.
     for row in grid:
@@ -755,7 +755,12 @@ class CraftaxEnvironment:
             )
 
         parts.append("")
-        parts.append("Action space:")
+        parts.append(
+            "Each turn you see a 7x9 view of your surroundings and your status. "
+            "The world extends beyond what you can see."
+        )
+        parts.append("")
+        parts.append("Action space (same actions are available every turn):")
         parts.append(self._action_mapper.describe())
 
         return "\n".join(parts)
@@ -880,11 +885,11 @@ class CraftaxEnvironment:
             data={"episode_step": 0, "cumulative_reward": 0.0},
         )
 
-        # Legacy prompt = task description
-        prompt = task_desc
+        # Combine task description and initial observation into a single first
+        # user message so the agent sees the game state before its first action.
+        prompt = task_desc + "\n\n" + state_text
 
-        # Legacy messages: step-0 observation as first user message
-        step_msg: dict[str, Any] = {"role": "user", "content": state_text}
+        step_msg: dict[str, Any] = {"role": "user", "content": prompt}
         if images:
             step_msg["images"] = [
                 {"data": img.data, "media_type": img.media_type} for img in images

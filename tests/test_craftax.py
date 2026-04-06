@@ -439,7 +439,7 @@ class TestRenderCraftaxClassicText:
         in_grid = False
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith("Map"):
+            if stripped.startswith("Nearby"):
                 in_grid = True
                 continue
             if in_grid:
