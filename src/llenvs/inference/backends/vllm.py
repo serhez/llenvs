@@ -13,7 +13,11 @@ from __future__ import annotations
 import base64
 import gc
 import io
+import logging
+import time
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from llenvs.core.state import ImageContent
 from llenvs.inference.protocol import (
@@ -137,6 +141,7 @@ class VLLMBackend(ModelBackend):
         gpu_memory_utilization: float = 0.9,
         seed: int = 42,
         chat_template_kwargs: dict[str, Any] | None = None,
+        post_shutdown_delay: float = 5.0,
         **vllm_kwargs: Any,
     ) -> None:
         """Initialize vLLM backend.
@@ -150,6 +155,10 @@ class VLLMBackend(ModelBackend):
             seed: Random seed.
             chat_template_kwargs: Extra keyword arguments passed to
                 ``tokenizer.apply_chat_template()`` (e.g. ``enable_thinking``).
+            post_shutdown_delay: Seconds to wait after engine shutdown in
+                :meth:`close` for the CUDA driver to reclaim GPU memory.
+                Increase this when closing one backend and immediately
+                creating another on the same GPUs.
             **vllm_kwargs: Additional arguments passed to vLLM LLM.
 
         Raises:
@@ -166,6 +175,7 @@ class VLLMBackend(ModelBackend):
         self._model_path = model_path
         self._VLLMSamplingParams = VLLMSamplingParams
         self._chat_template_kwargs = chat_template_kwargs or {}
+        self._post_shutdown_delay = post_shutdown_delay
         self._closed = False
 
         # Initialize vLLM engine
@@ -267,6 +277,15 @@ class VLLMBackend(ModelBackend):
                 torch.cuda.empty_cache()
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
+
+        delay = getattr(self, "_post_shutdown_delay", 0)
+        if delay > 0:
+            logger.info(
+                "Waiting %.0fs for GPU memory reclamation after vLLM shutdown",
+                delay,
+            )
+            time.sleep(delay)
+
         self._closed = True
 
     @property
