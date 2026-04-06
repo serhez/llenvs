@@ -737,6 +737,11 @@ class CraftaxEnvironment:
         )
 
     @property
+    def task_description(self) -> str:
+        """Static task description (game rules + action space), suitable for system prompt."""
+        return self._build_task_description()
+
+    @property
     def reward_functions(self) -> tuple[RewardFunction[CraftaxHidden], ...]:
         return self._native_rewards + self._extra_rewards
 
@@ -891,23 +896,24 @@ class CraftaxEnvironment:
         # Render observation
         obs_text, images = self._render_observation(raw_obs, craftax_state)
 
-        # Build structured observation components.
-        # The task content includes BOTH the task description AND the initial
-        # observation so the agent sees the game state before its first action.
-        # The pipeline uses task_content as the first user message — if the
-        # initial observation were only in state_content, it would appear after
-        # the agent's first (blind) action.
-        task_desc = self._build_task_description()
-        state_text = obs_text
-        combined_text = task_desc + "\n\n" + state_text
-        task_content = ObservationContent(text=combined_text, images=images)
+        # Task content = max-turns notice (static game description + action
+        # space lives in the system prompt, provided via ``task_description``).
+        # State content = dynamic per-step observation (map, HUD, inventory).
+        # At step 0 both are emitted as separate user messages and coalesced
+        # by the runner into one; on later steps the task message carries only
+        # the max-turns text while the state message has the current observation.
+        if self._max_steps is not None:
+            task_text = f"You have a maximum of {self._max_steps} turns."
+        else:
+            task_text = ""
+        task_content = ObservationContent(text=task_text)
         state_content = ObservationContent(
-            text=combined_text,
+            text=obs_text,
             images=images,
             data={"episode_step": 0, "cumulative_reward": 0.0},
         )
 
-        prompt = combined_text
+        prompt = self._build_task_description() + "\n\n" + obs_text
 
         step_msg: dict[str, Any] = {"role": "user", "content": prompt}
         if images:
