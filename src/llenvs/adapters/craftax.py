@@ -896,12 +896,11 @@ class CraftaxEnvironment:
         # Render observation
         obs_text, images = self._render_observation(raw_obs, craftax_state)
 
-        # Task content = max-turns notice (static game description + action
-        # space lives in the system prompt, provided via ``task_description``).
+        # Task content is empty — the static game description and action
+        # space are exposed via the ``task_description`` property for
+        # inclusion in the system prompt.  The runner's TurnInfoConfig
+        # appends a max-turns suffix to the (empty) task message.
         # State content = dynamic per-step observation (map, HUD, inventory).
-        # At step 0 both are emitted as separate user messages and coalesced
-        # by the runner into one; on later steps the task message carries only
-        # the max-turns text while the state message has the current observation.
         task_content = ObservationContent(text="")
         state_content = ObservationContent(
             text=obs_text,
