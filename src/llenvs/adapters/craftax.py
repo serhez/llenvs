@@ -138,9 +138,25 @@ class CraftaxActionMapper:
             f"(0-{self.num_actions - 1}) or one of: {valid}"
         )
 
+    # Display-only annotations for actions that need clarification.
+    _ACTION_HINTS: dict[str, str] = {
+        "interact": (
+            "a multi-purpose action applied to the tile you're facing, "
+            "the effect depends on what's there (e.g., tree\u2192chop, "
+            "ore\u2192mine, zombie\u2192attack, water\u2192drink, "
+            "plants\u2192harvest, etc.)"
+        ),
+    }
+
     def describe(self) -> str:
-        entries = "\n".join(f"  {name}" for _, name in sorted(self._actions.items()))
-        return f"Choose one of the following actions:\n{entries}"
+        lines = []
+        for _, name in sorted(self._actions.items()):
+            hint = self._ACTION_HINTS.get(name)
+            if hint:
+                lines.append(f"  {name} — {hint}")
+            else:
+                lines.append(f"  {name}")
+        return f"Choose one of the following actions:\n" + "\n".join(lines)
 
     def format_action(self, action: int) -> str:
         return self._actions.get(action, str(action))
