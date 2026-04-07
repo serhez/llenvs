@@ -220,12 +220,21 @@ class ChatMessage:
 
     Supports both text messages and tool-related messages.
 
+    For VLM prompts with interleaved text and images, use
+    ``content_blocks`` — a tuple of ``str | ImageContent`` items
+    rendered in order.  When set, ``content_blocks`` takes priority
+    over the legacy ``content`` + ``images`` fields.
+
     Attributes:
         role: Message role (system, user, assistant, tool).
         content: Message content (may be None for tool calls).
         tool_calls: Tool calls made by the assistant.
         tool_call_id: ID of the tool call this message responds to (for role=tool).
         name: Tool name (for role=tool).
+        images: Legacy image tuple (appended after content text).
+        content_blocks: Interleaved text/image blocks for VLM prompts.
+            When non-empty, overrides ``content`` and ``images`` in
+            serialisation.
     """
 
     role: str
@@ -234,17 +243,31 @@ class ChatMessage:
     tool_call_id: str | None = None
     name: str | None = None
     images: tuple[ImageContent, ...] = ()
+    content_blocks: tuple[str | ImageContent, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for API calls (OpenAI format).
 
-        When images are present, content becomes a content array with
-        text and image_url blocks (OpenAI vision format).
+        When ``content_blocks`` is set, builds an interleaved content
+        array.  Otherwise falls back to ``content`` + ``images``.
         """
         result: dict[str, Any] = {"role": self.role}
 
-        if self.images:
+        if self.content_blocks:
             content_parts: list[dict[str, Any]] = []
+            for block in self.content_blocks:
+                if isinstance(block, str):
+                    content_parts.append({"type": "text", "text": block})
+                else:
+                    content_parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{block.media_type};base64,{block.data}"},
+                        }
+                    )
+            result["content"] = content_parts
+        elif self.images:
+            content_parts = []
             if self.content is not None:
                 content_parts.append({"type": "text", "text": self.content})
             for img in self.images:
@@ -282,13 +305,30 @@ class ChatMessage:
     def to_anthropic_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for Anthropic API calls.
 
-        When images are present, content becomes a content array with
-        image and text blocks (Anthropic vision format).
+        When ``content_blocks`` is set, builds an interleaved content
+        array.  Otherwise falls back to ``content`` + ``images``.
         """
         result: dict[str, Any] = {"role": self.role}
 
-        if self.images:
+        if self.content_blocks:
             content_parts: list[dict[str, Any]] = []
+            for block in self.content_blocks:
+                if isinstance(block, str):
+                    content_parts.append({"type": "text", "text": block})
+                else:
+                    content_parts.append(
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": block.media_type,
+                                "data": block.data,
+                            },
+                        }
+                    )
+            result["content"] = content_parts
+        elif self.images:
+            content_parts = []
             for img in self.images:
                 content_parts.append(
                     {
