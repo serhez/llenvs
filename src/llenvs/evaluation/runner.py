@@ -650,15 +650,16 @@ class TrajectoryRunner:
                 if not skip_initial and init_state.text:
                     init_text = init_state.text
                     if tic is not None:
+                        init_turn = trajectory.initial_state.metadata.step + 1
                         if max_steps is not None:
                             init_text = tic.state_prefix.format(
                                 max_steps=max_steps,
-                                turn=1,
-                                turns_remaining=max_steps - 1,
+                                turn=init_turn,
+                                turns_remaining=max_steps - init_turn,
                             ) + init_text
                         else:
                             init_text = (
-                                tic.state_prefix_no_max.format(turn=1)
+                                tic.state_prefix_no_max.format(turn=init_turn)
                                 + init_text
                             )
                     initial_obs_msg = ChatMessage(

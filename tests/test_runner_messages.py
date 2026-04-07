@@ -1041,6 +1041,31 @@ class TestInitialObservation:
         assert "[Turn 1/10]" in first_user
         assert "Start." in first_user
 
+    def test_initial_obs_turn_info_mid_trajectory_restore(self):
+        """When restoring from mid-trajectory, initial obs uses actual turn number."""
+        runner = self._make_runner(turn_info=True, max_steps=50)
+        task = ObservationContent(text="Task.")
+        s0_content = ObservationContent(text="Restored state.")
+        s1_content = ObservationContent(text="Next state.")
+
+        # Simulate restoring from step 8 (turn 9)
+        s0 = _make_state(prompt="Task.", task=task, state=s0_content, step=8)
+        s1 = _make_state(prompt="Task.", task=task, state=s1_content, step=9)
+
+        trajectory = Trajectory.create(s0)
+        trajectory.add_transition(
+            Transition(
+                state=s0, action=Action(text="go north"), next_state=s1,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        messages = runner._build_messages(s1, trajectory=trajectory)
+        first_user = messages[0].content
+        assert "[Turn 9/50]" in first_user
+        assert "[Turn 1/" not in first_user
+        assert "Restored state." in first_user
+
     def test_initial_obs_with_images(self):
         """Images from initial state are carried into the injected message."""
         img = ImageContent(data="abc", media_type="image/png")
