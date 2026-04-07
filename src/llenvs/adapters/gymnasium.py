@@ -1108,7 +1108,6 @@ class GymnasiumEnvironment:
         observation = Observation(
             prompt=prompt,
             messages=initial_messages,
-            images=obs_images,
             task=task_content,
             state=state_content,
         )
@@ -1232,7 +1231,6 @@ class GymnasiumEnvironment:
         new_observation = Observation(
             prompt=state.observation.prompt,
             messages=new_messages,
-            images=obs_images,
             task=state.observation.task,
             state=state_content,
         )

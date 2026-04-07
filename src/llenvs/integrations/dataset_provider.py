@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from llenvs.core.environment import Environment
-from llenvs.core.state import ImageContent
+from llenvs.core.state import ObservationImages
 
 
 @dataclass(frozen=True)
@@ -23,7 +23,7 @@ class TaskItem:
         messages: Chat-format messages from the observation.
         ground_truth: Expected answer (None for multi-turn environments).
         metadata: Additional task metadata.
-        images: Images from the observation (empty for text-only tasks).
+        images: Images from the observation, separated by source.
     """
 
     task_index: int
@@ -31,7 +31,7 @@ class TaskItem:
     messages: tuple[dict[str, Any], ...]
     ground_truth: str | None
     metadata: dict[str, Any]
-    images: tuple[ImageContent, ...] = ()
+    images: ObservationImages = ObservationImages()
 
 
 class DatasetProvider:
@@ -87,7 +87,7 @@ class DatasetProvider:
                 "episode_id": state.metadata.episode_id,
                 **info,
             },
-            images=state.observation.images,
+            images=state.observation.get_images(),
         )
 
     def get_items(self, indices: list[int] | None = None) -> list[TaskItem]:
@@ -128,7 +128,7 @@ class DatasetProvider:
         has_images = any(item.images for item in items)
         if has_images:
             data["images"] = [
-                [{"data": img.data, "media_type": img.media_type} for img in item.images]
+                [{"data": img.data, "media_type": img.media_type} for img in item.images.all]
                 for item in items
             ]
 

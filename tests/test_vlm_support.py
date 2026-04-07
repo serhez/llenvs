@@ -18,7 +18,7 @@ import numpy as np
 import pytest
 
 from llenvs.core.reward import SignalBundle
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import Action, ImageContent, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.trajectory import Trajectory, Transition
 from llenvs.inference.protocol import (
     ChatMessage,
@@ -460,7 +460,7 @@ class TestImageHistoryTruncation:
             msgs = tuple(msg_list)
 
         return State(
-            observation=Observation(prompt="Initial", images=images, messages=msgs),
+            observation=Observation(prompt="Initial", state=ObservationContent(text="", images=images), messages=msgs),
             hidden=None,
             metadata=StateMetadata(step=step, episode_id="test"),
         )
@@ -513,7 +513,7 @@ class TestImageHistoryTruncation:
 
         img = ImageContent(data="abc")
         state = State(
-            observation=Observation(prompt="What is this?", images=(img,)),
+            observation=Observation(prompt="What is this?", state=ObservationContent(text="", images=(img,))),
             hidden=None,
             metadata=StateMetadata(step=0, episode_id="test"),
         )
@@ -533,14 +533,15 @@ class TestTrajectoryStripImages:
     def _make_transition(self, step: int, with_image: bool = True) -> Transition[None]:
         """Create a transition with optional images."""
         images = (ImageContent(data=f"img_{step}"),) if with_image else ()
+        state_content = ObservationContent(text="", images=images) if images else None
 
         state = State(
-            observation=Observation(prompt=f"Step {step}", images=images),
+            observation=Observation(prompt=f"Step {step}", state=state_content),
             hidden=None,
             metadata=StateMetadata(step=step, episode_id="test"),
         )
         next_state = State(
-            observation=Observation(prompt=f"Step {step + 1}", images=images),
+            observation=Observation(prompt=f"Step {step + 1}", state=state_content),
             hidden=None,
             metadata=StateMetadata(step=step + 1, episode_id="test"),
         )
@@ -553,7 +554,7 @@ class TestTrajectoryStripImages:
 
     def test_strip_images_returns_new_trajectory(self):
         state = State(
-            observation=Observation(prompt="Start", images=(ImageContent(data="init"),)),
+            observation=Observation(prompt="Start", state=ObservationContent(text="", images=(ImageContent(data="init"),))),
             hidden=None,
             metadata=StateMetadata(step=0, episode_id="test"),
         )
@@ -566,7 +567,7 @@ class TestTrajectoryStripImages:
 
     def test_strip_images_removes_all_images(self):
         state = State(
-            observation=Observation(prompt="Start", images=(ImageContent(data="init"),)),
+            observation=Observation(prompt="Start", state=ObservationContent(text="", images=(ImageContent(data="init"),))),
             hidden=None,
             metadata=StateMetadata(step=0, episode_id="test"),
         )
@@ -577,16 +578,16 @@ class TestTrajectoryStripImages:
         stripped = traj.strip_images()
 
         # Initial state should have no images
-        assert stripped.initial_state.observation.images == ()
+        assert stripped.initial_state.observation.get_images().all == ()
 
         # All transition states should have no images
         for t in stripped.transitions:
-            assert t.state.observation.images == ()
-            assert t.next_state.observation.images == ()
+            assert t.state.observation.get_images().all == ()
+            assert t.next_state.observation.get_images().all == ()
 
     def test_strip_images_preserves_text(self):
         state = State(
-            observation=Observation(prompt="Start", images=(ImageContent(data="init"),)),
+            observation=Observation(prompt="Start", state=ObservationContent(text="", images=(ImageContent(data="init"),))),
             hidden=None,
             metadata=StateMetadata(step=0, episode_id="test"),
         )
@@ -760,7 +761,7 @@ class TestGymnasiumMultimodalIntegration:
     """Test GymnasiumEnvironment with multimodal observation mappers."""
 
     def test_multimodal_mapper_produces_images_in_observation(self):
-        """When using MultimodalObservationMapper, Observation.images should be populated."""
+        """When using MultimodalObservationMapper, Observation.state.images should be populated."""
         import gymnasium.spaces as spaces
 
         from llenvs.adapters.gymnasium import (
@@ -786,8 +787,8 @@ class TestGymnasiumMultimodalIntegration:
         )
 
         state, info = env.reset(options={"task_index": 0})
-        assert len(state.observation.images) == 1
-        assert isinstance(state.observation.images[0], ImageContent)
+        assert len(state.observation.state.images) == 1
+        assert isinstance(state.observation.state.images[0], ImageContent)
 
     def test_step_produces_images(self):
         """Step should also produce images in observation."""
@@ -817,7 +818,7 @@ class TestGymnasiumMultimodalIntegration:
 
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="left"))
-        assert len(result.next_state.observation.images) == 1
+        assert len(result.next_state.observation.state.images) == 1
 
     def test_step_images_in_history(self):
         """Step should include images in message history."""
@@ -872,9 +873,10 @@ class TestTaskItemImages:
             ground_truth="world",
             metadata={},
         )
-        assert item.images == ()
+        assert not item.images
 
     def test_with_images(self):
+        from llenvs.core.state import ObservationImages
         from llenvs.integrations.dataset_provider import TaskItem
 
         imgs = (ImageContent(data="a"), ImageContent(data="b"))
@@ -884,10 +886,10 @@ class TestTaskItemImages:
             messages=(),
             ground_truth=None,
             metadata={},
-            images=imgs,
+            images=ObservationImages(state=imgs),
         )
-        assert len(item.images) == 2
-        assert item.images[0].data == "a"
+        assert len(item.images.state) == 2
+        assert item.images.state[0].data == "a"
 
     def test_frozen(self):
         from llenvs.integrations.dataset_provider import TaskItem
@@ -918,7 +920,8 @@ class TestDatasetProviderImages:
         mock_env.__len__ = MagicMock(return_value=5)
 
         images = (ImageContent(data="test_img"),) if with_images else ()
-        obs = Observation(prompt="Test prompt", images=images)
+        state_content = ObservationContent(text="", images=images) if images else None
+        obs = Observation(prompt="Test prompt", state=state_content)
         state = State(
             observation=obs,
             hidden=MagicMock(expected_answer="42"),
@@ -933,8 +936,8 @@ class TestDatasetProviderImages:
         env = self._make_mock_env(with_images=True)
         provider = DatasetProvider(env)
         item = provider[0]
-        assert len(item.images) == 1
-        assert item.images[0].data == "test_img"
+        assert len(item.images.state) == 1
+        assert item.images.state[0].data == "test_img"
 
     def test_getitem_no_images(self):
         from llenvs.integrations.dataset_provider import DatasetProvider
@@ -942,7 +945,7 @@ class TestDatasetProviderImages:
         env = self._make_mock_env(with_images=False)
         provider = DatasetProvider(env)
         item = provider[0]
-        assert item.images == ()
+        assert not item.images
 
     def test_to_hf_dataset_includes_images(self):
         """to_hf_dataset should include image data."""

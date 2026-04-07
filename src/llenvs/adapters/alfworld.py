@@ -475,7 +475,6 @@ class AlfWorldEnvironment:
 
         observation = Observation(
             prompt=obs_prompt,
-            images=images,
             task=ObservationContent(text=task_text),
             state=ObservationContent(text=state_text, images=images),
         )
@@ -625,7 +624,6 @@ class AlfWorldEnvironment:
         new_observation = Observation(
             prompt=state.observation.prompt,
             messages=new_messages,
-            images=images,
             task=state.observation.task,
             state=ObservationContent(text=state_text, images=images),
         )

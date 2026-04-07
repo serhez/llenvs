@@ -23,10 +23,39 @@ class ImageContent:
     Attributes:
         data: Base64-encoded image data.
         media_type: MIME type (e.g., "image/png", "image/jpeg").
+        source: Origin of this image — ``"state"`` for per-step visual
+            observations, ``"task"`` for goal/reference images, or ``""``
+            when unspecified.
     """
 
     data: str
     media_type: str = "image/png"
+    source: str = ""
+
+
+@dataclass(frozen=True)
+class ObservationImages:
+    """Images from an observation, separated by source.
+
+    Keeps task images (goal / reference) distinct from state images
+    (per-step visual observation) so callers can decide ordering and
+    placement in prompts.
+
+    Attributes:
+        task: Static goal or reference images (from ``obs.task``).
+        state: Per-step visual observations (from ``obs.state``).
+    """
+
+    task: tuple[ImageContent, ...] = ()
+    state: tuple[ImageContent, ...] = ()
+
+    @property
+    def all(self) -> tuple[ImageContent, ...]:
+        """All images, task first then state."""
+        return self.task + self.state
+
+    def __bool__(self) -> bool:
+        return bool(self.task or self.state)
 
 
 @dataclass(frozen=True)
@@ -103,12 +132,16 @@ class Observation:
     Supports both text-only and tool-aware environments. Text-only
     environments leave tool_results and available_tools as empty tuples.
 
+    Images live on the structured ``state`` and ``task`` fields
+    (:class:`ObservationContent`).  ``state.images`` carries per-step
+    visual observations (e.g. screenshots); ``task.images`` carries
+    static goal or reference images.
+
     Attributes:
         prompt: The question or prompt text.
         messages: Chat message history (including tool calls/results).
         tool_results: Results from the most recent tool calls.
         available_tools: Tools the model can call.
-        images: Image content for the observation.
         task: Static task description (same every turn). None = not supported.
         state: Dynamic state observation (changes each turn). None = not supported.
     """
@@ -117,9 +150,24 @@ class Observation:
     messages: tuple[dict[str, Any], ...] = ()
     tool_results: tuple[ToolResult, ...] = ()
     available_tools: tuple[ToolDefinition, ...] = ()
-    images: tuple[ImageContent, ...] = ()
     task: ObservationContent | None = None
     state: ObservationContent | None = None
+
+    def get_images(self) -> ObservationImages:
+        """Extract images from structured fields, separated by source.
+
+        Tags each :class:`ImageContent` with ``source="task"`` or
+        ``source="state"`` so downstream consumers can distinguish them.
+        """
+        task_imgs = tuple(
+            ImageContent(data=img.data, media_type=img.media_type, source="task")
+            for img in (self.task.images if self.task is not None else ())
+        )
+        state_imgs = tuple(
+            ImageContent(data=img.data, media_type=img.media_type, source="state")
+            for img in (self.state.images if self.state is not None else ())
+        )
+        return ObservationImages(task=task_imgs, state=state_imgs)
 
 
 @dataclass(frozen=True)

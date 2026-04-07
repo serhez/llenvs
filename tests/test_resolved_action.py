@@ -9,7 +9,7 @@ import pytest
 
 from llenvs.core.environment import StepResult
 from llenvs.core.reward import RewardType, Signal, SignalBundle
-from llenvs.core.state import Action, ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import Action, ImageContent, Observation, ObservationContent, State, StateMetadata
 from llenvs.core.trajectory import Trajectory, Transition
 
 # ---------------------------------------------------------------------------
@@ -135,7 +135,7 @@ class TestStripImagesPreservesActionFields:
         state = State(
             observation=Observation(
                 prompt="start",
-                images=(ImageContent(data="img"),),
+                state=ObservationContent(text="", images=(ImageContent(data="img"),)),
             ),
             hidden=None,
             metadata=StateMetadata(step=0, episode_id="ep"),
@@ -148,7 +148,7 @@ class TestStripImagesPreservesActionFields:
             next_state=State(
                 observation=Observation(
                     prompt="next",
-                    images=(ImageContent(data="img2"),),
+                    state=ObservationContent(text="", images=(ImageContent(data="img2"),)),
                 ),
                 hidden=None,
                 metadata=StateMetadata(step=1, episode_id="ep"),
@@ -164,7 +164,7 @@ class TestStripImagesPreservesActionFields:
         assert st.extracted_action == "extracted"
         assert st.resolved_action == "resolved"
         # Images should be removed
-        assert st.state.observation.images == ()
+        assert st.state.observation.get_images().all == ()
 
     def test_none_fields_preserved(self):
         state = _make_state(0)

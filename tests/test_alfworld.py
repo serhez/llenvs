@@ -1271,15 +1271,15 @@ class TestAlfWorldVisualMode:
     def test_text_mode_unchanged(self, env: AlfWorldEnvironment):
         """Default text mode should have no images."""
         state, _ = env.reset(options={"task_index": 0})
-        assert state.observation.images == ()
+        assert state.observation.get_images().all == ()
 
     def test_visual_reset_has_images(self):
         """Visual mode reset should include ImageContent."""
         env = _make_visual_env()
         state, _ = env.reset(options={"task_index": 0})
-        assert len(state.observation.images) == 1
-        assert isinstance(state.observation.images[0], ImageContent)
-        assert state.observation.images[0].media_type == "image/png"
+        assert len(state.observation.state.images) == 1
+        assert isinstance(state.observation.state.images[0], ImageContent)
+        assert state.observation.state.images[0].media_type == "image/png"
 
         # Structured observation: state includes images in visual mode
         obs = state.observation
@@ -1300,8 +1300,8 @@ class TestAlfWorldVisualMode:
         env = _make_visual_env()
         state, _ = env.reset(options={"task_index": 0})
         result = env.step(state, Action(text="look"))
-        assert len(result.next_state.observation.images) == 1
-        assert isinstance(result.next_state.observation.images[0], ImageContent)
+        assert len(result.next_state.observation.state.images) == 1
+        assert isinstance(result.next_state.observation.state.images[0], ImageContent)
 
     def test_visual_step_images_in_history(self):
         """Visual mode should include image data in message history."""
@@ -1368,7 +1368,7 @@ class TestAlfWorldVisualMode:
 
         env._init_game = mock_init_game  # type: ignore[assignment]
         state, _ = env.reset(options={"task_index": 0})
-        assert state.observation.images == ()
+        assert state.observation.get_images().all == ()
 
 
 class TestAlfWorldAdapterVisual:

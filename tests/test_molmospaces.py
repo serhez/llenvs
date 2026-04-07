@@ -717,7 +717,7 @@ class TestMolmoSpacesObservationRendering:
             cameras=("front", "wrist"),
         )
         state, _ = env.reset(options={"task_index": 0})
-        assert len(state.observation.images) == 2
+        assert len(state.observation.state.images) == 2
 
     def test_single_camera_observation(self) -> None:
         ms_env = MockMolmoSpacesEnv()
@@ -731,7 +731,7 @@ class TestMolmoSpacesObservationRendering:
             cameras=("front",),
         )
         state, _ = env.reset(options={"task_index": 0})
-        assert len(state.observation.images) == 1
+        assert len(state.observation.state.images) == 1
 
     def test_depth_images_included(self) -> None:
         ms_env = MockMolmoSpacesEnv()
@@ -747,7 +747,7 @@ class TestMolmoSpacesObservationRendering:
         )
         state, _ = env.reset(options={"task_index": 0})
         # 1 RGB + 1 depth = 2 images
-        assert len(state.observation.images) == 2
+        assert len(state.observation.state.images) == 2
 
 
 # ── TestMolmoSpacesEnvironment ───────────────────────────────────
@@ -832,7 +832,7 @@ class TestMolmoSpacesEnvironment:
     def test_reset_has_images(self) -> None:
         env = self._make_env()
         state, _ = env.reset(options={"task_index": 0})
-        assert len(state.observation.images) >= 1
+        assert len(state.observation.state.images) >= 1
 
     def test_reset_info(self) -> None:
         env = self._make_env()
@@ -1147,4 +1147,4 @@ class TestMolmoSpacesIntegration:
         call = ToolCall(id="c1", name="grasp", arguments={})
         result = env.step(state, Action(tool_calls=(call,)))
         # Images should be present in the next observation
-        assert len(result.next_state.observation.images) >= 1
+        assert len(result.next_state.observation.state.images) >= 1

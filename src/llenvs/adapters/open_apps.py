@@ -437,7 +437,9 @@ class OpenAppsEnvironment:
         if self._use_screenshot and "screenshot" in raw_obs:
             screenshot = raw_obs["screenshot"]
             if screenshot is not None:
-                images = (ImageContent(data=screenshot, media_type="image/png"),)
+                from llenvs.core.image_utils import pixels_to_image_content
+
+                images = (pixels_to_image_content(screenshot),)
 
         task_content: ObservationContent
         state_content = ObservationContent(text=obs_text, images=images)
@@ -461,7 +463,6 @@ class OpenAppsEnvironment:
             messages=messages,
             task=task_content,
             state=state_content,
-            images=images,
         )
 
     # -- MDP interface ------------------------------------------------------

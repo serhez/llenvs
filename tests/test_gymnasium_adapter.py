@@ -1270,15 +1270,15 @@ class TestAtariPresets:
 
         # Reset and check observation has images
         state, _ = env.reset()
-        assert len(state.observation.images) == 1
+        assert len(state.observation.state.images) == 1
 
         from llenvs.core.state import ImageContent
 
-        assert isinstance(state.observation.images[0], ImageContent)
+        assert isinstance(state.observation.state.images[0], ImageContent)
 
         # Step and check images
         result = env.step(state, Action(text="fire"))
-        assert len(result.next_state.observation.images) == 1
+        assert len(result.next_state.observation.state.images) == 1
 
     def test_atari_preset_max_steps_merges(self, import_adapter):
         """Preset max_steps should be used when not explicitly overridden."""
