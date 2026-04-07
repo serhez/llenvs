@@ -75,7 +75,23 @@ def _run_concurrent(coro_fn: Any, items: list[Any], max_concurrency: int) -> lis
             async with sem:
                 return await coro_fn(item)
 
-        return list(await asyncio.gather(*[_limited(item) for item in items]))
+        results = await asyncio.gather(
+            *[_limited(item) for item in items], return_exceptions=True,
+        )
+        # Re-raise the first exception (preserving the API contract) but only
+        # after all tasks have completed — no cascade cancellation.
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if failures:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Concurrent batch: %d/%d tasks failed (%s); "
+                "re-raising first exception",
+                len(failures),
+                len(results),
+                type(failures[0]).__name__,
+            )
+            raise failures[0]
+        return list(results)
 
     try:
         asyncio.get_running_loop()
@@ -115,6 +131,8 @@ class OpenAIBackend(ModelBackend):
         base_url: str | None = None,
         organization: str | None = None,
         max_concurrency: int = 64,
+        timeout: float | None = None,
+        max_retries: int | None = None,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenAI backend.
@@ -125,6 +143,11 @@ class OpenAIBackend(ModelBackend):
             base_url: Custom API base URL.
             organization: OpenAI organization ID.
             max_concurrency: Maximum concurrent requests for batch generation.
+            timeout: Connect timeout in seconds.  The overall read timeout
+                stays at the SDK default (600s).  ``None`` uses SDK defaults.
+            max_retries: Maximum SDK-level retries for transient errors
+                (timeouts, connection errors, 5xx).  ``None`` uses SDK
+                default (2).
             **client_kwargs: Additional kwargs for OpenAI client.
 
         Raises:
@@ -147,6 +170,11 @@ class OpenAIBackend(ModelBackend):
             client_args["base_url"] = base_url
         if organization is not None:
             client_args["organization"] = organization
+        if timeout is not None:
+            import httpx
+            client_args["timeout"] = httpx.Timeout(timeout=600.0, connect=timeout)
+        if max_retries is not None:
+            client_args["max_retries"] = max_retries
 
         self._client = OpenAI(**client_args)
         self._async_client = AsyncOpenAI(**client_args)
@@ -823,6 +851,8 @@ class OpenRouterBackend(ModelBackend):
         max_concurrency: int = 64,
         rate_limit_wait: float = 0.0,
         rate_limit_max_retries: int = 2,
+        timeout: float | None = None,
+        max_retries: int | None = None,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenRouter backend.
@@ -839,6 +869,11 @@ class OpenRouterBackend(ModelBackend):
                 free-tier models with strict per-minute caps.
             rate_limit_max_retries: Maximum number of rate-limit retries before
                 giving up and re-raising the error.
+            timeout: Connect timeout in seconds.  The overall read timeout
+                stays at the SDK default (600s).  ``None`` uses SDK defaults.
+            max_retries: Maximum SDK-level retries for transient errors
+                (timeouts, connection errors, 5xx).  ``None`` uses SDK
+                default (2).
             **client_kwargs: Additional kwargs for OpenAI client.
 
         Raises:
@@ -867,18 +902,21 @@ class OpenRouterBackend(ModelBackend):
         if app_name:
             headers["X-Title"] = app_name
 
-        self._client = OpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers=headers if headers else None,
+        client_args: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": "https://openrouter.ai/api/v1",
             **client_kwargs,
-        )
-        self._async_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url="https://openrouter.ai/api/v1",
-            default_headers=headers if headers else None,
-            **client_kwargs,
-        )
+        }
+        if headers:
+            client_args["default_headers"] = headers
+        if timeout is not None:
+            import httpx
+            client_args["timeout"] = httpx.Timeout(timeout=600.0, connect=timeout)
+        if max_retries is not None:
+            client_args["max_retries"] = max_retries
+
+        self._client = OpenAI(**client_args)
+        self._async_client = AsyncOpenAI(**client_args)
         self._closed = False
 
     @property

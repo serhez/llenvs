@@ -1749,3 +1749,108 @@ class TestMultiEvaluation:
             assert mr.metadata["task_index"] == dr.metadata["task_index"]
             assert mr.metadata["num_steps"] == dr.metadata["num_steps"]
             assert mr.success == dr.success
+
+
+# ── _run_concurrent error handling ─────────────────────────────
+
+
+class TestRunConcurrentErrorHandling:
+    """Tests for _run_concurrent per-task failure behavior."""
+
+    def test_one_failure_does_not_cancel_others(self):
+        """When one task fails, all other tasks still run to completion."""
+        from llenvs.inference.backends.api import _run_concurrent
+
+        completed = []
+
+        async def _task(item):
+            if item == 2:
+                raise RuntimeError("task 2 failed")
+            await asyncio.sleep(0.05)  # simulate API latency
+            completed.append(item)
+            return item * 10
+
+        with pytest.raises(RuntimeError, match="task 2 failed"):
+            _run_concurrent(_task, [0, 1, 2, 3, 4], max_concurrency=5)
+
+        # All non-failing tasks must have completed
+        assert sorted(completed) == [0, 1, 3, 4]
+
+    def test_all_failures_raises_first(self):
+        """When all tasks fail, the first exception is raised."""
+        from llenvs.inference.backends.api import _run_concurrent
+
+        async def _task(item):
+            raise ValueError(f"fail-{item}")
+
+        with pytest.raises(ValueError, match="fail-0"):
+            _run_concurrent(_task, [0, 1, 2], max_concurrency=3)
+
+    def test_success_returns_ordered_results(self):
+        """Successful tasks return results in input order."""
+        from llenvs.inference.backends.api import _run_concurrent
+
+        async def _task(item):
+            return item * 10
+
+        results = _run_concurrent(_task, [3, 1, 2], max_concurrency=3)
+        assert results == [30, 10, 20]
+
+
+# ── Backend timeout/max_retries config ─────────────────────────
+
+
+class TestBackendTimeoutConfig:
+    """Tests for timeout/max_retries constructor params."""
+
+    def test_openai_backend_accepts_timeout(self):
+        from unittest.mock import patch
+
+        with patch("openai.OpenAI") as mock_sync, \
+             patch("openai.AsyncOpenAI") as mock_async:
+            from llenvs.inference.backends.api import OpenAIBackend
+            OpenAIBackend(model="test", api_key="k", timeout=30.0, max_retries=5)
+
+            sync_kwargs = mock_sync.call_args[1]
+            async_kwargs = mock_async.call_args[1]
+            assert sync_kwargs["max_retries"] == 5
+            assert async_kwargs["max_retries"] == 5
+            assert sync_kwargs["timeout"].connect == 30.0
+            assert async_kwargs["timeout"].connect == 30.0
+
+    def test_openai_backend_none_timeout_uses_sdk_defaults(self):
+        from unittest.mock import patch
+
+        with patch("openai.OpenAI") as mock_sync, \
+             patch("openai.AsyncOpenAI") as mock_async:
+            from llenvs.inference.backends.api import OpenAIBackend
+            OpenAIBackend(model="test", api_key="k")
+
+            sync_kwargs = mock_sync.call_args[1]
+            assert "timeout" not in sync_kwargs
+            assert "max_retries" not in sync_kwargs
+
+    def test_openrouter_backend_accepts_timeout(self):
+        from unittest.mock import patch
+
+        with patch("openai.OpenAI") as mock_sync, \
+             patch("openai.AsyncOpenAI") as mock_async:
+            from llenvs.inference.backends.api import OpenRouterBackend
+            OpenRouterBackend(model="test", api_key="k", timeout=30.0, max_retries=5)
+
+            sync_kwargs = mock_sync.call_args[1]
+            async_kwargs = mock_async.call_args[1]
+            assert sync_kwargs["max_retries"] == 5
+            assert sync_kwargs["timeout"].connect == 30.0
+
+    def test_openrouter_backend_none_timeout_uses_sdk_defaults(self):
+        from unittest.mock import patch
+
+        with patch("openai.OpenAI") as mock_sync, \
+             patch("openai.AsyncOpenAI") as mock_async:
+            from llenvs.inference.backends.api import OpenRouterBackend
+            OpenRouterBackend(model="test", api_key="k")
+
+            sync_kwargs = mock_sync.call_args[1]
+            assert "timeout" not in sync_kwargs
+            assert "max_retries" not in sync_kwargs
