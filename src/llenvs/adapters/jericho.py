@@ -22,6 +22,10 @@ DEFAULT_JERICHO_PROMPTS: dict[str, str] = {
 }
 
 
+class JerichoEmulatorHaltedError(RuntimeError):
+    """Raised when Jericho reports that the emulator halted."""
+
+
 def _game_name_from_path(path: str) -> str:
     """Extract game name from a ROM file path.
 
@@ -184,8 +188,9 @@ class JerichoEnvironment:
             game_files: Tuple of game ROM file paths.
             game_names: Tuple of game names corresponding to game_files.
             max_steps: Maximum steps per episode before truncation.
-            include_valid_actions: Whether to append valid actions to
-                each observation. Defaults to False (wrapper fidelity).
+            include_valid_actions: Whether to generate and append Jericho's
+                admissible-action hints to each observation. Defaults to
+                False (wrapper fidelity).
             extra_rewards: Additional reward functions appended after
                 native rewards.
             prompts: Override default prompt components. Keys:
@@ -283,6 +288,30 @@ class JerichoEnvironment:
 
         return obs, info
 
+    def _discard_frotz_env(self) -> None:
+        """Close and discard the current FrotzEnv instance."""
+        if self._frotz_env is not None:
+            self._frotz_env.close()
+            self._frotz_env = None
+            self._current_game_file = None
+
+    def _check_emulator_halted(self, phase: str) -> None:
+        """Raise if Jericho reports that the emulator halted."""
+        if self._frotz_env is None:
+            return
+        halted_fn = getattr(self._frotz_env, "_emulator_halted", None)
+        if callable(halted_fn) and halted_fn():
+            self._discard_frotz_env()
+            raise JerichoEmulatorHaltedError(f"Jericho emulator halted {phase}")
+
+    def _get_valid_actions(self) -> tuple[str, ...]:
+        """Return valid actions unless they were explicitly disabled."""
+        if not self._include_valid_actions:
+            return ()
+        valid_actions = tuple(self._frotz_env.get_valid_actions())
+        self._check_emulator_halted("during valid action generation")
+        return valid_actions
+
     def _build_observation_prompt(
         self,
         raw_obs: str,
@@ -342,7 +371,7 @@ class JerichoEnvironment:
         self._frotz_env.seed(resolved_seed)
 
         # Get valid actions
-        valid_actions = tuple(self._frotz_env.get_valid_actions())
+        valid_actions = self._get_valid_actions()
 
         # Capture Z-Machine state for pure_step
         frotz_state = self._frotz_env.get_state() if self._pure_step else None
@@ -465,6 +494,7 @@ class JerichoEnvironment:
 
         # Step Jericho environment
         raw_obs, reward, done, info = self._frotz_env.step(cmd_for_env)
+        self._check_emulator_halted("after step")
 
         # Get current score and valid actions
         current_score = self._frotz_env.get_score()
@@ -472,7 +502,7 @@ class JerichoEnvironment:
         moves = self._frotz_env.get_moves()
         score_delta = current_score - state.hidden.prev_score
 
-        valid_actions = tuple(self._frotz_env.get_valid_actions())
+        valid_actions = self._get_valid_actions()
 
         # Check termination/truncation
         next_step = state.hidden.episode_step + 1
@@ -577,9 +607,7 @@ class JerichoEnvironment:
 
     def close(self) -> None:
         """Close the underlying FrotzEnv."""
-        if self._frotz_env is not None:
-            self._frotz_env.close()
-            self._frotz_env = None
+        self._discard_frotz_env()
 
 
 class JerichoAdapter:
@@ -647,8 +675,8 @@ class JerichoAdapter:
             game_files: Direct ROM file paths. Overrides both name
                 and games parameters.
             max_steps: Maximum steps per episode.
-            include_valid_actions: Whether to include valid actions
-                in observations. Defaults to False (wrapper fidelity).
+            include_valid_actions: Whether to generate and include valid
+                actions in observations. Defaults to False (wrapper fidelity).
             extra_rewards: Additional reward functions.
             prompts: Override default prompt components.
             pure_step: When True, enable state save/restore via

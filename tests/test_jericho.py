@@ -8,6 +8,7 @@ import pytest
 from llenvs.adapters.jericho import (
     DEFAULT_JERICHO_PROMPTS,
     JerichoAdapter,
+    JerichoEmulatorHaltedError,
     JerichoEnvironment,
     JerichoHidden,
     JerichoReward,
@@ -36,11 +37,16 @@ class MockFrotzEnv:
         self._closed = False
         self._seeded = False
         self._seed_value: int | None = None
+        self._halted = False
+        self._halt_after_step = False
+        self._halt_during_valid_actions = False
+        self.valid_actions_calls = 0
 
     def reset(self) -> str:
         self._step_count = 0
         self._score = 0
         self._done = False
+        self._halted = False
         return (
             "ZORK I: The Great Underground Empire\n"
             "West of House\n"
@@ -55,34 +61,47 @@ class MockFrotzEnv:
         if action == "open mailbox":
             obs = "Opening the small mailbox reveals a leaflet."
             self._score = 0
-            return obs, 0, False, {}
+            result = (obs, 0, False, {})
 
         elif action == "take leaflet":
             obs = "Taken."
             self._score = 5
-            return obs, 5, False, {}
+            result = (obs, 5, False, {})
 
         elif action == "go north":
             obs = "North of House\nYou are facing the north side of a white house."
             self._score = self._score  # no score change
-            return obs, 0, False, {}
+            result = (obs, 0, False, {})
 
         elif action == "win game":
             obs = "Congratulations! You have won!"
             self._score = self._max_score
             self._done = True
-            return obs, self._max_score - (self._score - self._max_score + self._score), True, {}
+            result = (
+                obs,
+                self._max_score - (self._score - self._max_score + self._score),
+                True,
+                {},
+            )
 
         elif action == "die":
             obs = "You have died."
             self._done = True
-            return obs, 0, True, {}
+            result = (obs, 0, True, {})
 
         else:
             obs = "I don't understand that."
-            return obs, 0, False, {}
+            result = (obs, 0, False, {})
+
+        if self._halt_after_step:
+            self._halted = True
+
+        return result
 
     def get_valid_actions(self) -> list[str]:
+        self.valid_actions_calls += 1
+        if self._halt_during_valid_actions:
+            self._halted = True
         return ["open mailbox", "go north", "go south", "look"]
 
     def get_score(self) -> int:
@@ -112,6 +131,9 @@ class MockFrotzEnv:
 
     def close(self) -> None:
         self._closed = True
+
+    def _emulator_halted(self) -> bool:
+        return self._halted
 
 
 MOCK_GAME_FILES = (
@@ -375,6 +397,10 @@ class TestJerichoEnvironment:
         assert env.spec.supports_seed is True
         assert env.spec.max_steps == 100
 
+    def test_include_valid_actions_disabled_by_default(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(mock_frotz=mock_frotz)
+        assert env._include_valid_actions is False
+
     def test_len(self, env: JerichoEnvironment):
         assert len(env) == len(MOCK_GAME_FILES)
 
@@ -460,13 +486,10 @@ class TestJerichoEnvironment:
 
     def test_step_updates_valid_actions(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})
-
-        initial_actions = state.hidden.valid_actions
-        assert len(initial_actions) > 0
+        assert state.hidden.valid_actions == ()
 
         result = env.step(state, Action(text="open mailbox"))
-        # Valid actions are re-fetched each step
-        assert result.next_state.hidden.valid_actions is not None
+        assert result.next_state.hidden.valid_actions == ()
 
     def test_step_game_over(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})
@@ -517,10 +540,69 @@ class TestJerichoEnvironment:
         assert "Valid actions:" in state.observation.prompt
         assert "open mailbox" in state.observation.prompt
 
-    def test_valid_actions_always_in_hidden(self, env: JerichoEnvironment):
-        """Valid actions are always stored in hidden state regardless of obs setting."""
+    def test_valid_actions_disabled_skips_generation_on_reset_and_step(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz, include_valid_actions=False)
         state, _ = env.reset(options={"task_index": 0})
+        assert mock_frotz.valid_actions_calls == 0
+        assert state.hidden.valid_actions == ()
+        assert state.observation.state is not None
+        assert state.observation.state.data == {
+            "valid_actions": [],
+            "score": 0,
+            "max_score": 350,
+            "moves": 0,
+        }
+
+        result = env.step(state, Action(text="open mailbox"))
+        assert mock_frotz.valid_actions_calls == 0
+        assert result.next_state.hidden.valid_actions == ()
+        assert result.info["valid_actions"] == ()
+
+    def test_valid_actions_enabled_fetches_on_reset_and_step(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz, include_valid_actions=True)
+        state, _ = env.reset(options={"task_index": 0})
+        assert mock_frotz.valid_actions_calls == 1
         assert len(state.hidden.valid_actions) > 0
+        result = env.step(state, Action(text="open mailbox"))
+        assert mock_frotz.valid_actions_calls == 2
+        assert len(result.next_state.hidden.valid_actions) > 0
+
+    def test_halted_emulator_after_step_raises_and_discards_env(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz)
+        state, _ = env.reset(options={"task_index": 0})
+        mock_frotz._halt_after_step = True
+
+        with pytest.raises(JerichoEmulatorHaltedError, match="after step"):
+            env.step(state, Action(text="open mailbox"))
+
+        assert env._frotz_env is None
+        assert mock_frotz._closed is True
+
+    def test_halted_emulator_during_valid_action_generation_raises_and_discards_env(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz, include_valid_actions=True)
+        state, _ = env.reset(options={"task_index": 0})
+        mock_frotz._halt_during_valid_actions = True
+
+        with pytest.raises(
+            JerichoEmulatorHaltedError,
+            match="during valid action generation",
+        ):
+            env.step(state, Action(text="open mailbox"))
+
+        assert env._frotz_env is None
+        assert mock_frotz._closed is True
 
     def test_game_file_in_hidden(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})

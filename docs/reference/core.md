@@ -56,7 +56,7 @@ The `data` field provides machine-readable structured state alongside the text r
 }
 ```
 
-Non-tool adapters populate `data` with adapter-specific structured state (e.g., Jericho includes `valid_actions`, `score`, `max_score`, `moves`; Gymnasium includes `gym_info`, `gym_reward`, `episode_step`). Adapters can extend the auto-populated data with additional fields (e.g., MolmoSpaces adds `proprioception` and `physics_steps` alongside `tool_results`).
+Non-tool adapters populate `data` with adapter-specific structured state (e.g., Jericho includes `valid_actions`, `score`, `max_score`, `moves`; when Jericho valid-action generation is disabled, `valid_actions` is an empty list; Gymnasium includes `gym_info`, `gym_reward`, `episode_step`). Adapters can extend the auto-populated data with additional fields (e.g., MolmoSpaces adds `proprioception` and `physics_steps` alongside `tool_results`).
 
 ### Observation
 

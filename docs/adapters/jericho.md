@@ -71,17 +71,18 @@ Actions are free-form text commands understood by the Z-Machine:
 
 ## Valid Actions
 
-Jericho can compute valid actions at each step. By default, these are **not** shown in the observation (wrapper fidelity — the original games don't show valid actions to players), but they are always tracked in the hidden state:
+Jericho can compute valid actions at each step. By default, these are **not** shown in the observation and are **not computed at all** (wrapper fidelity — the original games don't show valid actions to players):
 
 ```python
-# Not in observation (default, wrapper fidelity)
+# Not generated or shown in observation (default, wrapper fidelity)
 env = adapter.get_environment("jericho:zork1", include_valid_actions=False)
-
-# Included in observation (research/debug mode)
-env = adapter.get_environment("jericho:zork1", include_valid_actions=True)
-
 state, _ = env.reset(options={"task_index": 0})
-print(state.hidden.valid_actions)  # always available
+print(state.hidden.valid_actions)  # ()
+
+# Generated and included in observation (research/debug mode)
+env = adapter.get_environment("jericho:zork1", include_valid_actions=True)
+state, _ = env.reset(options={"task_index": 0})
+print(state.hidden.valid_actions)  # ('open mailbox', 'go north', ...)
 ```
 
 ## Adapter Configuration
@@ -165,10 +166,26 @@ class JerichoHidden:
     score: int                         # current cumulative score
     max_score: int                     # maximum achievable score
     moves: int                         # move counter from Jericho
-    valid_actions: tuple[str, ...]     # currently valid actions
+    valid_actions: tuple[str, ...]     # generated valid actions, or () when disabled
     prev_score: int = 0               # score at previous step (for delta)
     frotz_state: Any = None           # Z-Machine snapshot (pure_step only)
 ```
+
+## Native Fault Handling
+
+Jericho's upstream Frotz integration can report a halted emulator or trigger a native fault on rare `(state, action)` pairs. The adapter surfaces detected halts as `JerichoEmulatorHaltedError` instead of silently continuing with a poisoned interpreter instance:
+
+```python
+from llenvs.adapters.jericho import JerichoEmulatorHaltedError
+
+try:
+    result = env.step(state, Action(text="some risky command"))
+except JerichoEmulatorHaltedError:
+    # Discard the point/trajectory and continue at the caller level.
+    ...
+```
+
+When this happens, the adapter closes and discards the underlying `FrotzEnv` immediately.
 
 ## Using with TrajectoryRunner
 
