@@ -6943,6 +6943,66 @@ class TestDifficultyFiltering:
         assert len(filtered) == 1
 
 
+class TestFilterTasks:
+    """Tests for HarborAdapter.filter_tasks() public method."""
+
+    def test_none_difficulties_returns_all(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(3, difficulties=["easy", "hard", "medium"])
+        assert adapter.filter_tasks(tasks, difficulties=None) is tasks
+
+    def test_filter_single_difficulty(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(4, difficulties=["easy", "hard", "easy", "medium"])
+        result = adapter.filter_tasks(tasks, difficulties={"easy"})
+        assert len(result) == 2
+        assert all(t.name in ("task_00", "task_02") for t in result)
+
+    def test_filter_multiple_difficulties(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(4, difficulties=["easy", "hard", "medium", "extreme"])
+        result = adapter.filter_tasks(tasks, difficulties={"easy", "medium"})
+        assert len(result) == 2
+
+    def test_filter_case_insensitive(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(2, difficulties=["Easy", "HARD"])
+        result = adapter.filter_tasks(tasks, difficulties={"easy"})
+        assert len(result) == 1
+
+    def test_filter_with_list_input(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(3, difficulties=["easy", "hard", "easy"])
+        result = adapter.filter_tasks(tasks, difficulties=["easy"])
+        assert len(result) == 2
+
+    def test_no_match_raises_value_error(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(2, difficulties=["easy", "medium"])
+        with pytest.raises(ValueError, match="No tasks match difficulties"):
+            adapter.filter_tasks(tasks, difficulties={"extreme"})
+
+    def test_filter_na_selects_tasks_without_difficulty(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(3, difficulties=["easy", None, None])
+        result = adapter.filter_tasks(tasks, difficulties={"n/a"})
+        assert len(result) == 2
+
+
 class TestHarborHiddenDifficultyFields:
     """Tests for difficulty and recommended_timeout_sec on HarborHidden."""
 

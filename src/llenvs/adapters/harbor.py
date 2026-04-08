@@ -5296,6 +5296,40 @@ class HarborAdapter:
             tasks = self.load_tasks(name, dataset_path=dataset_path)
         return {getattr(t, "name", str(i)): _get_task_difficulty(t) for i, t in enumerate(tasks)}
 
+    def filter_tasks(
+        self,
+        tasks: tuple[Any, ...],
+        *,
+        difficulties: set[str] | list[str] | None = None,
+    ) -> tuple[Any, ...]:
+        """Filter a loaded task tuple by difficulty.
+
+        Returns the input unchanged when *difficulties* is ``None``.
+
+        Args:
+            tasks: Pre-loaded tuple of Harbor Task objects.
+            difficulties: Keep only tasks whose difficulty is in this set.
+                Case-insensitive, whitespace-stripped.  ``None`` means no
+                filtering.
+
+        Returns:
+            Filtered tuple of tasks.
+
+        Raises:
+            ValueError: If no tasks match the requested difficulties.
+        """
+        if difficulties is None:
+            return tasks
+        normalized = {d.lower().strip() for d in difficulties}
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in normalized)
+        if not filtered:
+            available = sorted({_get_task_difficulty(t) for t in tasks})
+            raise ValueError(
+                f"No tasks match difficulties {difficulties}. "
+                f"Available: {', '.join(available)}"
+            )
+        return filtered
+
     def inspect_snapshot_eligibility(
         self,
         name: str = "terminal-bench@2.0",
