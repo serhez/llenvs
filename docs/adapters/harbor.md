@@ -172,6 +172,8 @@ Available in tool mode:
 | `task_name` | `str` | Harbor task identifier |
 | `instruction` | `str` | Task instruction text |
 | `episode_step` | `int` | Current step in the episode |
+| `difficulty` | `str` | Task difficulty level (e.g., `"easy"`, `"hard"`). Defaults to `"n/a"` for tasks without explicit difficulty metadata |
+| `recommended_timeout_sec` | `float \| None` | Task-recommended agent timeout in seconds from the task definition, or `None` if not specified |
 | `last_action` | `str \| None` | Text of the last action |
 | `trajectory` | `tuple[str, ...]` | Command history |
 | `snapshot_ref` | `HarborSnapshotRef \| None` | Optional exact runtime snapshot artifact for this state |
@@ -204,6 +206,7 @@ Available in tool mode:
 | `runtime_probing` | `bool` | `False` | Enable runtime probing to annotate states with filesystem-restore risk signals |
 | `text_exec_mode` | `str` | `"independent_exec"` | Text-mode execution model: `independent_exec` runs each step in a fresh shell; `tmux_session` keeps a persistent tmux-backed shell inside the container |
 | `tmux_bootstrap_if_missing` | `bool` | `False` | When `text_exec_mode="tmux_session"`, attempt a bounded package-manager install of `tmux` inside the task image if it is missing |
+| `difficulties` | `set[str] \| None` | `None` | Filter tasks by difficulty level. Only tasks whose difficulty is in this set are included. `None` means no filtering. Tasks without explicit difficulty metadata are assigned `"n/a"`. Also available as a generic field on `EnvironmentConfig` |
 
 When both `command_soft_timeout` and `exec_timeout` are set, they apply to
 different phases:
@@ -219,6 +222,54 @@ different phases:
 ### `HarborAdapter.load_tasks()`
 
 Loads Harbor task definitions without creating environments. This is useful when another layer wants to inspect or filter the task set before collection.
+
+### `HarborAdapter.get_task_difficulties()`
+
+Returns a `{task_name: difficulty}` mapping for all tasks in a dataset. Tasks without explicit difficulty metadata are assigned `"n/a"`. Accepts `tasks=` for pre-loaded tasks or loads from the registry/path.
+
+### Difficulty Filtering
+
+Filter tasks by difficulty level using the `difficulties` parameter on `get_environment()` or the generic `difficulties` field on `EnvironmentConfig`:
+
+```python
+adapter = HarborAdapter()
+
+# Inspect available difficulties
+diffs = adapter.get_task_difficulties("terminal-bench@2.0")
+# {'crypto_01': 'n/a', 'ml_02': 'n/a', ...}
+
+# With TBLite (third-party difficulty-categorized tasks)
+diffs = adapter.get_task_difficulties(dataset_path="/path/to/OpenThoughts-TBLite")
+# {'csv-json-jsonl-merger': 'medium', 'broken-python': 'easy', ...}
+
+# Filter to easy + medium tasks only
+env = adapter.get_environment(
+    dataset_path="/path/to/OpenThoughts-TBLite",
+    difficulties={"easy", "medium"},
+    max_steps=30,
+)
+
+# Select tasks without explicit difficulty (e.g., standard TerminalBench)
+env = adapter.get_environment(
+    "terminal-bench@2.0",
+    difficulties={"n/a"},
+    max_steps=30,
+)
+```
+
+Via YAML config:
+
+```yaml
+environment:
+  name: "terminal-bench@2.0"
+  adapter: harbor
+  difficulties: ["easy", "medium"]
+  params:
+    dataset_path: "/path/to/OpenThoughts-TBLite"
+    max_steps: 30
+```
+
+The `difficulty` and `recommended_timeout_sec` fields are available on `HarborHidden` and in the state's `info` dict at every step.
 
 ### `HarborAdapter.inspect_snapshot_eligibility()`
 

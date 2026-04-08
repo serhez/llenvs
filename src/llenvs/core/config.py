@@ -44,6 +44,9 @@ class EnvironmentConfig:
         branching_strategy: Branching strategy preference for ``BranchManager``.
             One of ``"direct"``, ``"action_replay"``, ``"process_fork"``, or
             ``None`` for auto-resolution.
+        difficulties: Filter tasks by difficulty level. Only tasks whose
+            difficulty is in this set are included. ``None`` means no filtering.
+            Tasks without explicit difficulty metadata are assigned ``"n/a"``.
     """
 
     name: str
@@ -63,6 +66,7 @@ class EnvironmentConfig:
     judge: JudgeConfig | list[JudgeConfig] | None = None
     env_llm: EnvironmentLLMConfig | None = None
     branching_strategy: str | None = None
+    difficulties: set[str] | None = None
     iterative: IterativeConfig | None = None
 
 
@@ -443,6 +447,9 @@ class EvalConfig:
                     judge=env_judge,
                     env_llm=env_llm,
                     branching_strategy=env_data.get("branching_strategy"),
+                    difficulties=set(env_data["difficulties"])
+                    if env_data.get("difficulties") is not None
+                    else None,
                     iterative=iterative,
                 )
             )
@@ -470,9 +477,7 @@ class EvalConfig:
             thinking_budget_soft_ratio=inference_data.get("thinking_budget_soft_ratio"),
             thinking_budget_suffix=inference_data.get("thinking_budget_suffix"),
             second_elicitation_suffix=inference_data.get("second_elicitation_suffix"),
-            second_elicitation_max_tokens=inference_data.get(
-                "second_elicitation_max_tokens", 256
-            ),
+            second_elicitation_max_tokens=inference_data.get("second_elicitation_max_tokens", 256),
         )
 
         return cls(
@@ -552,6 +557,8 @@ class EvalConfig:
                 d["env_llm"] = env_llm_d
             if env.branching_strategy is not None:
                 d["branching_strategy"] = env.branching_strategy
+            if env.difficulties is not None:
+                d["difficulties"] = sorted(env.difficulties)
             if env.iterative is not None:
                 iter_d: dict[str, Any] = {
                     "max_turns": env.iterative.max_turns,
@@ -694,6 +701,11 @@ class EnvironmentFactory:
             env_kwargs["sampling_params"] = create_sampling_params(env_llm_inference)
             if config.env_llm.system_prompt:
                 env_kwargs["system_prompt"] = config.env_llm.system_prompt
+
+        # Pass difficulty filter only when set (avoid polluting adapters that
+        # forward **kwargs to library constructors).
+        if config.difficulties is not None:
+            env_kwargs["difficulties"] = config.difficulties
 
         # Use the environment registry to get the environment
         env = environment_registry.get(
