@@ -286,7 +286,7 @@ class WebShopEnvironment:
             parts.append(prefix.format(instruction=instruction))
             parts.append("")
 
-        parts.append(raw_obs)
+        parts.append(raw_obs.rstrip())
 
         hint = self._prompts.get("action_hint", "")
         if hint:

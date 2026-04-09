@@ -355,7 +355,7 @@ class JerichoEnvironment:
         Returns:
             Formatted observation string.
         """
-        parts = [raw_obs]
+        parts = [raw_obs.rstrip()]
 
         if self._include_valid_actions and valid_actions:
             prefix = self._prompts["valid_actions_prefix"]

@@ -428,7 +428,7 @@ class AlfWorldEnvironment:
             parts.append(prefix.format(objective=objective))
             parts.append("")
 
-        parts.append(raw_obs)
+        parts.append(raw_obs.rstrip())
 
         if self._include_admissible_commands and admissible_commands:
             commands_prefix = self._prompts["admissible_commands_prefix"]

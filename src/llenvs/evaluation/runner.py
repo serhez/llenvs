@@ -817,7 +817,7 @@ class TrajectoryRunner:
         """Append the optional format reminder to a user-facing text block."""
         if text is None or not self.format_reminder:
             return text
-        return text + "\n\n" + self.format_reminder
+        return text.rstrip() + "\n\n" + self.format_reminder
 
     def _resolve_action_text(self, transition: Transition[Any]) -> str:
         """Get the action text for a transition, respecting reasoning stripping.
