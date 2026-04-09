@@ -14,6 +14,7 @@ from llenvs.core.extraction import (
     PatternAnswerExtractor,
     RawGenerationExtractor,
     RegexExtractor,
+    SingleLineExtractor,
     TagBasedExtractor,
 )
 
@@ -139,6 +140,44 @@ class TestTakeFirstNonEmptyLine:
     def test_truncates_selected_line_before_returning(self):
         cleaner = take_first_nonempty_line(max_chars=8)
         assert cleaner("\nsearch[red headphones]\nclick[Buy Now]") == "search[r"
+
+
+class TestSingleLineExtractor:
+    def test_accepts_single_non_empty_line(self):
+        extractor = SingleLineExtractor(TagBasedExtractor(tag_name="action"))
+        answer, meta = extractor.extract("<action>\n north \n</action>")
+
+        assert answer == "north"
+        assert meta["found"] is True
+        assert meta["single_line"] is True
+
+    def test_rejects_multiple_non_empty_lines(self):
+        extractor = SingleLineExtractor(TagBasedExtractor(tag_name="action"))
+        answer, meta = extractor.extract("<action>north\nlook</action>")
+
+        assert answer is None
+        assert meta["found"] is False
+        assert meta["rejected_multiline"] is True
+        assert meta["num_nonempty_lines"] == 2
+
+    def test_passthrough_when_inner_fails(self):
+        extractor = SingleLineExtractor(TagBasedExtractor(tag_name="action"))
+        answer, meta = extractor.extract("no tags")
+
+        assert answer is None
+        assert meta["found"] is False
+
+    def test_rejects_single_line_when_too_long(self):
+        extractor = SingleLineExtractor(
+            RawGenerationExtractor(),
+            max_chars=5,
+        )
+        answer, meta = extractor.extract("northward")
+
+        assert answer is None
+        assert meta["found"] is False
+        assert meta["rejected_too_long"] is True
+        assert meta["max_chars"] == 5
 
 
 class TestRegexExtractor:

@@ -286,6 +286,7 @@ def register_defaults() -> None:
         PatternAnswerExtractor,
         RawGenerationExtractor,
         RegexExtractor,
+        SingleLineExtractor,
         TagBasedExtractor,
     )
 
@@ -298,6 +299,7 @@ def register_defaults() -> None:
     answer_extractor_registry.register("gsm8k", GSM8KExtractor)
     answer_extractor_registry.register("multiple_choice", MultipleChoiceExtractor)
     answer_extractor_registry.register("raw", RawGenerationExtractor)
+    answer_extractor_registry.register("single_line", SingleLineExtractor)
     answer_extractor_registry.register("boxed", BoxedExtractor)
     answer_extractor_registry.register("numeric", NumericExtractor)
     answer_extractor_registry.register("last_line", LastLineExtractor)

@@ -37,6 +37,7 @@ from llenvs.core.extraction import (
     PatternAnswerExtractor,
     RawGenerationExtractor,
     RegexExtractor,
+    SingleLineExtractor,
     TagBasedExtractor,
 )
 from llenvs.core.judge import (
@@ -158,6 +159,7 @@ __all__ = [
     "LastLineExtractor",
     "CodeBlockExtractor",
     "PatternAnswerExtractor",
+    "SingleLineExtractor",
     "CleanedExtractor",
     "NativeExtractor",
     # Registry

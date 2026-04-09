@@ -274,6 +274,58 @@ class RawGenerationExtractor:
 
 
 @dataclass
+class SingleLineExtractor:
+    """Wrap another extractor and reject multi-line extracted content.
+
+    A single non-empty line is accepted. Surrounding blank lines are ignored,
+    so inputs such as ``<action>\n north \n</action>`` still resolve to
+    ``"north"``. Any extraction with more than one non-empty line is rejected.
+    When ``max_chars`` is set, extracted single-line content longer than that
+    limit is rejected as well.
+    """
+
+    inner: AnswerExtractor
+    max_chars: int | None = None
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        result, metadata = self.inner.extract(response)
+        if result is None:
+            return None, metadata
+
+        lines = [line.strip() for line in result.splitlines() if line.strip()]
+        if len(lines) <= 1:
+            content = lines[0] if lines else result.strip()
+            if self.max_chars is not None and len(content) > self.max_chars:
+                enriched = dict(metadata)
+                enriched.update(
+                    {
+                        "found": False,
+                        "rejected_too_long": True,
+                        "single_line": True,
+                        "num_nonempty_lines": len(lines),
+                        "max_chars": self.max_chars,
+                        "content_length": len(content),
+                    }
+                )
+                return None, enriched
+            enriched = dict(metadata)
+            enriched["single_line"] = True
+            enriched["num_nonempty_lines"] = len(lines)
+            return content, enriched
+
+        enriched = dict(metadata)
+        enriched.update(
+            {
+                "found": False,
+                "rejected_multiline": True,
+                "single_line": False,
+                "num_nonempty_lines": len(lines),
+            }
+        )
+        return None, enriched
+
+
+@dataclass
 class BoxedExtractor:
     r"""Extract answers from LaTeX \boxed{...} format.
 
