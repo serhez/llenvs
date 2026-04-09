@@ -4197,6 +4197,8 @@ class HarborEnvironment:
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
         command_soft_timeout: int | None = None,
+        invalid_action_text: str | None = "[invalid action]",
+        invalid_action_observation: str | None = None,
     ) -> None:
         if command_soft_timeout is not None and command_soft_timeout <= 0:
             raise ValueError("command_soft_timeout must be > 0")
@@ -4219,6 +4221,8 @@ class HarborEnvironment:
         self._text_exec_mode = _normalize_text_exec_mode(text_exec_mode)
         self._tmux_bootstrap_if_missing = tmux_bootstrap_if_missing
         self._command_soft_timeout = command_soft_timeout
+        self._invalid_action_text = invalid_action_text
+        self._invalid_action_observation_text = invalid_action_observation
         self._verifier_timeout_sec = _internal_verifier_timeout_sec(
             exec_timeout,
             command_soft_timeout=command_soft_timeout,
@@ -4420,7 +4424,13 @@ class HarborEnvironment:
             **session_info,
         }
 
-    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+    def _text_for_history(
+        self,
+        raw_text: str,
+        extracted_cmd: str | None,
+        *,
+        invalid_action_format: bool = False,
+    ) -> str:
         """Return text for the assistant turn in conversation history.
 
         Uses extracted command when available. On extraction failure, applies
@@ -4430,6 +4440,8 @@ class HarborEnvironment:
         """
         if extracted_cmd is not None:
             return extracted_cmd
+        if invalid_action_format and self._invalid_action_text is not None:
+            return self._invalid_action_text
         if self._answer_extractor is None:
             return raw_text
         from llenvs.core.extraction import CleanedExtractor
@@ -4447,6 +4459,8 @@ class HarborEnvironment:
         Inspects the configured extractor to produce a message that tells
         the model exactly which format is expected.
         """
+        if self._invalid_action_observation_text is not None:
+            return self._invalid_action_observation_text
         from llenvs.core.extraction import (
             CleanedExtractor,
             CompositeExtractor,
@@ -4683,7 +4697,14 @@ class HarborEnvironment:
 
         # Build messages
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
+            {
+                "role": "assistant",
+                "content": self._text_for_history(
+                    action_text,
+                    extracted_cmd,
+                    invalid_action_format=invalid_action_format,
+                ),
+            },
             {"role": "user", "content": obs_text},
         )
 
@@ -4762,7 +4783,11 @@ class HarborEnvironment:
             terminated=terminated,
             truncated=truncated,
             extracted_action=extracted_cmd,
-            resolved_action=extracted_cmd,
+            resolved_action=(
+                self._invalid_action_text
+                if invalid_action_format and self._invalid_action_text is not None
+                else extracted_cmd
+            ),
             info={
                 "episode_step": next_step,
                 "observation": obs_text,
@@ -5399,6 +5424,8 @@ class HarborAdapter:
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
         command_soft_timeout: int | None = None,
+        invalid_action_text: str | None = "[invalid action]",
+        invalid_action_observation: str | None = None,
         difficulties: set[str] | None = None,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
@@ -5439,6 +5466,10 @@ class HarborAdapter:
                 task container if it is missing.
             command_soft_timeout: Text mode only — recoverable timeout (seconds)
                 for live model-issued commands. Disabled when ``None``.
+            invalid_action_text: Text stored in assistant history when
+                malformed responses produce no executable command.
+            invalid_action_observation: Optional custom invalid-format
+                observation shown instead of the default extractor-aware text.
             difficulties: Filter tasks by difficulty level. Only tasks whose
                 difficulty is in this set are included. ``None`` means no
                 filtering. Tasks without explicit difficulty metadata are
@@ -5547,6 +5578,8 @@ class HarborAdapter:
             text_exec_mode=text_exec_mode,
             tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
             command_soft_timeout=command_soft_timeout,
+            invalid_action_text=invalid_action_text,
+            invalid_action_observation=invalid_action_observation,
         )
 
     def get_default_system_prompt(self, name: str) -> str:

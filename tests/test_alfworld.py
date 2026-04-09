@@ -1600,44 +1600,79 @@ class TestAlfWorldAnswerExtractor:
         assert result.next_state.hidden.trajectory == ("go to shelf 1",)
         assert result.next_state.hidden.last_action == "go to shelf 1"
 
-    def test_fallback_to_raw_when_extraction_fails(self):
-        """When extraction returns None, raw action text is used for TextWorld."""
+    def test_invalid_extraction_uses_sentinel_command(self):
+        """Extraction failure wastes a real turn with the configured sentinel."""
         extractor = SimpleTagExtractor()
         env = _make_env(answer_extractor=extractor)
         state, _ = env.reset(options={"task_index": 0})
 
-        # No <answer> tag → extraction fails → fall back to raw text for env step
         raw_text = "go to desk 1"
         result = env.step(state, Action(text=raw_text))
 
-        # StepResult.extracted_action is None (extractor returned None)
         assert result.extracted_action is None
-        assert result.resolved_action is None
-        # Raw text was still used to step TextWorld
+        assert result.resolved_action == "[invalid action]"
+        assert result.info["invalid_action_format"] is True
+        assert result.info["action"] == "__invalid_action_noop__"
+        assert result.next_state.hidden.last_action == "__invalid_action_noop__"
+        assert result.next_state.hidden.trajectory == ("__invalid_action_noop__",)
+        assert result.next_state.metadata.step == 1
+        assert result.next_state.hidden.episode_step == 1
         obs_text = result.next_state.observation.state.text
-        assert "desk 1" in obs_text
+        assert "invalid" in obs_text.lower()
+        assert "Nothing happens." in obs_text
 
     def test_pre_cleaners_applied_to_history_on_extraction_failure(self):
-        """When extraction fails, pre-cleaners still clean the history text."""
+        """On extraction failure, placeholder is stored instead of cleaned raw text."""
         extractor = _make_cleaned_tag_extractor()
         env = _make_env(answer_extractor=extractor)
         state, _ = env.reset(options={"task_index": 0})
 
-        # Thinking tokens + no answer tag → extraction fails, but pre-cleaners run
         raw_text = "<think>I need to go to the desk.</think> go to desk 1"
         result = env.step(state, Action(text=raw_text))
 
-        assert result.extracted_action is None  # no <answer> tag found
+        assert result.extracted_action is None
+        assert result.resolved_action == "[invalid action]"
         assistant_msgs = [
             m for m in result.next_state.observation.messages if m.get("role") == "assistant"
         ]
         assert len(assistant_msgs) == 1
-        # <think> block should be stripped from history even though extraction failed
-        assert "<think>" not in assistant_msgs[0]["content"]
-        assert "go to desk 1" in assistant_msgs[0]["content"]
+        assert assistant_msgs[0]["content"] == "[invalid action]"
+
+    def test_custom_invalid_action_text_used_in_history(self):
+        """Custom invalid_action_text is used for malformed turns."""
+        env = _make_env(
+            answer_extractor=SimpleTagExtractor(),
+            invalid_action_text="[bad action]",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="<think>thinking</think> go to desk 1"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action == "[bad action]"
+        assistant_msgs = [
+            m for m in result.next_state.observation.messages if m.get("role") == "assistant"
+        ]
+        assert assistant_msgs[0]["content"] == "[bad action]"
+
+    def test_none_invalid_action_text_preserves_cleaned_raw_history(self):
+        """When invalid_action_text is None, cleaned raw text stays in history."""
+        extractor = _make_cleaned_tag_extractor()
+        env = _make_env(answer_extractor=extractor, invalid_action_text=None)
+        state, _ = env.reset(options={"task_index": 0})
+
+        raw_text = "<think>thinking</think> go to desk 1"
+        result = env.step(state, Action(text=raw_text))
+
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+        assistant_msgs = [
+            m for m in result.next_state.observation.messages if m.get("role") == "assistant"
+        ]
+        assert assistant_msgs[0]["content"] == "go to desk 1"
 
     def test_pre_cleaners_not_applied_when_extractor_is_plain(self):
-        """With a plain (non-CleanedExtractor) extractor, fallback uses raw text."""
+        """With a plain extractor and no placeholder, raw text stays in history."""
         env = _make_env(answer_extractor=SimpleTagExtractor())
         state, _ = env.reset(options={"task_index": 0})
 
@@ -1645,11 +1680,11 @@ class TestAlfWorldAnswerExtractor:
         result = env.step(state, Action(text=raw_text))
 
         assert result.extracted_action is None
+        assert result.resolved_action == "[invalid action]"
         assistant_msgs = [
             m for m in result.next_state.observation.messages if m.get("role") == "assistant"
         ]
-        # Plain extractor has no pre_cleaners → raw text in history
-        assert assistant_msgs[0]["content"] == raw_text
+        assert assistant_msgs[0]["content"] == "[invalid action]"
 
     def test_no_extractor_uses_raw_text(self):
         """Without extractor, extracted_action/resolved_action are None."""

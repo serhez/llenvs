@@ -510,6 +510,7 @@ class TrajectoryRunner:
     history_fn: HistoryFn | None = None
     prompt_budget: Any | None = None  # PromptBudget — uses Any to avoid circular import
     include_reasoning_in_history: bool = False
+    format_reminder: str | None = None
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
     last_environment_errors: dict[int, dict[str, Any]] = field(
@@ -722,6 +723,14 @@ class TrajectoryRunner:
                         turn=turn,
                     )
                 current_state_text = prefix + current_state_text
+            current_state_text = self._append_format_reminder(current_state_text)
+        elif self.format_reminder and messages and messages[-1].role == "user":
+            last = messages[-1]
+            messages[-1] = ChatMessage(
+                role=last.role,
+                content=self._append_format_reminder(last.content),
+                images=last.images,
+            )
 
         # Apply history function or prompt budget
         if self.prompt_budget is not None:
@@ -804,26 +813,33 @@ class TrajectoryRunner:
             return self.turn_info
         return None
 
+    def _append_format_reminder(self, text: str | None) -> str | None:
+        """Append the optional format reminder to a user-facing text block."""
+        if text is None or not self.format_reminder:
+            return text
+        return text + "\n\n" + self.format_reminder
+
     def _resolve_action_text(self, transition: Transition[Any]) -> str:
         """Get the action text for a transition, respecting reasoning stripping.
 
-        When ``include_reasoning_in_history`` is False (default), looks for
-        ``resolved_action`` on the transition first, then falls back to
-        ``extracted_action`` or ``extracted_answer`` in the transition's step
-        info, and uses that instead of the full model response.
+        When ``include_reasoning_in_history`` is False (default), uses the
+        priority chain ``resolved_action`` → ``extracted_action`` → legacy
+        step-info fields → raw text with thinking stripped.  This matches
+        ``value_bench.methods.serialization.action_text_for_display``.
         """
         full_text = transition.action.text or ""
 
         if self.include_reasoning_in_history:
             return full_text
 
-        # Prefer extracted_action (strips reasoning even on mapping failure)
-        if transition.extracted_action is not None:
-            return transition.extracted_action
-
-        # Then resolved_action (backward compat)
+        # Prefer resolved_action (formatted native command, or placeholder
+        # for invalid actions).
         if transition.resolved_action is not None:
             return transition.resolved_action
+
+        # Then extracted_action (strips reasoning even on mapping failure)
+        if transition.extracted_action is not None:
+            return transition.extracted_action
 
         # Legacy fallback: extracted action/answer from step info
         step_info = transition.info.get("step", {})
@@ -914,6 +930,14 @@ class TrajectoryRunner:
                     )
                 )
 
+        if self.format_reminder and messages and messages[-1].role == "user":
+            last = messages[-1]
+            messages[-1] = ChatMessage(
+                role=last.role,
+                content=self._append_format_reminder(last.content),
+                images=last.images,
+            )
+
         return messages
 
     def _legacy_message_images(self, msg: dict[str, Any]) -> tuple[Any, ...]:
@@ -1001,8 +1025,15 @@ class TrajectoryRunner:
         if current_message is not None:
             current_user_message = ChatMessage(
                 role="user",
-                content=current_message.get("content", "") or "",
+                content=self._append_format_reminder(current_message.get("content", "") or ""),
                 images=self._legacy_message_images(current_message),
+            )
+        elif self.format_reminder and messages and messages[-1].role == "user":
+            last = messages[-1]
+            messages[-1] = ChatMessage(
+                role=last.role,
+                content=self._append_format_reminder(last.content),
+                images=last.images,
             )
 
         if self.prompt_budget is not None:

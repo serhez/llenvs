@@ -42,6 +42,14 @@ DEFAULT_ALFWORLD_PROMPTS: dict[str, str] = {
     "admissible_commands_prefix": "Admissible commands:",
 }
 
+DEFAULT_INVALID_ACTION_TEXT = "[invalid action]"
+DEFAULT_INVALID_NOOP_COMMAND = "__invalid_action_noop__"
+DEFAULT_ALFWORLD_INVALID_ACTION_OBSERVATION = (
+    "The provided action was invalid. A turn was wasted. "
+    "Provide exactly one action in the required format and use a valid command "
+    "described above."
+)
+
 _SPLIT_DATA_KEYS: dict[str, str] = {
     "train": "data_path",
     "eval_in_distribution": "eval_id_data_path",
@@ -204,6 +212,9 @@ class AlfWorldEnvironment:
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         answer_extractor: AnswerExtractor | None = None,
+        invalid_action_text: str | None = DEFAULT_INVALID_ACTION_TEXT,
+        invalid_action_observation: str | None = None,
+        advance_on_invalid: str | None = DEFAULT_INVALID_NOOP_COMMAND,
     ) -> None:
         """Initialize AlfWorld environment wrapper.
 
@@ -227,6 +238,13 @@ class AlfWorldEnvironment:
                 command is used for both the TextWorld step and the
                 conversation history, keeping the history clean of
                 reasoning tokens.
+            invalid_action_text: Assistant history text stored when no
+                executable action could be extracted.
+            invalid_action_observation: Optional custom reminder shown
+                before the fallback env observation on malformed turns.
+            advance_on_invalid: Real TextWorld command executed when no
+                action could be extracted. Defaults to a fixed sentinel
+                invalid command so native episode limits still advance.
         """
         self._game_files = game_files
         self._config = config
@@ -240,6 +258,9 @@ class AlfWorldEnvironment:
         if prompts:
             self._prompts.update(prompts)
         self._answer_extractor = answer_extractor
+        self._invalid_action_text = invalid_action_text
+        self._invalid_action_observation = invalid_action_observation
+        self._advance_on_invalid = advance_on_invalid
 
         # Cache registered env_ids to avoid TextWorld registry leak
         self._env_id_cache: dict[str, str] = {}
@@ -511,7 +532,13 @@ class AlfWorldEnvironment:
             "game_file": game_file,
         }
 
-    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+    def _text_for_history(
+        self,
+        raw_text: str,
+        extracted_cmd: str | None,
+        *,
+        invalid_action_format: bool = False,
+    ) -> str:
         """Return the text to store as the assistant turn in conversation history.
 
         Uses the extracted command when available. On extraction failure, applies
@@ -527,6 +554,8 @@ class AlfWorldEnvironment:
         """
         if extracted_cmd is not None:
             return extracted_cmd
+        if invalid_action_format and self._invalid_action_text is not None:
+            return self._invalid_action_text
         if self._answer_extractor is None:
             return raw_text
         from llenvs.core.extraction import CleanedExtractor
@@ -536,6 +565,17 @@ class AlfWorldEnvironment:
                 cleaned = cleaner(cleaned)
             return cleaned
         return raw_text
+
+    def _invalid_action_notice(self) -> str:
+        if self._invalid_action_observation is not None:
+            return self._invalid_action_observation
+        return DEFAULT_ALFWORLD_INVALID_ACTION_OBSERVATION
+
+    def _combine_invalid_observation(self, env_feedback: str) -> str:
+        notice = self._invalid_action_notice()
+        if not env_feedback:
+            return notice
+        return f"{notice}\n\n{env_feedback}"
 
     def step(
         self,
@@ -555,29 +595,44 @@ class AlfWorldEnvironment:
 
         # Extract clean command for TextWorld (strips reasoning tokens etc.)
         extracted_cmd: str | None = None
-        if self._answer_extractor is not None and action.text:
-            extracted_cmd, _ = self._answer_extractor.extract(action.text)
-        cmd_for_env = extracted_cmd or action_text
+        extraction_metadata: dict[str, Any] = {}
+        invalid_action_format = False
+        if self._answer_extractor is not None:
+            extracted_cmd, extraction_metadata = self._answer_extractor.extract(action_text)
+            if extracted_cmd is not None:
+                extracted_cmd = extracted_cmd.strip()
+                if not extracted_cmd:
+                    extracted_cmd = None
+        if self._answer_extractor is not None and extracted_cmd is None:
+            cmd_for_env = self._advance_on_invalid
+            invalid_action_format = True
+        else:
+            cmd_for_env = extracted_cmd or action_text
 
         # Create fresh env and replay trajectory to reach current state
         gym_env, _, _, _ = self._init_game(state.hidden.game_file)
         for cmd in state.hidden.trajectory:
             gym_env.step(cmd)
 
-        # Apply new action
-        obs, scores, dones, infos = gym_env.step(cmd_for_env)
+        if cmd_for_env is not None:
+            # Apply new action
+            obs, scores, dones, infos = gym_env.step(cmd_for_env)
+
+            # Unbatch results
+            raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
+            won = False
+            admissible_commands: tuple[str, ...] = ()
+
+            if isinstance(infos, dict):
+                won_val = infos.get("won", False)
+                won = won_val[0] if isinstance(won_val, (list, tuple)) else won_val
+                ac_val = infos.get("admissible_commands", ())
+                admissible_commands = _unbatch_admissible_commands(ac_val)
+        else:
+            raw_obs = state.observation.state.text if state.observation.state is not None else ""
+            won = False
+            admissible_commands = state.hidden.admissible_commands
         gym_env.close()
-
-        # Unbatch results
-        raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
-        won = False
-        admissible_commands: tuple[str, ...] = ()
-
-        if isinstance(infos, dict):
-            won_val = infos.get("won", False)
-            won = won_val[0] if isinstance(won_val, (list, tuple)) else won_val
-            ac_val = infos.get("admissible_commands", ())
-            admissible_commands = _unbatch_admissible_commands(ac_val)
 
         # Extract text and images from observation
         images: tuple[ImageContent, ...] = ()
@@ -590,6 +645,12 @@ class AlfWorldEnvironment:
             obs_text = raw_obs.get("text", str(raw_obs))
         else:
             obs_text = raw_obs
+
+        obs_text = (
+            self._combine_invalid_observation(obs_text)
+            if invalid_action_format
+            else obs_text
+        )
 
         # Check truncation
         next_step = state.hidden.episode_step + 1
@@ -609,7 +670,11 @@ class AlfWorldEnvironment:
             episode_step=next_step,
             last_action=cmd_for_env,
             admissible_commands=admissible_commands,
-            trajectory=(*state.hidden.trajectory, cmd_for_env),
+            trajectory=(
+                (*state.hidden.trajectory, cmd_for_env)
+                if cmd_for_env is not None
+                else state.hidden.trajectory
+            ),
         )
 
         user_msg: dict[str, Any] = {"role": "user", "content": obs_prompt}
@@ -619,7 +684,14 @@ class AlfWorldEnvironment:
             ]
 
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
+            {
+                "role": "assistant",
+                "content": self._text_for_history(
+                    action_text,
+                    extracted_cmd,
+                    invalid_action_format=invalid_action_format,
+                ),
+            },
             user_msg,
         )
         state_parts = [obs_text]
@@ -646,7 +718,9 @@ class AlfWorldEnvironment:
             info={
                 **state.metadata.info,
                 "won": won,
-                "last_action": action_text,
+                "last_action": cmd_for_env,
+                "invalid_action_format": invalid_action_format,
+                **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
 
@@ -665,11 +739,17 @@ class AlfWorldEnvironment:
             terminated=terminated,
             truncated=truncated,
             extracted_action=extracted_cmd,
-            resolved_action=extracted_cmd,
+            resolved_action=(
+                self._invalid_action_text
+                if invalid_action_format and self._invalid_action_text is not None
+                else extracted_cmd
+            ),
             info={
                 "won": won,
                 "action": cmd_for_env,
                 "admissible_commands": admissible_commands,
+                "invalid_action_format": invalid_action_format,
+                **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
 
@@ -840,6 +920,9 @@ class AlfWorldAdapter:
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         answer_extractor: AnswerExtractor | None = None,
+        invalid_action_text: str | None = DEFAULT_INVALID_ACTION_TEXT,
+        invalid_action_observation: str | None = None,
+        advance_on_invalid: str | None = DEFAULT_INVALID_NOOP_COMMAND,
         **kwargs: Any,
     ) -> AlfWorldEnvironment:
         """Create an AlfWorld environment.
@@ -866,6 +949,12 @@ class AlfWorldAdapter:
             prompts: Override default prompt components.
             answer_extractor: Extractor applied to raw action text before
                 passing the command to TextWorld.
+            invalid_action_text: Assistant history text stored for
+                malformed responses.
+            invalid_action_observation: Optional custom reminder shown
+                before the fallback env observation on malformed turns.
+            advance_on_invalid: Real TextWorld command executed when no
+                action could be extracted.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -946,6 +1035,9 @@ class AlfWorldAdapter:
             extra_rewards=extra_rewards,
             prompts=prompts,
             answer_extractor=answer_extractor,
+            invalid_action_text=invalid_action_text,
+            invalid_action_observation=invalid_action_observation,
+            advance_on_invalid=advance_on_invalid,
         )
 
     def get_default_system_prompt(self, name: str) -> None:

@@ -21,6 +21,13 @@ DEFAULT_JERICHO_PROMPTS: dict[str, str] = {
     "valid_actions_prefix": "Valid actions:",
 }
 
+DEFAULT_INVALID_ACTION_TEXT = "[invalid action]"
+DEFAULT_JERICHO_INVALID_ACTION_OBSERVATION = (
+    "The provided action was invalid. A turn was wasted. "
+    "Provide exactly one action in the required format and use a valid command "
+    "described above."
+)
+
 
 class JerichoEmulatorHaltedError(RuntimeError):
     """Raised when Jericho reports that the emulator halted."""
@@ -181,6 +188,9 @@ class JerichoEnvironment:
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
         answer_extractor: AnswerExtractor | None = None,
+        invalid_action_text: str | None = DEFAULT_INVALID_ACTION_TEXT,
+        invalid_action_observation: str | None = None,
+        advance_on_invalid: str | None = "wait",
     ) -> None:
         """Initialize Jericho environment wrapper.
 
@@ -201,6 +211,13 @@ class JerichoEnvironment:
             answer_extractor: Optional extractor for parsing clean
                 commands from raw model output (strips reasoning tokens,
                 etc.).
+            invalid_action_text: Assistant history text stored when no
+                executable action could be extracted.
+            invalid_action_observation: Optional custom reminder shown
+                before the real fallback observation on malformed turns.
+            advance_on_invalid: Real Jericho command to execute when
+                extraction fails. Defaults to ``"wait"`` so the in-game
+                move counter stays aligned with wrapper steps.
         """
         self._game_files = game_files
         self._game_names = game_names
@@ -214,6 +231,9 @@ class JerichoEnvironment:
             self._prompts.update(prompts)
         self._state_tracker = None if pure_step else _StateContinuityTracker()
         self._answer_extractor = answer_extractor
+        self._invalid_action_text = invalid_action_text
+        self._invalid_action_observation = invalid_action_observation
+        self._advance_on_invalid = advance_on_invalid
 
         # Current FrotzEnv instance (re-created per task)
         self._frotz_env: Any = None
@@ -445,7 +465,13 @@ class JerichoEnvironment:
             "max_score": init_info["max_score"],
         }
 
-    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+    def _text_for_history(
+        self,
+        raw_text: str,
+        extracted_cmd: str | None,
+        *,
+        invalid_action_format: bool = False,
+    ) -> str:
         """Return text for the assistant turn in conversation history.
 
         Uses extracted command when available. On extraction failure, applies
@@ -453,6 +479,8 @@ class JerichoEnvironment:
         """
         if extracted_cmd is not None:
             return extracted_cmd
+        if invalid_action_format and self._invalid_action_text is not None:
+            return self._invalid_action_text
         if self._answer_extractor is None:
             return raw_text
         from llenvs.core.extraction import CleanedExtractor
@@ -463,6 +491,17 @@ class JerichoEnvironment:
                 cleaned = cleaner(cleaned)
             return cleaned
         return raw_text
+
+    def _invalid_action_notice(self) -> str:
+        if self._invalid_action_observation is not None:
+            return self._invalid_action_observation
+        return DEFAULT_JERICHO_INVALID_ACTION_OBSERVATION
+
+    def _combine_invalid_observation(self, env_feedback: str) -> str:
+        notice = self._invalid_action_notice()
+        if not env_feedback:
+            return notice
+        return f"{notice}\n\n{env_feedback}"
 
     def step(
         self,
@@ -497,21 +536,43 @@ class JerichoEnvironment:
 
         # Extract clean command (strips reasoning tokens etc.)
         extracted_cmd: str | None = None
-        if self._answer_extractor is not None and action_text:
-            extracted_cmd, _ = self._answer_extractor.extract(action_text)
-        cmd_for_env = extracted_cmd or action_text
+        extraction_metadata: dict[str, Any] = {}
+        invalid_action_format = False
+        if self._answer_extractor is not None:
+            extracted_cmd, extraction_metadata = self._answer_extractor.extract(action_text)
+            if extracted_cmd is not None:
+                extracted_cmd = extracted_cmd.strip()
+                if not extracted_cmd:
+                    extracted_cmd = None
 
-        # Step Jericho environment
-        raw_obs, reward, done, info = self._frotz_env.step(cmd_for_env)
-        self._check_emulator_halted("after step")
+        if self._answer_extractor is not None and extracted_cmd is None:
+            cmd_for_env = self._advance_on_invalid
+            invalid_action_format = True
+        else:
+            cmd_for_env = extracted_cmd or action_text
 
-        # Get current score and valid actions
-        current_score = self._frotz_env.get_score()
-        max_score = self._frotz_env.get_max_score()
-        moves = self._frotz_env.get_moves()
-        score_delta = current_score - state.hidden.prev_score
+        if cmd_for_env is not None:
+            # Step Jericho environment
+            raw_obs, reward, done, info = self._frotz_env.step(cmd_for_env)
+            self._check_emulator_halted("after step")
 
-        valid_actions = self._get_valid_actions()
+            # Get current score and valid actions
+            current_score = self._frotz_env.get_score()
+            max_score = self._frotz_env.get_max_score()
+            moves = self._frotz_env.get_moves()
+            score_delta = current_score - state.hidden.prev_score
+
+            valid_actions = self._get_valid_actions()
+        else:
+            raw_obs = ""
+            reward = 0
+            done = False
+            info = {}
+            current_score = state.hidden.score
+            max_score = state.hidden.max_score
+            moves = state.hidden.moves
+            score_delta = 0
+            valid_actions = state.hidden.valid_actions
 
         # Check termination/truncation
         next_step = state.hidden.episode_step + 1
@@ -522,7 +583,12 @@ class JerichoEnvironment:
         frotz_state = self._frotz_env.get_state() if self._pure_step else None
 
         # Build next observation
-        obs_prompt = self._build_observation_prompt(raw_obs, valid_actions)
+        obs_text = (
+            self._combine_invalid_observation(raw_obs)
+            if invalid_action_format
+            else raw_obs
+        )
+        obs_prompt = self._build_observation_prompt(obs_text, valid_actions)
 
         new_hidden = JerichoHidden(
             task_index=state.hidden.task_index,
@@ -539,7 +605,14 @@ class JerichoEnvironment:
         )
 
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
+            {
+                "role": "assistant",
+                "content": self._text_for_history(
+                    action_text,
+                    extracted_cmd,
+                    invalid_action_format=invalid_action_format,
+                ),
+            },
             {"role": "user", "content": obs_prompt},
         )
         new_observation = Observation(
@@ -568,6 +641,8 @@ class JerichoEnvironment:
                 "score_delta": score_delta,
                 "done": done,
                 "last_action": cmd_for_env,
+                "invalid_action_format": invalid_action_format,
+                **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
 
@@ -588,7 +663,11 @@ class JerichoEnvironment:
             terminated=terminated,
             truncated=truncated,
             extracted_action=extracted_cmd,
-            resolved_action=extracted_cmd,
+            resolved_action=(
+                self._invalid_action_text
+                if invalid_action_format and self._invalid_action_text is not None
+                else extracted_cmd
+            ),
             info={
                 "score": current_score,
                 "max_score": max_score,
@@ -596,6 +675,8 @@ class JerichoEnvironment:
                 "done": done,
                 "action": cmd_for_env,
                 "valid_actions": valid_actions,
+                "invalid_action_format": invalid_action_format,
+                **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
 
@@ -672,6 +753,9 @@ class JerichoAdapter:
         prompts: dict[str, str] | None = None,
         pure_step: bool = False,
         answer_extractor: AnswerExtractor | None = None,
+        invalid_action_text: str | None = DEFAULT_INVALID_ACTION_TEXT,
+        invalid_action_observation: str | None = None,
+        advance_on_invalid: str | None = "wait",
         **kwargs: Any,
     ) -> JerichoEnvironment:
         """Create a Jericho environment.
@@ -692,6 +776,12 @@ class JerichoAdapter:
                 Jericho's native get_state()/set_state() for branching.
             answer_extractor: Optional extractor for parsing clean
                 commands from raw model output.
+            invalid_action_text: Assistant history text stored for
+                malformed responses.
+            invalid_action_observation: Optional custom reminder shown
+                on malformed turns.
+            advance_on_invalid: Real Jericho command executed when no
+                action could be extracted.
             **kwargs: Additional arguments (unused).
 
         Returns:
@@ -746,6 +836,9 @@ class JerichoAdapter:
             prompts=prompts,
             pure_step=pure_step,
             answer_extractor=answer_extractor,
+            invalid_action_text=invalid_action_text,
+            invalid_action_observation=invalid_action_observation,
+            advance_on_invalid=advance_on_invalid,
         )
 
     def get_default_system_prompt(self, name: str) -> None:

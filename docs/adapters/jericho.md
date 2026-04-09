@@ -113,11 +113,21 @@ env = adapter.get_environment(
     max_steps=100,                         # default: 100
     include_valid_actions=False,           # default: False (wrapper fidelity)
     pure_step=True,                        # default: False; enable for MC rollouts
+    invalid_action_text="[invalid action]",  # default placeholder in history
+    invalid_action_observation=None,       # custom reminder prefix
+    advance_on_invalid="wait",            # default: keep Jericho moves aligned
     prompts={                              # override prompt templates
         "valid_actions_prefix": "Available commands:",
     },
 )
 ```
+
+When an `answer_extractor` is configured and extraction fails, Jericho no longer
+forwards the raw model text to the emulator. By default it executes `wait`,
+prepends an invalid-format reminder to the observation, and stores
+`[invalid action]` in history display. This keeps wrapper turns and Jericho's
+internal move counter aligned while avoiding refusal or hallucinated text
+polluting the conversation history.
 
 ## Rewards
 

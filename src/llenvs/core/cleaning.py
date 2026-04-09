@@ -21,6 +21,30 @@ def strip_special_tokens(text: str) -> str:
     return _SPECIAL_TOKEN_PATTERN.sub("", text)
 
 
+def take_first_nonempty_line(max_chars: int | None = None) -> Callable[[str], str]:
+    """Create a cleaner that keeps only the first non-empty line.
+
+    Args:
+        max_chars: Optional hard cap applied to the selected line.
+    """
+
+    def _take(text: str) -> str:
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if max_chars is not None and len(stripped) > max_chars:
+                return stripped[:max_chars]
+            return stripped
+
+        stripped = text.strip()
+        if max_chars is not None and len(stripped) > max_chars:
+            return stripped[:max_chars]
+        return stripped
+
+    return _take
+
+
 _THINKING_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.DOTALL)
 _UNCLOSED_THINKING_PATTERN = re.compile(r"<think>.*$", re.DOTALL)
 _ORPHAN_END_THINK_PATTERN = re.compile(r"^.*?</think>", re.DOTALL)
@@ -115,6 +139,7 @@ def truncate_tail(max_chars: int = 256) -> Callable[[str], str]:
 
 
 CLEANER_FACTORIES: dict[str, Callable[..., Callable[[str], str]]] = {
+    "take_first_nonempty_line": take_first_nonempty_line,
     "truncate_tail": truncate_tail,
 }
 

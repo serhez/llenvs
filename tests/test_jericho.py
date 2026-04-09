@@ -179,6 +179,20 @@ def _make_env(
     return env
 
 
+class SimpleTagExtractor:
+    """Minimal extractor that pulls text from <answer>...</answer>."""
+
+    def extract(self, text: str | None) -> tuple[str | None, dict]:
+        if not text:
+            return None, {}
+        import re
+
+        match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+        if match:
+            return match.group(1).strip(), {}
+        return None, {}
+
+
 @pytest.fixture
 def mock_frotz() -> MockFrotzEnv:
     """Create a mock Jericho FrotzEnv."""
@@ -706,6 +720,53 @@ class TestJerichoMessageHistory:
         assert result.terminated is True
         assert len(result.next_state.observation.messages) == 2
         assert result.next_state.observation.messages[0] == {"role": "assistant", "content": "die"}
+
+
+class TestJerichoAnswerExtractor:
+    def test_valid_extraction_uses_extracted_command(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(mock_frotz=mock_frotz, answer_extractor=SimpleTagExtractor())
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="<answer>open mailbox</answer>"))
+
+        assert result.extracted_action == "open mailbox"
+        assert result.resolved_action == "open mailbox"
+        assert result.info["action"] == "open mailbox"
+        assert result.next_state.hidden.last_action == "open mailbox"
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "open mailbox"
+
+    def test_invalid_extraction_executes_wait_and_uses_placeholder(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(mock_frotz=mock_frotz, answer_extractor=SimpleTagExtractor())
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="open mailbox"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action == "[invalid action]"
+        assert result.info["invalid_action_format"] is True
+        assert result.info["action"] == "wait"
+        assert result.next_state.hidden.last_action == "wait"
+        assert result.next_state.hidden.moves == 1
+        assert result.next_state.metadata.step == 1
+        assert "invalid" in result.next_state.observation.state.text.lower()
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "[invalid action]"
+
+    def test_none_invalid_action_text_preserves_raw_history(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(
+            mock_frotz=mock_frotz,
+            answer_extractor=SimpleTagExtractor(),
+            invalid_action_text=None,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="open mailbox"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "open mailbox"
 
 
 # ---------------------------------------------------------------------------

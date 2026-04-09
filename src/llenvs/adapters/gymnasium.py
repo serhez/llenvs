@@ -1051,6 +1051,7 @@ class GymnasiumEnvironment:
             terminated=False,
             truncated=truncated,
             extracted_action=extracted_action,
+            resolved_action=assistant_content if extracted_action is None else None,
             info=error_info,
         )
 

@@ -1200,7 +1200,7 @@ class TestHarborEnvironment:
 
         assert len(mock_env._exec_history) == before
         assert result.extracted_action is None
-        assert result.resolved_action is None
+        assert result.resolved_action == "[invalid action]"
         assert result.info["invalid_action_format"] is True
         assert result.info["extraction_metadata"] == {
             "found": False,
@@ -1218,6 +1218,8 @@ class TestHarborEnvironment:
         )
         assert result.next_state.hidden.last_action == "ls"
         assert result.next_state.hidden.trajectory == ()
+        assistant_turn = result.next_state.observation.messages[-2]
+        assert assistant_turn["content"] == "[invalid action]"
 
     def test_step_with_strict_action_regex_uses_action_specific_feedback(self):
         from llenvs.core.extraction import RegexExtractor
@@ -1250,7 +1252,7 @@ class TestHarborEnvironment:
 
         assistant_turn = result.next_state.observation.messages[-2]
         assert assistant_turn["role"] == "assistant"
-        assert assistant_turn["content"] == "apt update && apt install -y python3-pgmpy"
+        assert assistant_turn["content"] == "[invalid action]"
 
     def test_step_tmux_session_uses_two_exec_success_path(self):
         runtime = _FakeTmuxRuntime(

@@ -1,6 +1,6 @@
 """Tests for answer extraction."""
 
-from llenvs.core.cleaning import strip_special_tokens
+from llenvs.core.cleaning import strip_special_tokens, take_first_nonempty_line
 from llenvs.core.extraction import (
     BoxedExtractor,
     CleanedExtractor,
@@ -125,6 +125,20 @@ class TestTagBasedExtractor:
         assert answer == "correct"
         assert meta["found"] is True
         assert meta["closed"] is False
+
+
+class TestTakeFirstNonEmptyLine:
+    def test_returns_first_non_empty_line(self):
+        cleaner = take_first_nonempty_line()
+        assert cleaner("\n\n  go north  \nI refuse") == "go north"
+
+    def test_skips_blank_lines_only(self):
+        cleaner = take_first_nonempty_line()
+        assert cleaner(" \n\t\n") == ""
+
+    def test_truncates_selected_line_before_returning(self):
+        cleaner = take_first_nonempty_line(max_chars=8)
+        assert cleaner("\nsearch[red headphones]\nclick[Buy Now]") == "search[r"
 
 
 class TestRegexExtractor:
