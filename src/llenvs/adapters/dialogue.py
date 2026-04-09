@@ -146,6 +146,15 @@ class DialogueEnvironment:
         self._is_terminal = is_terminal
 
     @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return getattr(self, "_answer_extractor", None)
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
+    @property
     def prompts(self) -> dict[str, str]:
         return {}
 

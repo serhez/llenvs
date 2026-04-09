@@ -264,6 +264,15 @@ class GemEnvironment:
         self._current_task_index = 0
 
     @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
+    @property
     def prompts(self) -> dict[str, str]:
         """GEM manages its own observations."""
         return {}

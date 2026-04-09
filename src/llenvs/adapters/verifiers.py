@@ -198,6 +198,15 @@ class VerifiersSingleTurnEnvironment:
         self._extra_rewards = extra_rewards
 
     @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
+    @property
     def system_prompt(self) -> str | None:
         """The environment's system prompt."""
         return self._vf_env.system_prompt

@@ -244,6 +244,15 @@ class AlfWorldEnvironment:
         # Cache registered env_ids to avoid TextWorld registry leak
         self._env_id_cache: dict[str, str] = {}
 
+    @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
     def __len__(self) -> int:
         return len(self._game_files)
 

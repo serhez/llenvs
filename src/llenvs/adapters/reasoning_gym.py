@@ -132,6 +132,18 @@ class ReasoningGymEnvironment:
         self._dataset_name = getattr(dataset, "name", "reasoning_gym")
 
     @property
+    def answer_extractor(self) -> AnswerExtractor:
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value: AnswerExtractor) -> None:
+        self._answer_extractor = value
+        for rf in self._native_rewards:
+            if isinstance(rf, CorrectnessRewardFunction):
+                rf._answer_extractor = value
+
+    @property
     def prompts(self) -> dict[str, str]:
         """Single-turn environment has no configurable prompts."""
         return {}

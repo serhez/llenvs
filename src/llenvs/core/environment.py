@@ -6,11 +6,16 @@ Environments with ``pure_step=True`` are genuine pure functions;
 others enforce sequential continuity and raise on stale states.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, runtime_checkable
 
 from llenvs.core.reward import RewardFunction, SignalBundle
 from llenvs.core.state import Action, State
+
+if TYPE_CHECKING:
+    from llenvs.core.extraction import AnswerExtractor
 
 HiddenT = TypeVar("HiddenT")
 
@@ -213,6 +218,21 @@ class Environment(Protocol[HiddenT]):
     def reward_functions(self) -> tuple[RewardFunction[HiddenT], ...]:
         """Get the reward functions used by this environment."""
         ...
+
+    @property
+    def answer_extractor(self) -> AnswerExtractor | None:
+        """The extractor used to parse agent responses in ``step()``.
+
+        Settable at runtime to swap extraction behaviour, e.g. when
+        ranking collection needs a different extractor than trajectory
+        collection.
+
+        Returns ``None`` for environments that do not use extraction.
+        """
+        ...
+
+    @answer_extractor.setter
+    def answer_extractor(self, value: AnswerExtractor | None) -> None: ...
 
     def reset(
         self,

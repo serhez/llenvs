@@ -148,6 +148,15 @@ class AgentGymEnvironment:
         self._prompts: dict[str, str] = dict(prompts) if prompts else {}
         self._state_tracker = _StateContinuityTracker()
 
+    @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return getattr(self, "_answer_extractor", None)
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
     def __len__(self) -> int:
         """Number of tasks in the dataset."""
         return self._data_len

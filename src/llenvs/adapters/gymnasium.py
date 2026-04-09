@@ -864,6 +864,15 @@ class GymnasiumEnvironment:
         # State continuity tracking (only for non-pure envs)
         self._state_tracker = None if pure_step else _StateContinuityTracker()
 
+    @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
     def __len__(self) -> int:
         if self._seeds is not None:
             return len(self._seeds)
