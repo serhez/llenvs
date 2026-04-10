@@ -769,6 +769,65 @@ class TestJerichoAnswerExtractor:
         assert assistant_msg["content"] == "open mailbox"
 
 
+class TestFrotzCommandSanitization:
+    """Multi-line text must never reach Frotz.
+
+    Frotz's stdin pipe only consumes one line per Z-Machine READ
+    instruction.  Extra lines stay in the pipe buffer and leak into
+    subsequent set_state/step calls, corrupting other trajectories
+    that share the same FrotzEnv instance.
+    """
+
+    def test_multiline_raw_action_truncated_to_first_line(
+        self, mock_frotz: MockFrotzEnv
+    ):
+        """Without an extractor, multi-line action.text is truncated."""
+        env = _make_env(mock_frotz=mock_frotz)  # no extractor
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(
+            state,
+            Action(text="open mailbox\n\nextra junk\nmore junk"),
+        )
+
+        assert result.info["action"] == "open mailbox"
+        assert result.next_state.hidden.last_action == "open mailbox"
+
+    def test_multiline_raw_action_skips_leading_blank_lines(
+        self, mock_frotz: MockFrotzEnv
+    ):
+        """Leading blank lines are skipped; first non-empty line is used."""
+        env = _make_env(mock_frotz=mock_frotz)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="\n\nopen mailbox\ngarbage"))
+
+        assert result.info["action"] == "open mailbox"
+
+    def test_trailing_newlines_stripped(self, mock_frotz: MockFrotzEnv):
+        """Trailing newlines on a single-line command are stripped."""
+        env = _make_env(mock_frotz=mock_frotz)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="open mailbox\n\n\n"))
+
+        assert result.info["action"] == "open mailbox"
+
+    def test_multiline_with_extractor_fallback(self, mock_frotz: MockFrotzEnv):
+        """When extraction fails and advance_on_invalid is multi-line, sanitize."""
+        env = _make_env(
+            mock_frotz=mock_frotz,
+            answer_extractor=SimpleTagExtractor(),
+            advance_on_invalid="wait\nextra",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        # No <answer> tags → extraction fails → advance_on_invalid used
+        result = env.step(state, Action(text="no tags here"))
+
+        assert result.info["action"] == "wait"
+
+
 # ---------------------------------------------------------------------------
 # Prompt tests
 # ---------------------------------------------------------------------------

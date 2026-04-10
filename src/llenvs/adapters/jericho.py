@@ -29,6 +29,21 @@ DEFAULT_JERICHO_INVALID_ACTION_OBSERVATION = (
 )
 
 
+def _sanitize_frotz_command(cmd: str) -> str:
+    """Reduce a command to a single line for the Frotz emulator.
+
+    Frotz reads one line per Z-Machine READ instruction.  Any extra
+    lines remain in the stdin pipe buffer and leak into the *next*
+    ``set_state`` / ``step`` call — corrupting whichever trajectory
+    is processed next when multiple trajectories share one FrotzEnv.
+    """
+    for line in cmd.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return cmd.strip()
+
+
 class JerichoEmulatorHaltedError(RuntimeError):
     """Raised when Jericho reports that the emulator halted."""
 
@@ -550,6 +565,11 @@ class JerichoEnvironment:
             invalid_action_format = True
         else:
             cmd_for_env = extracted_cmd or action_text
+
+        # Frotz reads one line per READ instruction; extra lines stay in the
+        # stdin pipe and leak into the next set_state/step call.
+        if cmd_for_env is not None:
+            cmd_for_env = _sanitize_frotz_command(cmd_for_env)
 
         if cmd_for_env is not None:
             # Step Jericho environment
