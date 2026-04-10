@@ -5290,7 +5290,7 @@ class HarborAdapter:
         """Load Harbor tasks without creating environments."""
         dataset_name, version = self._parse_name(name)
         if dataset_path is not None:
-            cache_key = ("path", str(Path(dataset_path).resolve()))
+            cache_key = ("path", str(Path(dataset_path).expanduser().resolve()))
         else:
             cache_key = ("registry", dataset_name, version)
 
@@ -5610,7 +5610,7 @@ class HarborAdapter:
 
     @staticmethod
     def _load_tasks_from_path(api: _HarborAPI, dataset_path: str) -> tuple[Any, ...]:
-        tasks_root = Path(dataset_path)
+        tasks_root = Path(dataset_path).expanduser()
         if not tasks_root.exists():
             raise FileNotFoundError(f"Dataset path does not exist: {dataset_path}")
 
