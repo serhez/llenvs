@@ -845,6 +845,14 @@ class _HarborTmuxTextSession:
                 else:
                     raise result from exc
 
+        # Strip trailing newlines so the prefix-based diff in
+        # _diff_full_buffer works reliably.  tmux pane rows below the
+        # cursor emit variable-length trailing newlines; Docker's exec
+        # transport preserves them while the HPC transport (podman-hpc,
+        # apptainer) already rstrips all whitespace, making this a
+        # no-op there.  Only newlines are stripped (not spaces) so the
+        # prompt's trailing space is preserved at the diff boundary.
+        full_buffer = full_buffer.rstrip("\n")
         observation = self._diff_full_buffer(full_buffer)
         observation = self._sanitize_observation(observation, command_text, used_staged_file)
         if observation == "":
@@ -1107,7 +1115,14 @@ class _HarborTmuxTextSession:
             f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
-        return getattr(result, "stdout", "") or ""
+        # Strip trailing newlines: tmux pane rows below the cursor
+        # produce trailing newlines whose count changes as content is
+        # added.  Stripping them keeps _previous_full_buffer stable for
+        # prefix-based diffs.  Only newlines are stripped (not spaces)
+        # so the prompt's trailing space is preserved at the diff
+        # boundary.  No-op for HPC runtimes whose exec transport layer
+        # already rstrips all whitespace.
+        return (getattr(result, "stdout", "") or "").rstrip("\n")
 
     def _capture_visible_screen(self) -> str:
         result = self._exec(
