@@ -13,8 +13,8 @@ from llenvs.core.state import (
 )
 from llenvs.core.trajectory import Trajectory, Transition
 from llenvs.evaluation.history import HistoryEntry, no_history
-from llenvs.evaluation.runner import _coalesce_messages
-from llenvs.inference.protocol import ChatMessage
+from llenvs.evaluation.runner import TrajectoryRunner, _coalesce_messages
+from llenvs.inference.protocol import ChatMessage, GenerationResult, StopReason
 
 # =============================================================================
 # _coalesce_messages tests
@@ -1162,3 +1162,670 @@ class TestInitialObservation:
         messages = runner._build_messages(current, trajectory=trajectory)
         # Empty task coalesced with initial obs
         assert "Game opening." in messages[0].content
+
+
+# =============================================================================
+# _prior_history_from_messages unit tests
+# =============================================================================
+
+
+class TestPriorHistoryFromMessages:
+    """Tests for the _prior_history_from_messages helper."""
+
+    def _make_runner(self):
+        from unittest.mock import MagicMock
+
+        from llenvs.inference.protocol import SamplingParams
+
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        mock_backend = MagicMock()
+
+        return TrajectoryRunner(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+        )
+
+    def test_empty_messages(self):
+        """Empty messages → ([], [])."""
+        runner = self._make_runner()
+        result = runner._prior_history_from_messages((), split_final_user=False)
+        assert result == ([], [])
+
+    def test_one_assistant_user_pair(self):
+        """2 messages (1 assistant/user pair) → no prefix, 1 history entry."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "You see a door."},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is not None
+        prefix_msgs, entries = result
+        assert prefix_msgs == []
+        assert len(entries) == 1
+        assert entries[0].action_text == "go north"
+        assert entries[0].observation_text == "You see a door."
+
+    def test_three_assistant_user_pairs(self):
+        """6 messages (3 pairs) → 3 history entries with monotonic steps."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "o1"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "o2"},
+            {"role": "assistant", "content": "a3"},
+            {"role": "user", "content": "o3"},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is not None
+        prefix_msgs, entries = result
+        assert prefix_msgs == []
+        assert len(entries) == 3
+        assert entries[0].action_text == "a1"
+        assert entries[0].observation_text == "o1"
+        assert entries[2].action_text == "a3"
+        assert entries[2].observation_text == "o3"
+        # Monotonic step numbers starting at 1
+        assert entries[0].step == 1
+        assert entries[1].step == 2
+        assert entries[2].step == 3
+
+    def test_trailing_assistant(self):
+        """Trailing assistant → final entry with empty observation."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "o1"},
+            {"role": "assistant", "content": "a2"},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is not None
+        _, entries = result
+        assert len(entries) == 2
+        assert entries[1].action_text == "a2"
+        assert entries[1].observation_text == ""
+
+    def test_tool_calls_returns_none(self):
+        """Messages with tool calls → None."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "using tool", "tool_calls": [{"id": "1"}]},
+            {"role": "user", "content": "tool result"},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is None
+
+    def test_unexpected_role_returns_none(self):
+        """Unexpected role (e.g. 'tool') → None."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "tool", "content": "tool result"},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is None
+
+    def test_leading_user_message_craftax(self):
+        """Leading user message (craftax pattern) → in prefix_messages."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "user", "content": "Initial game observation"},
+            {"role": "assistant", "content": "look around"},
+            {"role": "user", "content": "You see a tree."},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is not None
+        prefix_msgs, entries = result
+        assert len(prefix_msgs) == 1
+        assert prefix_msgs[0].role == "user"
+        assert prefix_msgs[0].content == "Initial game observation"
+        assert len(entries) == 1
+        assert entries[0].action_text == "look around"
+        assert entries[0].observation_text == "You see a tree."
+
+    def test_split_final_user_true(self):
+        """split_final_user=True: final user excluded, assistant becomes empty-obs entry."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "o1"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "current obs"},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=True)
+        assert result is not None
+        _, entries = result
+        assert len(entries) == 2
+        assert entries[0].action_text == "a1"
+        assert entries[0].observation_text == "o1"
+        # Second entry: a2 with empty obs (the final user was split off)
+        assert entries[1].action_text == "a2"
+        assert entries[1].observation_text == ""
+
+    def test_split_final_user_noop_when_trailing_assistant(self):
+        """split_final_user=True: no effect when messages end with assistant."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "o1"},
+            {"role": "assistant", "content": "a2"},
+        )
+        result_split = runner._prior_history_from_messages(msgs, split_final_user=True)
+        result_nosplit = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result_split is not None
+        assert result_nosplit is not None
+        _, entries_split = result_split
+        _, entries_nosplit = result_nosplit
+        assert len(entries_split) == len(entries_nosplit)
+        assert entries_split[1].observation_text == entries_nosplit[1].observation_text
+
+    def test_messages_with_images(self):
+        """User messages with images → entries with populated observation_images."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "assistant", "content": "look"},
+            {"role": "user", "content": "You see this.", "images": [
+                {"data": "imgdata", "media_type": "image/png"},
+            ]},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is not None
+        _, entries = result
+        assert len(entries) == 1
+        assert len(entries[0].observation_images) == 1
+        assert entries[0].observation_images[0].data == "imgdata"
+
+    def test_multiple_leading_user_messages(self):
+        """Multiple leading user messages before first assistant."""
+        runner = self._make_runner()
+        msgs = (
+            {"role": "user", "content": "System context"},
+            {"role": "user", "content": "Game rules"},
+            {"role": "assistant", "content": "play"},
+            {"role": "user", "content": "Result"},
+        )
+        result = runner._prior_history_from_messages(msgs, split_final_user=False)
+        assert result is not None
+        prefix_msgs, entries = result
+        assert len(prefix_msgs) == 2
+        assert prefix_msgs[0].content == "System context"
+        assert prefix_msgs[1].content == "Game rules"
+        assert len(entries) == 1
+        assert entries[0].action_text == "play"
+
+
+# =============================================================================
+# Structured messages with prior history reconstruction
+# =============================================================================
+
+
+class TestStructuredMessagesWithPriorHistory:
+    """Integration tests for _build_structured_messages with mid-episode state restoration."""
+
+    def _make_runner(self, system_prompt=None, history_fn=None, format_reminder=None,
+                     prompt_budget=None, max_steps=10):
+        from unittest.mock import MagicMock
+
+        from llenvs.inference.protocol import SamplingParams
+
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = max_steps
+        mock_backend = MagicMock()
+
+        kwargs = dict(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+            system_prompt=system_prompt,
+        )
+        if history_fn is not None:
+            kwargs["history_fn"] = history_fn
+        if format_reminder is not None:
+            kwargs["format_reminder"] = format_reminder
+        if prompt_budget is not None:
+            kwargs["prompt_budget"] = prompt_budget
+        return TrajectoryRunner(**kwargs)
+
+    def _mid_episode_state(self, step=3, task_text="Task.", state_text="Current obs.",
+                           messages=()):
+        """Create a mid-episode state with accumulated messages."""
+        task = ObservationContent(text=task_text)
+        state_content = ObservationContent(text=state_text)
+        return _make_state(
+            prompt=task_text,
+            task=task,
+            state=state_content,
+            step=step,
+            messages=messages,
+        )
+
+    # -- Zero transitions (run_batch_from_states shape) --
+
+    def test_zero_transitions_prior_history_present(self):
+        """0 transitions from mid-episode state → prior history present, current obs once."""
+        prior_messages = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "Room 2"},
+            {"role": "assistant", "content": "look"},
+            {"role": "user", "content": "Current obs."},
+        )
+        restored_state = self._mid_episode_state(step=2, messages=prior_messages)
+        trajectory = Trajectory.create(restored_state)
+
+        runner = self._make_runner()
+        messages = runner._build_messages(restored_state, trajectory=trajectory)
+
+        user_msgs = [m for m in messages if m.role == "user"]
+        assistant_msgs = [m for m in messages if m.role == "assistant"]
+        assert len(assistant_msgs) == 2
+        assert assistant_msgs[0].content == "go north"
+        assert assistant_msgs[1].content == "look"
+        # Current observation appears exactly once
+        full_text = "\n".join(m.content for m in messages)
+        assert full_text.count("Current obs.") == 1
+
+    def test_zero_transitions_no_history_drops_prior(self):
+        """0 transitions + no_history → current obs still appears, prior history dropped."""
+        prior_messages = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "Room 2"},
+            {"role": "assistant", "content": "look"},
+            {"role": "user", "content": "Current obs."},
+        )
+        restored_state = self._mid_episode_state(step=2, messages=prior_messages)
+        trajectory = Trajectory.create(restored_state)
+
+        runner = self._make_runner(history_fn=no_history)
+        messages = runner._build_messages(restored_state, trajectory=trajectory)
+
+        full_text = "\n".join(m.content for m in messages)
+        assert "go north" not in full_text
+        assert "Room 2" not in full_text
+        assert "Current obs." in full_text
+
+    def test_zero_transitions_prompt_budget_preserves_current(self):
+        """0 transitions + prompt_budget → current obs survives even with tight budget."""
+        prior_messages = (
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "o1"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "Current obs."},
+        )
+        restored_state = self._mid_episode_state(step=2, messages=prior_messages)
+        trajectory = Trajectory.create(restored_state)
+
+        from llenvs.evaluation.history import PromptBudget
+
+        budget = PromptBudget(
+            max_prompt_tokens=50,  # very tight
+            estimate_tokens=lambda s: len(s) // 4,
+            build_history=lambda entries, available: [],  # drop all history
+        )
+        runner = self._make_runner(prompt_budget=budget)
+        messages = runner._build_messages(restored_state, trajectory=trajectory)
+
+        full_text = "\n".join(m.content for m in messages)
+        assert "Current obs." in full_text
+
+    def test_zero_transitions_format_reminder_on_current(self):
+        """0 transitions + format_reminder → reminder on current obs, not on task."""
+        prior_messages = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "Room 2"},
+            {"role": "assistant", "content": "look"},
+            {"role": "user", "content": "Current obs."},
+        )
+        restored_state = self._mid_episode_state(step=2, messages=prior_messages)
+        trajectory = Trajectory.create(restored_state)
+
+        runner = self._make_runner(format_reminder="REMINDER: use tags")
+        messages = runner._build_messages(restored_state, trajectory=trajectory)
+
+        user_msgs = [m for m in messages if m.role == "user"]
+        last_user = user_msgs[-1].content
+        assert "REMINDER: use tags" in last_user
+        assert "Current obs." in last_user
+
+    # -- One transition (run_batch_from_state_actions shape) --
+
+    def test_one_transition_prior_history(self):
+        """1 transition from mid-episode: prior history + new transition present."""
+        prior_messages = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "Room 2"},
+        )
+        restored_state = self._mid_episode_state(
+            step=1, state_text="Room 2", messages=prior_messages,
+        )
+
+        task = ObservationContent(text="Task.")
+        new_state = _make_state(
+            prompt="Task.", task=task,
+            state=ObservationContent(text="Room 3"), step=2,
+        )
+        trajectory = Trajectory.create(restored_state)
+        trajectory.add_transition(
+            Transition(
+                state=restored_state,
+                action=Action(text="go east"),
+                next_state=new_state,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        runner = self._make_runner()
+        messages = runner._build_messages(new_state, trajectory=trajectory)
+
+        assistant_msgs = [m for m in messages if m.role == "assistant"]
+        assert len(assistant_msgs) == 2
+        assert assistant_msgs[0].content == "go north"
+        assert assistant_msgs[1].content == "go east"
+        full_text = "\n".join(m.content for m in messages)
+        assert "Room 3" in full_text
+
+    # -- Many new transitions --
+
+    def test_many_transitions_prior_history_persists(self):
+        """Start from step 3, add 5 transitions → prior history still present."""
+        prior_messages = (
+            {"role": "assistant", "content": "a0"},
+            {"role": "user", "content": "o0"},
+            {"role": "assistant", "content": "a1"},
+            {"role": "user", "content": "o1"},
+            {"role": "assistant", "content": "a2"},
+            {"role": "user", "content": "o2"},
+        )
+        restored_state = self._mid_episode_state(
+            step=3, state_text="o2", messages=prior_messages,
+        )
+
+        task = ObservationContent(text="Task.")
+        trajectory = Trajectory.create(restored_state)
+        prev_state = restored_state
+        for i in range(5):
+            next_state = _make_state(
+                prompt="Task.", task=task,
+                state=ObservationContent(text=f"new_obs_{i}"),
+                step=4 + i,
+            )
+            trajectory.add_transition(
+                Transition(
+                    state=prev_state,
+                    action=Action(text=f"new_action_{i}"),
+                    next_state=next_state,
+                    rewards=SignalBundle(signals=()),
+                )
+            )
+            prev_state = next_state
+
+        runner = self._make_runner()
+        messages = runner._build_messages(prev_state, trajectory=trajectory)
+
+        full_text = "\n".join(m.content for m in messages)
+        assert "a0" in full_text
+        assert "a1" in full_text
+        assert "a2" in full_text
+        for i in range(5):
+            assert f"new_action_{i}" in full_text
+        assert "new_obs_4" in full_text
+
+    # -- Edge cases --
+
+    def test_step0_no_reconstruction(self):
+        """Step 0 state → no prior reconstruction (normal behavior)."""
+        state = _make_state(
+            prompt="Task.",
+            task=ObservationContent(text="Task."),
+            state=ObservationContent(text="Initial."),
+            step=0,
+            messages=(
+                {"role": "assistant", "content": "should not appear"},
+                {"role": "user", "content": "ignored"},
+            ),
+        )
+        trajectory = Trajectory.create(state)
+
+        runner = self._make_runner()
+        messages = runner._build_messages(state, trajectory=trajectory)
+
+        full_text = "\n".join(m.content for m in messages)
+        assert "should not appear" not in full_text
+        assert "Initial." in full_text
+
+    def test_mid_episode_empty_messages_no_reconstruction(self):
+        """State at step 5 with empty messages → no prior entries."""
+        state = self._mid_episode_state(step=5, messages=())
+        trajectory = Trajectory.create(state)
+
+        runner = self._make_runner()
+        messages = runner._build_messages(state, trajectory=trajectory)
+
+        user_msgs = [m for m in messages if m.role == "user"]
+        assert len(user_msgs) >= 1
+        full_text = "\n".join(m.content for m in messages)
+        assert "Current obs." in full_text
+
+    def test_last_n_history_with_reconstruction(self):
+        """last_n_history(2) → only last 2 from combined prior + suffix history."""
+        from llenvs.evaluation.history import last_n_history
+
+        prior_messages = (
+            {"role": "assistant", "content": "old_action"},
+            {"role": "user", "content": "old_obs"},
+            {"role": "assistant", "content": "recent_action"},
+            {"role": "user", "content": "recent_obs"},
+        )
+        restored_state = self._mid_episode_state(
+            step=2, state_text="recent_obs", messages=prior_messages,
+        )
+
+        task = ObservationContent(text="Task.")
+        new_state = _make_state(
+            prompt="Task.", task=task,
+            state=ObservationContent(text="newest"), step=3,
+        )
+        trajectory = Trajectory.create(restored_state)
+        trajectory.add_transition(
+            Transition(
+                state=restored_state,
+                action=Action(text="new_action"),
+                next_state=new_state,
+                rewards=SignalBundle(signals=()),
+            )
+        )
+
+        runner = self._make_runner(history_fn=last_n_history(2))
+        messages = runner._build_messages(new_state, trajectory=trajectory)
+
+        full_text = "\n".join(m.content for m in messages)
+        assert "recent_action" in full_text
+        assert "new_action" in full_text
+        assert "old_action" not in full_text
+
+    def test_craftax_leading_user_message_preserved(self):
+        """Craftax-style leading user message → preserved via reconstructed_prefix_msgs."""
+        prior_messages = (
+            {"role": "user", "content": "Initial game state from reset"},
+            {"role": "assistant", "content": "explore"},
+            {"role": "user", "content": "You found a tree."},
+            {"role": "assistant", "content": "chop tree"},
+            {"role": "user", "content": "Current obs."},
+        )
+        restored_state = self._mid_episode_state(
+            step=2, state_text="Current obs.", messages=prior_messages,
+        )
+        trajectory = Trajectory.create(restored_state)
+
+        runner = self._make_runner()
+        messages = runner._build_messages(restored_state, trajectory=trajectory)
+
+        full_text = "\n".join(m.content for m in messages)
+        assert "Initial game state from reset" in full_text
+        assert "explore" in full_text
+        assert "You found a tree." in full_text
+
+    # -- Runner path tests --
+
+    def test_run_batch_from_states_includes_prior_history(self):
+        """run_batch_from_states from mid-episode → prompts include prior history."""
+        from unittest.mock import MagicMock
+
+        from llenvs.inference.protocol import SamplingParams
+
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        mock_env.spec.name = "test-env"
+
+        prior_messages = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "Room 2"},
+        )
+        task = ObservationContent(text="Task.")
+        state_content = ObservationContent(text="Room 2")
+        restored_state = State(
+            observation=Observation(
+                prompt="Task.",
+                messages=prior_messages,
+                task=task,
+                state=state_content,
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=1, episode_id="test", is_terminal=False),
+        )
+
+        captured_prompts = []
+
+        def _gen_batch(msgs_batch, params):
+            captured_prompts.extend(msgs_batch)
+            return [
+                GenerationResult(text="done", finish_reason=StopReason.END_OF_TEXT)
+                for _ in msgs_batch
+            ]
+
+        mock_backend = MagicMock()
+        mock_backend.generate_chat_batch.side_effect = _gen_batch
+
+        terminal = State(
+            observation=Observation(
+                prompt="Task.",
+                task=task,
+                state=ObservationContent(text="Done."),
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=2, episode_id="test", is_terminal=True),
+        )
+        mock_env.step.return_value = MagicMock(
+            next_state=terminal,
+            rewards=SignalBundle(signals=()),
+            extracted_action=None,
+            resolved_action=None,
+            info={},
+            done=True,
+        )
+
+        runner = TrajectoryRunner(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+        )
+        runner.run_batch_from_states([restored_state], max_steps=1)
+
+        assert len(captured_prompts) >= 1
+        first_prompt = captured_prompts[0]
+        prompt_text = "\n".join(m.content for m in first_prompt)
+        assert "go north" in prompt_text
+
+    def test_run_batch_from_state_actions_includes_prior_history(self):
+        """run_batch_from_state_actions from mid-episode → prior history in prompts."""
+        from unittest.mock import MagicMock
+
+        from llenvs.inference.protocol import SamplingParams
+
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        mock_env.spec.name = "test-env"
+
+        prior_messages = (
+            {"role": "assistant", "content": "go north"},
+            {"role": "user", "content": "Room 2"},
+        )
+        task = ObservationContent(text="Task.")
+        state_content = ObservationContent(text="Room 2")
+        restored_state = State(
+            observation=Observation(
+                prompt="Task.",
+                messages=prior_messages,
+                task=task,
+                state=state_content,
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=1, episode_id="test", is_terminal=False),
+        )
+
+        after_action = State(
+            observation=Observation(
+                prompt="Task.",
+                task=task,
+                state=ObservationContent(text="Room 3"),
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=2, episode_id="test", is_terminal=False),
+        )
+        terminal = State(
+            observation=Observation(
+                prompt="Task.",
+                task=task,
+                state=ObservationContent(text="Done."),
+            ),
+            hidden=None,
+            metadata=StateMetadata(step=3, episode_id="test", is_terminal=True),
+        )
+
+        step_results = [
+            MagicMock(
+                next_state=after_action,
+                rewards=SignalBundle(signals=()),
+                extracted_action=None,
+                resolved_action=None,
+                info={},
+                done=False,
+            ),
+            MagicMock(
+                next_state=terminal,
+                rewards=SignalBundle(signals=()),
+                extracted_action=None,
+                resolved_action=None,
+                info={},
+                done=True,
+            ),
+        ]
+        mock_env.step.side_effect = step_results
+
+        captured_prompts = []
+
+        def _gen_batch(msgs_batch, params):
+            captured_prompts.extend(msgs_batch)
+            return [
+                GenerationResult(text="done", finish_reason=StopReason.END_OF_TEXT)
+                for _ in msgs_batch
+            ]
+
+        mock_backend = MagicMock()
+        mock_backend.generate_chat_batch.side_effect = _gen_batch
+
+        runner = TrajectoryRunner(
+            environment=mock_env,
+            backend=mock_backend,
+            sampling_params=SamplingParams(),
+        )
+        runner.run_batch_from_state_actions(
+            [restored_state],
+            [Action(text="go east")],
+            max_steps=2,
+        )
+
+        assert len(captured_prompts) >= 1
+        prompt_text = "\n".join(m.content for m in captured_prompts[0])
+        assert "go north" in prompt_text

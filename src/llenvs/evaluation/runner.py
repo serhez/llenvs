@@ -698,6 +698,29 @@ class TrajectoryRunner:
                     )
                 )
 
+        # When a trajectory was created fresh from a mid-episode state, the
+        # transitions only capture the rollout suffix.  Reconstruct the prefix
+        # transcript from the restored state's observation.messages.
+        reconstructed_prefix_msgs: list[ChatMessage] = []
+        init_obs = trajectory.initial_state.observation
+        if init_obs.messages and trajectory.initial_state.metadata.step > 0:
+            reconstructed = self._prior_history_from_messages(
+                init_obs.messages,
+                split_final_user=not trajectory.transitions,
+            )
+            if reconstructed is not None:
+                reconstructed_prefix_msgs, prior = reconstructed
+                if prior:
+                    history_entries = prior + history_entries
+                if reconstructed_prefix_msgs or prior:
+                    # Do not separately inject the restored state's observation.
+                    # If there are new transitions, the restored state already
+                    # lives in `prior`. If there are no new transitions, the
+                    # helper kept the restored current observation out of
+                    # history, and the normal current_state_text path will add
+                    # it exactly once.
+                    initial_obs_msg = None
+
         # Resolve current state content early so we can measure it for budgets
         skip_current_state = False
         if obs.state is not None and task is not None and state.metadata.step == 0:
@@ -752,10 +775,17 @@ class TrajectoryRunner:
                     budget.estimate_tokens(initial_obs_msg.content or "")
                     + self._MSG_OVERHEAD_TOKENS
                 )
+            for pfx_msg in reconstructed_prefix_msgs:
+                non_history_tokens += (
+                    budget.estimate_tokens(pfx_msg.content or "")
+                    + self._MSG_OVERHEAD_TOKENS
+                )
             available = max(0, budget.max_prompt_tokens - non_history_tokens)
             history_messages = budget.build_history(history_entries, available)
             if initial_obs_msg is not None and history_messages:
                 messages.append(initial_obs_msg)
+            if reconstructed_prefix_msgs and history_messages:
+                messages.extend(reconstructed_prefix_msgs)
             messages.extend(history_messages)
 
             # Phase 2: truncate current observation if still over budget
@@ -791,6 +821,8 @@ class TrajectoryRunner:
             history_messages = fn(history_entries)
             if initial_obs_msg is not None and history_messages:
                 messages.append(initial_obs_msg)
+            if reconstructed_prefix_msgs and history_messages:
+                messages.extend(reconstructed_prefix_msgs)
             messages.extend(history_messages)
 
         # Add current state observation
@@ -954,6 +986,96 @@ class TrajectoryRunner:
             )
             for im in msg["images"]
         )
+
+    def _prior_history_from_messages(
+        self,
+        messages: tuple[dict[str, Any], ...],
+        *,
+        split_final_user: bool,
+    ) -> tuple[list[ChatMessage], list["HistoryEntry"]] | None:
+        """Reconstruct structured prompt context from accumulated messages.
+
+        Returns ``(prefix_messages, history_entries)``, or ``None`` if the
+        transcript contains tool calls or unsupported roles.
+
+        When *split_final_user* is ``True`` and the transcript ends with a
+        user message, that final user message is excluded from the result so
+        the caller can present it via the normal ``current_state_text`` path.
+        """
+        from llenvs.evaluation.history import HistoryEntry
+
+        if not messages:
+            return ([], [])
+
+        raw = list(messages)
+
+        # When split_final_user is requested and the last message is a user
+        # message, pop it so it stays on the current_state_text path.
+        if split_final_user and raw and raw[-1].get("role", "user") == "user":
+            raw.pop()
+
+        prefix_messages: list[ChatMessage] = []
+        history_entries: list[HistoryEntry] = []
+        pending_action: str | None = None
+        step_counter = 0
+
+        for msg in raw:
+            role = msg.get("role", "user")
+
+            if role == "assistant":
+                if msg.get("tool_calls"):
+                    return None
+                # Flush any pending action as an empty-observation entry
+                if pending_action is not None:
+                    step_counter += 1
+                    history_entries.append(
+                        HistoryEntry(
+                            action_text=pending_action,
+                            observation_text="",
+                            step=step_counter,
+                        )
+                    )
+                pending_action = msg.get("content", "") or ""
+                continue
+
+            if role == "user":
+                if pending_action is None:
+                    # Leading user message(s) before any assistant turn
+                    prefix_messages.append(
+                        ChatMessage(
+                            role="user",
+                            content=msg.get("content", "") or "",
+                            images=self._legacy_message_images(msg),
+                        )
+                    )
+                else:
+                    step_counter += 1
+                    history_entries.append(
+                        HistoryEntry(
+                            action_text=pending_action,
+                            observation_text=msg.get("content", "") or "",
+                            observation_images=self._legacy_message_images(msg),
+                            step=step_counter,
+                        )
+                    )
+                    pending_action = None
+                continue
+
+            # Unexpected role (tool, system, etc.)
+            return None
+
+        # Trailing assistant with no paired user
+        if pending_action is not None:
+            step_counter += 1
+            history_entries.append(
+                HistoryEntry(
+                    action_text=pending_action,
+                    observation_text="",
+                    step=step_counter,
+                )
+            )
+
+        return (prefix_messages, history_entries)
 
     def _build_budgeted_legacy_messages(
         self,
