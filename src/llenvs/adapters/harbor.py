@@ -3743,7 +3743,7 @@ class ApptainerHPCEnvironment:
 
         if self._rootfs_mode == "sandbox":
             await self._start_sandbox_instance()
-            self.logger.info("Apptainer rootfs mode selected: sandbox")
+            self.logger.debug("Apptainer rootfs mode selected: sandbox")
             return
 
         cached_probe, probe_owner = self._claim_overlay_probe()
@@ -3780,7 +3780,7 @@ class ApptainerHPCEnvironment:
 
             self.logger.info("Apptainer overlay probe failed; falling back to writable sandbox")
             await self._start_sandbox_instance()
-            self.logger.info("Apptainer rootfs mode selected: sandbox")
+            self.logger.debug("Apptainer rootfs mode selected: sandbox")
         finally:
             if probe_owner:
                 self._finish_overlay_probe(probe_result)
