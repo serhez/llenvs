@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from llenvs.core.reward import SignalBundle
 from llenvs.core.state import (
     Action,
@@ -13,8 +15,14 @@ from llenvs.core.state import (
 )
 from llenvs.core.trajectory import Trajectory, Transition
 from llenvs.evaluation.history import HistoryEntry, no_history
-from llenvs.evaluation.runner import _coalesce_messages
-from llenvs.inference.protocol import ChatMessage
+from llenvs.evaluation.runner import (
+    MultiEvalEntry,
+    TrajectoryRunner,
+    _coalesce_messages,
+    _task_index_for_state,
+    run_multi_evaluation,
+)
+from llenvs.inference.protocol import ChatMessage, GenerationResult, StopReason
 
 # =============================================================================
 # _coalesce_messages tests
@@ -1162,3 +1170,200 @@ class TestInitialObservation:
         messages = runner._build_messages(current, trajectory=trajectory)
         # Empty task coalesced with initial obs
         assert "Game opening." in messages[0].content
+
+
+# =============================================================================
+# _task_index_for_state tests
+# =============================================================================
+
+
+class TestTaskIndexForState:
+    def _make_state(self, *, info=None, hidden=None):
+        return State(
+            observation=Observation(prompt="obs"),
+            hidden=hidden,
+            metadata=StateMetadata(
+                step=0,
+                episode_id="test",
+                is_terminal=False,
+                info=info or {},
+            ),
+        )
+
+    def test_extracts_from_metadata_info(self):
+        state = self._make_state(info={"task_index": 7})
+        assert _task_index_for_state(state) == 7
+
+    def test_extracts_from_hidden_task_index(self):
+        hidden = type("Hidden", (), {"task_index": 3})()
+        state = self._make_state(hidden=hidden)
+        assert _task_index_for_state(state) == 3
+
+    def test_defaults_to_zero(self):
+        state = self._make_state()
+        assert _task_index_for_state(state) == 0
+
+    def test_metadata_info_takes_precedence(self):
+        hidden = type("Hidden", (), {"task_index": 3})()
+        state = self._make_state(info={"task_index": 5}, hidden=hidden)
+        assert _task_index_for_state(state) == 5
+
+    def test_non_int_task_index_falls_through(self):
+        state = self._make_state(info={"task_index": "not-an-int"})
+        assert _task_index_for_state(state) == 0
+
+
+# =============================================================================
+# system_prompt_fn tests
+# =============================================================================
+
+
+class TestSystemPromptFn:
+    def _make_env(self):
+        from unittest.mock import MagicMock
+        mock_env = MagicMock()
+        mock_env.spec.max_steps = 10
+        return mock_env
+
+    def _make_backend(self):
+        from unittest.mock import MagicMock
+        return MagicMock()
+
+    def test_mutually_exclusive_with_system_prompt(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            TrajectoryRunner(
+                environment=self._make_env(),
+                backend=self._make_backend(),
+                system_prompt="static",
+                system_prompt_fn=lambda s, t: "dynamic",
+            )
+
+    def test_system_prompt_fn_resolves_per_state(self):
+        runner = TrajectoryRunner(
+            environment=self._make_env(),
+            backend=self._make_backend(),
+            system_prompt_fn=lambda state, task_index: f"prompt-{task_index}",
+        )
+        state = State(
+            observation=Observation(prompt="obs"),
+            hidden=None,
+            metadata=StateMetadata(step=0, episode_id="t", is_terminal=False, info={}),
+        )
+        assert runner._resolve_system_prompt(state, 0) == "prompt-0"
+        assert runner._resolve_system_prompt(state, 5) == "prompt-5"
+
+    def test_static_system_prompt_ignores_task_index(self):
+        runner = TrajectoryRunner(
+            environment=self._make_env(),
+            backend=self._make_backend(),
+            system_prompt="static-prompt",
+        )
+        state = State(
+            observation=Observation(prompt="obs"),
+            hidden=None,
+            metadata=StateMetadata(step=0, episode_id="t", is_terminal=False, info={}),
+        )
+        assert runner._resolve_system_prompt(state, 42) == "static-prompt"
+
+    def test_heterogeneous_prompts_in_legacy_messages(self):
+        prompts = {0: "Game A prompt", 1: "Game B prompt"}
+        runner = TrajectoryRunner(
+            environment=self._make_env(),
+            backend=self._make_backend(),
+            system_prompt_fn=lambda state, task_index: prompts.get(task_index, "default"),
+        )
+        state = State(
+            observation=Observation(prompt="obs"),
+            hidden=None,
+            metadata=StateMetadata(step=0, episode_id="t", is_terminal=False, info={}),
+        )
+        msgs_a = runner._build_messages(state, task_index=0)
+        msgs_b = runner._build_messages(state, task_index=1)
+        assert msgs_a[0].role == "system"
+        assert msgs_a[0].content == "Game A prompt"
+        assert msgs_b[0].role == "system"
+        assert msgs_b[0].content == "Game B prompt"
+
+    def test_none_system_prompt_fn_returns_none(self):
+        runner = TrajectoryRunner(
+            environment=self._make_env(),
+            backend=self._make_backend(),
+            system_prompt_fn=lambda state, task_index: None,
+        )
+        state = State(
+            observation=Observation(prompt="obs"),
+            hidden=None,
+            metadata=StateMetadata(step=0, episode_id="t", is_terminal=False, info={}),
+        )
+        msgs = runner._build_messages(state, task_index=0)
+        assert msgs[0].role != "system"
+
+    def test_run_multi_evaluation_threads_task_index_to_prompt_fn(self):
+        from unittest.mock import MagicMock
+
+        backend = MagicMock()
+        captured_batches: list[list[ChatMessage]] = []
+
+        def _generate_chat_batch(messages_batch, params):
+            captured_batches.extend(messages_batch)
+            return [
+                GenerationResult(text="look", finish_reason=StopReason.END_OF_TEXT)
+                for _ in messages_batch
+            ]
+
+        backend.generate_chat_batch.side_effect = _generate_chat_batch
+
+        env = MagicMock()
+        env.spec.max_steps = 1
+        env.spec.name = "test-env"
+
+        def _reset(*, options):
+            task_index = options["task_index"]
+            return (
+                State(
+                    observation=Observation(prompt=f"obs-{task_index}"),
+                    hidden=None,
+                    metadata=StateMetadata(
+                        step=0,
+                        episode_id=f"ep-{task_index}",
+                        is_terminal=False,
+                        info={"task_index": task_index},
+                    ),
+                ),
+                {},
+            )
+
+        def _step(state, action):
+            next_state = State(
+                observation=Observation(prompt="done"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=1,
+                    episode_id=state.metadata.episode_id,
+                    is_terminal=True,
+                    info=state.metadata.info,
+                ),
+            )
+            return MagicMock(
+                next_state=next_state,
+                rewards=SignalBundle(signals=()),
+                extracted_action=None,
+                resolved_action=None,
+                info={},
+                done=True,
+            )
+
+        env.reset.side_effect = _reset
+        env.step.side_effect = _step
+
+        runner = TrajectoryRunner(
+            environment=env,
+            backend=backend,
+            system_prompt_fn=lambda state, task_index: f"prompt-{task_index}",
+        )
+
+        run_multi_evaluation([MultiEvalEntry(runner=runner, task_indices=[7])])
+
+        assert len(captured_batches) == 1
+        assert captured_batches[0][0].role == "system"
+        assert captured_batches[0][0].content == "prompt-7"

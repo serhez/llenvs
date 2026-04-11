@@ -225,6 +225,21 @@ class BatchResult:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def _task_index_for_state(state: State[Any]) -> int:
+    """Extract the task index from a state's metadata or hidden fields.
+
+    Lookup order:
+    1. ``state.metadata.info["task_index"]`` (set by multi-instance resets)
+    2. ``state.hidden.task_index`` (adapter-level task identity)
+    3. ``0`` (single-task default)
+    """
+    task_index = state.metadata.info.get("task_index")
+    if isinstance(task_index, int):
+        return task_index
+    hidden_task_index = getattr(state.hidden, "task_index", 0)
+    return hidden_task_index if isinstance(hidden_task_index, int) else 0
+
+
 @dataclass
 class _ActiveTrajectory:
     """Internal state for tracking a trajectory during lockstep batch execution."""
@@ -513,14 +528,36 @@ class TrajectoryRunner:
     format_reminder: str | None = None
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
+    system_prompt_fn: Callable[[State[Any], int | None], str | None] | None = None
     last_environment_errors: dict[int, dict[str, Any]] = field(
         default_factory=dict, init=False,
     )
+
+    def __post_init__(self) -> None:
+        if self.system_prompt is not None and self.system_prompt_fn is not None:
+            raise ValueError(
+                "system_prompt and system_prompt_fn are mutually exclusive"
+            )
+
+    def _resolve_system_prompt(
+        self,
+        state: State[Any],
+        task_index: int | None = None,
+    ) -> str | None:
+        """Return the system prompt for a given state.
+
+        When ``system_prompt_fn`` is set, delegates to the callback.
+        Otherwise returns the static ``system_prompt``.
+        """
+        if self.system_prompt_fn is not None:
+            return self.system_prompt_fn(state, task_index)
+        return self.system_prompt
 
     def _build_messages(
         self,
         state: State[Any],
         trajectory: Trajectory[Any] | None = None,
+        task_index: int | None = None,
     ) -> list[ChatMessage]:
         """Build chat messages from state including tool results.
 
@@ -532,6 +569,8 @@ class TrajectoryRunner:
         Args:
             state: Current environment state.
             trajectory: Optional trajectory for structured message building.
+            task_index: Optional task index for per-task system prompt
+                resolution via ``system_prompt_fn``.
 
         Returns:
             List of ChatMessages for the model.
@@ -541,9 +580,9 @@ class TrajectoryRunner:
         # Structured mode: when task field is set, trajectory available,
         # and no tools (tool environments need legacy message formatting)
         if obs.task is not None and trajectory is not None and not obs.available_tools:
-            messages = self._build_structured_messages(state, trajectory)
+            messages = self._build_structured_messages(state, trajectory, task_index)
         else:
-            messages = self._build_legacy_messages(state)
+            messages = self._build_legacy_messages(state, task_index)
 
         # Apply prompt template to wrap the question
         if self.prompt_template is not None:
@@ -576,6 +615,7 @@ class TrajectoryRunner:
         self,
         state: State[Any],
         trajectory: Trajectory[Any],
+        task_index: int | None = None,
     ) -> list[ChatMessage]:
         """Build messages from structured task/state fields.
 
@@ -600,8 +640,9 @@ class TrajectoryRunner:
 
         messages: list[ChatMessage] = []
 
-        if self.system_prompt:
-            messages.append(ChatMessage(role="system", content=self.system_prompt))
+        resolved_prompt = self._resolve_system_prompt(state, task_index)
+        if resolved_prompt:
+            messages.append(ChatMessage(role="system", content=resolved_prompt))
 
         obs = state.observation
         task = obs.task
@@ -855,6 +896,7 @@ class TrajectoryRunner:
     def _build_legacy_messages(
         self,
         state: State[Any],
+        task_index: int | None = None,
     ) -> list[ChatMessage]:
         """Build messages using legacy prompt + messages fields.
 
@@ -865,20 +907,22 @@ class TrajectoryRunner:
         legacy path unchanged.
         """
         if self.prompt_budget is not None or self.history_fn is not None:
-            budgeted = self._build_budgeted_legacy_messages(state)
+            budgeted = self._build_budgeted_legacy_messages(state, task_index)
             if budgeted is not None:
                 return budgeted
-        return self._build_raw_legacy_messages(state)
+        return self._build_raw_legacy_messages(state, task_index)
 
     def _build_raw_legacy_messages(
         self,
         state: State[Any],
+        task_index: int | None = None,
     ) -> list[ChatMessage]:
         """Build legacy messages without history reconstruction."""
         messages: list[ChatMessage] = []
 
-        if self.system_prompt:
-            messages.append(ChatMessage(role="system", content=self.system_prompt))
+        resolved_prompt = self._resolve_system_prompt(state, task_index)
+        if resolved_prompt:
+            messages.append(ChatMessage(role="system", content=resolved_prompt))
 
         obs = state.observation
         messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
@@ -958,6 +1002,7 @@ class TrajectoryRunner:
     def _build_budgeted_legacy_messages(
         self,
         state: State[Any],
+        task_index: int | None = None,
     ) -> list[ChatMessage] | None:
         """Apply history shaping to plain text-only legacy chats when possible."""
         from llenvs.evaluation.history import HistoryEntry, full_history
@@ -965,8 +1010,9 @@ class TrajectoryRunner:
         obs = state.observation
         messages: list[ChatMessage] = []
 
-        if self.system_prompt:
-            messages.append(ChatMessage(role="system", content=self.system_prompt))
+        resolved_prompt = self._resolve_system_prompt(state, task_index)
+        if resolved_prompt:
+            messages.append(ChatMessage(role="system", content=resolved_prompt))
 
         messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
 
@@ -1563,7 +1609,8 @@ class TrajectoryRunner:
 
             prompt_build_started_at = _runner_now_monotonic()
             messages_batch = [
-                self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+                self._build_messages(t.state, trajectory=t.trajectory, task_index=t.task_index)
+                for t in remaining
             ]
             logger.debug(
                 "Trajectory round %d prompt build finished in %.2fs",
@@ -1883,7 +1930,10 @@ class TrajectoryRunner:
 
                 prompt_build_started_at = _runner_now_monotonic()
                 messages_batch = [
-                    self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+                    self._build_messages(
+                        t.state, trajectory=t.trajectory, task_index=t.task_index,
+                    )
+                    for t in remaining
                 ]
                 logger.debug(
                     "Trajectory round %d prompt build finished in %.2fs",
@@ -2492,13 +2542,6 @@ class TrajectoryRunner:
         envs: list[Environment[Any]] = []
         active: list[_ActiveTrajectory] = []
 
-        def _task_index_for_state(state: State[Any]) -> int:
-            task_index = state.metadata.info.get("task_index")
-            if isinstance(task_index, int):
-                return task_index
-            hidden_task_index = getattr(state.hidden, "task_index", 0)
-            return hidden_task_index if isinstance(hidden_task_index, int) else 0
-
         def _record_environment_error(
             *,
             position: int,
@@ -2639,7 +2682,10 @@ class TrajectoryRunner:
                 if step_i != 0 or forced_actions is None:
                     # Generate actions via batched inference
                     messages_batch = [
-                        self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+                        self._build_messages(
+                            t.state, trajectory=t.trajectory, task_index=t.task_index,
+                        )
+                        for t in remaining
                     ]
                     try:
                         gen_results = self.backend.generate_chat_batch(
@@ -2660,7 +2706,9 @@ class TrajectoryRunner:
                             if not remaining:
                                 break
                             messages_batch = [
-                                self._build_messages(t.state, trajectory=t.trajectory)
+                                self._build_messages(
+                                    t.state, trajectory=t.trajectory, task_index=t.task_index,
+                                )
                                 for t in remaining
                             ]
                             try:
@@ -2790,7 +2838,7 @@ class TrajectoryRunner:
             active.append(
                 _ActiveTrajectory(
                     position=pos,
-                    task_index=0,
+                    task_index=_task_index_for_state(state),
                     state=state,
                     reset_info={},
                     trajectory=trajectory,
@@ -2836,7 +2884,10 @@ class TrajectoryRunner:
             if step_i != 0 or forced_actions is None:
                 # Generate actions via batched inference
                 messages_batch = [
-                    self._build_messages(t.state, trajectory=t.trajectory) for t in remaining
+                    self._build_messages(
+                        t.state, trajectory=t.trajectory, task_index=t.task_index,
+                    )
+                    for t in remaining
                 ]
                 try:
                     gen_results = self.backend.generate_chat_batch(
@@ -2859,7 +2910,9 @@ class TrajectoryRunner:
                             break
                         # Rebuild messages and retry this step
                         messages_batch = [
-                            self._build_messages(t.state, trajectory=t.trajectory)
+                            self._build_messages(
+                                t.state, trajectory=t.trajectory, task_index=t.task_index,
+                            )
                             for t in remaining
                         ]
                         try:
@@ -2959,7 +3012,11 @@ def _run_multi_lockstep(
             break
 
         messages_batch = [
-            t.runner._build_messages(t.inner.state, trajectory=t.inner.trajectory)
+            t.runner._build_messages(
+                t.inner.state,
+                trajectory=t.inner.trajectory,
+                task_index=t.inner.task_index,
+            )
             for t in remaining
         ]
         gen_results = backend.generate_chat_batch(messages_batch, sampling_params)
