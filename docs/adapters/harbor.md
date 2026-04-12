@@ -197,7 +197,8 @@ Available in tool mode:
 | `max_steps` | `int` | `30` | Maximum steps per episode |
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
-| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, `Ctrl-C` / `Ctrl-\` recovery is attempted. Disabled when `None`. Trajectory-level limits (`max_steps`, `exec_timeout`) control total episode length |
+| `trajectory_timeout` | `int \| None` | `900` | Text mode only — live per-trajectory wall-clock timeout in seconds. When task metadata provides `recommended_timeout_sec`, the effective live budget is the smaller of the two. `None` disables the global live trajectory cap |
+| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, `Ctrl-C` / `Ctrl-\` recovery is attempted. Disabled when `None` |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
 | `extra_rewards` | `tuple` | `()` | Additional reward functions |
 | `state_capture_mode` | `str` | `"replay"` | Harbor state capture mode: `replay` or `snapshot_exact` |
@@ -213,11 +214,14 @@ different phases:
 
 - `command_soft_timeout` governs live model-issued text commands only and can
   recover with a timeout observation after a successful `Ctrl-C`.
+- `trajectory_timeout` bounds the total wall-clock spent on the live text-mode
+  trajectory. Internal replay / restore loops intentionally do not consume this
+  budget.
 - Harbor's extra runtime-probe execs and verifier execution are internally
   bounded without exposing separate public timeout knobs.
 - `exec_timeout` remains the hard timeout for non-recoverable Harbor runtime
-  operations such as replay/restore and any verifier/probe call that does not
-  override it.
+  operations and auxiliary hard-path commands such as replay probes or runtime
+  helpers that do not use the live soft-timeout path.
 
 ### `HarborAdapter.load_tasks()`
 
@@ -423,7 +427,7 @@ In ``tmux_session`` mode, Harbor also detects when bash has entered the continua
 
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
-When `command_soft_timeout` is set, live model-issued text commands become recoverable on timeout: Harbor interrupts the command with `Ctrl-C` (escalating to `Ctrl-\` if needed), appends a standard timeout observation to the trajectory, and keeps the session alive. Trajectory-level limits (`max_steps`, `exec_timeout`) control total episode length. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects this kwarg entirely.
+When `command_soft_timeout` is set, live model-issued text commands become recoverable on timeout: Harbor interrupts the command with `Ctrl-C`, escalates to `Ctrl-\`, then tries a TUI-oriented escape sequence (`Esc Esc`, `:qa!`, `q`) before declaring the session unrecoverable. A separate live `trajectory_timeout` bounds total wall-clock spent on the text-mode trajectory. Replay and restore disable that live trajectory budget intentionally, while auxiliary replay probes and similar helper commands still use the hard `exec_timeout` path. Tool mode rejects `command_soft_timeout` entirely.
 
 See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
 

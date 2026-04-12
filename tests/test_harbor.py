@@ -215,6 +215,7 @@ def _make_env(
     tmux_bootstrap_if_missing: bool = False,
     command_soft_timeout: int | None = None,
     runtime_probing: bool = False,
+    trajectory_timeout: int | None = 900,
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -241,6 +242,7 @@ def _make_env(
         tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
         command_soft_timeout=command_soft_timeout,
         runtime_probing=runtime_probing,
+        trajectory_timeout=trajectory_timeout,
     )
 
 
@@ -315,6 +317,7 @@ class _FakeTmuxRuntime:
         wait_timeout_once: bool = False,
         wait_recovery_fails: bool = False,
         ctrl_backslash_recovers: bool = False,
+        tui_escape_recovers: bool = False,
         ready_after_attempts: int | None = 1,
         hook_wait_timeout_once: bool = False,
         bang_requires_history_disable: bool = False,
@@ -329,6 +332,7 @@ class _FakeTmuxRuntime:
         self.pending_command_timeout = False
         self.wait_recovery_fails = wait_recovery_fails
         self.ctrl_backslash_recovers = ctrl_backslash_recovers
+        self.tui_escape_recovers = tui_escape_recovers
         self.ready_after_attempts = ready_after_attempts
         self.ready_send_attempts = 0
         self.hook_wait_timeout_once = hook_wait_timeout_once
@@ -440,6 +444,12 @@ class _FakeTmuxRuntime:
             if " C-\\" in command:
                 self.pending_command_timeout = False
                 if self.ctrl_backslash_recovers:
+                    self.wait_recovery_fails = False
+                    self.pending_bang_recovery_failure = False
+                return MockExecResult(stdout="")
+            if "':qa!'" in command:
+                self.pending_command_timeout = False
+                if self.tui_escape_recovers:
                     self.wait_recovery_fails = False
                     self.pending_bang_recovery_failure = False
                 return MockExecResult(stdout="")
@@ -1967,6 +1977,78 @@ class TestHarborEnvironment:
         assert result.info["command_timed_out"] is True
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
         assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert not any("':qa!'" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_timeout_recovery_escalates_to_tui_escape(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ vim file.txt\necho done",
+            ],
+            visible_buffers=["vim file.txt"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+            tui_escape_recovers=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="vim file.txt\necho done"))
+
+        assert result.info["command_timed_out"] is True
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_timeout_all_escalations_fail_raises(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ vim file.txt\necho done",
+            ],
+            visible_buffers=["vim file.txt"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        with pytest.raises(RuntimeError, match="Session unrecoverable after timeout"):
+            env.step(state, Action(text="vim file.txt\necho done"))
+
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
 
     def test_step_tmux_session_stages_file_for_large_commands(self):
         runtime = _FakeTmuxRuntime(
@@ -1999,7 +2081,7 @@ class TestHarborEnvironment:
             command_soft_timeout=5,
         )
         state, _ = _reset_env(env)
-        tick_values = [0.0, 4.5]
+        tick_values = [0.0, 0.0, 0.0, 4.5]
         last_tick = {"value": tick_values[-1]}
 
         def fake_monotonic() -> float:
@@ -2033,6 +2115,113 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="SUBMIT"))
         assert result.terminated is True
         assert result.next_state.metadata.is_terminal is True
+
+    def test_step_trajectory_timeout_truncates_without_executing_when_budget_exhausted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(harbor_env=mock_env, trajectory_timeout=900)
+        state, _ = _reset_env(env)
+        before_execs = len(mock_env._exec_history)
+
+        now["value"] = 901.0
+        result = env.step(state, Action(text="ls"))
+
+        assert result.truncated is True
+        assert result.terminated is False
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "[Trajectory timed out after 900 seconds. No command was executed.]"
+        )
+        assert len(mock_env._exec_history) == before_execs
+        assert result.next_state.hidden.trajectory == ()
+
+    def test_step_trajectory_timeout_clamps_live_command_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 3.0
+        result = env.step(state, Action(text="pwd"))
+
+        assert result.truncated is False
+        assert timeout_values == [2]
+
+    def test_step_trajectory_timeout_uses_smaller_of_configured_and_recommended(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        tasks = _make_tasks(1, timeouts=[3.0])
+        env = _make_env(
+            tasks=tasks,
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=600,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 1.0
+        env.step(state, Action(text="pwd"))
+
+        assert timeout_values == [2]
+
+    def test_step_trajectory_timeout_uses_configured_value_when_task_has_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=600,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 598.0
+        env.step(state, Action(text="pwd"))
+
+        assert timeout_values == [2]
 
     def test_step_submit_keyword_case_sensitive(self):
         mock_env = MockHarborEnvironment()
@@ -3557,6 +3746,14 @@ class TestHarborRestore:
         """Replay should use command_soft_timeout, same as normal collection."""
         from llenvs.adapters.harbor import HarborHidden, harbor_restore
 
+        tick_values = [0.0, 1000.0, 1000.0, 1000.0, 1000.0]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
         timeout_values: list[int] = []
 
         def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
@@ -3567,7 +3764,12 @@ class TestHarborRestore:
             harbor_env=MockHarborEnvironment(exec_handler=handler),
             exec_timeout=17,
             command_soft_timeout=5,
+            trajectory_timeout=180,
         )
+        import llenvs.adapters.harbor as harbor_module
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
 
         target_state = State(
             observation=MagicMock(),
@@ -3583,6 +3785,7 @@ class TestHarborRestore:
         )
 
         restored = harbor_restore(env, target_state)
+        monkeypatch.undo()
 
         assert restored.hidden.episode_step == 2
         assert timeout_values == [5, 5]
@@ -3877,6 +4080,14 @@ class TestValidateReplayConsistency:
     def test_replay_validation_uses_soft_timeout_for_replay_hard_for_probes(self):
         from llenvs.adapters.harbor import validate_replay_consistency
 
+        tick_values = [0.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
         timeout_values: list[int] = []
 
         def make_env():
@@ -3888,8 +4099,13 @@ class TestValidateReplayConsistency:
                 harbor_env=MockHarborEnvironment(exec_handler=handler),
                 exec_timeout=17,
                 command_soft_timeout=5,
+                trajectory_timeout=180,
             )
 
+        import llenvs.adapters.harbor as harbor_module
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
         result = validate_replay_consistency(
             env_factory=make_env,
             task_index=0,
@@ -3897,6 +4113,7 @@ class TestValidateReplayConsistency:
             probe_commands=("probe1",),
             num_trials=1,
         )
+        monkeypatch.undo()
 
         assert result["consistent"] is True
         # Replay step uses command_soft_timeout (5), probe uses exec_timeout (17)

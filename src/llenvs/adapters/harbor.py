@@ -1497,6 +1497,29 @@ class _HarborTmuxTextSession:
                 step_token,
                 timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
             )
+        if not recovered:
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} Escape Escape",
+                timeout_sec=5,
+            )
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} ':qa!' Enter",
+                timeout_sec=5,
+            )
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} 'q' Enter",
+                timeout_sec=5,
+            )
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux timeout recovery sent TUI escape (:qa! + q) after "
+                    "Ctrl-\\\\ failed: preview=%s",
+                    _preview_log_text(command),
+                )
+            recovered = self._poll_for_recovery(
+                step_token,
+                timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+            )
         # Discard any stale status file the hook may have written after Ctrl-C
         self._read_exit_status(step_token)
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
@@ -4211,10 +4234,13 @@ class HarborEnvironment:
         runtime_probing: bool = False,
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
+        trajectory_timeout: int | None = 900,
         command_soft_timeout: int | None = None,
         invalid_action_text: str | None = "[invalid action]",
         invalid_action_observation: str | None = None,
     ) -> None:
+        if trajectory_timeout is not None and trajectory_timeout <= 0:
+            raise ValueError("trajectory_timeout must be > 0")
         if command_soft_timeout is not None and command_soft_timeout <= 0:
             raise ValueError("command_soft_timeout must be > 0")
         self._tasks = tasks
@@ -4235,6 +4261,7 @@ class HarborEnvironment:
         self._runtime_probing = runtime_probing
         self._text_exec_mode = _normalize_text_exec_mode(text_exec_mode)
         self._tmux_bootstrap_if_missing = tmux_bootstrap_if_missing
+        self._trajectory_timeout = trajectory_timeout
         self._command_soft_timeout = command_soft_timeout
         self._invalid_action_text = invalid_action_text
         self._invalid_action_observation_text = invalid_action_observation
@@ -4243,6 +4270,8 @@ class HarborEnvironment:
             command_soft_timeout=command_soft_timeout,
         )
         self._soft_timeouts_disabled_depth = 0
+        self._trajectory_timeout_disabled_depth = 0
+        self._trajectory_started_at_monotonic: float | None = None
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -4425,6 +4454,7 @@ class HarborEnvironment:
             state,
             runtime_probing=self._runtime_probing,
         )
+        self._trajectory_started_at_monotonic = _now_monotonic()
         self._state_tracker.track(state)
         if debug_enabled:
             logger.debug(
@@ -4521,9 +4551,57 @@ class HarborEnvironment:
         finally:
             self._soft_timeouts_disabled_depth -= 1
 
+    def _trajectory_timeout_enabled(self) -> bool:
+        return self._trajectory_timeout_disabled_depth == 0
+
+    @contextlib.contextmanager
+    def _disable_trajectory_timeout_temporarily(self):
+        self._trajectory_timeout_disabled_depth += 1
+        try:
+            yield
+        finally:
+            self._trajectory_timeout_disabled_depth -= 1
+
+    def _trajectory_timeout_budget_sec(self, state: State[HarborHidden]) -> float | None:
+        if not self._trajectory_timeout_enabled():
+            return None
+        candidates = [
+            value
+            for value in (
+                self._trajectory_timeout,
+                state.hidden.recommended_timeout_sec,
+            )
+            if value is not None
+        ]
+        if not candidates:
+            return None
+        return min(candidates)
+
+    def _remaining_trajectory_timeout_sec(self, state: State[HarborHidden]) -> float | None:
+        budget = self._trajectory_timeout_budget_sec(state)
+        started_at = self._trajectory_started_at_monotonic
+        if budget is None or started_at is None:
+            return None
+        return budget - max(0.0, _now_monotonic() - started_at)
+
+    def _clamp_live_command_timeout_sec(
+        self,
+        state: State[HarborHidden],
+        per_command_timeout: int,
+    ) -> int:
+        remaining = self._remaining_trajectory_timeout_sec(state)
+        if remaining is None:
+            return per_command_timeout
+        return min(per_command_timeout, int(remaining))
+
     @staticmethod
     def _timeout_observation_text(timeout_sec: int) -> str:
         return f"[Command timed out after {timeout_sec} seconds and was cancelled.]"
+
+    @staticmethod
+    def _trajectory_timeout_observation_text(timeout_sec: float) -> str:
+        timeout_display = int(timeout_sec) if float(timeout_sec).is_integer() else timeout_sec
+        return f"[Trajectory timed out after {timeout_display} seconds. No command was executed.]"
 
     @staticmethod
     def _continuation_observation_text() -> str:
@@ -4563,6 +4641,8 @@ class HarborEnvironment:
         command_timed_out = False
         command_timeout_elapsed_sec: float | None = None
         shell_continuation_detected = False
+        command_executed = False
+        trajectory_timeout_elapsed = False
 
         # Check for submit keyword on extracted command (not on malformed raw text)
         if cmd_for_env is not None and self._submit_keyword in cmd_for_env:
@@ -4578,7 +4658,20 @@ class HarborEnvironment:
             )
 
         # Execute command in container (even for submit, to maintain trajectory)
-        if invalid_action_format:
+        trajectory_timeout_budget_sec = self._trajectory_timeout_budget_sec(state)
+        remaining_trajectory_timeout_sec = None
+        if not terminated:
+            remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
+            if remaining_trajectory_timeout_sec is not None and remaining_trajectory_timeout_sec < 1.0:
+                truncated = True
+                trajectory_timeout_elapsed = True
+                obs_text = self._trajectory_timeout_observation_text(
+                    trajectory_timeout_budget_sec if trajectory_timeout_budget_sec is not None else 0.0
+                )
+                continuation_exc = None
+        if trajectory_timeout_elapsed:
+            continuation_exc = None
+        elif invalid_action_format:
             obs_text = self._invalid_action_observation()
             continuation_exc = None
         elif not terminated:
@@ -4587,25 +4680,29 @@ class HarborEnvironment:
             if self._text_exec_mode == "tmux_session":
                 if self._text_session is None:
                     raise RuntimeError("Harbor tmux text session was not initialized")
+                live_timeout_sec = self._clamp_live_command_timeout_sec(
+                    state,
+                    self._command_soft_timeout if self._soft_timeouts_enabled() else self._exec_timeout,
+                )
+                command_executed = True
                 try:
-                    if self._soft_timeouts_enabled():
-                        obs_text = self._text_session.run_command(
-                            cmd_for_env,
-                            timeout_sec=self._command_soft_timeout,
-                        )
-                    else:
-                        obs_text = self._text_session.run_command(cmd_for_env)
+                    obs_text = self._text_session.run_command(
+                        cmd_for_env,
+                        timeout_sec=live_timeout_sec,
+                    )
                 except _HarborRecoverableCommandTimeout as exc:
                     timeout_exc = exc
                 except _HarborRecoverableShellContinuation as exc:
                     continuation_exc = exc
             else:
-                exec_timeout = (
+                exec_timeout = self._clamp_live_command_timeout_sec(
+                    state,
                     self._command_soft_timeout
                     if self._soft_timeouts_enabled()
                     else self._exec_timeout
                 )
                 started_at = _now_monotonic()
+                command_executed = True
                 try:
                     exec_result = run_async(
                         self._harbor_env.exec(cmd_for_env, timeout_sec=exec_timeout)
@@ -4648,6 +4745,10 @@ class HarborEnvironment:
         # Check truncation
         if not terminated and next_step >= self._max_steps:
             truncated = True
+        if not terminated and not truncated:
+            remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
+            if remaining_trajectory_timeout_sec is not None and remaining_trajectory_timeout_sec < 1.0:
+                truncated = True
 
         # Run verifier at terminal
         reward_value: float | None = None
@@ -4703,7 +4804,9 @@ class HarborEnvironment:
             trajectory=state.hidden.trajectory
             + (
                 (cmd_for_env,)
-                if cmd_for_env is not None and not shell_continuation_detected
+                if cmd_for_env is not None
+                and not shell_continuation_detected
+                and (command_executed or terminated)
                 else ()
             ),
             fs_restore_risk_ever=state.hidden.fs_restore_risk_ever
@@ -5438,6 +5541,7 @@ class HarborAdapter:
         runtime_probing: bool = False,
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
+        trajectory_timeout: int | None = 900,
         command_soft_timeout: int | None = None,
         invalid_action_text: str | None = "[invalid action]",
         invalid_action_observation: str | None = None,
@@ -5479,6 +5583,9 @@ class HarborAdapter:
             tmux_bootstrap_if_missing: When ``text_exec_mode="tmux_session"``,
                 attempt a bounded package-manager install of tmux inside the
                 task container if it is missing.
+            trajectory_timeout: Text mode only — live per-trajectory wall-clock
+                timeout in seconds. Task ``recommended_timeout_sec`` can tighten
+                this budget when present. ``None`` disables the global cap.
             command_soft_timeout: Text mode only — recoverable timeout (seconds)
                 for live model-issued commands. Disabled when ``None``.
             invalid_action_text: Text stored in assistant history when
@@ -5592,6 +5699,7 @@ class HarborAdapter:
             runtime_probing=runtime_probing,
             text_exec_mode=text_exec_mode,
             tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
+            trajectory_timeout=trajectory_timeout,
             command_soft_timeout=command_soft_timeout,
             invalid_action_text=invalid_action_text,
             invalid_action_observation=invalid_action_observation,
@@ -5763,14 +5871,15 @@ def harbor_restore(
                 f"Dataset version may have changed."
             )
 
-    for cmd in state.hidden.trajectory:
-        result = env.step(current, Action(text=cmd))
-        if result.info.get("shell_continuation_detected"):
-            observation = result.info.get("observation", "")
-            raise RuntimeError(
-                f"Harbor replay hit shell continuation prompt: {cmd}\nObservation: {observation}"
-            )
-        current = result.next_state
+    with env._disable_trajectory_timeout_temporarily():
+        for cmd in state.hidden.trajectory:
+            result = env.step(current, Action(text=cmd))
+            if result.info.get("shell_continuation_detected"):
+                observation = result.info.get("observation", "")
+                raise RuntimeError(
+                    f"Harbor replay hit shell continuation prompt: {cmd}\nObservation: {observation}"
+                )
+            current = result.next_state
 
     return current
 
@@ -5858,15 +5967,16 @@ def capture_replay_probe_outputs(
     env = env_factory()
     try:
         current, _info = env.reset(options={"task_index": task_index})
-        for cmd in trajectory:
-            result = env.step(current, Action(text=cmd))
-            if result.info.get("shell_continuation_detected"):
-                observation = result.info.get("observation", "")
-                raise RuntimeError(
-                    "Harbor replay hit shell continuation prompt: "
-                    f"{cmd}\nObservation: {observation}"
-                )
-            current = result.next_state
+        with env._disable_trajectory_timeout_temporarily():
+            for cmd in trajectory:
+                result = env.step(current, Action(text=cmd))
+                if result.info.get("shell_continuation_detected"):
+                    observation = result.info.get("observation", "")
+                    raise RuntimeError(
+                        "Harbor replay hit shell continuation prompt: "
+                        f"{cmd}\nObservation: {observation}"
+                    )
+                current = result.next_state
 
         return {
             probe_cmd: _run_replay_probe_command(env, probe_cmd) for probe_cmd in probe_commands
