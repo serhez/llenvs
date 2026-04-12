@@ -197,6 +197,7 @@ Available in tool mode:
 | `max_steps` | `int` | `30` | Maximum steps per episode |
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
+| `max_observation_chars` | `int \| None` | `50000` | Cap each text observation and tool-mode step observation with middle truncation before it is stored in prompt history. `None` disables capping |
 | `trajectory_timeout` | `int \| None` | `900` | Text mode only — live per-trajectory wall-clock timeout in seconds. When task metadata provides `recommended_timeout_sec`, the effective live budget is the smaller of the two. `None` disables the global live trajectory cap |
 | `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, Harbor escalates through `Ctrl-C`, `Ctrl-\`, and tmux TUI escape attempts (`Esc Esc`, `:qa!`, `q`). Disabled when `None` |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
@@ -225,6 +226,10 @@ different phases:
 
 Tool mode rejects explicit `command_soft_timeout` and `trajectory_timeout`
 because both knobs only apply to text-mode execution.
+
+`max_observation_chars` applies before Harbor observations are added to the
+conversation transcript. In tool mode, it caps both individual string-valued
+tool results and the aggregated per-step `state.text`.
 
 ### `HarborAdapter.load_tasks()`
 
@@ -344,7 +349,7 @@ trajectories = runner.run_batch_from_states(
 
 Restores a Harbor environment to a saved state by replaying the trajectory prefix. Resets to the original task via `task_index`, then replays each command from `state.hidden.trajectory`. Validates task name to guard against index drift across dataset versions.
 
-Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay. Replay runs with the live `trajectory_timeout` budget disabled, and the restored continuation starts with a fresh live trajectory budget after restore completes.
+Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay. Replay runs with the live `trajectory_timeout` budget disabled, and the restored continuation starts with a fresh live trajectory budget after restore completes. Prefer this helper over a manual `env.step(...)` replay loop: a naive loop can silently spend the continuation budget during restore.
 
 ### `harbor_snapshot_restore()`
 
@@ -430,7 +435,7 @@ In ``tmux_session`` mode, Harbor also detects when bash has entered the continua
 
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
-When `command_soft_timeout` is set, live model-issued text commands become recoverable on timeout: Harbor interrupts the command with `Ctrl-C`, escalates to `Ctrl-\`, then tries a TUI-oriented escape sequence (`Esc Esc`, `:qa!`, `q`) before declaring the session unrecoverable. A separate live `trajectory_timeout` bounds total wall-clock spent on the text-mode trajectory. Replay and restore disable that live trajectory budget intentionally, while auxiliary replay probes and similar helper commands still use the hard `exec_timeout` path. Tool mode rejects `command_soft_timeout` entirely.
+Recoverable live timeouts differ slightly by text execution mode. With `tmux_session`, `command_soft_timeout` recovers the live shell in place by sending `Ctrl-C`, escalating to `Ctrl-\`, then trying a TUI-oriented escape sequence (`Esc Esc`, `:qa!`, `q`) before declaring the session unrecoverable. With `independent_exec`, recoverable timeouts become synthetic timeout observations instead of raw exec errors. A separate live `trajectory_timeout` bounds total wall-clock spent on the text-mode trajectory in both modes; if that budget clamps a live `independent_exec` command more tightly than the normal per-command timeout, the timeout is still converted into the same recoverable timeout observation so the step truncates cleanly. Replay and restore disable the live `trajectory_timeout` budget intentionally, while auxiliary replay probes and similar helper commands still use the hard `exec_timeout` path. Tool mode rejects `command_soft_timeout` entirely.
 
 See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
 

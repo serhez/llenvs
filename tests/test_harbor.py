@@ -216,6 +216,7 @@ def _make_env(
     command_soft_timeout: int | None = None,
     runtime_probing: bool = False,
     trajectory_timeout: int | None = 900,
+    max_observation_chars: int | None = 50_000,
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -243,6 +244,7 @@ def _make_env(
         command_soft_timeout=command_soft_timeout,
         runtime_probing=runtime_probing,
         trajectory_timeout=trajectory_timeout,
+        max_observation_chars=max_observation_chars,
     )
 
 
@@ -258,6 +260,7 @@ def _make_tool_env(
     dataset_name: str = "terminal-bench",
     state_capture_mode: str = "replay",
     snapshot_artifact_root: Path | None = None,
+    max_observation_chars: int | None = 50_000,
 ):
     """Create a HarborToolEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborToolEnvironment
@@ -279,6 +282,7 @@ def _make_tool_env(
         extra_rewards=extra_rewards,
         state_capture_mode=state_capture_mode,
         snapshot_artifact_root=snapshot_artifact_root,
+        max_observation_chars=max_observation_chars,
     )
 
 
@@ -1157,6 +1161,42 @@ class TestHarborEnvironment:
         assert result.terminated is False
         assert result.truncated is False
 
+    def test_step_caps_large_observation(self):
+        large_output = "x" * 10_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_env(harbor_env=mock_env, max_observation_chars=200)
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="cmd"))
+
+        obs = result.next_state.observation.state.text
+        assert len(obs) < 300
+        assert "characters omitted" in obs
+        assert obs.startswith("x" * 100)
+        assert obs.endswith("x" * 100)
+
+    def test_step_no_cap_when_disabled(self):
+        large_output = "x" * 10_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_env(harbor_env=mock_env, max_observation_chars=None)
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="cmd"))
+
+        assert result.next_state.observation.state.text == large_output
+
+    def test_step_default_cap_truncates_huge_output(self):
+        large_output = "x" * 100_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_env(harbor_env=mock_env)
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="cmd"))
+
+        obs = result.next_state.observation.state.text
+        assert len(obs) < 51_000
+        assert "characters omitted" in obs
+
     def test_step_snapshot_exact_captures_checkpoint(self, tmp_path):
         mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="ok")])
         env = _make_env(
@@ -2021,6 +2061,45 @@ class TestHarborEnvironment:
         assert result.info["command_timed_out"] is True
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
         assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any(" Escape Escape" in cmd for cmd in mock_env._exec_history)
+        assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+        assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_timeout_recovery_escalates_to_pager_q(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ less README.md\necho done",
+            ],
+            visible_buffers=["less README.md"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+            pager_q_recovers=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="less README.md\necho done"))
+
+        assert result.info["command_timed_out"] is True
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any(" Escape Escape" in cmd for cmd in mock_env._exec_history)
         assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
         assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
 
@@ -2126,6 +2205,39 @@ class TestHarborEnvironment:
         assert result.terminated is True
         assert result.next_state.metadata.is_terminal is True
 
+    def test_step_submit_keyword_stays_terminal_when_budget_elapses_after_precheck(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        tick_values = [0.0, 4.0, 5.1]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(
+            harbor_env=mock_env,
+            submit_keyword="SUBMIT",
+            trajectory_timeout=5,
+            verify_on_truncation=False,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="SUBMIT"))
+
+        assert result.terminated is True
+        assert result.truncated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert result.info["observation"] == "Submitting for verification..."
+        assert mock_env._exec_history == []
+
     def test_step_submit_keyword_truncates_when_trajectory_budget_exhausted(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -2206,6 +2318,45 @@ class TestHarborEnvironment:
 
         assert result.truncated is False
         assert timeout_values == [2]
+
+    def test_step_trajectory_timeout_recovers_independent_exec_timeout_without_soft_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def timeout_handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            now["value"] = 5.0
+            raise RuntimeError(f"apptainer command timed out after {timeout_sec}s: {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=timeout_handler),
+            exec_timeout=120,
+            command_soft_timeout=None,
+            trajectory_timeout=5,
+            verify_on_truncation=False,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 3.0
+        result = env.step(state, Action(text="sleep 999"))
+
+        expected = "[Command timed out after 2 seconds and was cancelled.]"
+        assert timeout_values == [2]
+        assert result.terminated is False
+        assert result.truncated is True
+        assert result.info["command_timed_out"] is True
+        assert result.info["trajectory_timeout_elapsed"] is True
+        assert result.info["command_timeout_elapsed_sec"] == pytest.approx(2.0)
+        assert result.info["observation"] == expected
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == expected
+        assert result.next_state.hidden.trajectory == ("sleep 999",)
 
     def test_step_trajectory_timeout_clamps_to_at_least_one_second(
         self,
@@ -2896,6 +3047,26 @@ class TestHarborToolEnvironment:
         assert tool_results[0].is_success
         assert "file1.txt" in tool_results[0].output
 
+    def test_execute_command_caps_large_output(self):
+        large_output = "y" * 10_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_tool_env(harbor_env=mock_env, max_observation_chars=200)
+        state, _ = _reset_env(env)
+
+        call = ToolCall(
+            id="call_1",
+            name="execute_command",
+            arguments={"command": "ls -la"},
+        )
+        result = env.step(state, Action(tool_calls=(call,)))
+
+        tool_result = result.info["tool_results"][0]
+        assert tool_result.is_success
+        assert len(tool_result.output) < 300
+        assert "characters omitted" in tool_result.output
+        assert result.next_state.observation.state is not None
+        assert "characters omitted" in result.next_state.observation.state.text
+
     def test_read_file(self):
         mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="file contents here")])
         env = _make_tool_env(harbor_env=mock_env)
@@ -2909,6 +3080,33 @@ class TestHarborToolEnvironment:
         result = env.step(state, Action(tool_calls=(call,)))
         assert result.info["tool_results"][0].is_success
         assert "file contents here" in result.info["tool_results"][0].output
+
+    def test_tool_step_caps_aggregate_state_text(self):
+        first = "a" * 180
+        second = "b" * 180
+        mock_env = MockHarborEnvironment(
+            exec_results=[
+                MockExecResult(stdout=first),
+                MockExecResult(stdout=second),
+            ]
+        )
+        env = _make_tool_env(harbor_env=mock_env, max_observation_chars=200)
+        state, _ = _reset_env(env)
+
+        calls = (
+            ToolCall(id="call_1", name="execute_command", arguments={"command": "cmd1"}),
+            ToolCall(id="call_2", name="execute_command", arguments={"command": "cmd2"}),
+        )
+        result = env.step(state, Action(tool_calls=calls))
+
+        tool_results = result.info["tool_results"]
+        assert all(tr.is_success for tr in tool_results)
+        assert tool_results[0].output == first
+        assert tool_results[1].output == second
+        assert result.next_state.observation.state is not None
+        state_text = result.next_state.observation.state.text
+        assert len(state_text) < 300
+        assert "characters omitted" in state_text
 
     def test_write_file(self):
         mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="")])
@@ -3139,6 +3337,7 @@ class TestHarborAdapter:
             tool_mode=False,
         )
         assert isinstance(env, HarborEnvironment)
+        assert env._max_observation_chars == 50_000
 
     def test_get_environment_tool_mode(self):
         """Should return HarborToolEnvironment when tool_mode=True."""
@@ -3158,6 +3357,36 @@ class TestHarborAdapter:
             tool_mode=True,
         )
         assert isinstance(env, HarborToolEnvironment)
+        assert env._max_observation_chars == 50_000
+
+    def test_get_environment_threads_max_observation_chars(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks()
+        mock_env = MockHarborEnvironment()
+        env_factory = _make_harbor_env_factory(mock_env)
+        verifier_factory = _make_verifier_factory()
+
+        text_env = adapter.get_environment(
+            name="test",
+            tasks=tasks,
+            env_factory=env_factory,
+            verify_factory=verifier_factory,
+            tool_mode=False,
+            max_observation_chars=123,
+        )
+        tool_env = adapter.get_environment(
+            name="test",
+            tasks=tasks,
+            env_factory=env_factory,
+            verify_factory=verifier_factory,
+            tool_mode=True,
+            max_observation_chars=456,
+        )
+
+        assert text_env._max_observation_chars == 123
+        assert tool_env._max_observation_chars == 456
 
     def test_tool_mode_rejects_runtime_probing(self):
         """Should raise ValueError when both tool_mode and runtime_probing are True."""
@@ -3882,6 +4111,50 @@ class TestHarborRestore:
         assert restored.hidden.episode_step == 2
         assert timeout_values == [5, 5]
 
+    def test_harbor_restore_replay_ignores_live_trajectory_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            if command == "ls":
+                now["value"] = 200.0
+            elif command == "pwd":
+                now["value"] = 400.0
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=17,
+            command_soft_timeout=5,
+            trajectory_timeout=180,
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=HarborHidden(
+                task_index=0,
+                task_name="task_00",
+                instruction="Task 0 instruction",
+                episode_step=2,
+                last_action="pwd",
+                trajectory=("ls", "pwd"),
+            ),
+            metadata=MagicMock(step=2, episode_id="episode-1", is_terminal=False),
+        )
+
+        restored = harbor_restore(env, target_state)
+
+        assert restored.hidden.episode_step == 2
+        assert restored.hidden.trajectory == ("ls", "pwd")
+        assert timeout_values == [5, 5]
+
     def test_harbor_restore_reanchors_fresh_trajectory_timeout(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -4111,6 +4384,43 @@ class TestValidateReplayConsistency:
         )
 
         assert result == {"probe1": "abc123", "probe2": "def456"}
+
+    def test_capture_replay_probe_outputs_replay_ignores_live_trajectory_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import capture_replay_probe_outputs
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def env_factory():
+            def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+                timeout_values.append(timeout_sec)
+                if command == "echo a":
+                    now["value"] = 200.0
+                elif command == "echo b":
+                    now["value"] = 400.0
+                return MockExecResult(stdout=f"output for {command}")
+
+            return _make_env(
+                harbor_env=MockHarborEnvironment(exec_handler=handler),
+                exec_timeout=17,
+                command_soft_timeout=5,
+                trajectory_timeout=180,
+            )
+
+        result = capture_replay_probe_outputs(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo a", "echo b"),
+            probe_commands=("probe1",),
+        )
+
+        assert result == {"probe1": "output for probe1"}
+        assert timeout_values == [5, 5, 17]
 
     def test_consistent_replays(self):
         """Deterministic env produces consistent=True."""
