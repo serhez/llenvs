@@ -198,7 +198,7 @@ Available in tool mode:
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
 | `trajectory_timeout` | `int \| None` | `900` | Text mode only — live per-trajectory wall-clock timeout in seconds. When task metadata provides `recommended_timeout_sec`, the effective live budget is the smaller of the two. `None` disables the global live trajectory cap |
-| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, `Ctrl-C` / `Ctrl-\` recovery is attempted. Disabled when `None` |
+| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, Harbor escalates through `Ctrl-C`, `Ctrl-\`, and tmux TUI escape attempts (`Esc Esc`, `:qa!`, `q`). Disabled when `None` |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
 | `extra_rewards` | `tuple` | `()` | Additional reward functions |
 | `state_capture_mode` | `str` | `"replay"` | Harbor state capture mode: `replay` or `snapshot_exact` |
@@ -222,6 +222,9 @@ different phases:
 - `exec_timeout` remains the hard timeout for non-recoverable Harbor runtime
   operations and auxiliary hard-path commands such as replay probes or runtime
   helpers that do not use the live soft-timeout path.
+
+Tool mode rejects explicit `command_soft_timeout` and `trajectory_timeout`
+because both knobs only apply to text-mode execution.
 
 ### `HarborAdapter.load_tasks()`
 
@@ -341,11 +344,11 @@ trajectories = runner.run_batch_from_states(
 
 Restores a Harbor environment to a saved state by replaying the trajectory prefix. Resets to the original task via `task_index`, then replays each command from `state.hidden.trajectory`. Validates task name to guard against index drift across dataset versions.
 
-Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay.
+Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay. Replay runs with the live `trajectory_timeout` budget disabled, and the restored continuation starts with a fresh live trajectory budget after restore completes.
 
 ### `harbor_snapshot_restore()`
 
-For datasets collected with exact checkpoints, `harbor_snapshot_restore()` restores a fresh Harbor environment from `state.hidden.snapshot_ref` instead of replaying the command prefix.
+For datasets collected with exact checkpoints, `harbor_snapshot_restore()` restores a fresh Harbor environment from `state.hidden.snapshot_ref` instead of replaying the command prefix. Snapshot restore also re-anchors the live `trajectory_timeout` budget so the continuation starts from a fresh live budget after the checkpoint is loaded.
 
 ```python
 from llenvs.adapters.harbor import HarborAdapter, harbor_snapshot_restore
@@ -402,7 +405,7 @@ Two validation modes:
 1. **Self-consistency** (`reference_probes=None`): multiple replays produce the same state as each other.
 2. **Live-vs-restored** (`reference_probes` provided): restored state matches probe outputs captured from the live container during data collection. This is the stronger check.
 
-Probe commands are executed out-of-band against the restored Harbor runtime, not through `env.step(...)`, so validation does not consume episode steps or trigger verifier/truncation side effects on near-horizon states.
+Probe commands are executed out-of-band against the restored Harbor runtime, not through `env.step(...)`, so validation does not consume episode steps or trigger verifier/truncation side effects on near-horizon states. The replay prefix and probe commands also run outside the live `trajectory_timeout` budget used for actual continued text-mode interaction.
 
 Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `probe_outputs` (per-trial), and `divergence_details`.
 

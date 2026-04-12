@@ -66,6 +66,8 @@ from llenvs.core.tools import (
 
 logger = logging.getLogger(__name__)
 
+_ARG_UNSET = object()
+
 _HARBOR_TASK_CACHE: dict[tuple[Any, ...], tuple[Any, ...]] = {}
 _HARBOR_TASK_CACHE_LOCK = threading.Lock()
 
@@ -4586,13 +4588,12 @@ class HarborEnvironment:
 
     def _clamp_live_command_timeout_sec(
         self,
-        state: State[HarborHidden],
         per_command_timeout: int,
+        remaining_trajectory_timeout_sec: float | None,
     ) -> int:
-        remaining = self._remaining_trajectory_timeout_sec(state)
-        if remaining is None:
+        if remaining_trajectory_timeout_sec is None:
             return per_command_timeout
-        return min(per_command_timeout, int(remaining))
+        return max(1, min(per_command_timeout, int(remaining_trajectory_timeout_sec)))
 
     @staticmethod
     def _timeout_observation_text(timeout_sec: int) -> str:
@@ -4643,9 +4644,20 @@ class HarborEnvironment:
         shell_continuation_detected = False
         command_executed = False
         trajectory_timeout_elapsed = False
+        timeout_exc: _HarborRecoverableCommandTimeout | None = None
+        continuation_exc: _HarborRecoverableShellContinuation | None = None
+
+        trajectory_timeout_budget_sec = self._trajectory_timeout_budget_sec(state)
+        remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
+        if remaining_trajectory_timeout_sec is not None and remaining_trajectory_timeout_sec < 1.0:
+            truncated = True
+            trajectory_timeout_elapsed = True
+            obs_text = self._trajectory_timeout_observation_text(
+                trajectory_timeout_budget_sec if trajectory_timeout_budget_sec is not None else 0.0
+            )
 
         # Check for submit keyword on extracted command (not on malformed raw text)
-        if cmd_for_env is not None and self._submit_keyword in cmd_for_env:
+        if not trajectory_timeout_elapsed and cmd_for_env is not None and self._submit_keyword in cmd_for_env:
             terminated = True
         if debug_enabled:
             logger.debug(
@@ -4658,31 +4670,17 @@ class HarborEnvironment:
             )
 
         # Execute command in container (even for submit, to maintain trajectory)
-        trajectory_timeout_budget_sec = self._trajectory_timeout_budget_sec(state)
-        remaining_trajectory_timeout_sec = None
-        if not terminated:
-            remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
-            if remaining_trajectory_timeout_sec is not None and remaining_trajectory_timeout_sec < 1.0:
-                truncated = True
-                trajectory_timeout_elapsed = True
-                obs_text = self._trajectory_timeout_observation_text(
-                    trajectory_timeout_budget_sec if trajectory_timeout_budget_sec is not None else 0.0
-                )
-                continuation_exc = None
         if trajectory_timeout_elapsed:
-            continuation_exc = None
+            pass
         elif invalid_action_format:
             obs_text = self._invalid_action_observation()
-            continuation_exc = None
         elif not terminated:
-            timeout_exc: _HarborRecoverableCommandTimeout | None = None
-            continuation_exc: _HarborRecoverableShellContinuation | None = None
             if self._text_exec_mode == "tmux_session":
                 if self._text_session is None:
                     raise RuntimeError("Harbor tmux text session was not initialized")
                 live_timeout_sec = self._clamp_live_command_timeout_sec(
-                    state,
                     self._command_soft_timeout if self._soft_timeouts_enabled() else self._exec_timeout,
+                    remaining_trajectory_timeout_sec,
                 )
                 command_executed = True
                 try:
@@ -4696,10 +4694,10 @@ class HarborEnvironment:
                     continuation_exc = exc
             else:
                 exec_timeout = self._clamp_live_command_timeout_sec(
-                    state,
                     self._command_soft_timeout
                     if self._soft_timeouts_enabled()
-                    else self._exec_timeout
+                    else self._exec_timeout,
+                    remaining_trajectory_timeout_sec,
                 )
                 started_at = _now_monotonic()
                 command_executed = True
@@ -4745,10 +4743,13 @@ class HarborEnvironment:
         # Check truncation
         if not terminated and next_step >= self._max_steps:
             truncated = True
-        if not terminated and not truncated:
-            remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
-            if remaining_trajectory_timeout_sec is not None and remaining_trajectory_timeout_sec < 1.0:
-                truncated = True
+        post_command_remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
+        if (
+            post_command_remaining_trajectory_timeout_sec is not None
+            and post_command_remaining_trajectory_timeout_sec < 1.0
+        ):
+            truncated = True
+            trajectory_timeout_elapsed = True
 
         # Run verifier at terminal
         reward_value: float | None = None
@@ -4840,6 +4841,7 @@ class HarborEnvironment:
             "command_timed_out": command_timed_out,
             "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
             "shell_continuation_detected": shell_continuation_detected,
+            "trajectory_timeout_elapsed": trajectory_timeout_elapsed,
         }
         info.pop("extraction_metadata", None)
         if reward_value is not None:
@@ -4913,6 +4915,7 @@ class HarborEnvironment:
                 "command_timed_out": command_timed_out,
                 "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
                 "shell_continuation_detected": shell_continuation_detected,
+                "trajectory_timeout_elapsed": trajectory_timeout_elapsed,
                 **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
@@ -5541,7 +5544,7 @@ class HarborAdapter:
         runtime_probing: bool = False,
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
-        trajectory_timeout: int | None = 900,
+        trajectory_timeout: int | None | object = _ARG_UNSET,
         command_soft_timeout: int | None = None,
         invalid_action_text: str | None = "[invalid action]",
         invalid_action_observation: str | None = None,
@@ -5602,6 +5605,8 @@ class HarborAdapter:
             HarborEnvironment or HarborToolEnvironment.
         """
         dataset_name, _version = self._parse_name(name)
+        trajectory_timeout_explicit = trajectory_timeout is not _ARG_UNSET
+        effective_trajectory_timeout = 900 if trajectory_timeout is _ARG_UNSET else trajectory_timeout
 
         if tool_mode and command_soft_timeout is not None:
             raise ValueError(
@@ -5617,6 +5622,11 @@ class HarborAdapter:
             raise ValueError(
                 "tmux_session text execution is not supported in Harbor tool mode. "
                 "Use tool_mode=False when requesting text_exec_mode='tmux_session'."
+            )
+        if tool_mode and trajectory_timeout_explicit:
+            raise ValueError(
+                "trajectory_timeout is not supported in Harbor tool mode. "
+                "Use tool_mode=False for text-mode trajectory timeout handling."
             )
 
         # Load tasks and create factories from Harbor if not provided
@@ -5699,7 +5709,7 @@ class HarborAdapter:
             runtime_probing=runtime_probing,
             text_exec_mode=text_exec_mode,
             tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
-            trajectory_timeout=trajectory_timeout,
+            trajectory_timeout=effective_trajectory_timeout,
             command_soft_timeout=command_soft_timeout,
             invalid_action_text=invalid_action_text,
             invalid_action_observation=invalid_action_observation,
@@ -5881,6 +5891,7 @@ def harbor_restore(
                 )
             current = result.next_state
 
+    env._trajectory_started_at_monotonic = _now_monotonic()
     return current
 
 
@@ -5923,6 +5934,7 @@ def harbor_snapshot_restore(
             raise RuntimeError(
                 "Harbor tmux session could not be re-synchronized after snapshot restore"
             ) from exc
+    env._trajectory_started_at_monotonic = _now_monotonic()
     env._state_tracker.track(state)
     return state
 

@@ -318,6 +318,7 @@ class _FakeTmuxRuntime:
         wait_recovery_fails: bool = False,
         ctrl_backslash_recovers: bool = False,
         tui_escape_recovers: bool = False,
+        pager_q_recovers: bool = False,
         ready_after_attempts: int | None = 1,
         hook_wait_timeout_once: bool = False,
         bang_requires_history_disable: bool = False,
@@ -333,6 +334,7 @@ class _FakeTmuxRuntime:
         self.wait_recovery_fails = wait_recovery_fails
         self.ctrl_backslash_recovers = ctrl_backslash_recovers
         self.tui_escape_recovers = tui_escape_recovers
+        self.pager_q_recovers = pager_q_recovers
         self.ready_after_attempts = ready_after_attempts
         self.ready_send_attempts = 0
         self.hook_wait_timeout_once = hook_wait_timeout_once
@@ -450,6 +452,12 @@ class _FakeTmuxRuntime:
             if "':qa!'" in command:
                 self.pending_command_timeout = False
                 if self.tui_escape_recovers:
+                    self.wait_recovery_fails = False
+                    self.pending_bang_recovery_failure = False
+                return MockExecResult(stdout="")
+            if " 'q' Enter" in command and "':qa!'" not in command:
+                self.pending_command_timeout = False
+                if self.pager_q_recovers:
                     self.wait_recovery_fails = False
                     self.pending_bang_recovery_failure = False
                 return MockExecResult(stdout="")
@@ -2014,6 +2022,7 @@ class TestHarborEnvironment:
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
         assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
         assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+        assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
 
     def test_step_tmux_session_timeout_all_escalations_fail_raises(self, monkeypatch):
         import llenvs.adapters.harbor as harbor_module
@@ -2049,6 +2058,7 @@ class TestHarborEnvironment:
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
         assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
         assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+        assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
 
     def test_step_tmux_session_stages_file_for_large_commands(self):
         runtime = _FakeTmuxRuntime(
@@ -2081,7 +2091,7 @@ class TestHarborEnvironment:
             command_soft_timeout=5,
         )
         state, _ = _reset_env(env)
-        tick_values = [0.0, 0.0, 0.0, 4.5]
+        tick_values = [0.0, 0.0, 4.5, 4.5]
         last_tick = {"value": tick_values[-1]}
 
         def fake_monotonic() -> float:
@@ -2116,6 +2126,32 @@ class TestHarborEnvironment:
         assert result.terminated is True
         assert result.next_state.metadata.is_terminal is True
 
+    def test_step_submit_keyword_truncates_when_trajectory_budget_exhausted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(harbor_env=mock_env, submit_keyword="SUBMIT", trajectory_timeout=180)
+        state, _ = _reset_env(env)
+        before_execs = len(mock_env._exec_history)
+
+        now["value"] = 181.0
+        result = env.step(state, Action(text="SUBMIT"))
+
+        assert result.terminated is False
+        assert result.truncated is True
+        assert result.info["trajectory_timeout_elapsed"] is True
+        assert result.info["observation"] == (
+            "[Trajectory timed out after 180 seconds. No command was executed.]"
+        )
+        assert len(mock_env._exec_history) == before_execs
+        assert result.next_state.hidden.trajectory == ()
+
     def test_step_trajectory_timeout_truncates_without_executing_when_budget_exhausted(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -2135,10 +2171,12 @@ class TestHarborEnvironment:
 
         assert result.truncated is True
         assert result.terminated is False
+        assert result.info["trajectory_timeout_elapsed"] is True
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == (
             "[Trajectory timed out after 900 seconds. No command was executed.]"
         )
+        assert result.next_state.metadata.info["trajectory_timeout_elapsed"] is True
         assert len(mock_env._exec_history) == before_execs
         assert result.next_state.hidden.trajectory == ()
 
@@ -2168,6 +2206,39 @@ class TestHarborEnvironment:
 
         assert result.truncated is False
         assert timeout_values == [2]
+
+    def test_step_trajectory_timeout_clamps_to_at_least_one_second(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        tick_values = [0.0, 3.9, 4.2, 4.2, 4.2]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="pwd"))
+
+        assert timeout_values == [1]
+        assert result.info["trajectory_timeout_elapsed"] is True
 
     def test_step_trajectory_timeout_uses_smaller_of_configured_and_recommended(
         self,
@@ -3146,6 +3217,26 @@ class TestHarborAdapter:
                 command_soft_timeout=120,
             )
 
+    @pytest.mark.parametrize("trajectory_timeout", [900, None])
+    def test_tool_mode_rejects_explicit_trajectory_timeout(self, trajectory_timeout):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks()
+        mock_env = MockHarborEnvironment()
+        env_factory = _make_harbor_env_factory(mock_env)
+        verifier_factory = _make_verifier_factory()
+
+        with pytest.raises(ValueError, match="tool mode"):
+            adapter.get_environment(
+                name="test",
+                tasks=tasks,
+                env_factory=env_factory,
+                verify_factory=verifier_factory,
+                tool_mode=True,
+                trajectory_timeout=trajectory_timeout,
+            )
+
     def test_list_environments_uses_registry_client(self, monkeypatch: pytest.MonkeyPatch):
         from llenvs.adapters.harbor import HarborAdapter, _HarborAPI
 
@@ -3742,7 +3833,10 @@ class TestHarborRestore:
 
         assert steps_called == ["echo a", "echo b"]
 
-    def test_harbor_restore_uses_soft_timeout_like_collection(self):
+    def test_harbor_restore_uses_soft_timeout_like_collection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """Replay should use command_soft_timeout, same as normal collection."""
         from llenvs.adapters.harbor import HarborHidden, harbor_restore
 
@@ -3768,7 +3862,6 @@ class TestHarborRestore:
         )
         import llenvs.adapters.harbor as harbor_module
 
-        monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
 
         target_state = State(
@@ -3785,10 +3878,51 @@ class TestHarborRestore:
         )
 
         restored = harbor_restore(env, target_state)
-        monkeypatch.undo()
 
         assert restored.hidden.episode_step == 2
         assert timeout_values == [5, 5]
+
+    def test_harbor_restore_reanchors_fresh_trajectory_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            if command == "ls":
+                now["value"] = 1000.0
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=17,
+            command_soft_timeout=5,
+            trajectory_timeout=180,
+        )
+        state, _ = _reset_env(env)
+        target_state = State(
+            observation=state.observation,
+            hidden=HarborHidden(
+                task_index=state.hidden.task_index,
+                task_name=state.hidden.task_name,
+                instruction=state.hidden.instruction,
+                episode_step=1,
+                trajectory=("ls",),
+            ),
+            metadata=state.metadata,
+        )
+
+        restored = harbor_restore(env, target_state)
+        now["value"] = 1001.0
+        result = env.step(restored, Action(text="pwd"))
+
+        assert result.truncated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert result.info["observation"] == "ran pwd"
 
     def test_harbor_snapshot_restore_restores_checkpoint_archive(self, tmp_path):
         """harbor_snapshot_restore uses checkpoint restore instead of replay."""
@@ -3843,6 +3977,53 @@ class TestHarborRestore:
                 },
             )
         ]
+
+    def test_harbor_snapshot_restore_reanchors_fresh_trajectory_timeout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import HarborHidden, HarborSnapshotRef, harbor_snapshot_restore
+
+        snapshot_root = tmp_path / "dataset_root"
+        snapshot_path = snapshot_root / "snapshots/task_00/episode-1/state_0001.tar"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text("checkpoint-bytes")
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            return MockExecResult(stdout=f"ran {command}")
+
+        mock_env = MockHarborEnvironment(exec_handler=handler)
+        env = _make_env(harbor_env=mock_env, trajectory_timeout=180)
+        state, _ = _reset_env(env)
+        target_state = State(
+            observation=state.observation,
+            hidden=HarborHidden(
+                task_index=state.hidden.task_index,
+                task_name=state.hidden.task_name,
+                instruction=state.hidden.instruction,
+                episode_step=1,
+                trajectory=("ls",),
+                snapshot_ref=HarborSnapshotRef(
+                    runtime="podman-hpc",
+                    relative_path="snapshots/task_00/episode-1/state_0001.tar",
+                ),
+            ),
+            metadata=state.metadata,
+        )
+
+        now["value"] = 1000.0
+        restored = harbor_snapshot_restore(env, target_state, artifact_root=snapshot_root)
+        now["value"] = 1001.0
+        result = env.step(restored, Action(text="pwd"))
+
+        assert result.truncated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert result.info["observation"] == "ran pwd"
 
     def test_harbor_snapshot_restore_requires_snapshot_ref(self, tmp_path):
         from llenvs.adapters.harbor import HarborHidden, harbor_snapshot_restore
@@ -4077,7 +4258,10 @@ class TestValidateReplayConsistency:
         assert result["consistent"] is True
         assert verifier_calls == 0
 
-    def test_replay_validation_uses_soft_timeout_for_replay_hard_for_probes(self):
+    def test_replay_validation_uses_soft_timeout_for_replay_hard_for_probes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         from llenvs.adapters.harbor import validate_replay_consistency
 
         tick_values = [0.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
@@ -4104,7 +4288,6 @@ class TestValidateReplayConsistency:
 
         import llenvs.adapters.harbor as harbor_module
 
-        monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
         result = validate_replay_consistency(
             env_factory=make_env,
@@ -4113,7 +4296,6 @@ class TestValidateReplayConsistency:
             probe_commands=("probe1",),
             num_trials=1,
         )
-        monkeypatch.undo()
 
         assert result["consistent"] is True
         # Replay step uses command_soft_timeout (5), probe uses exec_timeout (17)
