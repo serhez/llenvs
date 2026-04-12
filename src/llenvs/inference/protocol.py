@@ -70,6 +70,31 @@ class PromptTooLongError(RecoverableInputError):
         self.offending_prompts = offending_prompts or []
 
 
+class RetryExhaustedTransientError(Exception):
+    """Raised when item-local transient retries were exhausted.
+
+    This indicates the backend appeared unhealthy for one specific batch slot
+    even after the runner retried that slot multiple times. Callers may treat
+    the affected point as aborted without broadening skip logic to arbitrary
+    raw transient backend errors.
+
+    Attributes:
+        original_error: The last transient error observed for the item.
+        retry_count: Number of retries attempted after the initial failure.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        original_error: BaseException,
+        retry_count: int,
+    ) -> None:
+        super().__init__(message)
+        self.original_error = original_error
+        self.retry_count = retry_count
+
+
 class PartialBatchError(Exception):
     """Raised when part of a concurrent batch succeeded and part failed.
 

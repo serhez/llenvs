@@ -35,6 +35,7 @@ from llenvs.inference.protocol import (
     PartialBatchError,
     PromptTooLongError,
     RecoverableInputError,
+    RetryExhaustedTransientError,
     SamplingParams,
     ScoringResult,
     StopReason,
@@ -55,6 +56,7 @@ __all__ = [
     "PartialBatchError",
     "PromptTooLongError",
     "RecoverableInputError",
+    "RetryExhaustedTransientError",
     "TokenLogprob",
     "TokenScore",
     # Prompting

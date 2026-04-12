@@ -19,6 +19,7 @@ from llenvs.core.trajectory import Trajectory
 from llenvs.core.tool_parsing import HermesToolCallParser
 from llenvs.core.tools import ToolDefinition
 from llenvs.evaluation.runner import TrajectoryRunner
+from llenvs.inference import protocol as inference_protocol
 from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
@@ -259,11 +260,13 @@ class TestGenerationErrorCallback:
             del params
             call_sizes.append(len(messages_batch))
             transient = RuntimeError("rate limited")
-            if len(call_sizes) <= 4:
+            if len(messages_batch) == 2:
                 raise PartialBatchError(
                     [_gen_result("ok0"), transient],
                     {1: transient},
                 )
+            if len(call_sizes) <= 4:
+                raise PartialBatchError([transient], {0: transient})
             raise AssertionError("unexpected extra retry")
 
         mock_backend = MagicMock()
@@ -279,6 +282,79 @@ class TestGenerationErrorCallback:
         assert len(results) == 1
         assert results[0] is not None
         assert call_sizes == [2, 1, 1, 1]
+
+    def test_retry_exhausted_partial_failure_wraps_error_for_callback(self) -> None:
+        exc_cls = getattr(inference_protocol, "RetryExhaustedTransientError", None)
+        assert exc_cls is not None
+
+        call_sizes: list[int] = []
+        seen_errors: list[Exception] = []
+
+        def side_effect(messages_batch, params):
+            del params
+            call_sizes.append(len(messages_batch))
+            transient = RuntimeError("rate limited")
+            if len(messages_batch) == 2:
+                raise PartialBatchError(
+                    [_gen_result("ok0"), transient],
+                    {1: transient},
+                )
+            raise PartialBatchError([transient], {0: transient})
+
+        mock_backend = MagicMock()
+        mock_backend.generate_chat_batch.side_effect = side_effect
+        runner, env = _make_runner(mock_backend, max_steps=1)
+        env.step.return_value = _make_step_result(done=True)
+
+        with patch("llenvs.evaluation.runner.time.sleep", lambda *_: None):
+            results = runner.run_batch_from_states(
+                [_make_state("s0"), _make_state("s1")],
+                on_generation_error=lambda exc: (
+                    seen_errors.append(exc),
+                    "skip" if isinstance(exc, exc_cls) else "raise",
+                )[1],
+            )
+
+        assert len(results) == 2
+        assert results[0] is not None
+        assert results[1] is None
+        assert call_sizes == [2, 1, 1, 1]
+        assert len(seen_errors) == 1
+        assert isinstance(seen_errors[0], exc_cls)
+        assert getattr(seen_errors[0], "retry_count", None) == 3
+        assert isinstance(getattr(seen_errors[0], "original_error", None), RuntimeError)
+
+    def test_retry_exhausted_whole_batch_failure_wraps_error_for_callback(self) -> None:
+        exc_cls = getattr(inference_protocol, "RetryExhaustedTransientError", None)
+        assert exc_cls is not None
+
+        seen_errors: list[Exception] = []
+        call_count = 0
+
+        def side_effect(messages_batch, params):
+            del messages_batch, params
+            nonlocal call_count
+            call_count += 1
+            raise RuntimeError("rate limited")
+
+        mock_backend = MagicMock()
+        mock_backend.generate_chat_batch.side_effect = side_effect
+        runner, _ = _make_runner(mock_backend, max_steps=1)
+
+        with patch("llenvs.evaluation.runner.time.sleep", lambda *_: None):
+            results = runner.run_batch_from_states(
+                [_make_state("s0")],
+                on_generation_error=lambda exc: (
+                    seen_errors.append(exc),
+                    "skip" if isinstance(exc, exc_cls) else "raise",
+                )[1],
+            )
+
+        assert results == [None]
+        assert call_count == 4
+        assert len(seen_errors) == 1
+        assert isinstance(seen_errors[0], exc_cls)
+        assert getattr(seen_errors[0], "retry_count", None) == 3
 
     def test_chunked_batch_with_callback(self) -> None:
         """Error in one chunk doesn't affect other chunks."""
@@ -436,6 +512,45 @@ class TestGenerationErrorCallback:
         assert env.step.call_count == 3
         assert call_sizes == [3, 1]
 
+    def test_partial_unrecoverable_failure_raises_without_extra_retry(self) -> None:
+        call_sizes: list[int] = []
+
+        def side_effect(messages_batch, params):
+            del params
+            call_sizes.append(len(messages_batch))
+            fatal = RuntimeError("GPU OOM")
+            raise PartialBatchError(
+                [_gen_result("ok0"), fatal],
+                {1: fatal},
+            )
+
+        mock_backend = MagicMock()
+        mock_backend.generate_chat_batch.side_effect = side_effect
+        runner, _ = _make_runner(mock_backend, max_steps=1)
+
+        with pytest.raises(RuntimeError, match="GPU OOM"):
+            runner.run_batch_from_states(
+                [_make_state("s0"), _make_state("s1")],
+                on_generation_error=lambda exc: "raise",
+            )
+
+        assert call_sizes == [2]
+
+    def test_partial_batch_short_results_raise_contract_error(self) -> None:
+        mock_backend = MagicMock()
+        transient = RuntimeError("rate limited")
+        mock_backend.generate_chat_batch.side_effect = PartialBatchError(
+            [],
+            {1: transient},
+        )
+        runner, _ = _make_runner(mock_backend, max_steps=1)
+
+        with pytest.raises(RuntimeError, match="PartialBatchError"):
+            runner.run_batch_from_states(
+                [_make_state("s0"), _make_state("s1")],
+                on_generation_error=lambda exc: "raise",
+            )
+
 
 class TestRunBatchPartialRecovery:
     def test_partial_prompt_too_long_skips_only_failed_trajectory(self) -> None:
@@ -494,10 +609,12 @@ class TestRunBatchPartialRecovery:
             del params
             call_sizes.append(len(messages_batch))
             transient = RuntimeError("rate limited")
-            raise PartialBatchError(
-                [_gen_result("ok0"), transient],
-                {1: transient},
-            )
+            if len(messages_batch) == 2:
+                raise PartialBatchError(
+                    [_gen_result("ok0"), transient],
+                    {1: transient},
+                )
+            raise PartialBatchError([transient], {0: transient})
 
         backend.generate_chat_batch.side_effect = side_effect
         runner, _ = _make_batch_runner(backend)
@@ -618,3 +735,58 @@ class TestRunBatchPartialRecovery:
             "partial0\nAnswer:done0",
             "partial1",
         ]
+
+
+class TestRunBatchFromStatesToolParity:
+    def test_native_tools_use_generate_with_tools_batch(self) -> None:
+        backend = MagicMock()
+        backend.capabilities.supports_function_calling = True
+        tools = (ToolDefinition(name="search", description="Search"),)
+        backend.generate_with_tools_batch.return_value = [
+            _gen_result("ok0"),
+            _gen_result("ok1"),
+        ]
+        runner, env = _make_batch_runner(backend, tool_defs=tools)
+
+        results = runner.run_batch_from_states(
+            [
+                _make_tool_state("s0", tools=tools),
+                _make_tool_state("s1", tools=tools),
+            ]
+        )
+
+        assert len(results) == 2
+        assert all(result is not None for result in results)
+        assert env.step.call_count == 2
+        backend.generate_with_tools_batch.assert_called_once()
+        backend.generate_chat_batch.assert_not_called()
+        assert tuple(backend.generate_with_tools_batch.call_args.args[1]) == tools
+
+    def test_text_tool_parser_uses_tool_prompt_and_parsed_action(self) -> None:
+        backend = MagicMock()
+        backend.capabilities.supports_function_calling = False
+        tools = (ToolDefinition(name="search", description="Search"),)
+        parser = HermesToolCallParser()
+        raw_tool_call = '<tool_call>{"name": "search", "arguments": {}}</tool_call>'
+        backend.generate_chat_batch.return_value = [
+            GenerationResult(text=raw_tool_call, finish_reason=StopReason.END_OF_TEXT),
+        ]
+        runner, env = _make_batch_runner(
+            backend,
+            tool_defs=tools,
+            tool_call_parser=parser,
+        )
+
+        results = runner.run_batch_from_states(
+            [_make_tool_state("s0", tools=tools)]
+        )
+
+        assert len(results) == 1
+        assert results[0] is not None
+        backend.generate_chat_batch.assert_called_once()
+        backend.generate_with_tools_batch.assert_not_called()
+        system_message = backend.generate_chat_batch.call_args.args[0][0][0]
+        assert system_message.role == "system"
+        assert "<tools>" in system_message.content
+        action = env.step.call_args.args[1]
+        assert action.has_tool_calls

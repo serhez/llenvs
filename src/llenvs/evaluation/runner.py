@@ -49,6 +49,7 @@ from llenvs.inference.protocol import (
     PartialBatchError,
     PromptTooLongError,
     RecoverableInputError,
+    RetryExhaustedTransientError,
     SamplingParams,
     StopReason,
 )
@@ -1422,6 +1423,30 @@ class TrajectoryRunner:
         trajectory.error = f"Generation error: {error}"
 
     @staticmethod
+    def _raise_partial_batch_contract_error(
+        *,
+        active_count: int,
+        exc: PartialBatchError,
+    ) -> None:
+        raise RuntimeError(
+            "PartialBatchError contract violation during recovery: "
+            f"expected {active_count} result slots, got {len(exc.results)}"
+        )
+
+    @staticmethod
+    def _wrap_retry_exhausted_transient_failure(
+        error: BaseException,
+    ) -> RetryExhaustedTransientError:
+        return RetryExhaustedTransientError(
+            (
+                "Transient generation failure persisted after "
+                f"{_TRANSIENT_RETRY_MAX_RETRIES} retries: {error}"
+            ),
+            original_error=error,
+            retry_count=_TRANSIENT_RETRY_MAX_RETRIES,
+        )
+
+    @staticmethod
     def _transform_partial_batch_error(
         exc: PartialBatchError,
         transform: Callable[[Any], Any],
@@ -1474,22 +1499,24 @@ class TrajectoryRunner:
             try:
                 batch_results = run_batch(batch_items)
             except PartialBatchError as exc:
+                if len(exc.results) != len(indexed_pending):
+                    self._raise_partial_batch_contract_error(
+                        active_count=len(indexed_pending),
+                        exc=exc,
+                    )
+                if any(idx < 0 or idx >= len(indexed_pending) for idx in exc.failures):
+                    self._raise_partial_batch_contract_error(
+                        active_count=len(indexed_pending),
+                        exc=exc,
+                    )
+
                 next_pending: list[tuple[int, Any]] = []
                 progress_made = False
-                first_unrecoverable: BaseException | None = None
                 max_retry_attempt = 0
-                use_original_indexing = any(
-                    idx >= len(indexed_pending) for idx in exc.failures
-                )
 
                 for pending_idx, (original_idx, item) in enumerate(indexed_pending):
-                    lookup_idx = original_idx if use_original_indexing else pending_idx
-                    result_value = (
-                        exc.results[lookup_idx]
-                        if 0 <= lookup_idx < len(exc.results)
-                        else None
-                    )
-                    failure = exc.failures.get(lookup_idx)
+                    result_value = exc.results[pending_idx]
+                    failure = exc.failures.get(pending_idx)
                     if failure is None and isinstance(result_value, BaseException):
                         failure = result_value
 
@@ -1506,31 +1533,26 @@ class TrajectoryRunner:
                                 next_pending.append((original_idx, item))
                                 max_retry_attempt = max(max_retry_attempt, attempt)
                             else:
-                                on_skip(item, error)
+                                on_skip(
+                                    item,
+                                    self._wrap_retry_exhausted_transient_failure(error),
+                                )
+                                transient_attempts.pop(original_idx, None)
                                 progress_made = True
                         else:
-                            if first_unrecoverable is None:
-                                first_unrecoverable = error
-                            next_pending.append((original_idx, item))
+                            raise error
                     else:
                         if result_value is None:
-                            if first_unrecoverable is None:
-                                first_unrecoverable = RuntimeError(
-                                    "PartialBatchError omitted a result for a "
-                                    "successful slot during recovery"
-                                )
-                            next_pending.append((original_idx, item))
-                            continue
+                            self._raise_partial_batch_contract_error(
+                                active_count=len(indexed_pending),
+                                exc=exc,
+                            )
                         result_slots[original_idx] = result_value
                         transient_attempts.pop(original_idx, None)
                         progress_made = True
 
                 if not next_pending:
                     break
-                if not progress_made and max_retry_attempt == 0:
-                    if first_unrecoverable is not None:
-                        raise first_unrecoverable
-                    raise
                 if max_retry_attempt > 0:
                     delay = _TRANSIENT_RETRY_BASE_DELAY * (2 ** (max_retry_attempt - 1))
                     logger.warning(
@@ -1569,7 +1591,11 @@ class TrajectoryRunner:
                         if attempt <= _TRANSIENT_RETRY_MAX_RETRIES:
                             retryable.append((original_idx, item))
                         else:
-                            on_skip(item, exc)
+                            on_skip(
+                                item,
+                                self._wrap_retry_exhausted_transient_failure(exc),
+                            )
+                            transient_attempts.pop(original_idx, None)
                     if retryable:
                         max_retry_attempt = max(
                             transient_attempts[original_idx]
@@ -1614,6 +1640,14 @@ class TrajectoryRunner:
             for trajectory in remaining
         ]
         requests = list(zip(remaining, messages_batch, strict=False))
+        first_obs = remaining[0].state.observation if remaining else None
+        tools = list(first_obs.available_tools) if first_obs is not None else []
+        use_native_tools = bool(
+            tools and self.backend.capabilities.supports_function_calling
+        )
+        use_text_tools = bool(
+            tools and not use_native_tools and self.tool_call_parser is not None
+        )
 
         def _mark_failed(trajectory: _ActiveTrajectory, error: Exception) -> None:
             trajectory.done = True
@@ -1641,12 +1675,36 @@ class TrajectoryRunner:
             _mark_failed(item[0], error)
 
         try:
-            requests, gen_results = self._recover_generation_batch(
-                requests,
-                run_batch=lambda batch: self.backend.generate_chat_batch(
+            if use_native_tools:
+                run_batch = lambda batch: self.backend.generate_with_tools_batch(
+                    [messages for _, messages in batch],
+                    tools,
+                    self.sampling_params,
+                )
+            elif use_text_tools:
+                tool_tuple = tuple(tools)
+                run_batch = lambda batch: self._generate_text_tool_batch(
+                    [messages for _, messages in batch],
+                    tool_tuple,
+                )
+            else:
+                if tools and not hasattr(self, "_from_state_tool_warning_logged"):
+                    logger.warning(
+                        "Environment provides %d tools but backend '%s' does "
+                        "not support function calling and no tool_call_parser "
+                        "is configured. Tools will be ignored.",
+                        len(tools),
+                        type(self.backend).__name__,
+                    )
+                    self._from_state_tool_warning_logged = True  # type: ignore[attr-defined]
+                run_batch = lambda batch: self.backend.generate_chat_batch(
                     [messages for _, messages in batch],
                     self.sampling_params,
-                ),
+                )
+
+            requests, gen_results = self._recover_generation_batch(
+                requests,
+                run_batch=run_batch,
                 on_skip=(
                     _skip_request
                     if on_generation_error is not None
