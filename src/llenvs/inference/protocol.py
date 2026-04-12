@@ -16,7 +16,27 @@ if TYPE_CHECKING:
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 
-class PromptTooLongError(ValueError):
+class RecoverableInputError(ValueError):
+    """Raised when a specific request item is invalid but the backend is healthy.
+
+    These failures are deterministic and local to one input. Callers may
+    safely drop the offending item, preserve sibling successes, and continue.
+
+    Attributes:
+        offending_indices: Batch-local indices for failed items when known.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        offending_indices: list[int] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.offending_indices = offending_indices or []
+
+
+class PromptTooLongError(RecoverableInputError):
     """Raised when a prompt exceeds the model's maximum context length.
 
     Wraps the backend error with structured diagnostic data for callers
@@ -42,13 +62,36 @@ class PromptTooLongError(ValueError):
         offending_indices: list[int] | None = None,
         offending_prompts: list[str] | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(message, offending_indices=offending_indices)
         self.model_name = model_name
         self.max_model_len = max_model_len
         self.batch_size = batch_size
         self.prompt_token_lengths = prompt_token_lengths or []
-        self.offending_indices = offending_indices or []
         self.offending_prompts = offending_prompts or []
+
+
+class PartialBatchError(Exception):
+    """Raised when part of a concurrent batch succeeded and part failed.
+
+    Attributes:
+        results: Full-length list aligned with the input batch. Successful
+            slots contain the returned value; failed slots contain the
+            corresponding exception instance.
+        failures: Mapping of failed batch indices to their exceptions.
+        offending_indices: Convenience list of failed indices.
+    """
+
+    def __init__(
+        self,
+        results: list[Any],
+        failures: dict[int, BaseException],
+    ) -> None:
+        self.results = results
+        self.failures = failures
+        self.offending_indices = list(failures)
+        super().__init__(
+            f"Concurrent batch had {len(failures)}/{len(results)} failed items"
+        )
 
 
 class StopReason(Enum):
