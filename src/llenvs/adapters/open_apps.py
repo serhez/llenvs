@@ -45,6 +45,10 @@ OPEN_APPS_TASKS: list[str] = [
     "save_paris_to_my_favorite_places",
 ]
 
+# Wait time injected after reset() to let the welcome-screen fade-in
+# animation complete before the actor sees the first observation.
+_HOME_FADE_IN_WAIT_MS: int = 1500
+
 # Available application modules in OpenApps
 OPEN_APPS_MODULES: list[str] = [
     "calendar",
@@ -521,6 +525,44 @@ class OpenAppsEnvironment:
             state=state_content,
         )
 
+    # -- Fade-in settle helpers --------------------------------------------
+
+    def _is_home_screen(self, raw_obs: dict[str, Any]) -> bool:
+        """Detect the OpenApps welcome page by URL.
+
+        The welcome page is the only screen that plays a fade-in
+        animation on each visit — both on initial reset and whenever
+        the agent navigates back to it during an episode.  We detect it
+        by URL because the URL is cheap to read and unaffected by the
+        in-flight animation, unlike the accessibility tree.
+        """
+        url = raw_obs.get("url", "") or ""
+        if not url:
+            return False
+        # Strip query/fragment, then compare path to the home routes.
+        # OpenApps serves the welcome page from "/" (and sometimes "").
+        from urllib.parse import urlparse
+        path = urlparse(url).path or "/"
+        return path in ("", "/", "/home", "/index.html")
+
+    def _settle_home_fade_in(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
+        """If the current page is the home screen, wait for the fade-in.
+
+        Replaces ``raw_obs`` with the post-wait observation so the
+        accessibility tree and screenshot reflect the fully-opaque app
+        cards.  The injected ``noop(ms)`` only calls Playwright's
+        ``page.wait_for_timeout`` — no side effects beyond advancing
+        time — and the resulting step's reward/terminated/info are
+        discarded because this is a visual settle, not part of the
+        episode.
+        """
+        if not self._is_home_screen(raw_obs):
+            return raw_obs
+        new_obs, _r, _term, _trunc, _info = self._env.step(
+            f"noop({_HOME_FADE_IN_WAIT_MS})"
+        )
+        return new_obs
+
     # -- MDP interface ------------------------------------------------------
 
     def reset(
@@ -552,6 +594,8 @@ class OpenAppsEnvironment:
             self._task_name = target_name
 
         raw_obs, info = self._env.reset()
+        # reset() always lands on the home page → settle the fade-in.
+        raw_obs = self._settle_home_fade_in(raw_obs)
 
         goal = self._task.goal
         initial_app_state = _get_app_state(self._base_url)
@@ -597,6 +641,10 @@ class OpenAppsEnvironment:
         self._state_tracker.validate(state, "OpenAppsEnvironment")
 
         raw_obs, reward, terminated, truncated, info = self._env.step(action.text)
+        # If the action navigated back to the home screen (e.g. via
+        # go_back), the welcome page replays its fade-in animation —
+        # settle it before the actor sees the next observation.
+        raw_obs = self._settle_home_fade_in(raw_obs)
 
         next_step = state.hidden.episode_step + 1
 
