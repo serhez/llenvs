@@ -188,28 +188,37 @@ def mock_browsergym_env() -> MockBrowserGymEnv:
     return MockBrowserGymEnv()
 
 
+def _make_env(
+    mock_task: MockTask,
+    mock_browsergym_env: MockBrowserGymEnv,
+    *,
+    task_name: str = "add_call_mom_to_my_todo",
+    max_steps: int = 10,
+) -> OpenAppsEnvironment:
+    """Build a single-task OpenAppsEnvironment from mock components.
+
+    Wraps the mocks in a one-element ``task_names`` + a trivial factory
+    that always returns the same (task, browsergym) pair.  Used by the
+    legacy fixtures whose tests don't care about task switching.
+    """
+    return OpenAppsEnvironment(
+        task_names=(task_name,),
+        task_factory=lambda _name: (mock_task, mock_browsergym_env),
+        base_url="http://localhost:5001",
+        max_steps=max_steps,
+    )
+
+
 @pytest.fixture
 def env(mock_browsergym_env, mock_task) -> OpenAppsEnvironment:
     """Standard environment with task-incomplete mock."""
-    return OpenAppsEnvironment(
-        browsergym_env=mock_browsergym_env,
-        task=mock_task,
-        task_name="add_call_mom_to_my_todo",
-        base_url="http://localhost:5001",
-        max_steps=10,
-    )
+    return _make_env(mock_task, mock_browsergym_env)
 
 
 @pytest.fixture
 def env_complete(mock_browsergym_env, mock_task_complete) -> OpenAppsEnvironment:
     """Environment where the task is always complete (for reward testing)."""
-    return OpenAppsEnvironment(
-        browsergym_env=mock_browsergym_env,
-        task=mock_task_complete,
-        task_name="add_call_mom_to_my_todo",
-        base_url="http://localhost:5001",
-        max_steps=10,
-    )
+    return _make_env(mock_task_complete, mock_browsergym_env)
 
 
 # ---------------------------------------------------------------------------
@@ -353,13 +362,7 @@ class TestOpenAppsEnvironment:
             env.step(state_0, Action(text="click('x')"))
 
     def test_truncation(self, mock_browsergym_env, mock_task):
-        env = OpenAppsEnvironment(
-            browsergym_env=mock_browsergym_env,
-            task=mock_task,
-            task_name="test",
-            base_url="http://localhost:5001",
-            max_steps=2,
-        )
+        env = _make_env(mock_task, mock_browsergym_env, task_name="test", max_steps=2)
         state, _ = env.reset()
 
         result1 = env.step(state, Action(text="click('a')"))
@@ -474,13 +477,7 @@ class TestOpenAppsMultiStepEpisode:
         )
 
         task = MockTask(complete=False)
-        env = OpenAppsEnvironment(
-            browsergym_env=mock_browsergym_env,
-            task=task,
-            task_name="add_call_mom_to_my_todo",
-            base_url="http://localhost:5001",
-            max_steps=10,
-        )
+        env = _make_env(task, mock_browsergym_env)
 
         state, info = env.reset()
         assert state.metadata.step == 0
@@ -515,13 +512,7 @@ class TestOpenAppsMultiStepEpisode:
         assert len(result3.next_state.observation.messages) == 6
 
     def test_episode_truncates_without_completion(self, mock_browsergym_env, mock_task):
-        env = OpenAppsEnvironment(
-            browsergym_env=mock_browsergym_env,
-            task=mock_task,
-            task_name="test",
-            base_url="http://localhost:5001",
-            max_steps=3,
-        )
+        env = _make_env(mock_task, mock_browsergym_env, task_name="test", max_steps=3)
 
         state, _ = env.reset()
         r1 = env.step(state, Action(text="a"))
@@ -596,3 +587,109 @@ class TestConstants:
         assert "todo" in OPEN_APPS_MODULES
         assert "messenger" in OPEN_APPS_MODULES
         assert "map" in OPEN_APPS_MODULES
+
+
+# ---------------------------------------------------------------------------
+# Tests: task_index switching via task_factory
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAppsTaskIndexSwitching:
+    """reset(options={'task_index': N}) should swap to OPEN_APPS_TASKS[N]."""
+
+    @staticmethod
+    def _make_factory(calls: list[str]):
+        """Build a factory that records every (mock_task, mock_env) it makes."""
+        def factory(task_name: str) -> tuple[MockTask, MockBrowserGymEnv]:
+            calls.append(task_name)
+            return MockTask(goal=f"goal for {task_name}"), MockBrowserGymEnv()
+        return factory
+
+    def _build_env(
+        self,
+        calls: list[str],
+        *,
+        task_names: tuple[str, ...] = OPEN_APPS_TASKS,
+        initial_task_index: int = 0,
+    ) -> OpenAppsEnvironment:
+        return OpenAppsEnvironment(
+            task_names=task_names,
+            task_factory=self._make_factory(calls),
+            base_url="http://localhost:5001",
+            max_steps=10,
+            initial_task_index=initial_task_index,
+        )
+
+    def test_initial_task_built_eagerly(self):
+        calls: list[str] = []
+        env = self._build_env(calls, initial_task_index=0)
+        assert env._task_name == OPEN_APPS_TASKS[0]
+        # Factory invoked once for the initial task
+        assert calls == [OPEN_APPS_TASKS[0]]
+        # __len__ exposes the full collection
+        assert len(env) == len(OPEN_APPS_TASKS)
+        # spec advertises task_index support
+        assert env.spec.supports_task_index is True
+        assert env.spec.supports_len is True
+        assert env.spec.metadata["task_names"] == list(OPEN_APPS_TASKS)
+
+    def test_switches_to_target_task_on_reset(self):
+        calls: list[str] = []
+        env = self._build_env(calls, initial_task_index=0)
+
+        target_name = OPEN_APPS_TASKS[4]
+        state, _ = env.reset(options={"task_index": 4})
+
+        assert env._task_name == target_name
+        assert state.hidden.task_name == target_name
+        assert state.hidden.task_index == 4
+        # Factory invoked once for the initial task and once for the target
+        assert calls == [OPEN_APPS_TASKS[0], target_name]
+
+    def test_no_swap_when_target_matches_current(self):
+        calls: list[str] = []
+        env = self._build_env(calls, initial_task_index=2)
+        # Reset to the same index — no extra factory call
+        env.reset(options={"task_index": 2})
+        assert env._task_name == OPEN_APPS_TASKS[2]
+        assert calls == [OPEN_APPS_TASKS[2]]  # only the eager initial build
+
+    def test_caches_proxies_per_task_name(self):
+        """Switching back to a previously-built task should reuse the cached env."""
+        calls: list[str] = []
+        env = self._build_env(calls, initial_task_index=0)
+
+        env.reset(options={"task_index": 1})  # build task 1
+        env.reset(options={"task_index": 0})  # back to task 0 (cached)
+        env.reset(options={"task_index": 1})  # back to task 1 (cached)
+
+        # Factory called exactly twice: once eagerly for task 0, once for task 1
+        assert calls == [OPEN_APPS_TASKS[0], OPEN_APPS_TASKS[1]]
+
+    def test_index_modulo_wraps(self):
+        calls: list[str] = []
+        env = self._build_env(calls, initial_task_index=0)
+
+        # task_index = 8 should wrap to OPEN_APPS_TASKS[0] (no swap)
+        env.reset(options={"task_index": 8})
+        assert env._task_name == OPEN_APPS_TASKS[0]
+        assert calls == [OPEN_APPS_TASKS[0]]  # only eager build
+
+        # task_index = 9 should wrap to OPEN_APPS_TASKS[1]
+        env.reset(options={"task_index": 9})
+        assert env._task_name == OPEN_APPS_TASKS[1]
+        assert calls == [OPEN_APPS_TASKS[0], OPEN_APPS_TASKS[1]]
+
+    def test_round_robin_8_tasks(self):
+        """Driving task_index 0..7 should produce 8 distinct task names."""
+        calls: list[str] = []
+        env = self._build_env(calls, initial_task_index=0)
+
+        seen_names = []
+        for i in range(len(OPEN_APPS_TASKS)):
+            state, _ = env.reset(options={"task_index": i})
+            seen_names.append(state.hidden.task_name)
+
+        assert seen_names == list(OPEN_APPS_TASKS)
+        # Factory called once per task (initial eager + 7 lazy), each cached
+        assert calls == list(OPEN_APPS_TASKS)

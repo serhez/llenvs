@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
@@ -349,17 +349,47 @@ class OpenAppsEnvironment:
 
     def __init__(
         self,
-        browsergym_env: Any,
-        task: Any,
-        task_name: str,
+        task_names: tuple[str, ...],
+        task_factory: Callable[[str], tuple[Any, Any]],
         base_url: str,
         max_steps: int = 30,
         use_screenshot: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
+        initial_task_index: int = 0,
     ) -> None:
-        self._env = browsergym_env
-        self._task = task
-        self._task_name = task_name
+        """Initialize an OpenApps environment over a collection of tasks.
+
+        Mirrors :class:`AlfWorldEnvironment`'s shape: the env is constructed
+        with the full collection of tasks it can serve (``task_names``) and
+        a builder for the per-task BrowserGym proxy (``task_factory``).
+        ``reset(options={"task_index": N})`` looks up
+        ``task_names[N % len(task_names)]`` and switches to that task.
+
+        Unlike alfworld, the per-task BrowserGym proxies are **lazily
+        cached** rather than rebuilt on every reset: each proxy owns a
+        dedicated daemon thread, a Playwright instance and a Chromium
+        browser context, which take several seconds to spin up.  The
+        initial task (``initial_task_index``) is built eagerly so the env
+        is immediately usable.
+
+        Args:
+            task_names: Tuple of task names this env can serve.  Indexing
+                via ``task_index`` is taken modulo ``len(task_names)``.
+            task_factory: Callable mapping a task name to ``(task,
+                browsergym_proxy)``.
+            base_url: URL of the OpenApps server (shared across tasks).
+            max_steps: Maximum browser interactions per episode.
+            use_screenshot: Include screenshots in observations.
+            extra_rewards: Additional reward functions appended after the
+                native task-completion reward.
+            initial_task_index: Index of the task to activate eagerly.
+                Defaults to 0.
+        """
+        if not task_names:
+            raise ValueError("OpenAppsEnvironment requires at least one task name")
+
+        self._task_names = tuple(task_names)
+        self._task_factory = task_factory
         self._base_url = base_url
         self._max_steps = max_steps
         self._use_screenshot = use_screenshot
@@ -368,7 +398,21 @@ class OpenAppsEnvironment:
         self._extra_rewards = extra_rewards
 
         self._state_tracker = _StateContinuityTracker()
-        self._current_task_index = 0
+
+        # Eagerly build the initial task so the env is immediately usable;
+        # other tasks are built lazily on first reference and cached.
+        initial_idx = initial_task_index % len(self._task_names)
+        self._current_task_index = initial_idx
+        self._task_name = self._task_names[initial_idx]
+        initial_task, initial_env = self._task_factory(self._task_name)
+        self._task = initial_task
+        self._env = initial_env
+        self._envs_by_name: dict[str, tuple[Any, Any]] = {
+            self._task_name: (initial_task, initial_env),
+        }
+
+    def __len__(self) -> int:
+        return len(self._task_names)
 
     @property
     def answer_extractor(self):
@@ -398,9 +442,12 @@ class OpenAppsEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
+            supports_task_index=True,
+            supports_len=True,
             metadata={
                 "base_url": self._base_url,
                 "description": f"OpenApps task: {self._task_name}",
+                "task_names": list(self._task_names),
             },
         )
 
@@ -482,10 +529,27 @@ class OpenAppsEnvironment:
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[State[OpenAppsHidden], dict[str, Any]]:
-        """Reset the environment and return the initial state."""
+        """Reset the environment and return the initial state.
+
+        ``options["task_index"]`` selects which task in
+        ``self._task_names`` to activate, mirroring alfworld and the
+        other multi-task adapters.  Indexing is taken modulo the number
+        of tasks.  Per-task BrowserGym proxies are built lazily on first
+        reference and cached for subsequent resets to avoid paying
+        Playwright/Chromium startup costs more than once per task.
+        """
         options = options or {}
         task_index = options.get("task_index", self._current_task_index)
         self._current_task_index = task_index
+
+        target_name = self._task_names[task_index % len(self._task_names)]
+        if target_name != self._task_name:
+            cached = self._envs_by_name.get(target_name)
+            if cached is None:
+                cached = self._task_factory(target_name)
+                self._envs_by_name[target_name] = cached
+            self._task, self._env = cached
+            self._task_name = target_name
 
         raw_obs, info = self._env.reset()
 
@@ -932,12 +996,20 @@ class OpenAppsAdapter:
         headless: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
         config_overrides: dict[str, Any] | None = None,
+        task_names: tuple[str, ...] | None = None,
         **kwargs: Any,
     ) -> OpenAppsEnvironment:
-        """Create an OpenApps environment for the given task.
+        """Create an OpenApps environment.
+
+        The returned environment knows about *all* tasks in ``task_names``
+        (defaults to :data:`OPEN_APPS_TASKS`) and switches between them
+        on ``reset(options={"task_index": N})``, mirroring alfworld and
+        the other multi-task adapters.  ``name`` selects which task is
+        active eagerly so the env is immediately usable before any
+        explicit task-index switch.
 
         Args:
-            name: Task name (one of :data:`OPEN_APPS_TASKS`).
+            name: Initial task name (one of :data:`OPEN_APPS_TASKS`).
             max_steps: Maximum browser interactions per episode.
             use_screenshot: Include screenshots in observations.
             base_url: URL of an already-running OpenApps server.
@@ -945,7 +1017,9 @@ class OpenAppsAdapter:
             headless: Run the browser in headless mode.
             extra_rewards: Additional reward functions.
             config_overrides: Hydra config overrides for the server.
-            **kwargs: Extra keyword arguments forwarded to the task.
+            task_names: Subset of tasks the env should serve.  Defaults
+                to all of :data:`OPEN_APPS_TASKS`.
+            **kwargs: Extra keyword arguments forwarded to BrowserGym.
 
         Returns:
             Configured :class:`OpenAppsEnvironment`.
@@ -982,41 +1056,59 @@ class OpenAppsAdapter:
                 f"Unknown task '{name}'. Available: {list(all_tasks_cfg.keys())}"
             )
 
-        task_cfg = all_tasks_cfg[name]
-        task: Task = hydra.utils.instantiate(task_cfg)
-
-        # Register with BrowserGym
-        register_tasks_with_browsergym(tasks=[task])
-
-        # Create the BrowserGym env on a dedicated proxy thread.
-        # Playwright's sync API binds greenlets to the creating thread,
-        # so each env gets its own thread with its own Playwright instance.
-        # Multiple envs run truly in parallel on separate threads.
+        # Closure that builds (task, BrowserGym proxy) for any task_name in
+        # all_tasks_cfg.  Used both for the initial environment and for
+        # lazy task switching via reset(options={"task_index": ...}).
         import gymnasium as gym
 
-        task_id = task.task_id
         _base_url = base_url
         _headless = headless
         _extra_kw = dict(kwargs)
 
-        def _make_browsergym_env() -> Any:
-            return gym.make(
-                f"browsergym/{task_id}",
-                task_kwargs={"base_url": _base_url},
-                headless=_headless,
-                **_extra_kw,
+        def _build_task_env(task_name: str) -> tuple[Any, Any]:
+            if task_name not in all_tasks_cfg:
+                raise ValueError(
+                    f"Unknown task '{task_name}'. Available: "
+                    f"{list(all_tasks_cfg.keys())}"
+                )
+            # _convert_="all" strips omegaconf wrappers so task dataclass
+            # fields are plain list/dict — needed because tasks like
+            # add_paper_reading_meeting_with_einstein have non-empty
+            # `invitees` lists that later flow into JSON comparisons.
+            task_obj: Task = hydra.utils.instantiate(
+                all_tasks_cfg[task_name], _convert_="all"
             )
+            register_tasks_with_browsergym(tasks=[task_obj])
+            task_id = task_obj.task_id
 
-        browsergym_env = _BrowserGymProxy(_make_browsergym_env)
+            def _make_browsergym_env() -> Any:
+                return gym.make(
+                    f"browsergym/{task_id}",
+                    task_kwargs={"base_url": _base_url},
+                    headless=_headless,
+                    **_extra_kw,
+                )
+
+            return task_obj, _BrowserGymProxy(_make_browsergym_env)
+
+        # Resolve the task list this env will serve and validate `name`.
+        env_task_names: tuple[str, ...] = (
+            tuple(task_names) if task_names is not None else tuple(OPEN_APPS_TASKS)
+        )
+        if name not in env_task_names:
+            raise ValueError(
+                f"Initial task {name!r} is not in task_names {list(env_task_names)}"
+            )
+        initial_task_index = env_task_names.index(name)
 
         return OpenAppsEnvironment(
-            browsergym_env=browsergym_env,
-            task=task,
-            task_name=name,
+            task_names=env_task_names,
+            task_factory=_build_task_env,
             base_url=base_url,
             max_steps=max_steps,
             use_screenshot=use_screenshot,
             extra_rewards=extra_rewards,
+            initial_task_index=initial_task_index,
         )
 
     def get_default_system_prompt(self, name: str) -> str | None:
