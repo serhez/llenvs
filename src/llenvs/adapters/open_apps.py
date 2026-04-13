@@ -358,6 +358,8 @@ class OpenAppsEnvironment:
         base_url: str,
         max_steps: int = 30,
         use_screenshot: bool = False,
+        screenshot_with_som: bool = False,
+        omit_axtree_text: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         initial_task_index: int = 0,
     ) -> None:
@@ -384,6 +386,17 @@ class OpenAppsEnvironment:
             base_url: URL of the OpenApps server (shared across tasks).
             max_steps: Maximum browser interactions per episode.
             use_screenshot: Include screenshots in observations.
+            screenshot_with_som: When ``True`` (and ``use_screenshot`` is
+                also ``True``), render Set-of-Marks bid number tags on
+                each screenshot so a vision-only actor can read element
+                bids directly from the image.  Implies a SoM-enabled
+                vision condition; harmless to set with text-only actors
+                because they ignore images.
+            omit_axtree_text: When ``True``, replace the accessibility
+                tree text in ``state.text`` with a short stub.  Use this
+                with ``screenshot_with_som=True`` to run a true
+                vision-only condition where the actor can only read
+                element bids off the SoM-annotated screenshot.
             extra_rewards: Additional reward functions appended after the
                 native task-completion reward.
             initial_task_index: Index of the task to activate eagerly.
@@ -397,6 +410,8 @@ class OpenAppsEnvironment:
         self._base_url = base_url
         self._max_steps = max_steps
         self._use_screenshot = use_screenshot
+        self._screenshot_with_som = screenshot_with_som
+        self._omit_axtree_text = omit_axtree_text
 
         self._native_rewards: tuple[RewardFunction, ...] = (OpenAppsReward(),)
         self._extra_rewards = extra_rewards
@@ -481,7 +496,15 @@ class OpenAppsEnvironment:
 
         axtree_obj = raw_obs.get("axtree_object")
         extra_props = raw_obs.get("extra_element_properties", {})
-        if axtree_obj is not None:
+        if self._omit_axtree_text:
+            # Vision-only condition: hide the accessibility tree from the
+            # actor.  The screenshot (with SoM overlays) is the only
+            # source of element bids in this mode.
+            obs_text = (
+                "[accessibility tree omitted — element bids are labelled "
+                "on the screenshot via Set-of-Marks overlays]"
+            )
+        elif axtree_obj is not None:
             obs_text = flatten_axtree_to_str(
                 axtree_obj,
                 extra_properties=extra_props,
@@ -499,6 +522,10 @@ class OpenAppsEnvironment:
             if screenshot is not None:
                 from llenvs.core.image_utils import pixels_to_image_content
 
+                if self._screenshot_with_som:
+                    from browsergym.utils.obs import overlay_som
+
+                    screenshot = overlay_som(screenshot, extra_props)
                 images = (pixels_to_image_content(screenshot),)
 
         task_content: ObservationContent
@@ -1040,6 +1067,8 @@ class OpenAppsAdapter:
         name: str,
         max_steps: int = 30,
         use_screenshot: bool = False,
+        screenshot_with_som: bool = False,
+        omit_axtree_text: bool = False,
         base_url: str | None = None,
         headless: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
@@ -1060,6 +1089,11 @@ class OpenAppsAdapter:
             name: Initial task name (one of :data:`OPEN_APPS_TASKS`).
             max_steps: Maximum browser interactions per episode.
             use_screenshot: Include screenshots in observations.
+            screenshot_with_som: Render Set-of-Marks bid number tags on
+                each screenshot (requires ``use_screenshot=True``).
+            omit_axtree_text: Replace the accessibility tree text with
+                a stub.  Pair with ``screenshot_with_som=True`` for a
+                vision-only condition.
             base_url: URL of an already-running OpenApps server.
                 If *None*, the adapter will launch one automatically.
             headless: Run the browser in headless mode.
@@ -1155,6 +1189,8 @@ class OpenAppsAdapter:
             base_url=base_url,
             max_steps=max_steps,
             use_screenshot=use_screenshot,
+            screenshot_with_som=screenshot_with_som,
+            omit_axtree_text=omit_axtree_text,
             extra_rewards=extra_rewards,
             initial_task_index=initial_task_index,
         )

@@ -194,6 +194,9 @@ def _make_env(
     *,
     task_name: str = "add_call_mom_to_my_todo",
     max_steps: int = 10,
+    use_screenshot: bool = False,
+    screenshot_with_som: bool = False,
+    omit_axtree_text: bool = False,
 ) -> OpenAppsEnvironment:
     """Build a single-task OpenAppsEnvironment from mock components.
 
@@ -206,6 +209,9 @@ def _make_env(
         task_factory=lambda _name: (mock_task, mock_browsergym_env),
         base_url="http://localhost:5001",
         max_steps=max_steps,
+        use_screenshot=use_screenshot,
+        screenshot_with_som=screenshot_with_som,
+        omit_axtree_text=omit_axtree_text,
     )
 
 
@@ -693,3 +699,116 @@ class TestOpenAppsTaskIndexSwitching:
         assert seen_names == list(OPEN_APPS_TASKS)
         # Factory called once per task (initial eager + 7 lazy), each cached
         assert calls == list(OPEN_APPS_TASKS)
+
+
+# ---------------------------------------------------------------------------
+# Tests: vision-only mode (omit_axtree_text + screenshot_with_som)
+# ---------------------------------------------------------------------------
+
+
+class TestOpenAppsVisionOnly:
+    """Flags that support a true vision-only actor condition."""
+
+    def test_omit_axtree_text_replaces_state_text_with_stub(
+        self, mock_task, mock_browsergym_env
+    ):
+        env = _make_env(mock_task, mock_browsergym_env, omit_axtree_text=True)
+        state, _ = env.reset()
+        text = state.observation.state.text
+        assert "accessibility tree omitted" in text
+        assert "Set-of-Marks" in text
+        # Sanity: real axtree content from MockBrowserGymEnv should NOT appear
+        assert "OpenApps Dashboard" not in text
+
+    def test_omit_axtree_text_persists_through_step(
+        self, mock_task, mock_browsergym_env
+    ):
+        env = _make_env(mock_task, mock_browsergym_env, omit_axtree_text=True)
+        state, _ = env.reset()
+        result = env.step(state, Action(text="click('11')"))
+        assert "accessibility tree omitted" in result.next_state.observation.state.text
+
+    def test_default_keeps_axtree_text(self, mock_task, mock_browsergym_env):
+        """Without omit_axtree_text, the flattened a11y tree is shown."""
+        env = _make_env(mock_task, mock_browsergym_env, omit_axtree_text=False)
+        state, _ = env.reset()
+        text = state.observation.state.text
+        assert "accessibility tree omitted" not in text
+        # MockBrowserGymEnv axtree contains "OpenApps Dashboard"
+        assert "OpenApps Dashboard" in text
+
+    def test_screenshot_with_som_calls_overlay(
+        self, mock_task, mock_browsergym_env, monkeypatch
+    ):
+        """When screenshot_with_som=True, overlay_som is invoked on the screenshot."""
+        import numpy as np
+
+        # Provide a real numpy screenshot in the mock obs so the vision
+        # path actually runs.
+        original_make_obs = mock_browsergym_env._make_obs
+
+        def make_obs_with_screenshot(*args, **kwargs):
+            obs = original_make_obs(*args, **kwargs)
+            obs["screenshot"] = np.zeros((720, 1280, 3), dtype=np.uint8)
+            return obs
+
+        monkeypatch.setattr(
+            mock_browsergym_env, "_make_obs", make_obs_with_screenshot
+        )
+
+        # Spy on browsergym.utils.obs.overlay_som from within the adapter.
+        calls: list[int] = []
+        from browsergym.utils import obs as bg_obs
+
+        def fake_overlay_som(screenshot, extra_props, **kw):
+            calls.append(len(extra_props))
+            # Return the input unchanged so encoding succeeds.
+            return np.asarray(screenshot)
+
+        monkeypatch.setattr(bg_obs, "overlay_som", fake_overlay_som)
+
+        env = _make_env(
+            mock_task,
+            mock_browsergym_env,
+            use_screenshot=True,
+            screenshot_with_som=True,
+        )
+        state, _ = env.reset()
+
+        # overlay_som called at least once with the mock's extra_props
+        assert len(calls) >= 1
+        # Image is still attached to the observation
+        assert state.observation.state.images
+        assert state.observation.state.images[0].media_type == "image/png"
+
+    def test_screenshot_without_som_skips_overlay(
+        self, mock_task, mock_browsergym_env, monkeypatch
+    ):
+        import numpy as np
+
+        original_make_obs = mock_browsergym_env._make_obs
+
+        def make_obs_with_screenshot(*args, **kwargs):
+            obs = original_make_obs(*args, **kwargs)
+            obs["screenshot"] = np.zeros((720, 1280, 3), dtype=np.uint8)
+            return obs
+
+        monkeypatch.setattr(
+            mock_browsergym_env, "_make_obs", make_obs_with_screenshot
+        )
+
+        from browsergym.utils import obs as bg_obs
+
+        called = []
+        monkeypatch.setattr(
+            bg_obs, "overlay_som", lambda *a, **kw: called.append(1) or a[0]
+        )
+
+        env = _make_env(
+            mock_task,
+            mock_browsergym_env,
+            use_screenshot=True,
+            screenshot_with_som=False,
+        )
+        env.reset()
+        assert called == []  # overlay never invoked
