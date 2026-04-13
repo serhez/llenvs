@@ -575,8 +575,11 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        with pytest.raises(RuntimeError, match="Error resetting task 1"):
-            runner.run_batch([0, 1, 2])
+        result = runner.run_batch([0, 1, 2])
+        assert len(result.trajectory_results) == 3
+        assert result.trajectory_results[0].metadata.get("error") is None
+        assert result.trajectory_results[2].metadata.get("error") is None
+        assert "Reset failed for task 1" in result.trajectory_results[1].metadata["error"]
 
         files = list((tmp_path / "logs" / "mock_failing").glob("*.jsonl"))
         lines = files[0].read_text().strip().split("\n")
@@ -597,8 +600,11 @@ class TestRunnerIntegration:
             log=LogConfig(targets=("file",), log_dir=log_dir),
         )
 
-        with pytest.raises(RuntimeError, match="Error stepping task 1"):
-            runner.run_batch([0, 1, 2])
+        result = runner.run_batch([0, 1, 2])
+        assert len(result.trajectory_results) == 3
+        assert result.trajectory_results[0].metadata.get("error") is None
+        assert result.trajectory_results[2].metadata.get("error") is None
+        assert "Step failed for task 1" in result.trajectory_results[1].metadata["error"]
 
         files = list((tmp_path / "logs" / "mock_step_fail").glob("*.jsonl"))
         lines = files[0].read_text().strip().split("\n")

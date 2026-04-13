@@ -8,6 +8,7 @@ import pytest
 from llenvs.adapters.jericho import (
     DEFAULT_JERICHO_PROMPTS,
     JerichoAdapter,
+    JerichoEmulatorHaltedError,
     JerichoEnvironment,
     JerichoHidden,
     JerichoReward,
@@ -36,11 +37,16 @@ class MockFrotzEnv:
         self._closed = False
         self._seeded = False
         self._seed_value: int | None = None
+        self._halted = False
+        self._halt_after_step = False
+        self._halt_during_valid_actions = False
+        self.valid_actions_calls = 0
 
     def reset(self) -> str:
         self._step_count = 0
         self._score = 0
         self._done = False
+        self._halted = False
         return (
             "ZORK I: The Great Underground Empire\n"
             "West of House\n"
@@ -55,34 +61,47 @@ class MockFrotzEnv:
         if action == "open mailbox":
             obs = "Opening the small mailbox reveals a leaflet."
             self._score = 0
-            return obs, 0, False, {}
+            result = (obs, 0, False, {})
 
         elif action == "take leaflet":
             obs = "Taken."
             self._score = 5
-            return obs, 5, False, {}
+            result = (obs, 5, False, {})
 
         elif action == "go north":
             obs = "North of House\nYou are facing the north side of a white house."
             self._score = self._score  # no score change
-            return obs, 0, False, {}
+            result = (obs, 0, False, {})
 
         elif action == "win game":
             obs = "Congratulations! You have won!"
             self._score = self._max_score
             self._done = True
-            return obs, self._max_score - (self._score - self._max_score + self._score), True, {}
+            result = (
+                obs,
+                self._max_score - (self._score - self._max_score + self._score),
+                True,
+                {},
+            )
 
         elif action == "die":
             obs = "You have died."
             self._done = True
-            return obs, 0, True, {}
+            result = (obs, 0, True, {})
 
         else:
             obs = "I don't understand that."
-            return obs, 0, False, {}
+            result = (obs, 0, False, {})
+
+        if self._halt_after_step:
+            self._halted = True
+
+        return result
 
     def get_valid_actions(self) -> list[str]:
+        self.valid_actions_calls += 1
+        if self._halt_during_valid_actions:
+            self._halted = True
         return ["open mailbox", "go north", "go south", "look"]
 
     def get_score(self) -> int:
@@ -112,6 +131,9 @@ class MockFrotzEnv:
 
     def close(self) -> None:
         self._closed = True
+
+    def _emulator_halted(self) -> bool:
+        return self._halted
 
 
 MOCK_GAME_FILES = (
@@ -155,6 +177,20 @@ def _make_env(
 
     env._init_game = mock_init_game  # type: ignore[assignment]
     return env
+
+
+class SimpleTagExtractor:
+    """Minimal extractor that pulls text from <answer>...</answer>."""
+
+    def extract(self, text: str | None) -> tuple[str | None, dict]:
+        if not text:
+            return None, {}
+        import re
+
+        match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+        if match:
+            return match.group(1).strip(), {}
+        return None, {}
 
 
 @pytest.fixture
@@ -375,6 +411,10 @@ class TestJerichoEnvironment:
         assert env.spec.supports_seed is True
         assert env.spec.max_steps == 100
 
+    def test_include_valid_actions_disabled_by_default(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(mock_frotz=mock_frotz)
+        assert env._include_valid_actions is False
+
     def test_len(self, env: JerichoEnvironment):
         assert len(env) == len(MOCK_GAME_FILES)
 
@@ -460,13 +500,10 @@ class TestJerichoEnvironment:
 
     def test_step_updates_valid_actions(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})
-
-        initial_actions = state.hidden.valid_actions
-        assert len(initial_actions) > 0
+        assert state.hidden.valid_actions == ()
 
         result = env.step(state, Action(text="open mailbox"))
-        # Valid actions are re-fetched each step
-        assert result.next_state.hidden.valid_actions is not None
+        assert result.next_state.hidden.valid_actions == ()
 
     def test_step_game_over(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})
@@ -517,10 +554,69 @@ class TestJerichoEnvironment:
         assert "Valid actions:" in state.observation.prompt
         assert "open mailbox" in state.observation.prompt
 
-    def test_valid_actions_always_in_hidden(self, env: JerichoEnvironment):
-        """Valid actions are always stored in hidden state regardless of obs setting."""
+    def test_valid_actions_disabled_skips_generation_on_reset_and_step(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz, include_valid_actions=False)
         state, _ = env.reset(options={"task_index": 0})
+        assert mock_frotz.valid_actions_calls == 0
+        assert state.hidden.valid_actions == ()
+        assert state.observation.state is not None
+        assert state.observation.state.data == {
+            "valid_actions": [],
+            "score": 0,
+            "max_score": 350,
+            "moves": 0,
+        }
+
+        result = env.step(state, Action(text="open mailbox"))
+        assert mock_frotz.valid_actions_calls == 0
+        assert result.next_state.hidden.valid_actions == ()
+        assert result.info["valid_actions"] == ()
+
+    def test_valid_actions_enabled_fetches_on_reset_and_step(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz, include_valid_actions=True)
+        state, _ = env.reset(options={"task_index": 0})
+        assert mock_frotz.valid_actions_calls == 1
         assert len(state.hidden.valid_actions) > 0
+        result = env.step(state, Action(text="open mailbox"))
+        assert mock_frotz.valid_actions_calls == 2
+        assert len(result.next_state.hidden.valid_actions) > 0
+
+    def test_halted_emulator_after_step_raises_and_discards_env(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz)
+        state, _ = env.reset(options={"task_index": 0})
+        mock_frotz._halt_after_step = True
+
+        with pytest.raises(JerichoEmulatorHaltedError, match="after step"):
+            env.step(state, Action(text="open mailbox"))
+
+        assert env._frotz_env is None
+        assert mock_frotz._closed is True
+
+    def test_halted_emulator_during_valid_action_generation_raises_and_discards_env(
+        self,
+        mock_frotz: MockFrotzEnv,
+    ):
+        env = _make_env(mock_frotz=mock_frotz, include_valid_actions=True)
+        state, _ = env.reset(options={"task_index": 0})
+        mock_frotz._halt_during_valid_actions = True
+
+        with pytest.raises(
+            JerichoEmulatorHaltedError,
+            match="during valid action generation",
+        ):
+            env.step(state, Action(text="open mailbox"))
+
+        assert env._frotz_env is None
+        assert mock_frotz._closed is True
 
     def test_game_file_in_hidden(self, env: JerichoEnvironment):
         state, _ = env.reset(options={"task_index": 0})
@@ -624,6 +720,112 @@ class TestJerichoMessageHistory:
         assert result.terminated is True
         assert len(result.next_state.observation.messages) == 2
         assert result.next_state.observation.messages[0] == {"role": "assistant", "content": "die"}
+
+
+class TestJerichoAnswerExtractor:
+    def test_valid_extraction_uses_extracted_command(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(mock_frotz=mock_frotz, answer_extractor=SimpleTagExtractor())
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="<answer>open mailbox</answer>"))
+
+        assert result.extracted_action == "open mailbox"
+        assert result.resolved_action == "open mailbox"
+        assert result.info["action"] == "open mailbox"
+        assert result.next_state.hidden.last_action == "open mailbox"
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "open mailbox"
+
+    def test_invalid_extraction_executes_wait_and_uses_placeholder(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(mock_frotz=mock_frotz, answer_extractor=SimpleTagExtractor())
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="open mailbox"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action == "[invalid action]"
+        assert result.info["invalid_action_format"] is True
+        assert result.info["action"] == "wait"
+        assert result.next_state.hidden.last_action == "wait"
+        assert result.next_state.hidden.moves == 1
+        assert result.next_state.metadata.step == 1
+        assert "invalid" in result.next_state.observation.state.text.lower()
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "[invalid action]"
+
+    def test_none_invalid_action_text_preserves_raw_history(self, mock_frotz: MockFrotzEnv):
+        env = _make_env(
+            mock_frotz=mock_frotz,
+            answer_extractor=SimpleTagExtractor(),
+            invalid_action_text=None,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="open mailbox"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "open mailbox"
+
+
+class TestFrotzCommandSanitization:
+    """Multi-line text must never reach Frotz.
+
+    Frotz's stdin pipe only consumes one line per Z-Machine READ
+    instruction.  Extra lines stay in the pipe buffer and leak into
+    subsequent set_state/step calls, corrupting other trajectories
+    that share the same FrotzEnv instance.
+    """
+
+    def test_multiline_raw_action_truncated_to_first_line(
+        self, mock_frotz: MockFrotzEnv
+    ):
+        """Without an extractor, multi-line action.text is truncated."""
+        env = _make_env(mock_frotz=mock_frotz)  # no extractor
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(
+            state,
+            Action(text="open mailbox\n\nextra junk\nmore junk"),
+        )
+
+        assert result.info["action"] == "open mailbox"
+        assert result.next_state.hidden.last_action == "open mailbox"
+
+    def test_multiline_raw_action_skips_leading_blank_lines(
+        self, mock_frotz: MockFrotzEnv
+    ):
+        """Leading blank lines are skipped; first non-empty line is used."""
+        env = _make_env(mock_frotz=mock_frotz)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="\n\nopen mailbox\ngarbage"))
+
+        assert result.info["action"] == "open mailbox"
+
+    def test_trailing_newlines_stripped(self, mock_frotz: MockFrotzEnv):
+        """Trailing newlines on a single-line command are stripped."""
+        env = _make_env(mock_frotz=mock_frotz)
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="open mailbox\n\n\n"))
+
+        assert result.info["action"] == "open mailbox"
+
+    def test_multiline_with_extractor_fallback(self, mock_frotz: MockFrotzEnv):
+        """When extraction fails and advance_on_invalid is multi-line, sanitize."""
+        env = _make_env(
+            mock_frotz=mock_frotz,
+            answer_extractor=SimpleTagExtractor(),
+            advance_on_invalid="wait\nextra",
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        # No <answer> tags → extraction fails → advance_on_invalid used
+        result = env.step(state, Action(text="no tags here"))
+
+        assert result.info["action"] == "wait"
 
 
 # ---------------------------------------------------------------------------

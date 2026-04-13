@@ -703,6 +703,15 @@ class CraftaxEnvironment:
             except ImportError:
                 self._jax_random = None
 
+    @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
+
     def __len__(self) -> int:
         if self._num_tasks is not None:
             return self._num_tasks
@@ -871,6 +880,7 @@ class CraftaxEnvironment:
             terminated=False,
             truncated=truncated,
             extracted_action=extracted_action,
+            resolved_action=assistant_content if extracted_action is None else None,
             info=error_info,
         )
 

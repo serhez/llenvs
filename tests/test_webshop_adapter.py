@@ -133,6 +133,20 @@ class MockWebShopEnv:
             return obs, 0.0, False, None
 
 
+class SimpleTagExtractor:
+    """Minimal extractor that pulls text from <answer>...</answer>."""
+
+    def extract(self, text: str | None) -> tuple[str | None, dict]:
+        if not text:
+            return None, {}
+        import re
+
+        match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
+        if match:
+            return match.group(1).strip(), {}
+        return None, {}
+
+
 @pytest.fixture
 def mock_webshop_env() -> MockWebShopEnv:
     """Create mock WebShop environment."""
@@ -698,6 +712,61 @@ class TestWebShopPrompts:
 
         # Default action hint should not appear
         assert "Actions: search[keywords]" not in state.observation.prompt
+
+
+class TestWebShopAnswerExtractor:
+    def test_extracted_action_is_used_for_valid_steps(self, mock_webshop_env):
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            answer_extractor=SimpleTagExtractor(),
+            pure_step=True,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="<answer>search[headphones]</answer>"))
+
+        assert result.extracted_action == "search[headphones]"
+        assert result.resolved_action == "search[headphones]"
+        assert result.next_state.hidden.trajectory == ("search[headphones]",)
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "search[headphones]"
+
+    def test_invalid_extraction_executes_sentinel_and_consumes_turn(self, mock_webshop_env):
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            answer_extractor=SimpleTagExtractor(),
+            pure_step=True,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="search[headphones]"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action == "[invalid action]"
+        assert result.info["invalid_action_format"] is True
+        assert result.info["action"] == "__invalid_action_noop__"
+        assert result.next_state.metadata.step == 1
+        assert result.next_state.hidden.last_action == "__invalid_action_noop__"
+        assert result.next_state.hidden.trajectory == ("__invalid_action_noop__",)
+        assert result.next_state.hidden.gym_snapshot is not None
+        assert "invalid" in result.next_state.observation.state.text.lower()
+        assert "Invalid action format" in result.next_state.observation.state.text
+
+    def test_none_invalid_action_text_preserves_raw_history(self, mock_webshop_env):
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            answer_extractor=SimpleTagExtractor(),
+            invalid_action_text=None,
+            pure_step=True,
+        )
+        state, _ = env.reset(options={"task_index": 0})
+
+        result = env.step(state, Action(text="search[headphones]"))
+
+        assert result.extracted_action is None
+        assert result.resolved_action is None
+        assistant_msg = result.next_state.observation.messages[-2]
+        assert assistant_msg["content"] == "search[headphones]"
 
 
 class TestWebShopAdapterDefaultSystemPrompt:

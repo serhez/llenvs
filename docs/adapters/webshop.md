@@ -79,6 +79,9 @@ env = adapter.get_environment(
     max_steps=15,
     num_products=None,  # Use full dataset
     human_goals=True,   # Use human-written goals
+    invalid_action_text="[invalid action]",  # default history placeholder
+    invalid_action_observation=None,  # custom reminder prefix
+    advance_on_invalid="__invalid_action_noop__",  # default sentinel action
 )
 
 # Check environment info
@@ -153,3 +156,9 @@ WebShop is a multi-turn environment. After each action, the agent receives updat
 3. **Purchase confirmation**: Shows reward
 
 The agent must navigate multiple pages to complete the task. Conversation history accumulates in `observation.messages` — each turn appends an assistant message (the action) and a user message (the formatted observation). The initial observation stays in `observation.prompt`.
+
+When an `answer_extractor` is configured and extraction fails, WebShop no longer
+forwards the raw model text to the environment. By default it executes the fixed
+sentinel `__invalid_action_noop__`, prepends an invalid-format reminder to the
+observation, and stores `[invalid action]` in history display while keeping the
+hidden replay state aligned with the real step that was executed.

@@ -129,6 +129,9 @@ env = adapter.get_environment(
     include_objective_in_obs=True,  # default: True
     task_types=[1, 2, 3],  # filter task types (None = all)
     answer_extractor=my_extractor,  # extract command from raw model output
+    invalid_action_text="[invalid action]",  # default history placeholder
+    invalid_action_observation=None,  # custom reminder prefix
+    advance_on_invalid="__invalid_action_noop__",  # default sentinel command
     prompts={  # override prompt templates
         "objective_prefix": "Goal: {objective}",
         "admissible_commands_prefix": "Valid actions:",
@@ -154,7 +157,7 @@ When an extractor is provided:
 - The extracted command is passed to TextWorld for stepping and stored in `hidden.trajectory` for replay
 - The assistant turn in the conversation history contains the extracted command (not raw text), keeping the history clean
 - `StepResult.extracted_action` and `StepResult.resolved_action` are set to the extracted command
-- If extraction fails (returns `None`), the raw `action.text` is used as a fallback
+- If extraction fails (returns `None`), the adapter executes the configured invalid-action command (by default `__invalid_action_noop__`), prepends an invalid-format reminder to the observation, stores the sentinel in replay state, and shows `[invalid action]` in history display
 
 ## Rewards
 

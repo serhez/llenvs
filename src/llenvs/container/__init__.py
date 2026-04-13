@@ -58,6 +58,8 @@ def create_container_environment(config: EnvironmentConfig) -> ContainerEnvironm
         config_dict["system_prompt"] = server_config.system_prompt
     if server_config.prompts is not None:
         config_dict["prompts"] = server_config.prompts
+    if server_config.difficulties is not None:
+        config_dict["difficulties"] = sorted(server_config.difficulties)
 
     config_json = json.dumps(config_dict)
 

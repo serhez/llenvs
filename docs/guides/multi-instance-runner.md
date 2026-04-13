@@ -47,18 +47,21 @@ When `run_batch_from_states()` is called and the environment is non-pure with an
 
 ## Writing a Restore Function
 
-A restore function takes `(env, state)` and returns the restored state. For Harbor, this means resetting to the original task and replaying the command prefix:
+A restore function takes `(env, state)` and returns the restored state. For Harbor, prefer the built-in `harbor_restore` helper instead of open-coding the replay loop:
 
 ```python
-def harbor_restore(env, state):
-    current, info = env.reset(options={"task_index": state.hidden.task_index})
-    for cmd in state.hidden.trajectory:
-        result = env.step(current, Action(text=cmd))
-        current = result.next_state
-    return current
+from llenvs.adapters.harbor import harbor_restore
+
+runner = TrajectoryRunner(
+    environment=env,
+    backend=backend,
+    sampling_params=sampling_params,
+    env_factory=env_factory,
+    restore_fn=harbor_restore,
+)
 ```
 
-The built-in `harbor_restore` also validates task name consistency to guard against index drift across dataset versions.
+The built-in helper validates task name consistency to guard against index drift across dataset versions, aborts on shell continuation prompts, replays the prefix with the live `trajectory_timeout` budget disabled, and re-anchors that budget before the restored continuation begins. A naive loop over `env.step(...)` is incomplete for Harbor because it can silently spend the continuation budget during replay.
 
 ## Concurrency Tuning
 

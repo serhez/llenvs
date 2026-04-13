@@ -172,6 +172,8 @@ Available in tool mode:
 | `task_name` | `str` | Harbor task identifier |
 | `instruction` | `str` | Task instruction text |
 | `episode_step` | `int` | Current step in the episode |
+| `difficulty` | `str` | Task difficulty level (e.g., `"easy"`, `"hard"`). Defaults to `"n/a"` for tasks without explicit difficulty metadata |
+| `recommended_timeout_sec` | `float \| None` | Task-recommended agent timeout in seconds from the task definition, or `None` if not specified |
 | `last_action` | `str \| None` | Text of the last action |
 | `trajectory` | `tuple[str, ...]` | Command history |
 | `snapshot_ref` | `HarborSnapshotRef \| None` | Optional exact runtime snapshot artifact for this state |
@@ -195,7 +197,9 @@ Available in tool mode:
 | `max_steps` | `int` | `30` | Maximum steps per episode |
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
-| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, `Ctrl-C` / `Ctrl-\` recovery is attempted. Disabled when `None`. Trajectory-level limits (`max_steps`, `exec_timeout`) control total episode length |
+| `max_observation_chars` | `int \| None` | `50000` | Cap each text observation and tool-mode step observation with middle truncation before it is stored in prompt history. `None` disables capping |
+| `trajectory_timeout` | `int \| None` | `900` | Text mode only — live per-trajectory wall-clock timeout in seconds. When task metadata provides `recommended_timeout_sec`, the effective live budget is the smaller of the two. `None` disables the global live trajectory cap |
+| `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, Harbor escalates through `Ctrl-C`, `Ctrl-\`, and tmux TUI escape attempts (`Esc Esc`, `:qa!`, `q`). Disabled when `None` |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
 | `extra_rewards` | `tuple` | `()` | Additional reward functions |
 | `state_capture_mode` | `str` | `"replay"` | Harbor state capture mode: `replay` or `snapshot_exact` |
@@ -204,21 +208,80 @@ Available in tool mode:
 | `runtime_probing` | `bool` | `False` | Enable runtime probing to annotate states with filesystem-restore risk signals |
 | `text_exec_mode` | `str` | `"independent_exec"` | Text-mode execution model: `independent_exec` runs each step in a fresh shell; `tmux_session` keeps a persistent tmux-backed shell inside the container |
 | `tmux_bootstrap_if_missing` | `bool` | `False` | When `text_exec_mode="tmux_session"`, attempt a bounded package-manager install of `tmux` inside the task image if it is missing |
+| `difficulties` | `set[str] \| None` | `None` | Filter tasks by difficulty level. Only tasks whose difficulty is in this set are included. `None` means no filtering. Tasks without explicit difficulty metadata are assigned `"n/a"`. Also available as a generic field on `EnvironmentConfig` |
 
 When both `command_soft_timeout` and `exec_timeout` are set, they apply to
 different phases:
 
 - `command_soft_timeout` governs live model-issued text commands only and can
   recover with a timeout observation after a successful `Ctrl-C`.
+- `trajectory_timeout` bounds the total wall-clock spent on the live text-mode
+  trajectory. Internal replay / restore loops intentionally do not consume this
+  budget.
 - Harbor's extra runtime-probe execs and verifier execution are internally
   bounded without exposing separate public timeout knobs.
 - `exec_timeout` remains the hard timeout for non-recoverable Harbor runtime
-  operations such as replay/restore and any verifier/probe call that does not
-  override it.
+  operations and auxiliary hard-path commands such as replay probes or runtime
+  helpers that do not use the live soft-timeout path.
+
+Tool mode rejects explicit `command_soft_timeout` and `trajectory_timeout`
+because both knobs only apply to text-mode execution.
+
+`max_observation_chars` applies before Harbor observations are added to the
+conversation transcript. In tool mode, it caps both individual string-valued
+tool results and the aggregated per-step `state.text`.
 
 ### `HarborAdapter.load_tasks()`
 
 Loads Harbor task definitions without creating environments. This is useful when another layer wants to inspect or filter the task set before collection.
+
+### `HarborAdapter.get_task_difficulties()`
+
+Returns a `{task_name: difficulty}` mapping for all tasks in a dataset. Tasks without explicit difficulty metadata are assigned `"n/a"`. Accepts `tasks=` for pre-loaded tasks or loads from the registry/path.
+
+### Difficulty Filtering
+
+Filter tasks by difficulty level using the `difficulties` parameter on `get_environment()` or the generic `difficulties` field on `EnvironmentConfig`:
+
+```python
+adapter = HarborAdapter()
+
+# Inspect available difficulties
+diffs = adapter.get_task_difficulties("terminal-bench@2.0")
+# {'crypto_01': 'n/a', 'ml_02': 'n/a', ...}
+
+# With TBLite (third-party difficulty-categorized tasks)
+diffs = adapter.get_task_difficulties(dataset_path="/path/to/OpenThoughts-TBLite")
+# {'csv-json-jsonl-merger': 'medium', 'broken-python': 'easy', ...}
+
+# Filter to easy + medium tasks only
+env = adapter.get_environment(
+    dataset_path="/path/to/OpenThoughts-TBLite",
+    difficulties={"easy", "medium"},
+    max_steps=30,
+)
+
+# Select tasks without explicit difficulty (e.g., standard TerminalBench)
+env = adapter.get_environment(
+    "terminal-bench@2.0",
+    difficulties={"n/a"},
+    max_steps=30,
+)
+```
+
+Via YAML config:
+
+```yaml
+environment:
+  name: "terminal-bench@2.0"
+  adapter: harbor
+  difficulties: ["easy", "medium"]
+  params:
+    dataset_path: "/path/to/OpenThoughts-TBLite"
+    max_steps: 30
+```
+
+The `difficulty` and `recommended_timeout_sec` fields are available on `HarborHidden` and in the state's `info` dict at every step.
 
 ### `HarborAdapter.inspect_snapshot_eligibility()`
 
@@ -286,11 +349,11 @@ trajectories = runner.run_batch_from_states(
 
 Restores a Harbor environment to a saved state by replaying the trajectory prefix. Resets to the original task via `task_index`, then replays each command from `state.hidden.trajectory`. Validates task name to guard against index drift across dataset versions.
 
-Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay.
+Replay uses `command_soft_timeout` (the same per-command timeout as normal collection). If a replayed command times out and recovery succeeds, replay continues to the next command — the timeout observation is preserved in the state's message history. Only shell continuation prompts (incomplete syntax) abort replay. Replay runs with the live `trajectory_timeout` budget disabled, and the restored continuation starts with a fresh live trajectory budget after restore completes. Prefer this helper over a manual `env.step(...)` replay loop: a naive loop can silently spend the continuation budget during restore.
 
 ### `harbor_snapshot_restore()`
 
-For datasets collected with exact checkpoints, `harbor_snapshot_restore()` restores a fresh Harbor environment from `state.hidden.snapshot_ref` instead of replaying the command prefix.
+For datasets collected with exact checkpoints, `harbor_snapshot_restore()` restores a fresh Harbor environment from `state.hidden.snapshot_ref` instead of replaying the command prefix. Snapshot restore also re-anchors the live `trajectory_timeout` budget so the continuation starts from a fresh live budget after the checkpoint is loaded.
 
 ```python
 from llenvs.adapters.harbor import HarborAdapter, harbor_snapshot_restore
@@ -347,7 +410,7 @@ Two validation modes:
 1. **Self-consistency** (`reference_probes=None`): multiple replays produce the same state as each other.
 2. **Live-vs-restored** (`reference_probes` provided): restored state matches probe outputs captured from the live container during data collection. This is the stronger check.
 
-Probe commands are executed out-of-band against the restored Harbor runtime, not through `env.step(...)`, so validation does not consume episode steps or trigger verifier/truncation side effects on near-horizon states.
+Probe commands are executed out-of-band against the restored Harbor runtime, not through `env.step(...)`, so validation does not consume episode steps or trigger verifier/truncation side effects on near-horizon states. The replay prefix and probe commands also run outside the live `trajectory_timeout` budget used for actual continued text-mode interaction.
 
 Returns a dict with `consistent` (bool), `matches_reference` (bool | None), `probe_outputs` (per-trial), and `divergence_details`.
 
@@ -366,13 +429,13 @@ Timeout and startup diagnostics still use raw (non-joined) pane captures so the 
 
 In both text exec modes, commands that produce no visible output get an explicit observation instead of an empty string.  In ``tmux_session`` mode, the shell exit code is captured via the ``PROMPT_COMMAND`` hook: silent successful commands show ``[Command completed successfully with no output]``, silent failures show ``[exit code: N]``, and if the exit status is unavailable (e.g. after a timeout) the fallback is ``[No output]``.  ``independent_exec`` mode has the same behaviour using the exec return code directly.
 
-When an ``answer_extractor`` is configured and it cannot extract an action, Harbor does not execute the raw model text. Instead it returns a format-specific invalid-action observation (for example, reminding the model to use ``<answer>...</answer>``) and records the invalid-format flag plus extraction metadata in step info.
+When an ``answer_extractor`` is configured and it cannot extract an action, Harbor does not execute the raw model text. Instead it returns a format-specific invalid-action observation (for example, reminding the model to use ``<answer>...</answer>``) and records the invalid-format flag plus extraction metadata in step info. Use ``invalid_action_text`` to control what assistant text is stored in history for these turns (default: ``[invalid action]``), and ``invalid_action_observation`` to override the reminder shown to the model.
 
 In ``tmux_session`` mode, Harbor also detects when bash has entered the continuation prompt because a direct command is syntactically incomplete (for example, unmatched quotes). Live steps are cancelled immediately and receive a synthetic observation explaining that the shell is waiting for more input. Replay and replay-probe restore paths treat the same condition as an immediate restore failure instead of waiting for the full command timeout.
 
 If `tmux` is missing inside the image and `tmux_bootstrap_if_missing=True`, the adapter attempts a bounded package-manager install. Production runs still benefit from preinstalled `tmux`, especially when replay or fresh-container restores are frequent.
 
-When `command_soft_timeout` is set, live model-issued text commands become recoverable on timeout: Harbor interrupts the command with `Ctrl-C` (escalating to `Ctrl-\` if needed), appends a standard timeout observation to the trajectory, and keeps the session alive. Trajectory-level limits (`max_steps`, `exec_timeout`) control total episode length. Replay, restore, and replay-validation commands stay on the hard `exec_timeout` path, and tool mode rejects this kwarg entirely.
+Recoverable live timeouts differ slightly by text execution mode. With `tmux_session`, `command_soft_timeout` recovers the live shell in place by sending `Ctrl-C`, escalating to `Ctrl-\`, then trying a TUI-oriented escape sequence (`Esc Esc`, `:qa!`, `q`) before declaring the session unrecoverable. With `independent_exec`, recoverable timeouts become synthetic timeout observations instead of raw exec errors. A separate live `trajectory_timeout` bounds total wall-clock spent on the text-mode trajectory in both modes; if that budget clamps a live `independent_exec` command more tightly than the normal per-command timeout, the timeout is still converted into the same recoverable timeout observation so the step truncates cleanly. Replay and restore disable the live `trajectory_timeout` budget intentionally, while auxiliary replay probes and similar helper commands still use the hard `exec_timeout` path. Tool mode rejects `command_soft_timeout` entirely.
 
 See the [multi-instance runner guide](../guides/multi-instance-runner.md) for architecture details.
 

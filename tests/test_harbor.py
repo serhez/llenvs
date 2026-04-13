@@ -31,12 +31,28 @@ class MockExecResult:
 
 
 @dataclass
+class _MockAgentConfig:
+    """Mock Harbor agent config section."""
+
+    timeout_sec: float | None = None
+
+
+@dataclass
+class _MockTaskConfig:
+    """Mock Harbor task config with attribute access for metadata/agent/environment."""
+
+    environment: dict = field(default_factory=dict)
+    metadata: dict = field(default_factory=dict)
+    agent: _MockAgentConfig | None = None
+
+
+@dataclass
 class MockHarborTask:
     """Mock Harbor task."""
 
     name: str = "crypto_01"
     instruction: str = "Decrypt the file secret.enc using AES-256."
-    config: dict = field(default_factory=lambda: {"image": "harbor/crypto:latest"})
+    config: _MockTaskConfig = field(default_factory=_MockTaskConfig)
 
 
 @dataclass
@@ -160,14 +176,24 @@ def _make_verifier_factory(
 # ── Helpers ─────────────────────────────────────────────────────
 
 
-def _make_tasks(n: int = 3) -> tuple:
+def _make_tasks(
+    n: int = 3,
+    difficulties: list[str | None] | None = None,
+    timeouts: list[float | None] | None = None,
+) -> tuple:
     """Create a tuple of mock tasks."""
+    diffs = difficulties or [None] * n
+    touts = timeouts or [None] * n
     return tuple(
         MockHarborTask(
             name=f"task_{i:02d}",
             instruction=f"Task {i} instruction",
+            config=_MockTaskConfig(
+                metadata={"difficulty": d} if d is not None else {},
+                agent=_MockAgentConfig(timeout_sec=t) if t is not None else None,
+            ),
         )
-        for i in range(n)
+        for i, d, t in zip(range(n), diffs, touts)
     )
 
 
@@ -189,6 +215,8 @@ def _make_env(
     tmux_bootstrap_if_missing: bool = False,
     command_soft_timeout: int | None = None,
     runtime_probing: bool = False,
+    trajectory_timeout: int | None = 900,
+    max_observation_chars: int | None = 50_000,
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -215,6 +243,8 @@ def _make_env(
         tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
         command_soft_timeout=command_soft_timeout,
         runtime_probing=runtime_probing,
+        trajectory_timeout=trajectory_timeout,
+        max_observation_chars=max_observation_chars,
     )
 
 
@@ -230,6 +260,7 @@ def _make_tool_env(
     dataset_name: str = "terminal-bench",
     state_capture_mode: str = "replay",
     snapshot_artifact_root: Path | None = None,
+    max_observation_chars: int | None = 50_000,
 ):
     """Create a HarborToolEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborToolEnvironment
@@ -251,6 +282,7 @@ def _make_tool_env(
         extra_rewards=extra_rewards,
         state_capture_mode=state_capture_mode,
         snapshot_artifact_root=snapshot_artifact_root,
+        max_observation_chars=max_observation_chars,
     )
 
 
@@ -259,7 +291,9 @@ def _reset_env(env, task_index: int = 0):
     return env.reset(options={"task_index": task_index})
 
 
-def _make_snapshot_task(tmp_path: Path, name: str, *, dockerfile: str | None = None, compose: str | None = None):
+def _make_snapshot_task(
+    tmp_path: Path, name: str, *, dockerfile: str | None = None, compose: str | None = None
+):
     task_dir = tmp_path / name
     env_dir = task_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
@@ -287,6 +321,8 @@ class _FakeTmuxRuntime:
         wait_timeout_once: bool = False,
         wait_recovery_fails: bool = False,
         ctrl_backslash_recovers: bool = False,
+        tui_escape_recovers: bool = False,
+        pager_q_recovers: bool = False,
         ready_after_attempts: int | None = 1,
         hook_wait_timeout_once: bool = False,
         bang_requires_history_disable: bool = False,
@@ -301,6 +337,8 @@ class _FakeTmuxRuntime:
         self.pending_command_timeout = False
         self.wait_recovery_fails = wait_recovery_fails
         self.ctrl_backslash_recovers = ctrl_backslash_recovers
+        self.tui_escape_recovers = tui_escape_recovers
+        self.pager_q_recovers = pager_q_recovers
         self.ready_after_attempts = ready_after_attempts
         self.ready_send_attempts = 0
         self.hook_wait_timeout_once = hook_wait_timeout_once
@@ -352,9 +390,7 @@ class _FakeTmuxRuntime:
             return MockExecResult(stdout="")
 
         if "test -r /tmp/.llenvs_harbor_tmux_ready" in command:
-            return MockExecResult(
-                stdout=self.files.get("/tmp/.llenvs_harbor_tmux_ready", "")
-            )
+            return MockExecResult(stdout=self.files.get("/tmp/.llenvs_harbor_tmux_ready", ""))
 
         if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in command:
             marker = "cat > /tmp/.llenvs_harbor_hook_init.sh << "
@@ -374,9 +410,7 @@ class _FakeTmuxRuntime:
                     self.pending_bang_timeout = False
                     self.pending_bang_recovery_failure = True
                     if not self.visible_buffers:
-                        self.visible_buffers.append(
-                            "bash: !DOCTYPE: event not found\nbash$ "
-                        )
+                        self.visible_buffers.append("bash: !DOCTYPE: event not found\nbash$ ")
                     raise RuntimeError("apptainer command timed out after 120s")
                 if self.wait_timeout_once:
                     self.wait_timeout_once = False
@@ -416,6 +450,18 @@ class _FakeTmuxRuntime:
             if " C-\\" in command:
                 self.pending_command_timeout = False
                 if self.ctrl_backslash_recovers:
+                    self.wait_recovery_fails = False
+                    self.pending_bang_recovery_failure = False
+                return MockExecResult(stdout="")
+            if "':qa!'" in command:
+                self.pending_command_timeout = False
+                if self.tui_escape_recovers:
+                    self.wait_recovery_fails = False
+                    self.pending_bang_recovery_failure = False
+                return MockExecResult(stdout="")
+            if " 'q' Enter" in command and "':qa!'" not in command:
+                self.pending_command_timeout = False
+                if self.pager_q_recovers:
                     self.wait_recovery_fails = False
                     self.pending_bang_recovery_failure = False
                 return MockExecResult(stdout="")
@@ -460,13 +506,19 @@ class _FakeTmuxRuntime:
                     token_match = re.search(r"(llenvs_harbor_step_[A-Za-z0-9]+)", command)
                     if token_match is not None and self.step_exit_codes:
                         exit_code = self.step_exit_codes.pop(0)
-                        self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(exit_code or 0)
+                        self.files[f"{self._STATUS_DIR}/{token_match.group(1)}"] = str(
+                            exit_code or 0
+                        )
                     return MockExecResult(stdout="found")
                 return MockExecResult(stdout="")
             # Default: command completed unless a timeout is pending or
             # recovery is configured to fail (simulates PROMPT_COMMAND not
             # firing / status file not written).
-            if not self.wait_timeout_once and not self.pending_command_timeout and not self.wait_recovery_fails:
+            if (
+                not self.wait_timeout_once
+                and not self.pending_command_timeout
+                and not self.wait_recovery_fails
+            ):
                 return MockExecResult(stdout="found")
             return MockExecResult(stdout="")
 
@@ -483,7 +535,6 @@ class _FakeTmuxRuntime:
 
         if "tmux has-session" in command:
             return MockExecResult(stdout="")
-
 
 
 class _FakeTimeoutThenExitProcess:
@@ -574,11 +625,7 @@ class TestHarborSnapshotEligibility:
             tmp_path,
             "task_01",
             compose=(
-                "services:\n"
-                "  main:\n"
-                "    image: ubuntu:latest\n"
-                "  db:\n"
-                "    image: postgres:latest\n"
+                "services:\n  main:\n    image: ubuntu:latest\n  db:\n    image: postgres:latest\n"
             ),
         )
 
@@ -597,11 +644,7 @@ class TestHarborSnapshotEligibility:
             tmp_path,
             "task_01",
             compose=(
-                "services:\n"
-                "  main:\n"
-                "    image: ubuntu:latest\n"
-                "    ports:\n"
-                "      - '8080:8080'\n"
+                "services:\n  main:\n    image: ubuntu:latest\n    ports:\n      - '8080:8080'\n"
             ),
         )
 
@@ -938,8 +981,7 @@ class TestHarborEnvironment:
         assert "PROMPT_COMMAND" in init_cmd
         assert "set +H" in init_cmd
         assert any(
-            "printf '%s' llenvs_harbor_init_" in cmd
-            and "tmux send-keys" in cmd
+            "printf '%s' llenvs_harbor_init_" in cmd and "tmux send-keys" in cmd
             for cmd in mock_env._exec_history
         )
         # Hook init waits for status file, not lock.
@@ -948,18 +990,13 @@ class TestHarborEnvironment:
             for cmd in mock_env._exec_history
         )
         # Init-token status file cleaned up after install.
+        assert any("llenvs_harbor_init_" in path for path in runtime.status_reads)
         assert any(
-            "llenvs_harbor_init_" in path
-            for path in runtime.status_reads
-        )
-        assert any(
-            "tmux send-keys -t" in cmd
-            and "source /tmp/.llenvs_harbor_hook_init.sh" in cmd
+            "tmux send-keys -t" in cmd and "source /tmp/.llenvs_harbor_hook_init.sh" in cmd
             for cmd in mock_env._exec_history
         )
         assert any(
-            "tmux resize-window -t " in cmd and " -x 200" in cmd
-            for cmd in mock_env._exec_history
+            "tmux resize-window -t " in cmd and " -x 200" in cmd for cmd in mock_env._exec_history
         )
 
     def test_reset_tmux_session_bootstraps_missing_tmux(self):
@@ -989,7 +1026,8 @@ class TestHarborEnvironment:
         _state, _info = _reset_env(env)
 
         bootstrap_cmd = next(
-            cmd for cmd in mock_env._exec_history
+            cmd
+            for cmd in mock_env._exec_history
             if "apt-get" in cmd or "yum " in cmd or "dnf " in cmd or "apk add" in cmd
         )
         # TMPDIR export must appear before any package-manager invocation
@@ -1014,8 +1052,7 @@ class TestHarborEnvironment:
             for cmd in mock_env._exec_history
         )
         assert any(
-            "tmux resize-window -t " in cmd and " -x 200" in cmd
-            for cmd in mock_env._exec_history
+            "tmux resize-window -t " in cmd and " -x 200" in cmd for cmd in mock_env._exec_history
         )
 
     def test_reset_tmux_session_readiness_timeout_includes_pane_diagnostics(
@@ -1048,8 +1085,7 @@ class TestHarborEnvironment:
         assert "full startup buffer" in message
         assert runtime.ready_send_attempts >= 1
         assert any(
-            "tmux capture-pane -p -t " in cmd and "-J" not in cmd
-            for cmd in mock_env._exec_history
+            "tmux capture-pane -p -t " in cmd and "-J" not in cmd for cmd in mock_env._exec_history
         )
         assert any(
             "tmux capture-pane -p -S - -t " in cmd and "-J" not in cmd
@@ -1125,6 +1161,42 @@ class TestHarborEnvironment:
         assert result.terminated is False
         assert result.truncated is False
 
+    def test_step_caps_large_observation(self):
+        large_output = "x" * 10_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_env(harbor_env=mock_env, max_observation_chars=200)
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="cmd"))
+
+        obs = result.next_state.observation.state.text
+        assert len(obs) < 300
+        assert "characters omitted" in obs
+        assert obs.startswith("x" * 100)
+        assert obs.endswith("x" * 100)
+
+    def test_step_no_cap_when_disabled(self):
+        large_output = "x" * 10_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_env(harbor_env=mock_env, max_observation_chars=None)
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="cmd"))
+
+        assert result.next_state.observation.state.text == large_output
+
+    def test_step_default_cap_truncates_huge_output(self):
+        large_output = "x" * 100_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_env(harbor_env=mock_env)
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="cmd"))
+
+        obs = result.next_state.observation.state.text
+        assert len(obs) < 51_000
+        assert "characters omitted" in obs
+
     def test_step_snapshot_exact_captures_checkpoint(self, tmp_path):
         mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="ok")])
         env = _make_env(
@@ -1186,7 +1258,7 @@ class TestHarborEnvironment:
 
         assert len(mock_env._exec_history) == before
         assert result.extracted_action is None
-        assert result.resolved_action is None
+        assert result.resolved_action == "[invalid action]"
         assert result.info["invalid_action_format"] is True
         assert result.info["extraction_metadata"] == {
             "found": False,
@@ -1204,6 +1276,8 @@ class TestHarborEnvironment:
         )
         assert result.next_state.hidden.last_action == "ls"
         assert result.next_state.hidden.trajectory == ()
+        assistant_turn = result.next_state.observation.messages[-2]
+        assert assistant_turn["content"] == "[invalid action]"
 
     def test_step_with_strict_action_regex_uses_action_specific_feedback(self):
         from llenvs.core.extraction import RegexExtractor
@@ -1236,7 +1310,7 @@ class TestHarborEnvironment:
 
         assistant_turn = result.next_state.observation.messages[-2]
         assert assistant_turn["role"] == "assistant"
-        assert assistant_turn["content"] == "apt update && apt install -y python3-pgmpy"
+        assert assistant_turn["content"] == "[invalid action]"
 
     def test_step_tmux_session_uses_two_exec_success_path(self):
         runtime = _FakeTmuxRuntime(
@@ -1356,7 +1430,8 @@ class TestHarborEnvironment:
         assert "source /tmp/.llenvs_harbor_tmux_command" not in obs_text
         # Verify the hook script disables history expansion and forces prompt sentinel.
         hook_cmd = next(
-            cmd for cmd in mock_env._exec_history
+            cmd
+            for cmd in mock_env._exec_history
             if "cat > /tmp/.llenvs_harbor_hook_init.sh <<" in cmd
         )
         assert "set +H" in hook_cmd
@@ -1371,7 +1446,7 @@ class TestHarborEnvironment:
         text_session = getattr(env, "_text_session")
         assert text_session is not None
         runtime.full_buffers.append(
-            "bash$  echo '<!DOCTYPE html><html><body><img src=\"x\" on\n"
+            'bash$  echo \'<!DOCTYPE html><html><body><img src="x" on\n'
             "error=\"alert(\\'xss\\')\"></body></html>' > /app/out.html\n"
             "bash: syntax error near unexpected token `)'\n"
             f"{text_session._prompt_sentinel}"
@@ -1381,7 +1456,7 @@ class TestHarborEnvironment:
             state,
             Action(
                 text=(
-                    "echo '<!DOCTYPE html><html><body><img src=\"x\" "
+                    'echo \'<!DOCTYPE html><html><body><img src="x" '
                     "onerror=\"alert(\\'xss\\')\"></body></html>' > /app/out.html"
                 )
             ),
@@ -1413,8 +1488,7 @@ class TestHarborEnvironment:
 
         assert result.next_state.observation.state is not None
         assert result.next_state.observation.state.text == (
-            "bash: line 1: syntax error near unexpected token `newline'\n"
-            "bash: line 1: `<answer>'"
+            "bash: line 1: syntax error near unexpected token `newline'\nbash: line 1: `<answer>'"
         )
 
     def test_step_tmux_session_silent_exit_zero_shows_success_placeholder(self):
@@ -1516,9 +1590,7 @@ class TestHarborEnvironment:
 
         result = env.step(
             state,
-            Action(
-                text="x" * (text_session._DIRECT_SEND_KEYS_MAX_CHARS + 1)
-            ),
+            Action(text="x" * (text_session._DIRECT_SEND_KEYS_MAX_CHARS + 1)),
         )
 
         assert result.next_state.observation.state is not None
@@ -1596,13 +1668,13 @@ class TestHarborEnvironment:
         assert len(runtime.status_polls) >= 1
         # Phase 1 did NOT use tmux wait-for -L (the bug we're fixing)
         phase1_cmds = [
-            cmd for cmd, ts in runtime.exec_calls
-            if "test -f" in cmd and runtime._STATUS_DIR in cmd
+            cmd for cmd, ts in runtime.exec_calls if "test -f" in cmd and runtime._STATUS_DIR in cmd
         ]
         assert len(phase1_cmds) >= 1
         # Phase 2 used a single wait_and_capture (status-file polling)
         wait_capture_cmds = [
-            cmd for cmd in mock_env._exec_history
+            cmd
+            for cmd in mock_env._exec_history
             if "while ! test -f" in cmd and "capture-pane" in cmd
         ]
         assert len(wait_capture_cmds) == 1
@@ -1632,14 +1704,10 @@ class TestHarborEnvironment:
         assert text_session is not None
         # Status file never appears (command is incomplete)
         # Visible screen shows continuation sentinel
-        runtime.visible_buffers.append(
-            f'echo "unterminated\n{text_session._continuation_sentinel}'
-        )
+        runtime.visible_buffers.append(f'echo "unterminated\n{text_session._continuation_sentinel}')
         # Recovery visual check: prompt appeared after Ctrl-C cancelled.
         runtime.visible_buffers.append(f"{text_session._prompt_sentinel}")
-        runtime.full_buffers.append(
-            f'bash$ echo "unterminated\n{text_session._prompt_sentinel}'
-        )
+        runtime.full_buffers.append(f'bash$ echo "unterminated\n{text_session._prompt_sentinel}')
 
         result = env.step(state, Action(text='echo "unterminated'))
 
@@ -1720,8 +1788,7 @@ class TestHarborEnvironment:
         # Recovery uses status-file polling, not lock-based wait-for.
         assert len(runtime.status_polls) > 0
         assert any(
-            "tmux capture-pane -p -t " in cmd and "-J" not in cmd
-            for cmd in mock_env._exec_history
+            "tmux capture-pane -p -t " in cmd and "-J" not in cmd for cmd in mock_env._exec_history
         )
         assert any(
             "tmux capture-pane -p -S - -t " in cmd and "-J" not in cmd
@@ -1765,10 +1832,7 @@ class TestHarborEnvironment:
         assert any("C-c" in cmd for cmd in mock_env._exec_history)
         assert not any("C-\\" in cmd for cmd in mock_env._exec_history)
         # Recovery used status-file polling (not lock-based wait-for).
-        recovery_polls = [
-            p for p in runtime.status_polls
-            if "llenvs_harbor_step_" in p
-        ]
+        recovery_polls = [p for p in runtime.status_polls if "llenvs_harbor_step_" in p]
         assert len(recovery_polls) > 0
         # No tmux wait-for commands anywhere (lock fully eliminated).
         assert not any("tmux wait-for" in cmd for cmd in mock_env._exec_history)
@@ -1831,9 +1895,7 @@ class TestHarborEnvironment:
         text_session = getattr(env, "_text_session")
         assert text_session is not None
         # Visible screen already shows the prompt (command completed, signal lost).
-        runtime.visible_buffers.append(
-            f"done.\n{text_session._prompt_sentinel}"
-        )
+        runtime.visible_buffers.append(f"done.\n{text_session._prompt_sentinel}")
         # Full buffer has the real output (used by salvage capture).
         runtime.full_buffers.append(
             f"bash$ apt-get update\napt-get install -y curl\ndone.\n{text_session._prompt_sentinel}"
@@ -1963,6 +2025,119 @@ class TestHarborEnvironment:
         assert result.info["command_timed_out"] is True
         assert any(" C-c" in cmd for cmd in mock_env._exec_history)
         assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert not any("':qa!'" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_timeout_recovery_escalates_to_tui_escape(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ vim file.txt\necho done",
+            ],
+            visible_buffers=["vim file.txt"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+            tui_escape_recovers=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="vim file.txt\necho done"))
+
+        assert result.info["command_timed_out"] is True
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any(" Escape Escape" in cmd for cmd in mock_env._exec_history)
+        assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+        assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_timeout_recovery_escalates_to_pager_q(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ less README.md\necho done",
+            ],
+            visible_buffers=["less README.md"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+            pager_q_recovers=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="less README.md\necho done"))
+
+        assert result.info["command_timed_out"] is True
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any(" Escape Escape" in cmd for cmd in mock_env._exec_history)
+        assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+        assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
+
+    def test_step_tmux_session_timeout_all_escalations_fail_raises(self, monkeypatch):
+        import llenvs.adapters.harbor as harbor_module
+
+        fake_time = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: fake_time["value"])
+        monkeypatch.setattr(
+            harbor_module,
+            "_sleep",
+            lambda s: fake_time.__setitem__("value", fake_time["value"] + s),
+        )
+
+        runtime = _FakeTmuxRuntime(
+            full_buffers=[
+                "bash$ vim file.txt\necho done",
+            ],
+            visible_buffers=["vim file.txt"],
+            wait_timeout_once=True,
+            wait_recovery_fails=True,
+        )
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(
+            harbor_env=mock_env,
+            text_exec_mode="tmux_session",
+            exec_timeout=30,
+            command_soft_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        with pytest.raises(RuntimeError, match="Session unrecoverable after timeout"):
+            env.step(state, Action(text="vim file.txt\necho done"))
+
+        assert any(" C-c" in cmd for cmd in mock_env._exec_history)
+        assert any(" C-\\" in cmd for cmd in mock_env._exec_history)
+        assert any("':qa!'" in cmd for cmd in mock_env._exec_history)
+        assert any(" 'q' Enter" in cmd for cmd in mock_env._exec_history)
 
     def test_step_tmux_session_stages_file_for_large_commands(self):
         runtime = _FakeTmuxRuntime(
@@ -1995,7 +2170,7 @@ class TestHarborEnvironment:
             command_soft_timeout=5,
         )
         state, _ = _reset_env(env)
-        tick_values = [0.0, 4.5]
+        tick_values = [0.0, 0.0, 4.5, 4.5]
         last_tick = {"value": tick_values[-1]}
 
         def fake_monotonic() -> float:
@@ -2029,6 +2204,246 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text="SUBMIT"))
         assert result.terminated is True
         assert result.next_state.metadata.is_terminal is True
+
+    def test_step_submit_keyword_stays_terminal_when_budget_elapses_after_precheck(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        tick_values = [0.0, 4.0, 5.1]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(
+            harbor_env=mock_env,
+            submit_keyword="SUBMIT",
+            trajectory_timeout=5,
+            verify_on_truncation=False,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="SUBMIT"))
+
+        assert result.terminated is True
+        assert result.truncated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert result.info["observation"] == "Submitting for verification..."
+        assert mock_env._exec_history == []
+
+    def test_step_submit_keyword_truncates_when_trajectory_budget_exhausted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(harbor_env=mock_env, submit_keyword="SUBMIT", trajectory_timeout=180)
+        state, _ = _reset_env(env)
+        before_execs = len(mock_env._exec_history)
+
+        now["value"] = 181.0
+        result = env.step(state, Action(text="SUBMIT"))
+
+        assert result.terminated is False
+        assert result.truncated is True
+        assert result.info["trajectory_timeout_elapsed"] is True
+        assert result.info["observation"] == (
+            "[Trajectory timed out after 180 seconds. No command was executed.]"
+        )
+        assert len(mock_env._exec_history) == before_execs
+        assert result.next_state.hidden.trajectory == ()
+
+    def test_step_trajectory_timeout_truncates_without_executing_when_budget_exhausted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(harbor_env=mock_env, trajectory_timeout=900)
+        state, _ = _reset_env(env)
+        before_execs = len(mock_env._exec_history)
+
+        now["value"] = 901.0
+        result = env.step(state, Action(text="ls"))
+
+        assert result.truncated is True
+        assert result.terminated is False
+        assert result.info["trajectory_timeout_elapsed"] is True
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == (
+            "[Trajectory timed out after 900 seconds. No command was executed.]"
+        )
+        assert result.next_state.metadata.info["trajectory_timeout_elapsed"] is True
+        assert len(mock_env._exec_history) == before_execs
+        assert result.next_state.hidden.trajectory == ()
+
+    def test_step_trajectory_timeout_clamps_live_command_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 3.0
+        result = env.step(state, Action(text="pwd"))
+
+        assert result.truncated is False
+        assert timeout_values == [2]
+
+    def test_step_trajectory_timeout_recovers_independent_exec_timeout_without_soft_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def timeout_handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            now["value"] = 5.0
+            raise RuntimeError(f"apptainer command timed out after {timeout_sec}s: {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=timeout_handler),
+            exec_timeout=120,
+            command_soft_timeout=None,
+            trajectory_timeout=5,
+            verify_on_truncation=False,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 3.0
+        result = env.step(state, Action(text="sleep 999"))
+
+        expected = "[Command timed out after 2 seconds and was cancelled.]"
+        assert timeout_values == [2]
+        assert result.terminated is False
+        assert result.truncated is True
+        assert result.info["command_timed_out"] is True
+        assert result.info["trajectory_timeout_elapsed"] is True
+        assert result.info["command_timeout_elapsed_sec"] == pytest.approx(2.0)
+        assert result.info["observation"] == expected
+        assert result.next_state.observation.state is not None
+        assert result.next_state.observation.state.text == expected
+        assert result.next_state.hidden.trajectory == ("sleep 999",)
+
+    def test_step_trajectory_timeout_clamps_to_at_least_one_second(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        tick_values = [0.0, 3.9, 4.2, 4.2, 4.2]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
+
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=5,
+        )
+        state, _ = _reset_env(env)
+
+        result = env.step(state, Action(text="pwd"))
+
+        assert timeout_values == [1]
+        assert result.info["trajectory_timeout_elapsed"] is True
+
+    def test_step_trajectory_timeout_uses_smaller_of_configured_and_recommended(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        tasks = _make_tasks(1, timeouts=[3.0])
+        env = _make_env(
+            tasks=tasks,
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=600,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 1.0
+        env.step(state, Action(text="pwd"))
+
+        assert timeout_values == [2]
+
+    def test_step_trajectory_timeout_uses_configured_value_when_task_has_none(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=120,
+            trajectory_timeout=600,
+        )
+        state, _ = _reset_env(env)
+
+        now["value"] = 598.0
+        env.step(state, Action(text="pwd"))
+
+        assert timeout_values == [2]
 
     def test_step_submit_keyword_case_sensitive(self):
         mock_env = MockHarborEnvironment()
@@ -2179,9 +2594,7 @@ class TestHarborEnvironment:
         # No reward should be set
         assert result.next_state.metadata.info.get("reward") is None
 
-    def test_truncation_verifier_timeout_returns_zero_reward(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_truncation_verifier_timeout_returns_zero_reward(self, monkeypatch: pytest.MonkeyPatch):
         import llenvs.adapters.harbor as harbor_module
 
         class NeverVerifier:
@@ -2360,7 +2773,8 @@ class _HostSideFakeTmuxRuntime(_FakeTmuxRuntime):
         # by writing the status file — unless a timeout is pending.
         if "tmux send-keys" in command and "tmux send-keys -l" in command:
             token_match = re.search(
-                r"(llenvs_harbor_step_[A-Za-z0-9]+)", command,
+                r"(llenvs_harbor_step_[A-Za-z0-9]+)",
+                command,
             )
             if (
                 token_match is not None
@@ -2372,12 +2786,10 @@ class _HostSideFakeTmuxRuntime(_FakeTmuxRuntime):
                 if exit_code is not None:
                     self._write_status_file(token_match.group(1), exit_code)
         # Hook source — write init-token status file for hook install.
-        if (
-            "tmux send-keys" in command
-            and "source /tmp/.llenvs_harbor_hook_init.sh" in command
-        ):
+        if "tmux send-keys" in command and "source /tmp/.llenvs_harbor_hook_init.sh" in command:
             token_match = re.search(
-                r"(llenvs_harbor_init_[A-Za-z0-9]+)", command,
+                r"(llenvs_harbor_init_[A-Za-z0-9]+)",
+                command,
             )
             if token_match is not None and not self.hook_wait_timeout_once:
                 self._write_status_file(token_match.group(1), 0)
@@ -2432,9 +2844,7 @@ class TestHostSideStatusFiles:
             assert "test -f /tmp/.llenvs_harbor_tmux_status/" not in cmd, (
                 f"Unexpected exec-based status check: {cmd}"
             )
-            assert "while ! test -f" not in cmd, (
-                f"Unexpected in-container wait loop: {cmd}"
-            )
+            assert "while ! test -f" not in cmd, f"Unexpected in-container wait loop: {cmd}"
         assert "file.txt" in result.next_state.observation.state.text
 
     def test_happy_path_reads_exit_code_from_host(self, tmp_path):
@@ -2447,9 +2857,7 @@ class TestHostSideStatusFiles:
         text_session = getattr(env, "_text_session")
         # Append a buffer that produces empty observation after sanitization
         # so _read_exit_status is triggered.
-        runtime.full_buffers.append(
-            f"bash$ cmd\n{text_session._prompt_sentinel}"
-        )
+        runtime.full_buffers.append(f"bash$ cmd\n{text_session._prompt_sentinel}")
 
         result = env.step(state, Action(text="cmd"))
 
@@ -2466,8 +2874,7 @@ class TestHostSideStatusFiles:
         assert host_status_dir.is_dir()
         # No mkdir exec for status dir.
         assert not any(
-            "mkdir -p /tmp/.llenvs_harbor_tmux_status" in cmd
-            for cmd in mock_env._exec_history
+            "mkdir -p /tmp/.llenvs_harbor_tmux_status" in cmd for cmd in mock_env._exec_history
         )
 
     def test_fallback_when_no_host_tmp(self):
@@ -2640,6 +3047,26 @@ class TestHarborToolEnvironment:
         assert tool_results[0].is_success
         assert "file1.txt" in tool_results[0].output
 
+    def test_execute_command_caps_large_output(self):
+        large_output = "y" * 10_000
+        mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout=large_output)])
+        env = _make_tool_env(harbor_env=mock_env, max_observation_chars=200)
+        state, _ = _reset_env(env)
+
+        call = ToolCall(
+            id="call_1",
+            name="execute_command",
+            arguments={"command": "ls -la"},
+        )
+        result = env.step(state, Action(tool_calls=(call,)))
+
+        tool_result = result.info["tool_results"][0]
+        assert tool_result.is_success
+        assert len(tool_result.output) < 300
+        assert "characters omitted" in tool_result.output
+        assert result.next_state.observation.state is not None
+        assert "characters omitted" in result.next_state.observation.state.text
+
     def test_read_file(self):
         mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="file contents here")])
         env = _make_tool_env(harbor_env=mock_env)
@@ -2653,6 +3080,33 @@ class TestHarborToolEnvironment:
         result = env.step(state, Action(tool_calls=(call,)))
         assert result.info["tool_results"][0].is_success
         assert "file contents here" in result.info["tool_results"][0].output
+
+    def test_tool_step_caps_aggregate_state_text(self):
+        first = "a" * 180
+        second = "b" * 180
+        mock_env = MockHarborEnvironment(
+            exec_results=[
+                MockExecResult(stdout=first),
+                MockExecResult(stdout=second),
+            ]
+        )
+        env = _make_tool_env(harbor_env=mock_env, max_observation_chars=200)
+        state, _ = _reset_env(env)
+
+        calls = (
+            ToolCall(id="call_1", name="execute_command", arguments={"command": "cmd1"}),
+            ToolCall(id="call_2", name="execute_command", arguments={"command": "cmd2"}),
+        )
+        result = env.step(state, Action(tool_calls=calls))
+
+        tool_results = result.info["tool_results"]
+        assert all(tr.is_success for tr in tool_results)
+        assert tool_results[0].output == first
+        assert tool_results[1].output == second
+        assert result.next_state.observation.state is not None
+        state_text = result.next_state.observation.state.text
+        assert len(state_text) < 300
+        assert "characters omitted" in state_text
 
     def test_write_file(self):
         mock_env = MockHarborEnvironment(exec_results=[MockExecResult(stdout="")])
@@ -2883,6 +3337,7 @@ class TestHarborAdapter:
             tool_mode=False,
         )
         assert isinstance(env, HarborEnvironment)
+        assert env._max_observation_chars == 50_000
 
     def test_get_environment_tool_mode(self):
         """Should return HarborToolEnvironment when tool_mode=True."""
@@ -2902,6 +3357,36 @@ class TestHarborAdapter:
             tool_mode=True,
         )
         assert isinstance(env, HarborToolEnvironment)
+        assert env._max_observation_chars == 50_000
+
+    def test_get_environment_threads_max_observation_chars(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks()
+        mock_env = MockHarborEnvironment()
+        env_factory = _make_harbor_env_factory(mock_env)
+        verifier_factory = _make_verifier_factory()
+
+        text_env = adapter.get_environment(
+            name="test",
+            tasks=tasks,
+            env_factory=env_factory,
+            verify_factory=verifier_factory,
+            tool_mode=False,
+            max_observation_chars=123,
+        )
+        tool_env = adapter.get_environment(
+            name="test",
+            tasks=tasks,
+            env_factory=env_factory,
+            verify_factory=verifier_factory,
+            tool_mode=True,
+            max_observation_chars=456,
+        )
+
+        assert text_env._max_observation_chars == 123
+        assert tool_env._max_observation_chars == 456
 
     def test_tool_mode_rejects_runtime_probing(self):
         """Should raise ValueError when both tool_mode and runtime_probing are True."""
@@ -2959,6 +3444,26 @@ class TestHarborAdapter:
                 verify_factory=verifier_factory,
                 tool_mode=True,
                 command_soft_timeout=120,
+            )
+
+    @pytest.mark.parametrize("trajectory_timeout", [900, None])
+    def test_tool_mode_rejects_explicit_trajectory_timeout(self, trajectory_timeout):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks()
+        mock_env = MockHarborEnvironment()
+        env_factory = _make_harbor_env_factory(mock_env)
+        verifier_factory = _make_verifier_factory()
+
+        with pytest.raises(ValueError, match="tool mode"):
+            adapter.get_environment(
+                name="test",
+                tasks=tasks,
+                env_factory=env_factory,
+                verify_factory=verifier_factory,
+                tool_mode=True,
+                trajectory_timeout=trajectory_timeout,
             )
 
     def test_list_environments_uses_registry_client(self, monkeypatch: pytest.MonkeyPatch):
@@ -3089,9 +3594,7 @@ class TestHarborAdapter:
         assert mock_env._stopped is True
         assert mock_env._stop_delete is True
 
-    def test_get_environment_builds_local_podman_hpc_factory(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
+    def test_get_environment_builds_local_podman_hpc_factory(self, monkeypatch: pytest.MonkeyPatch):
         from llenvs.adapters.harbor import HarborAdapter
 
         mock_env = MockHarborEnvironment()
@@ -3165,6 +3668,7 @@ class TestHarborAdapter:
         from llenvs.adapters.harbor import HarborAdapter
 
         adapter = HarborAdapter()
+
         def boom() -> Any:
             raise ImportError("harbor")
 
@@ -3558,9 +4062,20 @@ class TestHarborRestore:
 
         assert steps_called == ["echo a", "echo b"]
 
-    def test_harbor_restore_uses_soft_timeout_like_collection(self):
+    def test_harbor_restore_uses_soft_timeout_like_collection(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         """Replay should use command_soft_timeout, same as normal collection."""
         from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        tick_values = [0.0, 1000.0, 1000.0, 1000.0, 1000.0]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
 
         timeout_values: list[int] = []
 
@@ -3572,7 +4087,11 @@ class TestHarborRestore:
             harbor_env=MockHarborEnvironment(exec_handler=handler),
             exec_timeout=17,
             command_soft_timeout=5,
+            trajectory_timeout=180,
         )
+        import llenvs.adapters.harbor as harbor_module
+
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
 
         target_state = State(
             observation=MagicMock(),
@@ -3591,6 +4110,92 @@ class TestHarborRestore:
 
         assert restored.hidden.episode_step == 2
         assert timeout_values == [5, 5]
+
+    def test_harbor_restore_replay_ignores_live_trajectory_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            timeout_values.append(timeout_sec)
+            if command == "ls":
+                now["value"] = 200.0
+            elif command == "pwd":
+                now["value"] = 400.0
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=17,
+            command_soft_timeout=5,
+            trajectory_timeout=180,
+        )
+        target_state = State(
+            observation=MagicMock(),
+            hidden=HarborHidden(
+                task_index=0,
+                task_name="task_00",
+                instruction="Task 0 instruction",
+                episode_step=2,
+                last_action="pwd",
+                trajectory=("ls", "pwd"),
+            ),
+            metadata=MagicMock(step=2, episode_id="episode-1", is_terminal=False),
+        )
+
+        restored = harbor_restore(env, target_state)
+
+        assert restored.hidden.episode_step == 2
+        assert restored.hidden.trajectory == ("ls", "pwd")
+        assert timeout_values == [5, 5]
+
+    def test_harbor_restore_reanchors_fresh_trajectory_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import HarborHidden, harbor_restore
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            if command == "ls":
+                now["value"] = 1000.0
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            exec_timeout=17,
+            command_soft_timeout=5,
+            trajectory_timeout=180,
+        )
+        state, _ = _reset_env(env)
+        target_state = State(
+            observation=state.observation,
+            hidden=HarborHidden(
+                task_index=state.hidden.task_index,
+                task_name=state.hidden.task_name,
+                instruction=state.hidden.instruction,
+                episode_step=1,
+                trajectory=("ls",),
+            ),
+            metadata=state.metadata,
+        )
+
+        restored = harbor_restore(env, target_state)
+        now["value"] = 1001.0
+        result = env.step(restored, Action(text="pwd"))
+
+        assert result.truncated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert result.info["observation"] == "ran pwd"
 
     def test_harbor_snapshot_restore_restores_checkpoint_archive(self, tmp_path):
         """harbor_snapshot_restore uses checkpoint restore instead of replay."""
@@ -3645,6 +4250,53 @@ class TestHarborRestore:
                 },
             )
         ]
+
+    def test_harbor_snapshot_restore_reanchors_fresh_trajectory_timeout(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import HarborHidden, HarborSnapshotRef, harbor_snapshot_restore
+
+        snapshot_root = tmp_path / "dataset_root"
+        snapshot_path = snapshot_root / "snapshots/task_00/episode-1/state_0001.tar"
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_path.write_text("checkpoint-bytes")
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            return MockExecResult(stdout=f"ran {command}")
+
+        mock_env = MockHarborEnvironment(exec_handler=handler)
+        env = _make_env(harbor_env=mock_env, trajectory_timeout=180)
+        state, _ = _reset_env(env)
+        target_state = State(
+            observation=state.observation,
+            hidden=HarborHidden(
+                task_index=state.hidden.task_index,
+                task_name=state.hidden.task_name,
+                instruction=state.hidden.instruction,
+                episode_step=1,
+                trajectory=("ls",),
+                snapshot_ref=HarborSnapshotRef(
+                    runtime="podman-hpc",
+                    relative_path="snapshots/task_00/episode-1/state_0001.tar",
+                ),
+            ),
+            metadata=state.metadata,
+        )
+
+        now["value"] = 1000.0
+        restored = harbor_snapshot_restore(env, target_state, artifact_root=snapshot_root)
+        now["value"] = 1001.0
+        result = env.step(restored, Action(text="pwd"))
+
+        assert result.truncated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert result.info["observation"] == "ran pwd"
 
     def test_harbor_snapshot_restore_requires_snapshot_ref(self, tmp_path):
         from llenvs.adapters.harbor import HarborHidden, harbor_snapshot_restore
@@ -3732,6 +4384,43 @@ class TestValidateReplayConsistency:
         )
 
         assert result == {"probe1": "abc123", "probe2": "def456"}
+
+    def test_capture_replay_probe_outputs_replay_ignores_live_trajectory_timeout(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        import llenvs.adapters.harbor as harbor_module
+        from llenvs.adapters.harbor import capture_replay_probe_outputs
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+        timeout_values: list[int] = []
+
+        def env_factory():
+            def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+                timeout_values.append(timeout_sec)
+                if command == "echo a":
+                    now["value"] = 200.0
+                elif command == "echo b":
+                    now["value"] = 400.0
+                return MockExecResult(stdout=f"output for {command}")
+
+            return _make_env(
+                harbor_env=MockHarborEnvironment(exec_handler=handler),
+                exec_timeout=17,
+                command_soft_timeout=5,
+                trajectory_timeout=180,
+            )
+
+        result = capture_replay_probe_outputs(
+            env_factory=env_factory,
+            task_index=0,
+            trajectory=("echo a", "echo b"),
+            probe_commands=("probe1",),
+        )
+
+        assert result == {"probe1": "output for probe1"}
+        assert timeout_values == [5, 5, 17]
 
     def test_consistent_replays(self):
         """Deterministic env produces consistent=True."""
@@ -3879,8 +4568,19 @@ class TestValidateReplayConsistency:
         assert result["consistent"] is True
         assert verifier_calls == 0
 
-    def test_replay_validation_uses_soft_timeout_for_replay_hard_for_probes(self):
+    def test_replay_validation_uses_soft_timeout_for_replay_hard_for_probes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
         from llenvs.adapters.harbor import validate_replay_consistency
+
+        tick_values = [0.0, 1000.0, 1000.0, 1000.0, 1000.0, 1000.0]
+        last_tick = {"value": tick_values[-1]}
+
+        def fake_monotonic() -> float:
+            if tick_values:
+                last_tick["value"] = tick_values.pop(0)
+            return last_tick["value"]
 
         timeout_values: list[int] = []
 
@@ -3893,8 +4593,12 @@ class TestValidateReplayConsistency:
                 harbor_env=MockHarborEnvironment(exec_handler=handler),
                 exec_timeout=17,
                 command_soft_timeout=5,
+                trajectory_timeout=180,
             )
 
+        import llenvs.adapters.harbor as harbor_module
+
+        monkeypatch.setattr(harbor_module, "_now_monotonic", fake_monotonic)
         result = validate_replay_consistency(
             env_factory=make_env,
             task_index=0,
@@ -3950,7 +4654,9 @@ class TestHarborHpcCliRunner:
         assert process.communicate_timeouts == [3, 5]
         assert kill_signals == [(process.pid, signal.SIGTERM)]
         messages = [record.getMessage() for record in caplog.records]
-        assert any("apptainer cmd[" in message and "timeout after" in message for message in messages)
+        assert any(
+            "apptainer cmd[" in message and "timeout after" in message for message in messages
+        )
         assert any("sent SIGTERM" in message for message in messages)
         assert any("reaped after SIGTERM" in message for message in messages)
 
@@ -4028,7 +4734,9 @@ class TestPodmanHPCEnvironment:
     def test_rejects_compose_without_main_service(self, tmp_path):
         from llenvs.adapters.harbor import PodmanHPCEnvironment
 
-        (tmp_path / "docker-compose.yaml").write_text("services:\n  db:\n    image: postgres:latest\n")
+        (tmp_path / "docker-compose.yaml").write_text(
+            "services:\n  db:\n    image: postgres:latest\n"
+        )
 
         with pytest.raises(ValueError, match="main"):
             PodmanHPCEnvironment(
@@ -4172,9 +4880,7 @@ volumes:
             "mkdir -p /logs/agent /logs/verifier",
         ]
 
-    def test_exec_targets_main_service_for_compose(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_exec_targets_main_service_for_compose(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import PodmanHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -4217,9 +4923,7 @@ services:
             "pwd",
         ]
 
-    def test_exec_respects_cwd_env_and_timeout(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_exec_respects_cwd_env_and_timeout(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import PodmanHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -4573,10 +5277,7 @@ class TestApptainerHPCEnvironment:
         assert "--size" in overlay_cmd
         assert "256" in overlay_cmd
 
-        inst_cmd = next(
-            cmd for cmd in commands
-            if cmd[:3] == ["apptainer", "instance", "start"]
-        )
+        inst_cmd = next(cmd for cmd in commands if cmd[:3] == ["apptainer", "instance", "start"])
         assert inst_cmd[:3] == ["apptainer", "instance", "start"]
         assert "--overlay" in inst_cmd
         assert "--cleanenv" in inst_cmd
@@ -4589,9 +5290,9 @@ class TestApptainerHPCEnvironment:
         assert env._instance_name == inst_cmd[-1]
 
         bootstrap_cmd = next(
-            cmd for cmd in commands
-            if cmd[:2] == ["apptainer", "exec"]
-            and "mkdir -p /logs/agent /logs/verifier" in cmd[-1]
+            cmd
+            for cmd in commands
+            if cmd[:2] == ["apptainer", "exec"] and "mkdir -p /logs/agent /logs/verifier" in cmd[-1]
         )
         assert "apptainer" == bootstrap_cmd[0]
         assert "exec" == bootstrap_cmd[1]
@@ -4600,9 +5301,9 @@ class TestApptainerHPCEnvironment:
         assert "mkdir -p /logs/agent /logs/verifier" in bootstrap_cmd
 
         probe_cmd = next(
-            cmd for cmd in commands
-            if cmd[:2] == ["apptainer", "exec"]
-            and "touch /.vb_probe && rm /.vb_probe" in cmd[-1]
+            cmd
+            for cmd in commands
+            if cmd[:2] == ["apptainer", "exec"] and "touch /.vb_probe && rm /.vb_probe" in cmd[-1]
         )
         assert probe_cmd[:2] == ["apptainer", "exec"]
         assert f"instance://{env._instance_name}" in probe_cmd
@@ -4610,9 +5311,7 @@ class TestApptainerHPCEnvironment:
 
         assert env._started is True
 
-    def test_start_seeds_trial_app_and_tests_binds(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_start_seeds_trial_app_and_tests_binds(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -4689,9 +5388,7 @@ class TestApptainerHPCEnvironment:
         assert calls == []
         assert (env._tests_bind_dir / "test_a.sh").read_text() == "echo ok"
 
-    def test_start_with_fakeroot(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_start_with_fakeroot(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         import llenvs.adapters.harbor as harbor_mod
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
@@ -4727,8 +5424,7 @@ class TestApptainerHPCEnvironment:
         run_async(env.start())
 
         inst_cmd = next(
-            cmd for cmd, _check, _timeout in calls
-            if cmd[:3] == ["apptainer", "instance", "start"]
+            cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]
         )
         assert "--fakeroot" in inst_cmd
 
@@ -4774,8 +5470,7 @@ class TestApptainerHPCEnvironment:
         run_async(env.start())
 
         inst_cmd = next(
-            cmd for cmd, _check, _timeout in calls
-            if cmd[:3] == ["apptainer", "instance", "start"]
+            cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]
         )
         assert inst_cmd[:3] == ["apptainer", "instance", "start"]
         assert "--writable" in inst_cmd
@@ -4835,7 +5530,9 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_probe_root_writability", fake_probe)
         run_async(env.start())
 
-        inst_cmds = [cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]]
+        inst_cmds = [
+            cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]
+        ]
         assert len(inst_cmds) == 2
         assert "--overlay" in inst_cmds[0] or "--writable-tmpfs" in inst_cmds[0]
         assert "--writable" in inst_cmds[1]
@@ -4904,8 +5601,16 @@ class TestApptainerHPCEnvironment:
         run_async(env_a.start())
         run_async(env_b.start())
 
-        inst_cmds_a = [cmd for cmd, _check, _timeout in calls_a if cmd[:3] == ["apptainer", "instance", "start"]]
-        inst_cmds_b = [cmd for cmd, _check, _timeout in calls_b if cmd[:3] == ["apptainer", "instance", "start"]]
+        inst_cmds_a = [
+            cmd
+            for cmd, _check, _timeout in calls_a
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        ]
+        inst_cmds_b = [
+            cmd
+            for cmd, _check, _timeout in calls_b
+            if cmd[:3] == ["apptainer", "instance", "start"]
+        ]
         assert len(inst_cmds_a) == 2
         assert len(inst_cmds_b) == 1
         assert "--writable" in inst_cmds_b[0]
@@ -5117,9 +5822,9 @@ class TestApptainerHPCEnvironment:
             run_async(env_b.start())
 
         messages = [record.getMessage() for record in caplog.records]
-        assert messages.count(
-            "Apptainer overlay probe failed; falling back to writable sandbox"
-        ) == 1
+        assert (
+            messages.count("Apptainer overlay probe failed; falling back to writable sandbox") == 1
+        )
         assert all("cached overlay probe failure" not in message for message in messages)
 
     def test_overlay_mode_raises_with_remediation_when_probe_fails(
@@ -5182,9 +5887,7 @@ class TestApptainerHPCEnvironment:
 
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
 
-        result = run_async(
-            env.exec("pwd", cwd="/workspace", env={"FOO": "bar"}, timeout_sec=17)
-        )
+        result = run_async(env.exec("pwd", cwd="/workspace", env={"FOO": "bar"}, timeout_sec=17))
 
         assert result.stdout == "ok"
         cmd = calls[0][0]
@@ -5325,9 +6028,7 @@ class TestApptainerHPCEnvironment:
         pwd_idx = cmd.index("--pwd")
         assert cmd[pwd_idx + 1] == "/app"
 
-    def test_stop_calls_instance_stop(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_stop_calls_instance_stop(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -5350,9 +6051,7 @@ class TestApptainerHPCEnvironment:
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         run_async(env.stop())
 
-        assert calls[0][0] == [
-            "apptainer", "instance", "stop", env._instance_name
-        ]
+        assert calls[0][0] == ["apptainer", "instance", "stop", env._instance_name]
         assert env._started is False
 
     def test_upload_dir_to_tests_uses_generic_exec_in_sandbox_mode(
@@ -5390,9 +6089,7 @@ class TestApptainerHPCEnvironment:
         assert calls[0][0][:2] == ["apptainer", "exec"]
         assert "mkdir -p /tests && cp -a " in calls[0][0][-1]
 
-    def test_upload_dir_via_staging(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_upload_dir_via_staging(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -5476,10 +6173,13 @@ class TestApptainerHPCEnvironment:
         async def fake_run(cmd, *, check=True, timeout_sec=None):
             if cmd[:3] == ["apptainer", "instance", "start"]:
                 # Record which bind-mount dirs exist at the time of start.
-                dirs_at_instance_start.append([
-                    d for d in ("staging", "logs/verifier", "logs/agent")
-                    if (rootfs_dir / d).exists()
-                ])
+                dirs_at_instance_start.append(
+                    [
+                        d
+                        for d in ("staging", "logs/verifier", "logs/agent")
+                        if (rootfs_dir / d).exists()
+                    ]
+                )
             return MockExecResult(stdout="ok")
 
         monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_trial_rootfs)
@@ -5488,9 +6188,7 @@ class TestApptainerHPCEnvironment:
 
         assert dirs_at_instance_start == [["staging", "logs/verifier", "logs/agent"]]
 
-    def test_overlay_start_binds_tmp_and_var_tmp(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_overlay_start_binds_tmp_and_var_tmp(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         import llenvs.adapters.harbor as harbor_mod
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
@@ -5527,8 +6225,7 @@ class TestApptainerHPCEnvironment:
         run_async(env.start())
 
         inst_cmd = next(
-            cmd for cmd, _check, _timeout in calls
-            if cmd[:3] == ["apptainer", "instance", "start"]
+            cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]
         )
         assert f"{trial / 'tmp'}:/tmp" in inst_cmd
         assert f"{trial / 'var_tmp'}:/var/tmp" in inst_cmd
@@ -5537,9 +6234,7 @@ class TestApptainerHPCEnvironment:
         assert (trial / "tmp").stat().st_mode & 0o7777 == 0o1777
         assert (trial / "var_tmp").stat().st_mode & 0o7777 == 0o1777
 
-    def test_sandbox_start_binds_tmp_and_var_tmp(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_sandbox_start_binds_tmp_and_var_tmp(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -5575,8 +6270,7 @@ class TestApptainerHPCEnvironment:
         run_async(env.start())
 
         inst_cmd = next(
-            cmd for cmd, _check, _timeout in calls
-            if cmd[:3] == ["apptainer", "instance", "start"]
+            cmd for cmd, _check, _timeout in calls if cmd[:3] == ["apptainer", "instance", "start"]
         )
         assert f"{trial / 'tmp'}:/tmp" in inst_cmd
         assert f"{trial / 'var_tmp'}:/var/tmp" in inst_cmd
@@ -5610,18 +6304,14 @@ class TestApptainerHPCEnvironment:
             # First call is mkdir for log dirs — succeeds.
             # Second call is tmpdir probe — fails.
             if call_count == 2:
-                return MockExecResult(
-                    stdout="", stderr="Permission denied", return_code=1
-                )
+                return MockExecResult(stdout="", stderr="Permission denied", return_code=1)
             return MockExecResult(stdout="ok")
 
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
         with pytest.raises(RuntimeError, match="/tmp is not writable"):
             run_async(env._bootstrap_log_dirs())
 
-    def test_stop_cleans_up_tmp_dirs(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_stop_cleans_up_tmp_dirs(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.adapters.harbor import ApptainerHPCEnvironment
         from llenvs.core.async_utils import run_async
 
@@ -5716,8 +6406,9 @@ class TestApptainerHPCEnvironment:
 
         for env in (env_a, env_b):
             monkeypatch.setattr(env, "_prepare_app_seed_dir", fake_prepare_seed)
-            monkeypatch.setattr(env, "_prepare_trial_rootfs",
-                                lambda e=env: (Path(e.trial_paths.trial_dir) / "rootfs"))
+            monkeypatch.setattr(
+                env, "_prepare_trial_rootfs", lambda e=env: Path(e.trial_paths.trial_dir) / "rootfs"
+            )
             monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
             monkeypatch.setattr(env, "_probe_root_writability", fake_probe)
 
@@ -5937,11 +6628,7 @@ class TestApptainerCheckpointRestore:
         assert cmd[:2] == ["apptainer", "exec"]
         assert "--cleanenv" in cmd
         assert "--fakeroot" in cmd
-        bind_specs = [
-            cmd[i + 1]
-            for i, token in enumerate(cmd)
-            if token == "--bind"
-        ]
+        bind_specs = [cmd[i + 1] for i, token in enumerate(cmd) if token == "--bind"]
         assert f"{env._sandbox_rootfs_dir}:/.vb_checkpoint_src" in bind_specs
         assert f"{export_path.parent}:/.vb_checkpoint_out" in bind_specs
         assert str(env._sif_path) in cmd
@@ -6003,11 +6690,7 @@ class TestApptainerCheckpointRestore:
         assert cmd[:2] == ["apptainer", "exec"]
         assert "--cleanenv" in cmd
         assert "--fakeroot" in cmd
-        bind_specs = [
-            cmd[i + 1]
-            for i, token in enumerate(cmd)
-            if token == "--bind"
-        ]
+        bind_specs = [cmd[i + 1] for i, token in enumerate(cmd) if token == "--bind"]
         assert f"{tar_path.parent}:/.vb_checkpoint_in" in bind_specs
         assert f"{env._sandbox_rootfs_dir}:/.vb_checkpoint_dst" in bind_specs
         assert str(env._sif_path) in cmd
@@ -6071,7 +6754,7 @@ class TestApptainerCheckpointRestore:
             start = shell_cmd.index(prefix) + len(prefix)
             end = shell_cmd.index(" ", start)
             temp_name = shell_cmd[start:end].strip("'\"")
-            partial_path = (tmp_path / "exports" / temp_name)
+            partial_path = tmp_path / "exports" / temp_name
             partial_path.parent.mkdir(parents=True, exist_ok=True)
             partial_path.write_text("partial")
             raise RuntimeError("boom")
@@ -6085,9 +6768,7 @@ class TestApptainerCheckpointRestore:
         assert not export_path.exists()
         assert list(export_path.parent.glob(".*.tmp")) == []
 
-    def test_checkpoint_reports_missing_tar(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_checkpoint_reports_missing_tar(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.core.async_utils import run_async
 
         env = self._make_env(tmp_path)
@@ -6147,8 +6828,10 @@ class TestApptainerCheckpointRestore:
 
         # Find the instance start command
         inst_cmds = [
-            cmd for cmd, _check, _timeout in calls
-            if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
+            cmd
+            for cmd, _check, _timeout in calls
+            if len(cmd) >= 3
+            and cmd[:3] == ["apptainer", "instance", "start"]
             and "--help" not in cmd
         ]
         assert len(inst_cmds) >= 1
@@ -6175,12 +6858,14 @@ class TestApptainerCheckpointRestore:
             # --pids-limit, and "--pid" in --no-init description, but
             # NOT --pid as a standalone flag.
             if "start" in cmd and "--help" in cmd:
-                return MockExecResult(stdout=(
-                    "  -C, --containall                    contain PID, IPC, env\n"
-                    "      --no-init                       do NOT start shim process with --pid\n"
-                    "      --pid-file string               write instance PID to file\n"
-                    "      --pids-limit int                Limit number of container PIDs\n"
-                ))
+                return MockExecResult(
+                    stdout=(
+                        "  -C, --containall                    contain PID, IPC, env\n"
+                        "      --no-init                       do NOT start shim process with --pid\n"
+                        "      --pid-file string               write instance PID to file\n"
+                        "      --pids-limit int                Limit number of container PIDs\n"
+                    )
+                )
             return MockExecResult(stdout="ok")
 
         def fake_prepare_trial_rootfs() -> Path:
@@ -6194,8 +6879,10 @@ class TestApptainerCheckpointRestore:
 
         # Find the instance start command (not the help probe)
         inst_cmds = [
-            cmd for cmd, _check, _timeout in calls
-            if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
+            cmd
+            for cmd, _check, _timeout in calls
+            if len(cmd) >= 3
+            and cmd[:3] == ["apptainer", "instance", "start"]
             and "--help" not in cmd
         ]
         assert len(inst_cmds) >= 1
@@ -6204,9 +6891,7 @@ class TestApptainerCheckpointRestore:
         # --contain should be removed (superseded by --containall)
         assert "--contain" not in inst_cmds[0]
 
-    def test_start_sandbox_from_rootfs_reuses_dir(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path
-    ):
+    def test_start_sandbox_from_rootfs_reuses_dir(self, monkeypatch: pytest.MonkeyPatch, tmp_path):
         from llenvs.core.async_utils import run_async
 
         env = self._make_env(tmp_path)
@@ -6230,7 +6915,8 @@ class TestApptainerCheckpointRestore:
 
         # Instance start should have used the rootfs dir
         inst_cmds = [
-            cmd for cmd, _check, _timeout in calls
+            cmd
+            for cmd, _check, _timeout in calls
             if len(cmd) >= 3 and cmd[:3] == ["apptainer", "instance", "start"]
         ]
         assert len(inst_cmds) == 1
@@ -6276,9 +6962,7 @@ class TestApptainerCheckpointRestore:
         env._started = True
 
         async def fake_run(cmd, *, check=True, timeout_sec=None):
-            raise RuntimeError(
-                f"apptainer command timed out after {timeout_sec}s: {' '.join(cmd)}"
-            )
+            raise RuntimeError(f"apptainer command timed out after {timeout_sec}s: {' '.join(cmd)}")
 
         monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
 
@@ -6605,7 +7289,11 @@ class TestRuntimeProbing:
         assert next_hidden.fs_restore_risk_now is False
 
     def test_risk_now_resets_per_step(self):
-        from llenvs.adapters.harbor import HarborHidden, RuntimeProbeSnapshot, _probe_and_annotate_state
+        from llenvs.adapters.harbor import (
+            HarborHidden,
+            RuntimeProbeSnapshot,
+            _probe_and_annotate_state,
+        )
         from llenvs.core.state import Observation, ObservationContent, State, StateMetadata
 
         hidden = HarborHidden(
@@ -6658,6 +7346,7 @@ class TestRuntimeProbing:
                         listening_ports=frozenset(),
                         staging_has_content=False,
                     )
+
                 return _probe()
 
             def detect_runtime_risk(self, current):
@@ -6665,7 +7354,9 @@ class TestRuntimeProbing:
                 return False, ()
 
         annotated = _probe_and_annotate_state(
-            FakeHarborEnv(), state, runtime_probing=True,
+            FakeHarborEnv(),
+            state,
+            runtime_probing=True,
         )
 
         # risk_now should be False for this step
@@ -6674,7 +7365,11 @@ class TestRuntimeProbing:
         assert annotated.hidden.fs_restore_risk_ever is True
 
     def test_baseline_probe_failure_recorded_immediately(self):
-        from llenvs.adapters.harbor import HarborHidden, RuntimeProbeSnapshot, _probe_and_annotate_state
+        from llenvs.adapters.harbor import (
+            HarborHidden,
+            RuntimeProbeSnapshot,
+            _probe_and_annotate_state,
+        )
         from llenvs.core.state import Observation, ObservationContent, State, StateMetadata
 
         hidden = HarborHidden(
@@ -6710,11 +7405,14 @@ class TestRuntimeProbing:
                         probe_failed=True,
                         probe_error="command not found: ss",
                     )
+
                 return _probe()
 
         fake_env = FakeHarborEnv()
         annotated = _probe_and_annotate_state(
-            fake_env, state, runtime_probing=True,
+            fake_env,
+            state,
+            runtime_probing=True,
         )
 
         assert annotated.hidden.fs_restore_risk_now is True
@@ -6725,7 +7423,16 @@ class TestRuntimeProbing:
 
 
 class TestRuntimeEligibility:
-    def _make_task(self, tmp_path, name, *, dockerfile=None, compose=None, docker_image=None, allow_internet=True):
+    def _make_task(
+        self,
+        tmp_path,
+        name,
+        *,
+        dockerfile=None,
+        compose=None,
+        docker_image=None,
+        allow_internet=True,
+    ):
         env_dir = tmp_path / name
         env_dir.mkdir(parents=True, exist_ok=True)
         if dockerfile:
@@ -6754,9 +7461,7 @@ class TestRuntimeEligibility:
     def test_apptainer_hpc_rejects_compose(self, tmp_path):
         from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
 
-        tasks = (
-            self._make_task(tmp_path, "t0", compose="services:\n  main:\n    image: x\n"),
-        )
+        tasks = (self._make_task(tmp_path, "t0", compose="services:\n  main:\n    image: x\n"),)
         results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
         assert not results[0].eligible
         assert results[0].reason_code == "multi_service_compose"
@@ -6764,9 +7469,7 @@ class TestRuntimeEligibility:
     def test_apptainer_hpc_rejects_network_isolation(self, tmp_path):
         from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
 
-        tasks = (
-            self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n", allow_internet=False),
-        )
+        tasks = (self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n", allow_internet=False),)
         results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
         assert not results[0].eligible
         assert results[0].reason_code == "network_isolation"
@@ -6774,9 +7477,7 @@ class TestRuntimeEligibility:
     def test_apptainer_hpc_rejects_missing_sif(self, tmp_path):
         from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
 
-        tasks = (
-            self._make_task(tmp_path, "t0", docker_image="ubuntu:latest"),
-        )
+        tasks = (self._make_task(tmp_path, "t0", docker_image="ubuntu:latest"),)
         sif_dir = tmp_path / "sif_cache"
         sif_dir.mkdir()
         results = inspect_harbor_runtime_eligibility(
@@ -6788,9 +7489,7 @@ class TestRuntimeEligibility:
     def test_apptainer_hpc_accepts_valid_task(self, tmp_path):
         from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
 
-        tasks = (
-            self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n"),
-        )
+        tasks = (self._make_task(tmp_path, "t0", dockerfile="FROM ubuntu\n"),)
         # No sif_cache_dir = skip SIF check
         results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
         assert results[0].eligible
@@ -6798,9 +7497,7 @@ class TestRuntimeEligibility:
     def test_singularity_hpc_routes_to_apptainer(self, tmp_path):
         from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
 
-        tasks = (
-            self._make_task(tmp_path, "t0", compose="services:\n  main:\n    image: x\n"),
-        )
+        tasks = (self._make_task(tmp_path, "t0", compose="services:\n  main:\n    image: x\n"),)
         results = inspect_harbor_runtime_eligibility(tasks, "singularity-hpc")
         assert not results[0].eligible
         assert results[0].reason_code == "multi_service_compose"
@@ -6808,9 +7505,302 @@ class TestRuntimeEligibility:
     def test_apptainer_hpc_rejects_missing_source(self, tmp_path):
         from llenvs.adapters.harbor import inspect_harbor_runtime_eligibility
 
-        tasks = (
-            self._make_task(tmp_path, "t0"),
-        )
+        tasks = (self._make_task(tmp_path, "t0"),)
         results = inspect_harbor_runtime_eligibility(tasks, "apptainer-hpc")
         assert not results[0].eligible
         assert results[0].reason_code == "missing_container_source"
+
+
+# ── Difficulty helpers and filtering ──────────────────────────────
+
+
+class TestGetTaskDifficulty:
+    """Tests for _get_task_difficulty helper."""
+
+    def test_extracts_difficulty(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = MockHarborTask(config=_MockTaskConfig(metadata={"difficulty": "easy"}))
+        assert _get_task_difficulty(task) == "easy"
+
+    def test_normalizes_case_and_whitespace(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = MockHarborTask(config=_MockTaskConfig(metadata={"difficulty": " Hard "}))
+        assert _get_task_difficulty(task) == "hard"
+
+    def test_no_difficulty_returns_na(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = MockHarborTask(config=_MockTaskConfig(metadata={}))
+        assert _get_task_difficulty(task) == "n/a"
+
+    def test_none_config_returns_na(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = SimpleNamespace(name="t", config=None)
+        assert _get_task_difficulty(task) == "n/a"
+
+    def test_no_config_attr_returns_na(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = SimpleNamespace(name="t")
+        assert _get_task_difficulty(task) == "n/a"
+
+    def test_non_dict_metadata_returns_na(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = SimpleNamespace(name="t", config=SimpleNamespace(metadata="not_a_dict"))
+        assert _get_task_difficulty(task) == "n/a"
+
+    def test_none_difficulty_value_returns_na(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        task = MockHarborTask(config=_MockTaskConfig(metadata={"difficulty": None}))
+        assert _get_task_difficulty(task) == "n/a"
+
+
+class TestGetTaskRecommendedTimeout:
+    """Tests for _get_task_recommended_timeout helper."""
+
+    def test_extracts_timeout(self):
+        from llenvs.adapters.harbor import _get_task_recommended_timeout
+
+        task = MockHarborTask(config=_MockTaskConfig(agent=_MockAgentConfig(timeout_sec=900.0)))
+        assert _get_task_recommended_timeout(task) == 900.0
+
+    def test_no_agent_returns_none(self):
+        from llenvs.adapters.harbor import _get_task_recommended_timeout
+
+        task = MockHarborTask(config=_MockTaskConfig(agent=None))
+        assert _get_task_recommended_timeout(task) is None
+
+    def test_none_config_returns_none(self):
+        from llenvs.adapters.harbor import _get_task_recommended_timeout
+
+        task = SimpleNamespace(name="t", config=None)
+        assert _get_task_recommended_timeout(task) is None
+
+    def test_no_timeout_attr_returns_none(self):
+        from llenvs.adapters.harbor import _get_task_recommended_timeout
+
+        task = SimpleNamespace(name="t", config=SimpleNamespace(agent=SimpleNamespace()))
+        assert _get_task_recommended_timeout(task) is None
+
+    def test_integer_timeout_coerced_to_float(self):
+        from llenvs.adapters.harbor import _get_task_recommended_timeout
+
+        task = MockHarborTask(config=_MockTaskConfig(agent=_MockAgentConfig(timeout_sec=300)))
+        result = _get_task_recommended_timeout(task)
+        assert result == 300.0
+        assert isinstance(result, float)
+
+
+class TestDifficultyFiltering:
+    """Tests for difficulty filtering in get_environment and get_task_difficulties."""
+
+    def test_get_task_difficulties_returns_mapping(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        tasks = _make_tasks(3, difficulties=["easy", "hard", None])
+        adapter = HarborAdapter()
+        result = adapter.get_task_difficulties(tasks=tasks)
+        assert result == {"task_00": "easy", "task_01": "hard", "task_02": "n/a"}
+
+    def test_no_difficulties_returns_all_tasks(self):
+        """difficulties=None passes all tasks through."""
+        tasks = _make_tasks(3, difficulties=["easy", "hard", "extreme"])
+        env = _make_env(tasks=tasks)
+        assert len(env) == 3
+
+    def test_filter_single_difficulty(self):
+        """Filtering by a single difficulty keeps only matching tasks."""
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        tasks = _make_tasks(4, difficulties=["easy", "medium", "hard", "easy"])
+        # Simulate filtering as get_environment does
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in {"easy"})
+        assert len(filtered) == 2
+        assert all(_get_task_difficulty(t) == "easy" for t in filtered)
+
+    def test_filter_multiple_difficulties(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        tasks = _make_tasks(4, difficulties=["easy", "medium", "hard", "extreme"])
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in {"easy", "medium"})
+        assert len(filtered) == 2
+
+    def test_filter_na_selects_tasks_without_difficulty(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        tasks = _make_tasks(3, difficulties=["easy", None, None])
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in {"n/a"})
+        assert len(filtered) == 2
+
+    def test_filter_no_match_raises_value_error(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        tasks = _make_tasks(2, difficulties=["easy", "medium"])
+        difficulties = {"extreme"}
+        normalized = {d.lower().strip() for d in difficulties}
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in normalized)
+        assert len(filtered) == 0
+
+    def test_filter_case_insensitive(self):
+        from llenvs.adapters.harbor import _get_task_difficulty
+
+        tasks = _make_tasks(2, difficulties=["Easy", "HARD"])
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in {"easy"})
+        assert len(filtered) == 1
+
+
+class TestFilterTasks:
+    """Tests for HarborAdapter.filter_tasks() public method."""
+
+    def test_none_difficulties_returns_all(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(3, difficulties=["easy", "hard", "medium"])
+        assert adapter.filter_tasks(tasks, difficulties=None) is tasks
+
+    def test_filter_single_difficulty(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(4, difficulties=["easy", "hard", "easy", "medium"])
+        result = adapter.filter_tasks(tasks, difficulties={"easy"})
+        assert len(result) == 2
+        assert all(t.name in ("task_00", "task_02") for t in result)
+
+    def test_filter_multiple_difficulties(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(4, difficulties=["easy", "hard", "medium", "extreme"])
+        result = adapter.filter_tasks(tasks, difficulties={"easy", "medium"})
+        assert len(result) == 2
+
+    def test_filter_case_insensitive(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(2, difficulties=["Easy", "HARD"])
+        result = adapter.filter_tasks(tasks, difficulties={"easy"})
+        assert len(result) == 1
+
+    def test_filter_with_list_input(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(3, difficulties=["easy", "hard", "easy"])
+        result = adapter.filter_tasks(tasks, difficulties=["easy"])
+        assert len(result) == 2
+
+    def test_no_match_raises_value_error(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(2, difficulties=["easy", "medium"])
+        with pytest.raises(ValueError, match="No tasks match difficulties"):
+            adapter.filter_tasks(tasks, difficulties={"extreme"})
+
+    def test_filter_na_selects_tasks_without_difficulty(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        adapter = HarborAdapter()
+        tasks = _make_tasks(3, difficulties=["easy", None, None])
+        result = adapter.filter_tasks(tasks, difficulties={"n/a"})
+        assert len(result) == 2
+
+
+class TestHarborHiddenDifficultyFields:
+    """Tests for difficulty and recommended_timeout_sec on HarborHidden."""
+
+    def test_hidden_defaults(self):
+        from llenvs.adapters.harbor import HarborHidden
+
+        hidden = HarborHidden(task_index=0, task_name="t", instruction="i", episode_step=0)
+        assert hidden.difficulty == "n/a"
+        assert hidden.recommended_timeout_sec is None
+
+    def test_hidden_with_values(self):
+        from llenvs.adapters.harbor import HarborHidden
+
+        hidden = HarborHidden(
+            task_index=0,
+            task_name="t",
+            instruction="i",
+            episode_step=0,
+            difficulty="easy",
+            recommended_timeout_sec=900.0,
+        )
+        assert hidden.difficulty == "easy"
+        assert hidden.recommended_timeout_sec == 900.0
+
+    def test_difficulty_set_on_reset(self):
+        """Reset populates difficulty from task metadata."""
+        tasks = _make_tasks(2, difficulties=["hard", "easy"], timeouts=[1800.0, 900.0])
+        env = _make_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.hidden.difficulty == "hard"
+        assert state.hidden.recommended_timeout_sec == 1800.0
+
+        state, _ = env.reset(options={"task_index": 1})
+        assert state.hidden.difficulty == "easy"
+        assert state.hidden.recommended_timeout_sec == 900.0
+
+    def test_difficulty_na_when_absent(self):
+        """Tasks without difficulty metadata get 'n/a'."""
+        tasks = _make_tasks(1)
+        env = _make_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.hidden.difficulty == "n/a"
+        assert state.hidden.recommended_timeout_sec is None
+
+    def test_difficulty_in_reset_info_dict(self):
+        tasks = _make_tasks(1, difficulties=["medium"], timeouts=[600.0])
+        env = _make_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.metadata.info["difficulty"] == "medium"
+        assert state.metadata.info["recommended_timeout_sec"] == 600.0
+
+    def test_difficulty_carried_through_step(self):
+        tasks = _make_tasks(1, difficulties=["hard"], timeouts=[1200.0])
+        env = _make_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="ls"))
+        assert result.next_state.hidden.difficulty == "hard"
+        assert result.next_state.hidden.recommended_timeout_sec == 1200.0
+
+    def test_difficulty_propagated_in_step_info(self):
+        tasks = _make_tasks(1, difficulties=["easy"], timeouts=[300.0])
+        env = _make_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(state, Action(text="ls"))
+        assert result.next_state.metadata.info["difficulty"] == "easy"
+        assert result.next_state.metadata.info["recommended_timeout_sec"] == 300.0
+
+    def test_tool_mode_hidden_difficulty(self):
+        """Tool mode also populates difficulty on HarborHidden."""
+        tasks = _make_tasks(1, difficulties=["extreme"], timeouts=[3600.0])
+        env = _make_tool_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        assert state.hidden.difficulty == "extreme"
+        assert state.hidden.recommended_timeout_sec == 3600.0
+        assert state.metadata.info["difficulty"] == "extreme"
+
+    def test_tool_mode_difficulty_carried_through_step(self):
+        tasks = _make_tasks(1, difficulties=["medium"], timeouts=[900.0])
+        env = _make_tool_env(tasks=tasks)
+        state, _ = env.reset(options={"task_index": 0})
+        result = env.step(
+            state,
+            Action(
+                tool_calls=[
+                    ToolCall(id="tc_1", name="execute_command", arguments={"command": "ls"}),
+                ]
+            ),
+        )
+        assert result.next_state.hidden.difficulty == "medium"
+        assert result.next_state.hidden.recommended_timeout_sec == 900.0

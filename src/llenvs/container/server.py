@@ -330,6 +330,7 @@ def run_server_from_config(config_json: str, port: int = 8080) -> None:
         system_prompt=data.get("system_prompt"),
         prompts=data.get("prompts"),
         params=data.get("params", {}),
+        difficulties=set(data["difficulties"]) if data.get("difficulties") is not None else None,
     )
     env = EnvironmentFactory.create(config)
     server = EnvironmentServer(env, port=port)

@@ -376,7 +376,7 @@ class TestGymnasiumActionFields:
         assert result.resolved_action == "down"
 
     def test_extraction_failure(self, import_adapter):
-        """Extraction fails: both fields None, metadata in info."""
+        """Extraction fails: placeholder goes in resolved_action, metadata in info."""
         from llenvs.core.extraction import TagBasedExtractor
         from tests.test_gymnasium_adapter import MockDiscrete, MockGymEnv
 
@@ -392,7 +392,7 @@ class TestGymnasiumActionFields:
         state, _ = env.reset()
         result = env.step(state, Action(text="no tag here"))
         assert result.extracted_action is None
-        assert result.resolved_action is None
+        assert result.resolved_action == "[invalid action]"
         assert "extraction_metadata" in result.info
 
     def test_mapping_failure(self, import_adapter):
@@ -536,8 +536,8 @@ class TestResolveActionText:
         runner.log = None
         return runner
 
-    def test_prefers_extracted_action(self):
-        """extracted_action is highest priority (strips reasoning even on mapping failure)."""
+    def test_prefers_resolved_action(self):
+        """resolved_action is highest priority (matches action_text_for_display)."""
         runner = self._make_runner()
         t = Transition(
             state=_make_state(0),
@@ -547,9 +547,21 @@ class TestResolveActionText:
             extracted_action="42",
             resolved_action="left",
         )
+        assert runner._resolve_action_text(t) == "left"
+
+    def test_falls_back_to_extracted_action(self):
+        """When resolved is None, falls back to extracted_action."""
+        runner = self._make_runner()
+        t = Transition(
+            state=_make_state(0),
+            action=Action(text="<think>long reasoning</think>The answer is 42"),
+            next_state=_make_state(1),
+            rewards=_empty_bundle(),
+            extracted_action="42",
+        )
         assert runner._resolve_action_text(t) == "42"
 
-    def test_falls_back_to_resolved_action(self):
+    def test_falls_back_to_resolved_when_extracted_none(self):
         """When extracted is None, falls back to resolved_action."""
         runner = self._make_runner()
         t = Transition(
@@ -628,6 +640,7 @@ class TestCraftaxInvalidActionText:
             craftax_env=mock_craftax,
             is_classic=True,
             observation_mode="symbolic",
+            max_steps=50,
             num_tasks=1,
             answer_extractor=TagBasedExtractor(tag_name="action"),
             invalid_action_text=invalid_action_text,
@@ -658,12 +671,12 @@ class TestCraftaxInvalidActionText:
         assert assistant_msg["content"] == "raw model output"
 
     def test_extraction_failure_fields(self, import_adapter):
-        """Extraction failure: both fields None."""
+        """Extraction failure uses placeholder resolved_action."""
         env = self._make_env(import_adapter)
         state, _ = env.reset()
         result = env.step(state, Action(text="no tag here"))
         assert result.extracted_action is None
-        assert result.resolved_action is None
+        assert result.resolved_action == "[invalid action]"
         assert "extraction_metadata" in result.info
 
     def test_mapping_failure_fields(self, import_adapter):
@@ -754,7 +767,7 @@ class TestCraftaxActionMapperFormatAction:
     def test_known_action(self, import_adapter):
         mapper = import_adapter.CraftaxActionMapper(is_classic=True)
         assert mapper.format_action(0) == "noop"
-        assert mapper.format_action(5) == "do"
+        assert mapper.format_action(5) == "interact"
 
     def test_unknown_index(self, import_adapter):
         mapper = import_adapter.CraftaxActionMapper(is_classic=True)

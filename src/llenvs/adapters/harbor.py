@@ -66,6 +66,8 @@ from llenvs.core.tools import (
 
 logger = logging.getLogger(__name__)
 
+_ARG_UNSET = object()
+
 _HARBOR_TASK_CACHE: dict[tuple[Any, ...], tuple[Any, ...]] = {}
 _HARBOR_TASK_CACHE_LOCK = threading.Lock()
 
@@ -90,6 +92,32 @@ def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
         return run_async(asyncio.wait_for(coro, timeout=timeout))
     except TimeoutError as exc:
         raise TimeoutError(f"{label} timed out after {timeout}s") from exc
+
+
+def _get_task_difficulty(task: Any) -> str:
+    """Extract difficulty from a Harbor task, defaulting to ``'n/a'``."""
+    config = getattr(task, "config", None)
+    if config is None:
+        return "n/a"
+    metadata = getattr(config, "metadata", None)
+    if metadata is None or not isinstance(metadata, dict):
+        return "n/a"
+    raw = metadata.get("difficulty")
+    if raw is None:
+        return "n/a"
+    return str(raw).lower().strip()
+
+
+def _get_task_recommended_timeout(task: Any) -> float | None:
+    """Extract recommended agent timeout (seconds) from a Harbor task."""
+    config = getattr(task, "config", None)
+    if config is None:
+        return None
+    agent = getattr(config, "agent", None)
+    if agent is None:
+        return None
+    timeout = getattr(agent, "timeout_sec", None)
+    return float(timeout) if timeout is not None else None
 
 
 # ── Tool definitions (for tool mode) ────────────────────────────
@@ -215,6 +243,10 @@ class HarborHidden:
         task_name: The Harbor task identifier.
         instruction: Task instruction text.
         episode_step: Current step in the episode.
+        difficulty: Task difficulty level (e.g., ``"easy"``, ``"hard"``).
+            Defaults to ``"n/a"`` for tasks without explicit difficulty.
+        recommended_timeout_sec: Task-recommended agent timeout in seconds
+            from the task definition, or ``None`` if not specified.
         last_action: Text of the last action taken.
         trajectory: Command history (frozen tuple).
         snapshot_ref: Optional exact runtime snapshot artifact for this state.
@@ -227,6 +259,8 @@ class HarborHidden:
     task_name: str
     instruction: str
     episode_step: int
+    difficulty: str = "n/a"
+    recommended_timeout_sec: float | None = None
     last_action: str | None = None
     trajectory: tuple[str, ...] = ()
     snapshot_ref: HarborSnapshotRef | None = None
@@ -399,6 +433,7 @@ class _PodmanServiceSpec:
 
 # ── Helpers ─────────────────────────────────────────────────────
 
+
 def _format_exec_result(result: Any) -> str:
     """Format an exec result as observation text.
 
@@ -421,6 +456,34 @@ def _format_exec_result(result: Any) -> str:
     if stderr:
         parts.append(f"[stderr] {stderr}")
     return "\n".join(parts)
+
+
+def _cap_observation_text(text: str, max_chars: int | None) -> str:
+    """Middle-truncate observation text that exceeds *max_chars*."""
+    if max_chars is None or len(text) <= max_chars:
+        return text
+    omitted = len(text) - max_chars
+    half = max_chars // 2
+    return (
+        text[:half]
+        + f"\n\n[... {omitted} characters omitted ...]\n\n"
+        + text[-half:]
+    )
+
+
+def _cap_tool_result_text(result: ToolResult, max_chars: int | None) -> ToolResult:
+    """Cap string-valued tool outputs and errors."""
+    output = result.output
+    error = result.error
+
+    if isinstance(output, str):
+        output = _cap_observation_text(output, max_chars)
+    if error is not None:
+        error = _cap_observation_text(error, max_chars)
+
+    if output == result.output and error == result.error:
+        return result
+    return replace(result, output=output, error=error)
 
 
 def _looks_like_timeout_error(exc: Exception) -> bool:
@@ -629,7 +692,6 @@ def _normalize_text_exec_mode(mode: str) -> str:
     return normalized
 
 
-
 def _pick_heredoc_delimiter(text: str) -> str:
     """Choose a heredoc delimiter that does not collide with command lines."""
     existing_lines = set(text.splitlines())
@@ -742,9 +804,7 @@ class _HarborTmuxTextSession:
         # both waiting and capture.
         status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
         if self._host_status_dir:
-            capture_cmd = (
-                f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
-            )
+            capture_cmd = f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
         else:
             capture_cmd = (
                 f"while ! test -f {status_path_q}; do sleep 0.1; done"
@@ -756,7 +816,8 @@ class _HarborTmuxTextSession:
                 if self._host_status_dir:
                     deadline = _now_monotonic() + effective_timeout
                     if not self._wait_for_status_file(
-                        step_token, timeout_sec=effective_timeout,
+                        step_token,
+                        timeout_sec=effective_timeout,
                     ):
                         raise RuntimeError(
                             f"apptainer command timed out after {effective_timeout}s"
@@ -814,6 +875,14 @@ class _HarborTmuxTextSession:
                 else:
                     raise result from exc
 
+        # Strip trailing newlines so the prefix-based diff in
+        # _diff_full_buffer works reliably.  tmux pane rows below the
+        # cursor emit variable-length trailing newlines; Docker's exec
+        # transport preserves them while the HPC transport (podman-hpc,
+        # apptainer) already rstrips all whitespace, making this a
+        # no-op there.  Only newlines are stripped (not spaces) so the
+        # prompt's trailing space is preserved at the diff boundary.
+        full_buffer = full_buffer.rstrip("\n")
         observation = self._diff_full_buffer(full_buffer)
         observation = self._sanitize_observation(observation, command_text, used_staged_file)
         if observation == "":
@@ -838,7 +907,10 @@ class _HarborTmuxTextSession:
         return observation
 
     def _sanitize_observation(
-        self, observation: str, command: str, used_staged_file: bool,
+        self,
+        observation: str,
+        command: str,
+        used_staged_file: bool,
     ) -> str:
         """Remove harness artifacts from the model-facing observation.
 
@@ -968,9 +1040,7 @@ class _HarborTmuxTextSession:
         if self._host_status_dir:
             deadline = _now_monotonic() + timeout_sec
             path = self._host_status_dir / token
-            next_health_check = (
-                _now_monotonic() + self._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC
-            )
+            next_health_check = _now_monotonic() + self._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC
             session_q = shlex.quote(self._SESSION_NAME)
             while _now_monotonic() < deadline:
                 if path.is_file():
@@ -990,10 +1060,7 @@ class _HarborTmuxTextSession:
                         # Container/session died — propagate as transport
                         # error rather than masking as a timeout.
                         raise
-                    next_health_check = (
-                        _now_monotonic()
-                        + self._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC
-                    )
+                    next_health_check = _now_monotonic() + self._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC
                 remaining = deadline - _now_monotonic()
                 if remaining <= 0:
                     break
@@ -1078,7 +1145,14 @@ class _HarborTmuxTextSession:
             f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
-        return getattr(result, "stdout", "") or ""
+        # Strip trailing newlines: tmux pane rows below the cursor
+        # produce trailing newlines whose count changes as content is
+        # added.  Stripping them keeps _previous_full_buffer stable for
+        # prefix-based diffs.  Only newlines are stripped (not spaces)
+        # so the prompt's trailing space is preserved at the diff
+        # boundary.  No-op for HPC runtimes whose exec transport layer
+        # already rstrips all whitespace.
+        return (getattr(result, "stdout", "") or "").rstrip("\n")
 
     def _capture_visible_screen(self) -> str:
         result = self._exec(
@@ -1202,9 +1276,7 @@ class _HarborTmuxTextSession:
             ]
         )
         self._exec(control_cmd, timeout_sec=startup_timeout)
-        if not self._wait_for_status_file(
-            init_token, timeout_sec=startup_timeout
-        ):
+        if not self._wait_for_status_file(init_token, timeout_sec=startup_timeout):
             raise self._startup_timeout_error(
                 f"Prompt hook installation timed out after {startup_timeout}s"
             )
@@ -1396,15 +1468,9 @@ class _HarborTmuxTextSession:
         debug_enabled = logger.isEnabledFor(logging.DEBUG)
         if debug_enabled:
             visible_tail = (
-                "\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
-                if visible
-                else ""
+                "\n".join(visible.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]) if visible else ""
             )
-            full_tail = (
-                "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :])
-                if full
-                else ""
-            )
+            full_tail = "\n".join(full.splitlines()[-self._DIAGNOSTIC_TAIL_LINES :]) if full else ""
             logger.debug(
                 "Harbor tmux timeout recovery start: timeout=%ss elapsed=%.2fs preview=%s\nvisible_tail:\n%s\nfull_tail:\n%s",
                 timeout_sec,
@@ -1444,7 +1510,8 @@ class _HarborTmuxTextSession:
                 _preview_log_text(command),
             )
         recovered = self._poll_for_recovery(
-            step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+            step_token,
+            timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
         )
         if not recovered:
             self._safe_exec(
@@ -1457,7 +1524,31 @@ class _HarborTmuxTextSession:
                     _preview_log_text(command),
                 )
             recovered = self._poll_for_recovery(
-                step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+                step_token,
+                timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+            )
+        if not recovered:
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} Escape Escape",
+                timeout_sec=5,
+            )
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} ':qa!' Enter",
+                timeout_sec=5,
+            )
+            self._safe_exec(
+                f"tmux send-keys -t {shlex.quote(self._SESSION_NAME)} 'q' Enter",
+                timeout_sec=5,
+            )
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux timeout recovery sent TUI escape (:qa! + q) after "
+                    "Ctrl-\\\\ failed: preview=%s",
+                    _preview_log_text(command),
+                )
+            recovered = self._poll_for_recovery(
+                step_token,
+                timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
             )
         # Discard any stale status file the hook may have written after Ctrl-C
         self._read_exit_status(step_token)
@@ -1533,7 +1624,8 @@ class _HarborTmuxTextSession:
             timeout_sec=10,
         )
         recovered = self._poll_for_recovery(
-            step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+            step_token,
+            timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
         )
         if not recovered:
             self._safe_exec(
@@ -1541,7 +1633,8 @@ class _HarborTmuxTextSession:
                 timeout_sec=10,
             )
             recovered = self._poll_for_recovery(
-                step_token, timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
+                step_token,
+                timeout_sec=self._RECOVERY_POLL_TIMEOUT_SEC,
             )
         self._read_exit_status(step_token)
         recovered_buffer = self._safe_capture(self._capture_full_buffer)
@@ -1732,9 +1825,7 @@ class _HarborTmuxTextSession:
                     timeout_sec=5,
                 )
             except Exception:
-                raise _TmuxSessionDead(
-                    "tmux session died during command execution"
-                ) from cap_exc
+                raise _TmuxSessionDead("tmux session died during command execution") from cap_exc
             # Session exists; capture failure was transient.
             return ""
 
@@ -3705,7 +3796,7 @@ class ApptainerHPCEnvironment:
 
         if self._rootfs_mode == "sandbox":
             await self._start_sandbox_instance()
-            self.logger.info("Apptainer rootfs mode selected: sandbox")
+            self.logger.debug("Apptainer rootfs mode selected: sandbox")
             return
 
         cached_probe, probe_owner = self._claim_overlay_probe()
@@ -3742,7 +3833,7 @@ class ApptainerHPCEnvironment:
 
             self.logger.info("Apptainer overlay probe failed; falling back to writable sandbox")
             await self._start_sandbox_instance()
-            self.logger.info("Apptainer rootfs mode selected: sandbox")
+            self.logger.debug("Apptainer rootfs mode selected: sandbox")
         finally:
             if probe_owner:
                 self._finish_overlay_probe(probe_result)
@@ -4173,10 +4264,18 @@ class HarborEnvironment:
         runtime_probing: bool = False,
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
+        trajectory_timeout: int | None = 900,
         command_soft_timeout: int | None = None,
+        invalid_action_text: str | None = "[invalid action]",
+        invalid_action_observation: str | None = None,
+        max_observation_chars: int | None = 50_000,
     ) -> None:
+        if trajectory_timeout is not None and trajectory_timeout <= 0:
+            raise ValueError("trajectory_timeout must be > 0")
         if command_soft_timeout is not None and command_soft_timeout <= 0:
             raise ValueError("command_soft_timeout must be > 0")
+        if max_observation_chars is not None and max_observation_chars <= 0:
+            raise ValueError("max_observation_chars must be > 0")
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
         self._verifier_factory = verifier_factory
@@ -4195,12 +4294,18 @@ class HarborEnvironment:
         self._runtime_probing = runtime_probing
         self._text_exec_mode = _normalize_text_exec_mode(text_exec_mode)
         self._tmux_bootstrap_if_missing = tmux_bootstrap_if_missing
+        self._trajectory_timeout = trajectory_timeout
         self._command_soft_timeout = command_soft_timeout
+        self._invalid_action_text = invalid_action_text
+        self._invalid_action_observation_text = invalid_action_observation
+        self._max_observation_chars = max_observation_chars
         self._verifier_timeout_sec = _internal_verifier_timeout_sec(
             exec_timeout,
             command_soft_timeout=command_soft_timeout,
         )
         self._soft_timeouts_disabled_depth = 0
+        self._trajectory_timeout_disabled_depth = 0
+        self._trajectory_started_at_monotonic: float | None = None
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -4209,6 +4314,15 @@ class HarborEnvironment:
         self._harbor_env: Any = None
         self._current_task: Any = None
         self._text_session: _HarborTmuxTextSession | None = None
+
+    @property
+    def answer_extractor(self):
+        """The extractor used to parse agent responses in ``step()``."""
+        return self._answer_extractor
+
+    @answer_extractor.setter
+    def answer_extractor(self, value):
+        self._answer_extractor = value
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -4329,6 +4443,8 @@ class HarborEnvironment:
             task_name=getattr(task, "name", str(task_index)),
             instruction=instruction,
             episode_step=0,
+            difficulty=_get_task_difficulty(task),
+            recommended_timeout_sec=_get_task_recommended_timeout(task),
         )
 
         observation = Observation(
@@ -4342,7 +4458,12 @@ class HarborEnvironment:
             step=0,
             episode_id=episode_id,
             is_terminal=False,
-            info={"task_index": task_index, **session_info},
+            info={
+                "task_index": task_index,
+                "difficulty": hidden.difficulty,
+                "recommended_timeout_sec": hidden.recommended_timeout_sec,
+                **session_info,
+            },
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
@@ -4367,6 +4488,7 @@ class HarborEnvironment:
             state,
             runtime_probing=self._runtime_probing,
         )
+        self._trajectory_started_at_monotonic = _now_monotonic()
         self._state_tracker.track(state)
         if debug_enabled:
             logger.debug(
@@ -4381,7 +4503,13 @@ class HarborEnvironment:
             **session_info,
         }
 
-    def _text_for_history(self, raw_text: str, extracted_cmd: str | None) -> str:
+    def _text_for_history(
+        self,
+        raw_text: str,
+        extracted_cmd: str | None,
+        *,
+        invalid_action_format: bool = False,
+    ) -> str:
         """Return text for the assistant turn in conversation history.
 
         Uses extracted command when available. On extraction failure, applies
@@ -4391,6 +4519,8 @@ class HarborEnvironment:
         """
         if extracted_cmd is not None:
             return extracted_cmd
+        if invalid_action_format and self._invalid_action_text is not None:
+            return self._invalid_action_text
         if self._answer_extractor is None:
             return raw_text
         from llenvs.core.extraction import CleanedExtractor
@@ -4408,6 +4538,8 @@ class HarborEnvironment:
         Inspects the configured extractor to produce a message that tells
         the model exactly which format is expected.
         """
+        if self._invalid_action_observation_text is not None:
+            return self._invalid_action_observation_text
         from llenvs.core.extraction import (
             CleanedExtractor,
             CompositeExtractor,
@@ -4453,9 +4585,56 @@ class HarborEnvironment:
         finally:
             self._soft_timeouts_disabled_depth -= 1
 
+    def _trajectory_timeout_enabled(self) -> bool:
+        return self._trajectory_timeout_disabled_depth == 0
+
+    @contextlib.contextmanager
+    def _disable_trajectory_timeout_temporarily(self):
+        self._trajectory_timeout_disabled_depth += 1
+        try:
+            yield
+        finally:
+            self._trajectory_timeout_disabled_depth -= 1
+
+    def _trajectory_timeout_budget_sec(self, state: State[HarborHidden]) -> float | None:
+        if not self._trajectory_timeout_enabled():
+            return None
+        candidates = [
+            value
+            for value in (
+                self._trajectory_timeout,
+                state.hidden.recommended_timeout_sec,
+            )
+            if value is not None
+        ]
+        if not candidates:
+            return None
+        return min(candidates)
+
+    def _remaining_trajectory_timeout_sec(self, state: State[HarborHidden]) -> float | None:
+        budget = self._trajectory_timeout_budget_sec(state)
+        started_at = self._trajectory_started_at_monotonic
+        if budget is None or started_at is None:
+            return None
+        return budget - max(0.0, _now_monotonic() - started_at)
+
+    def _clamp_live_command_timeout_sec(
+        self,
+        per_command_timeout: int,
+        remaining_trajectory_timeout_sec: float | None,
+    ) -> int:
+        if remaining_trajectory_timeout_sec is None:
+            return per_command_timeout
+        return max(1, min(per_command_timeout, int(remaining_trajectory_timeout_sec)))
+
     @staticmethod
     def _timeout_observation_text(timeout_sec: int) -> str:
         return f"[Command timed out after {timeout_sec} seconds and was cancelled.]"
+
+    @staticmethod
+    def _trajectory_timeout_observation_text(timeout_sec: float) -> str:
+        timeout_display = int(timeout_sec) if float(timeout_sec).is_integer() else timeout_sec
+        return f"[Trajectory timed out after {timeout_display} seconds. No command was executed.]"
 
     @staticmethod
     def _continuation_observation_text() -> str:
@@ -4495,9 +4674,23 @@ class HarborEnvironment:
         command_timed_out = False
         command_timeout_elapsed_sec: float | None = None
         shell_continuation_detected = False
+        command_executed = False
+        trajectory_timeout_elapsed = False
+        timeout_exc: _HarborRecoverableCommandTimeout | None = None
+        continuation_exc: _HarborRecoverableShellContinuation | None = None
+        soft_timeouts_enabled = self._soft_timeouts_enabled()
+
+        trajectory_timeout_budget_sec = self._trajectory_timeout_budget_sec(state)
+        remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
+        if remaining_trajectory_timeout_sec is not None and remaining_trajectory_timeout_sec < 1.0:
+            truncated = True
+            trajectory_timeout_elapsed = True
+            obs_text = self._trajectory_timeout_observation_text(
+                trajectory_timeout_budget_sec if trajectory_timeout_budget_sec is not None else 0.0
+            )
 
         # Check for submit keyword on extracted command (not on malformed raw text)
-        if cmd_for_env is not None and self._submit_keyword in cmd_for_env:
+        if not trajectory_timeout_elapsed and cmd_for_env is not None and self._submit_keyword in cmd_for_env:
             terminated = True
         if debug_enabled:
             logger.debug(
@@ -4510,41 +4703,52 @@ class HarborEnvironment:
             )
 
         # Execute command in container (even for submit, to maintain trajectory)
-        if invalid_action_format:
+        if trajectory_timeout_elapsed:
+            pass
+        elif invalid_action_format:
             obs_text = self._invalid_action_observation()
-            continuation_exc = None
         elif not terminated:
-            timeout_exc: _HarborRecoverableCommandTimeout | None = None
-            continuation_exc: _HarborRecoverableShellContinuation | None = None
             if self._text_exec_mode == "tmux_session":
                 if self._text_session is None:
                     raise RuntimeError("Harbor tmux text session was not initialized")
+                live_timeout_sec = self._clamp_live_command_timeout_sec(
+                    self._command_soft_timeout if soft_timeouts_enabled else self._exec_timeout,
+                    remaining_trajectory_timeout_sec,
+                )
+                command_executed = True
                 try:
-                    if self._soft_timeouts_enabled():
-                        obs_text = self._text_session.run_command(
-                            cmd_for_env,
-                            timeout_sec=self._command_soft_timeout,
-                        )
-                    else:
-                        obs_text = self._text_session.run_command(cmd_for_env)
+                    obs_text = self._text_session.run_command(
+                        cmd_for_env,
+                        timeout_sec=live_timeout_sec,
+                    )
                 except _HarborRecoverableCommandTimeout as exc:
                     timeout_exc = exc
                 except _HarborRecoverableShellContinuation as exc:
                     continuation_exc = exc
             else:
-                exec_timeout = (
-                    self._command_soft_timeout
-                    if self._soft_timeouts_enabled()
-                    else self._exec_timeout
+                configured_live_timeout_sec = (
+                    self._command_soft_timeout if soft_timeouts_enabled else self._exec_timeout
+                )
+                exec_timeout = self._clamp_live_command_timeout_sec(
+                    configured_live_timeout_sec,
+                    remaining_trajectory_timeout_sec,
+                )
+                trajectory_timeout_clamped_command = (
+                    remaining_trajectory_timeout_sec is not None
+                    and exec_timeout < configured_live_timeout_sec
                 )
                 started_at = _now_monotonic()
+                command_executed = True
                 try:
                     exec_result = run_async(
                         self._harbor_env.exec(cmd_for_env, timeout_sec=exec_timeout)
                     )
                     obs_text = _format_exec_result(exec_result)
                 except Exception as exc:
-                    if self._soft_timeouts_enabled() and _looks_like_timeout_error(exc):
+                    if (
+                        (soft_timeouts_enabled or trajectory_timeout_clamped_command)
+                        and _looks_like_timeout_error(exc)
+                    ):
                         elapsed_sec = max(0.0, _now_monotonic() - started_at)
                         timeout_exc = _HarborRecoverableCommandTimeout(
                             command=cmd_for_env,
@@ -4580,6 +4784,14 @@ class HarborEnvironment:
         # Check truncation
         if not terminated and next_step >= self._max_steps:
             truncated = True
+        post_command_remaining_trajectory_timeout_sec = self._remaining_trajectory_timeout_sec(state)
+        if (
+            not terminated
+            and post_command_remaining_trajectory_timeout_sec is not None
+            and post_command_remaining_trajectory_timeout_sec < 1.0
+        ):
+            truncated = True
+            trajectory_timeout_elapsed = True
 
         # Run verifier at terminal
         reward_value: float | None = None
@@ -4623,22 +4835,39 @@ class HarborEnvironment:
                         )
                     reward_value = 0.0
 
+        obs_text = _cap_observation_text(obs_text, self._max_observation_chars)
+
         # Build next hidden
         next_hidden = HarborHidden(
             task_index=state.hidden.task_index,
             task_name=state.hidden.task_name,
             instruction=state.hidden.instruction,
             episode_step=next_step,
+            difficulty=state.hidden.difficulty,
+            recommended_timeout_sec=state.hidden.recommended_timeout_sec,
             last_action=cmd_for_env if cmd_for_env is not None else action_text,
             trajectory=state.hidden.trajectory
-            + ((cmd_for_env,) if cmd_for_env is not None and not shell_continuation_detected else ()),
+            + (
+                (cmd_for_env,)
+                if cmd_for_env is not None
+                and not shell_continuation_detected
+                and (command_executed or terminated)
+                else ()
+            ),
             fs_restore_risk_ever=state.hidden.fs_restore_risk_ever
             or state.hidden.fs_restore_risk_now,
         )
 
         # Build messages
         new_messages = tuple(state.observation.messages) + (
-            {"role": "assistant", "content": self._text_for_history(action_text, extracted_cmd)},
+            {
+                "role": "assistant",
+                "content": self._text_for_history(
+                    action_text,
+                    extracted_cmd,
+                    invalid_action_format=invalid_action_format,
+                ),
+            },
             {"role": "user", "content": obs_text},
         )
 
@@ -4656,6 +4885,7 @@ class HarborEnvironment:
             "command_timed_out": command_timed_out,
             "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
             "shell_continuation_detected": shell_continuation_detected,
+            "trajectory_timeout_elapsed": trajectory_timeout_elapsed,
         }
         info.pop("extraction_metadata", None)
         if reward_value is not None:
@@ -4717,7 +4947,11 @@ class HarborEnvironment:
             terminated=terminated,
             truncated=truncated,
             extracted_action=extracted_cmd,
-            resolved_action=extracted_cmd,
+            resolved_action=(
+                self._invalid_action_text
+                if invalid_action_format and self._invalid_action_text is not None
+                else extracted_cmd
+            ),
             info={
                 "episode_step": next_step,
                 "observation": obs_text,
@@ -4725,6 +4959,7 @@ class HarborEnvironment:
                 "command_timed_out": command_timed_out,
                 "command_timeout_elapsed_sec": command_timeout_elapsed_sec,
                 "shell_continuation_detected": shell_continuation_detected,
+                "trajectory_timeout_elapsed": trajectory_timeout_elapsed,
                 **({"extraction_metadata": extraction_metadata} if extraction_metadata else {}),
             },
         )
@@ -4785,7 +5020,10 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         state_capture_mode: str = "replay",
         snapshot_artifact_root: Path | str | None = None,
         snapshot_options: HarborSnapshotOptions | None = None,
+        max_observation_chars: int | None = 50_000,
     ) -> None:
+        if max_observation_chars is not None and max_observation_chars <= 0:
+            raise ValueError("max_observation_chars must be > 0")
         self._tasks = tasks
         self._harbor_env_factory = harbor_env_factory
         self._verifier_factory = verifier_factory
@@ -4800,6 +5038,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
         )
         self._snapshot_options = snapshot_options or HarborSnapshotOptions()
+        self._max_observation_chars = max_observation_chars
 
         self._tools = HARBOR_TOOLS
         self._executor = None  # Not used — we handle execution directly
@@ -4880,6 +5119,8 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             task_name=getattr(task, "name", str(task_index)),
             instruction=instruction,
             episode_step=0,
+            difficulty=_get_task_difficulty(task),
+            recommended_timeout_sec=_get_task_recommended_timeout(task),
         )
 
         observation = Observation(
@@ -4893,7 +5134,11 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             step=0,
             episode_id=episode_id,
             is_terminal=False,
-            info={"task_index": task_index},
+            info={
+                "task_index": task_index,
+                "difficulty": hidden.difficulty,
+                "recommended_timeout_sec": hidden.recommended_timeout_sec,
+            },
         )
 
         state = State(observation=observation, hidden=hidden, metadata=metadata)
@@ -4996,19 +5241,27 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             for tc in action.tool_calls:
                 validation_error = self._validate_tool_call(tc)
                 if validation_error is not None:
-                    tool_results.append(validation_error)
+                    tool_results.append(
+                        _cap_tool_result_text(validation_error, self._max_observation_chars)
+                    )
                     continue
 
                 try:
-                    result = self._execute_tool_call(tc)
+                    result = _cap_tool_result_text(
+                        self._execute_tool_call(tc),
+                        self._max_observation_chars,
+                    )
                     tool_results.append(result)
                 except Exception as e:
                     logger.warning(f"Harbor tool call {tc.name} failed: {e}")
                     tool_results.append(
-                        ToolResult.from_error(
-                            call_id=tc.id,
-                            tool_name=tc.name,
-                            error_message=str(e),
+                        _cap_tool_result_text(
+                            ToolResult.from_error(
+                                call_id=tc.id,
+                                tool_name=tc.name,
+                                error_message=str(e),
+                            ),
+                            self._max_observation_chars,
                         )
                     )
 
@@ -5040,6 +5293,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         state_text = "\n".join(
             str(tr.output) if tr.is_success else str(tr.error) for tr in tool_results
         )
+        state_text = _cap_observation_text(state_text, self._max_observation_chars)
         next_obs = self._build_next_observation(
             current_obs=state.observation,
             action=action,
@@ -5063,6 +5317,8 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
             task_name=state.hidden.task_name,
             instruction=state.hidden.instruction,
             episode_step=next_step,
+            difficulty=state.hidden.difficulty,
+            recommended_timeout_sec=state.hidden.recommended_timeout_sec,
             last_action=action_text,
             trajectory=state.hidden.trajectory + ((action_text,) if action_text else ()),
         )
@@ -5212,7 +5468,7 @@ class HarborAdapter:
         """Load Harbor tasks without creating environments."""
         dataset_name, version = self._parse_name(name)
         if dataset_path is not None:
-            cache_key = ("path", str(Path(dataset_path).resolve()))
+            cache_key = ("path", str(Path(dataset_path).expanduser().resolve()))
         else:
             cache_key = ("registry", dataset_name, version)
 
@@ -5228,6 +5484,63 @@ class HarborAdapter:
                 tasks = self._load_tasks_from_registry(api, dataset_name, version)
             _HARBOR_TASK_CACHE[cache_key] = tasks
             return tasks
+
+    def get_task_difficulties(
+        self,
+        name: str = "terminal-bench@2.0",
+        *,
+        tasks: tuple[Any, ...] | None = None,
+        dataset_path: str | None = None,
+    ) -> dict[str, str]:
+        """Return ``{task_name: difficulty}`` for all tasks in a dataset.
+
+        Tasks without explicit difficulty metadata are assigned ``"n/a"``.
+
+        Args:
+            name: Dataset name with optional version.
+            tasks: Pre-loaded tasks. If None, loaded via ``load_tasks()``.
+            dataset_path: Local path to dataset directory.
+
+        Returns:
+            Mapping of task name to difficulty string.
+        """
+        if tasks is None:
+            tasks = self.load_tasks(name, dataset_path=dataset_path)
+        return {getattr(t, "name", str(i)): _get_task_difficulty(t) for i, t in enumerate(tasks)}
+
+    def filter_tasks(
+        self,
+        tasks: tuple[Any, ...],
+        *,
+        difficulties: set[str] | list[str] | None = None,
+    ) -> tuple[Any, ...]:
+        """Filter a loaded task tuple by difficulty.
+
+        Returns the input unchanged when *difficulties* is ``None``.
+
+        Args:
+            tasks: Pre-loaded tuple of Harbor Task objects.
+            difficulties: Keep only tasks whose difficulty is in this set.
+                Case-insensitive, whitespace-stripped.  ``None`` means no
+                filtering.
+
+        Returns:
+            Filtered tuple of tasks.
+
+        Raises:
+            ValueError: If no tasks match the requested difficulties.
+        """
+        if difficulties is None:
+            return tasks
+        normalized = {d.lower().strip() for d in difficulties}
+        filtered = tuple(t for t in tasks if _get_task_difficulty(t) in normalized)
+        if not filtered:
+            available = sorted({_get_task_difficulty(t) for t in tasks})
+            raise ValueError(
+                f"No tasks match difficulties {difficulties}. "
+                f"Available: {', '.join(available)}"
+            )
+        return filtered
 
     def inspect_snapshot_eligibility(
         self,
@@ -5288,7 +5601,12 @@ class HarborAdapter:
         runtime_probing: bool = False,
         text_exec_mode: str = "independent_exec",
         tmux_bootstrap_if_missing: bool = False,
+        trajectory_timeout: int | None | object = _ARG_UNSET,
         command_soft_timeout: int | None = None,
+        invalid_action_text: str | None = "[invalid action]",
+        invalid_action_observation: str | None = None,
+        max_observation_chars: int | None = 50_000,
+        difficulties: set[str] | None = None,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
         """Create a Harbor environment.
@@ -5326,14 +5644,29 @@ class HarborAdapter:
             tmux_bootstrap_if_missing: When ``text_exec_mode="tmux_session"``,
                 attempt a bounded package-manager install of tmux inside the
                 task container if it is missing.
+            trajectory_timeout: Text mode only — live per-trajectory wall-clock
+                timeout in seconds. Task ``recommended_timeout_sec`` can tighten
+                this budget when present. ``None`` disables the global cap.
             command_soft_timeout: Text mode only — recoverable timeout (seconds)
                 for live model-issued commands. Disabled when ``None``.
+            invalid_action_text: Text stored in assistant history when
+                malformed responses produce no executable command.
+            invalid_action_observation: Optional custom invalid-format
+                observation shown instead of the default extractor-aware text.
+            max_observation_chars: Cap per-step observation text at this many
+                characters using middle truncation. ``None`` disables capping.
+            difficulties: Filter tasks by difficulty level. Only tasks whose
+                difficulty is in this set are included. ``None`` means no
+                filtering. Tasks without explicit difficulty metadata are
+                assigned ``"n/a"``.
             **kwargs: Passed to Harbor constructors.
 
         Returns:
             HarborEnvironment or HarborToolEnvironment.
         """
         dataset_name, _version = self._parse_name(name)
+        trajectory_timeout_explicit = trajectory_timeout is not _ARG_UNSET
+        effective_trajectory_timeout = 900 if trajectory_timeout is _ARG_UNSET else trajectory_timeout
 
         if tool_mode and command_soft_timeout is not None:
             raise ValueError(
@@ -5349,6 +5682,11 @@ class HarborAdapter:
             raise ValueError(
                 "tmux_session text execution is not supported in Harbor tool mode. "
                 "Use tool_mode=False when requesting text_exec_mode='tmux_session'."
+            )
+        if tool_mode and trajectory_timeout_explicit:
+            raise ValueError(
+                "trajectory_timeout is not supported in Harbor tool mode. "
+                "Use tool_mode=False for text-mode trajectory timeout handling."
             )
 
         # Load tasks and create factories from Harbor if not provided
@@ -5385,6 +5723,18 @@ class HarborAdapter:
 
                 verify_factory = build_verifier
 
+        # Filter tasks by difficulty
+        if difficulties is not None:
+            normalized = {d.lower().strip() for d in difficulties}
+            original_tasks = tasks
+            tasks = tuple(t for t in tasks if _get_task_difficulty(t) in normalized)
+            if not tasks:
+                available = sorted({_get_task_difficulty(t) for t in original_tasks})
+                raise ValueError(
+                    f"No Harbor tasks match difficulties {difficulties}. "
+                    f"Available difficulties: {', '.join(available)}"
+                )
+
         if tool_mode:
             return HarborToolEnvironment(
                 tasks=tasks,
@@ -5399,6 +5749,7 @@ class HarborAdapter:
                 state_capture_mode=state_capture_mode,
                 snapshot_artifact_root=snapshot_artifact_root,
                 snapshot_options=snapshot_options,
+                max_observation_chars=max_observation_chars,
             )
 
         return HarborEnvironment(
@@ -5419,7 +5770,11 @@ class HarborAdapter:
             runtime_probing=runtime_probing,
             text_exec_mode=text_exec_mode,
             tmux_bootstrap_if_missing=tmux_bootstrap_if_missing,
+            trajectory_timeout=effective_trajectory_timeout,
             command_soft_timeout=command_soft_timeout,
+            invalid_action_text=invalid_action_text,
+            invalid_action_observation=invalid_action_observation,
+            max_observation_chars=max_observation_chars,
         )
 
     def get_default_system_prompt(self, name: str) -> str:
@@ -5450,7 +5805,7 @@ class HarborAdapter:
 
     @staticmethod
     def _load_tasks_from_path(api: _HarborAPI, dataset_path: str) -> tuple[Any, ...]:
-        tasks_root = Path(dataset_path)
+        tasks_root = Path(dataset_path).expanduser()
         if not tasks_root.exists():
             raise FileNotFoundError(f"Dataset path does not exist: {dataset_path}")
 
@@ -5559,7 +5914,9 @@ def harbor_restore(
 
     Resets to the original task via ``task_index``, then replays each command
     from ``state.hidden.trajectory``. Validates task name to guard against
-    index drift across dataset versions.
+    index drift across dataset versions. Replay temporarily disables the live
+    ``trajectory_timeout`` budget so the restored continuation starts with a
+    fresh live budget after replay completes.
 
     Args:
         env: A fresh ``HarborEnvironment`` instance (new container).
@@ -5588,16 +5945,17 @@ def harbor_restore(
                 f"Dataset version may have changed."
             )
 
-    for cmd in state.hidden.trajectory:
-        result = env.step(current, Action(text=cmd))
-        if result.info.get("shell_continuation_detected"):
-            observation = result.info.get("observation", "")
-            raise RuntimeError(
-                "Harbor replay hit shell continuation prompt: "
-                f"{cmd}\nObservation: {observation}"
-            )
-        current = result.next_state
+    with env._disable_trajectory_timeout_temporarily():
+        for cmd in state.hidden.trajectory:
+            result = env.step(current, Action(text=cmd))
+            if result.info.get("shell_continuation_detected"):
+                observation = result.info.get("observation", "")
+                raise RuntimeError(
+                    f"Harbor replay hit shell continuation prompt: {cmd}\nObservation: {observation}"
+                )
+            current = result.next_state
 
+    env._trajectory_started_at_monotonic = _now_monotonic()
     return current
 
 
@@ -5640,6 +5998,7 @@ def harbor_snapshot_restore(
             raise RuntimeError(
                 "Harbor tmux session could not be re-synchronized after snapshot restore"
             ) from exc
+    env._trajectory_started_at_monotonic = _now_monotonic()
     env._state_tracker.track(state)
     return state
 
@@ -5679,24 +6038,26 @@ def capture_replay_probe_outputs(
 
     Replays the saved trajectory via ``env.step(...)`` to reach the target
     state, then runs probe commands directly against the restored runtime so
-    probe capture does not consume additional episode steps.
+    probe capture does not consume additional episode steps. The replay prefix
+    runs with the live ``trajectory_timeout`` budget disabled; the probe
+    commands still use the hard ``exec_timeout`` path.
     """
     env = env_factory()
     try:
         current, _info = env.reset(options={"task_index": task_index})
-        for cmd in trajectory:
-            result = env.step(current, Action(text=cmd))
-            if result.info.get("shell_continuation_detected"):
-                observation = result.info.get("observation", "")
-                raise RuntimeError(
-                    "Harbor replay hit shell continuation prompt: "
-                    f"{cmd}\nObservation: {observation}"
-                )
-            current = result.next_state
+        with env._disable_trajectory_timeout_temporarily():
+            for cmd in trajectory:
+                result = env.step(current, Action(text=cmd))
+                if result.info.get("shell_continuation_detected"):
+                    observation = result.info.get("observation", "")
+                    raise RuntimeError(
+                        "Harbor replay hit shell continuation prompt: "
+                        f"{cmd}\nObservation: {observation}"
+                    )
+                current = result.next_state
 
         return {
-            probe_cmd: _run_replay_probe_command(env, probe_cmd)
-            for probe_cmd in probe_commands
+            probe_cmd: _run_replay_probe_command(env, probe_cmd) for probe_cmd in probe_commands
         }
     finally:
         env.close()
