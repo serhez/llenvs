@@ -17,7 +17,13 @@ from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import RewardType, Signal, SignalBundle
 from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.evaluation.runner import TrajectoryRunner
-from llenvs.inference.protocol import GenerationResult, SamplingParams, StopReason
+from llenvs.inference.protocol import (
+    GenerationResult,
+    PartialBatchError,
+    PromptTooLongError,
+    SamplingParams,
+    StopReason,
+)
 
 # ── Mock infrastructure ──────────────────────────────────────────
 
@@ -459,6 +465,38 @@ class TestMultiInstanceRunner:
         # Last call should show all done
         assert progress_calls[-1] == (2, 2)
 
+    def test_run_batch_partial_prompt_too_long_preserves_other_instances(self):
+        """A deterministic partial batch failure should only fail the offending task."""
+        created, factory = _mock_env_factory(terminate_after=1)
+        primary_env = MockNonPureEnvironment(terminate_after=1)
+        backend = _make_mock_backend()
+        too_long = PromptTooLongError(
+            "too long",
+            model_name="test",
+            max_model_len=100,
+            offending_indices=[1],
+        )
+        backend.generate_chat_batch.side_effect = PartialBatchError(
+            [
+                GenerationResult(text="ok0", finish_reason=StopReason.END_OF_TEXT),
+                too_long,
+            ],
+            {1: too_long},
+        )
+
+        runner = TrajectoryRunner(
+            environment=primary_env,
+            backend=backend,
+            sampling_params=SamplingParams(),
+            env_factory=factory,
+            restore_fn=_mock_restore_fn,
+        )
+
+        result = runner.run_batch([0, 1], batch_size=2)
+
+        assert [tr.success for tr in result.trajectory_results] == [True, False]
+        assert all(env.closed for env in created)
+
     def test_run_batch_debug_logs_round_generation_and_step_waits(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -575,3 +613,44 @@ class TestMultiInstanceRunner:
         assert trajectories[1] is None
         assert trajectories[2] is not None
         assert runner.last_environment_errors[1]["phase"] == "step"
+
+    def test_generation_partial_prompt_too_long_skips_only_failed_rollout(self):
+        primary_env = MockNonPureEnvironment()
+        created, factory = _mock_env_factory(terminate_after=1)
+        backend = _make_mock_backend()
+        too_long = PromptTooLongError(
+            "too long",
+            model_name="test",
+            max_model_len=100,
+            offending_indices=[1],
+        )
+        backend.generate_chat_batch.side_effect = PartialBatchError(
+            [
+                GenerationResult(text="ok0", finish_reason=StopReason.END_OF_TEXT),
+                too_long,
+                GenerationResult(text="ok2", finish_reason=StopReason.END_OF_TEXT),
+            ],
+            {1: too_long},
+        )
+
+        runner = TrajectoryRunner(
+            environment=primary_env,
+            backend=backend,
+            sampling_params=SamplingParams(),
+            env_factory=factory,
+            restore_fn=_mock_restore_fn,
+        )
+
+        trajectories = runner.run_batch_from_states(
+            [_make_state(task_index=i) for i in range(3)],
+            on_generation_error=lambda exc: (
+                "skip" if isinstance(exc, PromptTooLongError) else "raise"
+            ),
+        )
+
+        assert len(trajectories) == 3
+        assert trajectories[0] is not None
+        assert trajectories[1] is None
+        assert trajectories[2] is not None
+        assert backend.generate_chat_batch.call_count == 1
+        assert all(env.closed for env in created)

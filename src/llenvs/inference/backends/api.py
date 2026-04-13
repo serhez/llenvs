@@ -13,6 +13,9 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     ModelBackend,
+    PartialBatchError,
+    PromptTooLongError,
+    RecoverableInputError,
     SamplingParams,
     StopReason,
     TokenLogprob,
@@ -51,7 +54,123 @@ def _anthropic_stop_reason(reason: str | None) -> StopReason:
     return StopReason.UNKNOWN
 
 
-def _run_concurrent(coro_fn: Any, items: list[Any], max_concurrency: int) -> list[Any]:
+def _error_status_code(error: BaseException) -> int | None:
+    status = getattr(error, "status_code", None)
+    if isinstance(status, int):
+        return status
+    response = getattr(error, "response", None)
+    response_status = getattr(response, "status_code", None)
+    return response_status if isinstance(response_status, int) else None
+
+
+def _error_body(error: BaseException) -> Any:
+    body = getattr(error, "body", None)
+    if body is not None:
+        return body
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+def _flatten_error_text(error: BaseException) -> str:
+    parts: list[str] = [str(error)]
+    body = _error_body(error)
+
+    def _walk(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, str):
+            parts.append(value)
+            return
+        if isinstance(value, dict):
+            for inner in value.values():
+                _walk(inner)
+            return
+        if isinstance(value, (list, tuple)):
+            for inner in value:
+                _walk(inner)
+
+    _walk(body)
+    return " ".join(part for part in parts if part)
+
+
+def _is_policy_error(error: BaseException) -> bool:
+    text = _flatten_error_text(error).lower()
+    return any(
+        needle in text
+        for needle in (
+            "content_policy_violation",
+            "content policy",
+            "safety policy",
+            "safety system",
+            "policy violation",
+        )
+    )
+
+
+def _is_context_limit_error(error: BaseException) -> bool:
+    text = _flatten_error_text(error).lower()
+    return any(
+        needle in text
+        for needle in (
+            "maximum context length",
+            "context length",
+            "prompt is too long",
+            "input is too long",
+            "request is too large",
+            "too many tokens",
+            "reduce the length",
+        )
+    )
+
+
+def _is_invalid_input_error(error: BaseException) -> bool:
+    text = _flatten_error_text(error).lower()
+    return any(
+        needle in text
+        for needle in (
+            "invalid image",
+            "image input",
+            "unsupported image",
+            "unsupported file type",
+            "unsupported media type",
+            "invalid base64",
+            "image exceeds",
+            "maximum allowed size",
+            "invalid audio",
+            "unsupported audio",
+        )
+    )
+
+
+def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseException:
+    status = _error_status_code(error)
+    if status != 400 or _is_policy_error(error):
+        return error
+
+    message = _flatten_error_text(error)
+    if _is_context_limit_error(error):
+        return PromptTooLongError(
+            message,
+            model_name=model_name,
+            offending_indices=[0],
+        )
+    if _is_invalid_input_error(error):
+        return RecoverableInputError(message, offending_indices=[0])
+    return error
+
+
+def _run_concurrent(
+    coro_fn: Any,
+    items: list[Any],
+    max_concurrency: int,
+    *,
+    return_partial: bool = False,
+) -> list[Any]:
     """Run an async function concurrently over a list of items.
 
     Uses asyncio.gather with a semaphore to limit concurrency.
@@ -78,19 +197,27 @@ def _run_concurrent(coro_fn: Any, items: list[Any], max_concurrency: int) -> lis
         results = await asyncio.gather(
             *[_limited(item) for item in items], return_exceptions=True,
         )
-        # Re-raise the first exception (preserving the API contract) but only
-        # after all tasks have completed — no cascade cancellation.
-        failures = [r for r in results if isinstance(r, BaseException)]
+        failures = {
+            idx: failure
+            for idx, failure in enumerate(results)
+            if isinstance(failure, BaseException)
+        }
         if failures:
             import logging
+
             logging.getLogger(__name__).warning(
                 "Concurrent batch: %d/%d tasks failed (%s); "
-                "re-raising first exception",
+                "%s",
                 len(failures),
                 len(results),
-                type(failures[0]).__name__,
+                type(next(iter(failures.values()))).__name__,
+                "raising PartialBatchError"
+                if return_partial
+                else "re-raising first exception",
             )
-            raise failures[0]
+            if return_partial:
+                raise PartialBatchError(list(results), failures)
+            raise next(iter(failures.values()))
         return list(results)
 
     try:
@@ -162,6 +289,7 @@ class OpenAIBackend(ModelBackend):
 
         self._model = model
         self._max_concurrency = max_concurrency
+        self._return_partial_batch = True
 
         client_args: dict[str, Any] = {**client_kwargs}
         if api_key is not None:
@@ -262,7 +390,10 @@ class OpenAIBackend(ModelBackend):
         if params.extra:
             kwargs.update(params.extra)
 
-        response = self._client.chat.completions.create(**kwargs)
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
         choice = response.choices[0]
 
         # Extract logprobs if available
@@ -324,7 +455,10 @@ class OpenAIBackend(ModelBackend):
         if params.extra:
             kwargs.update(params.extra)
 
-        response = await self._async_client.chat.completions.create(**kwargs)
+        try:
+            response = await self._async_client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
         choice = response.choices[0]
 
         token_logprobs = None
@@ -366,6 +500,7 @@ class OpenAIBackend(ModelBackend):
             lambda msgs: self._generate_chat_async(msgs, params),
             messages_batch,
             self._max_concurrency,
+            return_partial=getattr(self, "_return_partial_batch", True),
         )
 
     def generate_with_tools(
@@ -405,7 +540,13 @@ class OpenAIBackend(ModelBackend):
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
 
-        response = self._client.chat.completions.create(**kwargs)
+        if params.extra:
+            kwargs.update(params.extra)
+
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
         choice = response.choices[0]
 
         # Parse tool calls from response
@@ -438,6 +579,95 @@ class OpenAIBackend(ModelBackend):
                 "model": response.model,
                 "id": response.id,
             },
+        )
+
+    async def _generate_with_tools_async(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> GenerationResult:
+        """Async version of generate_with_tools for concurrent batch execution."""
+        message_dicts = [m.to_dict() for m in messages]
+        tool_schemas = [t.to_openai_schema() for t in tools]
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": message_dicts,
+            "tools": tool_schemas,
+            "max_tokens": params.max_tokens,
+            "temperature": params.temperature,
+            "top_p": params.top_p,
+            "presence_penalty": params.presence_penalty,
+            "frequency_penalty": params.frequency_penalty,
+            "n": params.n,
+        }
+
+        if tool_choice == "auto":
+            kwargs["tool_choice"] = "auto"
+        elif tool_choice == "none":
+            kwargs["tool_choice"] = "none"
+        elif tool_choice == "required":
+            kwargs["tool_choice"] = "required"
+        else:
+            kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
+
+        if params.stop_sequences:
+            kwargs["stop"] = list(params.stop_sequences)
+
+        if params.extra:
+            kwargs.update(params.extra)
+
+        try:
+            response = await self._async_client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
+        choice = response.choices[0]
+
+        tool_calls: tuple[ToolCall, ...] = ()
+        if choice.message.tool_calls:
+            parsed_calls = []
+            for tc in choice.message.tool_calls:
+                try:
+                    arguments = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    arguments = {"raw": tc.function.arguments}
+
+                parsed_calls.append(
+                    ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=arguments,
+                    )
+                )
+            tool_calls = tuple(parsed_calls)
+
+        return GenerationResult(
+            text=choice.message.content,
+            finish_reason=_openai_stop_reason(choice.finish_reason),
+            tool_calls=tool_calls,
+            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
+            completion_tokens=response.usage.completion_tokens if response.usage else 0,
+            metadata={
+                "model": response.model,
+                "id": response.id,
+            },
+        )
+
+    def generate_with_tools_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        tools: list[ToolDefinition],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> list[GenerationResult]:
+        """Generate tool-calling responses for multiple conversations concurrently."""
+        return _run_concurrent(
+            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
+            messages_batch,
+            self._max_concurrency,
+            return_partial=getattr(self, "_return_partial_batch", True),
         )
 
 
@@ -476,6 +706,7 @@ class AnthropicBackend(ModelBackend):
 
         self._model = model
         self._max_concurrency = max_concurrency
+        self._return_partial_batch = True
 
         client_args: dict[str, Any] = {
             "max_retries": max_retries,
@@ -579,7 +810,10 @@ class AnthropicBackend(ModelBackend):
         if params.extra:
             kwargs.update(params.extra)
 
-        response = self._client.messages.create(**kwargs)
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
 
         # Extract text from content blocks
         text = ""
@@ -638,7 +872,10 @@ class AnthropicBackend(ModelBackend):
         if params.extra:
             kwargs.update(params.extra)
 
-        response = await self._async_client.messages.create(**kwargs)
+        try:
+            response = await self._async_client.messages.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
 
         text = ""
         for block in response.content:
@@ -667,6 +904,7 @@ class AnthropicBackend(ModelBackend):
             lambda msgs: self._generate_chat_async(msgs, params),
             messages_batch,
             self._max_concurrency,
+            return_partial=getattr(self, "_return_partial_batch", True),
         )
 
     def continue_from_prefix(
@@ -699,7 +937,10 @@ class AnthropicBackend(ModelBackend):
             if params.stop_sequences:
                 kwargs["stop_sequences"] = list(params.stop_sequences)
 
-            response = self._client.messages.create(**kwargs)
+            try:
+                response = self._client.messages.create(**kwargs)
+            except Exception as exc:
+                raise _normalize_provider_error(exc, model_name=self._model) from exc
 
             text = ""
             for block in response.content:
@@ -802,7 +1043,13 @@ class AnthropicBackend(ModelBackend):
         if params.stop_sequences:
             kwargs["stop_sequences"] = list(params.stop_sequences)
 
-        response = self._client.messages.create(**kwargs)
+        if params.extra:
+            kwargs.update(params.extra)
+
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
 
         # Extract text and tool calls from content blocks
         text_parts: list[str] = []
@@ -832,6 +1079,135 @@ class AnthropicBackend(ModelBackend):
                 "model": response.model,
                 "id": response.id,
             },
+        )
+
+    async def _generate_with_tools_async(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> GenerationResult:
+        """Async version of generate_with_tools for concurrent batch execution."""
+        system_content = None
+        chat_messages = []
+
+        for msg in messages:
+            if msg.role == "system":
+                system_content = msg.content
+            elif msg.role == "tool":
+                chat_messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": msg.content,
+                            }
+                        ],
+                    }
+                )
+            elif msg.role == "assistant" and msg.tool_calls:
+                content: list[dict[str, Any]] = []
+                if msg.content:
+                    content.append({"type": "text", "text": msg.content})
+                for tc in msg.tool_calls:
+                    content.append(
+                        {
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments,
+                        }
+                    )
+                chat_messages.append({"role": "assistant", "content": content})
+            else:
+                chat_messages.append(msg.to_dict())
+
+        tool_schemas = [t.to_anthropic_schema() for t in tools]
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": chat_messages,
+            "tools": tool_schemas,
+            "max_tokens": params.max_tokens,
+        }
+
+        if system_content:
+            kwargs["system"] = system_content
+
+        if tool_choice == "auto":
+            kwargs["tool_choice"] = {"type": "auto"}
+        elif tool_choice == "none":
+            del kwargs["tools"]
+        elif tool_choice == "required":
+            kwargs["tool_choice"] = {"type": "any"}
+        else:
+            kwargs["tool_choice"] = {"type": "tool", "name": tool_choice}
+
+        if params.temperature > 0:
+            kwargs["temperature"] = params.temperature
+
+        if params.top_p < 1.0:
+            kwargs["top_p"] = params.top_p
+
+        if params.top_k > 0:
+            kwargs["top_k"] = params.top_k
+
+        if params.stop_sequences:
+            kwargs["stop_sequences"] = list(params.stop_sequences)
+
+        if params.extra:
+            kwargs.update(params.extra)
+
+        try:
+            response = await self._async_client.messages.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
+
+        text_parts: list[str] = []
+        parsed_calls: list[ToolCall] = []
+
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+            elif block.type == "tool_use":
+                parsed_calls.append(
+                    ToolCall(
+                        id=block.id,
+                        name=block.name,
+                        arguments=block.input if isinstance(block.input, dict) else {},
+                    )
+                )
+
+        text = "".join(text_parts) if text_parts else None
+
+        return GenerationResult(
+            text=text,
+            finish_reason=_anthropic_stop_reason(response.stop_reason),
+            tool_calls=tuple(parsed_calls),
+            prompt_tokens=response.usage.input_tokens,
+            completion_tokens=response.usage.output_tokens,
+            metadata={
+                "model": response.model,
+                "id": response.id,
+            },
+        )
+
+    def generate_with_tools_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        tools: list[ToolDefinition],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> list[GenerationResult]:
+        """Generate tool-calling responses for multiple conversations concurrently."""
+        return _run_concurrent(
+            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
+            messages_batch,
+            self._max_concurrency,
+            return_partial=getattr(self, "_return_partial_batch", True),
         )
 
 
@@ -892,6 +1268,7 @@ class OpenRouterBackend(ModelBackend):
         self._max_concurrency = max_concurrency
         self._rate_limit_wait = rate_limit_wait
         self._rate_limit_max_retries = rate_limit_max_retries
+        self._return_partial_batch = True
 
         # OpenRouter uses OpenAI-compatible API
         api_key = api_key or os.environ.get("OPENROUTER_API_KEY")
@@ -1026,7 +1403,10 @@ class OpenRouterBackend(ModelBackend):
 
         for attempt in range(self._rate_limit_max_retries + 1):
             try:
-                response = self._client.chat.completions.create(**kwargs)
+                try:
+                    response = self._client.chat.completions.create(**kwargs)
+                except Exception as exc:
+                    raise _normalize_provider_error(exc, model_name=self._model) from exc
                 return self._chat_result(response)
             except RateLimitError as exc:
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
@@ -1056,7 +1436,10 @@ class OpenRouterBackend(ModelBackend):
 
         for attempt in range(self._rate_limit_max_retries + 1):
             try:
-                response = await self._async_client.chat.completions.create(**kwargs)
+                try:
+                    response = await self._async_client.chat.completions.create(**kwargs)
+                except Exception as exc:
+                    raise _normalize_provider_error(exc, model_name=self._model) from exc
                 return self._chat_result(response)
             except RateLimitError as exc:
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
@@ -1080,6 +1463,7 @@ class OpenRouterBackend(ModelBackend):
             lambda msgs: self._generate_chat_async(msgs, params),
             messages_batch,
             self._max_concurrency,
+            return_partial=getattr(self, "_return_partial_batch", True),
         )
 
     def generate_with_tools(
@@ -1120,7 +1504,13 @@ class OpenRouterBackend(ModelBackend):
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
 
-        response = self._client.chat.completions.create(**kwargs)
+        if params.extra:
+            kwargs.update(params.extra)
+
+        try:
+            response = self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
         choice = response.choices[0]
 
         # Parse tool calls from response
@@ -1152,4 +1542,92 @@ class OpenRouterBackend(ModelBackend):
                 "model": response.model,
                 "id": response.id,
             },
+        )
+
+    async def _generate_with_tools_async(
+        self,
+        messages: list[ChatMessage],
+        tools: list[ToolDefinition],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> GenerationResult:
+        """Async version of generate_with_tools for concurrent batch execution."""
+        message_dicts = [m.to_dict() for m in messages]
+        tool_schemas = [t.to_openai_schema() for t in tools]
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": message_dicts,
+            "tools": tool_schemas,
+            "max_tokens": params.max_tokens,
+            "temperature": params.temperature,
+            "top_p": params.top_p,
+            "presence_penalty": params.presence_penalty,
+            "frequency_penalty": params.frequency_penalty,
+        }
+
+        if tool_choice == "auto":
+            kwargs["tool_choice"] = "auto"
+        elif tool_choice == "none":
+            kwargs["tool_choice"] = "none"
+        elif tool_choice == "required":
+            kwargs["tool_choice"] = "required"
+        else:
+            kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
+
+        if params.stop_sequences:
+            kwargs["stop"] = list(params.stop_sequences)
+
+        if params.extra:
+            kwargs.update(params.extra)
+
+        try:
+            response = await self._async_client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            raise _normalize_provider_error(exc, model_name=self._model) from exc
+        choice = response.choices[0]
+
+        tool_calls: tuple[ToolCall, ...] = ()
+        if choice.message.tool_calls:
+            parsed_calls = []
+            for tc in choice.message.tool_calls:
+                try:
+                    arguments = json.loads(tc.function.arguments)
+                except json.JSONDecodeError:
+                    arguments = {"raw": tc.function.arguments}
+
+                parsed_calls.append(
+                    ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=arguments,
+                    )
+                )
+            tool_calls = tuple(parsed_calls)
+
+        return GenerationResult(
+            text=choice.message.content,
+            finish_reason=_openai_stop_reason(choice.finish_reason),
+            tool_calls=tool_calls,
+            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
+            completion_tokens=response.usage.completion_tokens if response.usage else 0,
+            metadata={
+                "model": response.model,
+                "id": response.id,
+            },
+        )
+
+    def generate_with_tools_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        tools: list[ToolDefinition],
+        params: SamplingParams,
+        tool_choice: str = "auto",
+    ) -> list[GenerationResult]:
+        """Generate tool-calling responses for multiple conversations concurrently."""
+        return _run_concurrent(
+            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
+            messages_batch,
+            self._max_concurrency,
+            return_partial=getattr(self, "_return_partial_batch", True),
         )

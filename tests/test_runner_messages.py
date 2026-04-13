@@ -1368,6 +1368,288 @@ class TestSystemPromptFn:
         assert captured_batches[0][0].role == "system"
         assert captured_batches[0][0].content == "prompt-7"
 
+    def test_run_batch_from_states_threads_task_index_to_prompt_fn(self):
+        from unittest.mock import MagicMock
+
+        backend = MagicMock()
+        captured_batches: list[list[ChatMessage]] = []
+
+        def _generate_chat_batch(messages_batch, params):
+            captured_batches.extend(messages_batch)
+            return [
+                GenerationResult(text="look", finish_reason=StopReason.END_OF_TEXT)
+                for _ in messages_batch
+            ]
+
+        backend.generate_chat_batch.side_effect = _generate_chat_batch
+
+        env = MagicMock()
+        env.spec.max_steps = 1
+        env.spec.pure_step = True
+
+        def _step(state, action):
+            del action
+            return MagicMock(
+                next_state=State(
+                    observation=Observation(prompt="done"),
+                    hidden=None,
+                    metadata=StateMetadata(
+                        step=1,
+                        episode_id=state.metadata.episode_id,
+                        is_terminal=True,
+                        info={},
+                    ),
+                ),
+                rewards=SignalBundle(signals=()),
+                extracted_action=None,
+                resolved_action=None,
+                info={},
+                done=True,
+            )
+
+        env.step.side_effect = _step
+
+        runner = TrajectoryRunner(
+            environment=env,
+            backend=backend,
+            system_prompt_fn=lambda state, task_index: f"prompt-{task_index}",
+        )
+
+        states = [
+            State(
+                observation=Observation(prompt="obs-a"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id="ep-a",
+                    is_terminal=False,
+                    info={"task_index": 3},
+                ),
+            ),
+            State(
+                observation=Observation(prompt="obs-b"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id="ep-b",
+                    is_terminal=False,
+                    info={"task_index": 9},
+                ),
+            ),
+        ]
+
+        runner.run_batch_from_states(states, max_steps=1)
+
+        assert len(captured_batches) == 2
+        assert [prompt[0].content for prompt in captured_batches] == [
+            "prompt-3",
+            "prompt-9",
+        ]
+
+    def test_run_batch_from_state_actions_uses_original_task_index_for_prompt_fn(self):
+        from unittest.mock import MagicMock
+
+        backend = MagicMock()
+        captured_batches: list[list[ChatMessage]] = []
+
+        def _generate_chat_batch(messages_batch, params):
+            captured_batches.extend(messages_batch)
+            return [
+                GenerationResult(text="look", finish_reason=StopReason.END_OF_TEXT)
+                for _ in messages_batch
+            ]
+
+        backend.generate_chat_batch.side_effect = _generate_chat_batch
+
+        env = MagicMock()
+        env.spec.max_steps = 2
+        env.spec.pure_step = True
+        forced_call_count = [0]
+
+        def _step(state, action):
+            del action
+            forced_call_count[0] += 1
+            if forced_call_count[0] <= 2:
+                return MagicMock(
+                    next_state=State(
+                        observation=Observation(prompt=f"mid-{forced_call_count[0]}"),
+                        hidden=None,
+                        metadata=StateMetadata(
+                            step=1,
+                            episode_id=state.metadata.episode_id,
+                            is_terminal=False,
+                            info={},
+                        ),
+                    ),
+                    rewards=SignalBundle(signals=()),
+                    extracted_action=None,
+                    resolved_action=None,
+                    info={},
+                    done=False,
+                )
+            return MagicMock(
+                next_state=State(
+                    observation=Observation(prompt="done"),
+                    hidden=None,
+                    metadata=StateMetadata(
+                        step=2,
+                        episode_id=state.metadata.episode_id,
+                        is_terminal=True,
+                        info={},
+                    ),
+                ),
+                rewards=SignalBundle(signals=()),
+                extracted_action=None,
+                resolved_action=None,
+                info={},
+                done=True,
+            )
+
+        env.step.side_effect = _step
+
+        runner = TrajectoryRunner(
+            environment=env,
+            backend=backend,
+            system_prompt_fn=lambda state, task_index: f"prompt-{task_index}",
+        )
+
+        states = [
+            State(
+                observation=Observation(prompt="obs-a"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id="ep-a",
+                    is_terminal=False,
+                    info={"task_index": 11},
+                ),
+            ),
+            State(
+                observation=Observation(prompt="obs-b"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id="ep-b",
+                    is_terminal=False,
+                    info={"task_index": 17},
+                ),
+            ),
+        ]
+
+        runner.run_batch_from_state_actions(
+            states,
+            [Action(text="force-a"), Action(text="force-b")],
+            max_steps=2,
+        )
+
+        assert len(captured_batches) == 2
+        assert [prompt[0].content for prompt in captured_batches] == [
+            "prompt-11",
+            "prompt-17",
+        ]
+
+    def test_multi_instance_run_batch_from_states_threads_task_index_to_prompt_fn(self):
+        from unittest.mock import MagicMock
+
+        backend = MagicMock()
+        captured_batches: list[list[ChatMessage]] = []
+
+        def _generate_chat_batch(messages_batch, params):
+            captured_batches.extend(messages_batch)
+            return [
+                GenerationResult(text="look", finish_reason=StopReason.END_OF_TEXT)
+                for _ in messages_batch
+            ]
+
+        backend.generate_chat_batch.side_effect = _generate_chat_batch
+
+        primary_env = MagicMock()
+        primary_env.spec.max_steps = 1
+        primary_env.spec.pure_step = False
+
+        created_envs: list[MagicMock] = []
+
+        def _factory():
+            env = MagicMock()
+            env.close = MagicMock()
+
+            def _step(state, action):
+                del action
+                return MagicMock(
+                    next_state=State(
+                        observation=Observation(prompt="done"),
+                        hidden=None,
+                        metadata=StateMetadata(
+                            step=1,
+                            episode_id=state.metadata.episode_id,
+                            is_terminal=True,
+                            info={},
+                        ),
+                    ),
+                    rewards=SignalBundle(signals=()),
+                    extracted_action=None,
+                    resolved_action=None,
+                    info={},
+                    done=True,
+                )
+
+            env.step.side_effect = _step
+            created_envs.append(env)
+            return env
+
+        def _restore(env, state):
+            del env
+            return State(
+                observation=Observation(prompt=f"restored-{state.metadata.episode_id}"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id=state.metadata.episode_id,
+                    is_terminal=False,
+                    info={},
+                ),
+            )
+
+        runner = TrajectoryRunner(
+            environment=primary_env,
+            backend=backend,
+            system_prompt_fn=lambda state, task_index: f"prompt-{task_index}",
+            env_factory=_factory,
+            restore_fn=_restore,
+        )
+
+        states = [
+            State(
+                observation=Observation(prompt="obs-a"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id="ep-a",
+                    is_terminal=False,
+                    info={"task_index": 2},
+                ),
+            ),
+            State(
+                observation=Observation(prompt="obs-b"),
+                hidden=None,
+                metadata=StateMetadata(
+                    step=0,
+                    episode_id="ep-b",
+                    is_terminal=False,
+                    info={"task_index": 4},
+                ),
+            ),
+        ]
+
+        runner.run_batch_from_states(states, max_steps=1)
+
+        assert len(captured_batches) == 2
+        assert [prompt[0].content for prompt in captured_batches] == [
+            "prompt-2",
+            "prompt-4",
+        ]
+        assert len(created_envs) == 2
+
 
 # =============================================================================
 # _prior_history_from_messages unit tests
@@ -1380,7 +1662,6 @@ class TestPriorHistoryFromMessages:
     def _make_runner(self):
         from unittest.mock import MagicMock
 
-        from llenvs.evaluation.runner import TrajectoryRunner
         from llenvs.inference.protocol import SamplingParams
 
         mock_env = MagicMock()
@@ -1574,7 +1855,6 @@ class TestStructuredMessagesWithPriorHistory:
                      prompt_budget=None, max_steps=10):
         from unittest.mock import MagicMock
 
-        from llenvs.evaluation.runner import TrajectoryRunner
         from llenvs.inference.protocol import SamplingParams
 
         mock_env = MagicMock()
@@ -1624,8 +1904,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner()
         messages = runner._build_messages(restored_state, trajectory=trajectory)
 
-        # Should have: user(task) + assistant(go north) + user(Room 2) + assistant(look) + user(Current obs.)
-        # The last user message (Current obs.) comes from current_state_text, not from history
         user_msgs = [m for m in messages if m.role == "user"]
         assistant_msgs = [m for m in messages if m.role == "assistant"]
         assert len(assistant_msgs) == 2
@@ -1649,7 +1927,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner(history_fn=no_history)
         messages = runner._build_messages(restored_state, trajectory=trajectory)
 
-        # Prior history dropped, but current obs survives
         full_text = "\n".join(m.content for m in messages)
         assert "go north" not in full_text
         assert "Room 2" not in full_text
@@ -1657,8 +1934,6 @@ class TestStructuredMessagesWithPriorHistory:
 
     def test_zero_transitions_prompt_budget_preserves_current(self):
         """0 transitions + prompt_budget → current obs survives even with tight budget."""
-        from llenvs.evaluation.history import HistoryEntry, no_history as _no_hist
-
         prior_messages = (
             {"role": "assistant", "content": "a1"},
             {"role": "user", "content": "o1"},
@@ -1678,7 +1953,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner(prompt_budget=budget)
         messages = runner._build_messages(restored_state, trajectory=trajectory)
 
-        # Current obs must still appear
         full_text = "\n".join(m.content for m in messages)
         assert "Current obs." in full_text
 
@@ -1696,12 +1970,10 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner(format_reminder="REMINDER: use tags")
         messages = runner._build_messages(restored_state, trajectory=trajectory)
 
-        # Format reminder should be on the last user message (current obs)
         user_msgs = [m for m in messages if m.role == "user"]
         last_user = user_msgs[-1].content
         assert "REMINDER: use tags" in last_user
         assert "Current obs." in last_user
-        # Should NOT be on the task message
         assert "REMINDER: use tags" not in messages[0].content or messages[0].role == "system"
 
     # -- One transition (run_batch_from_state_actions shape) --
@@ -1716,7 +1988,6 @@ class TestStructuredMessagesWithPriorHistory:
             step=1, state_text="Room 2", messages=prior_messages,
         )
 
-        # Build a new transition from the restored state
         task = ObservationContent(text="Task.")
         new_state = _make_state(
             prompt="Task.", task=task,
@@ -1735,7 +2006,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner()
         messages = runner._build_messages(new_state, trajectory=trajectory)
 
-        # Should have prior history (go north → Room 2) + new transition (go east) + current (Room 3)
         assistant_msgs = [m for m in messages if m.role == "assistant"]
         assert len(assistant_msgs) == 2
         assert assistant_msgs[0].content == "go north"
@@ -1781,15 +2051,12 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner()
         messages = runner._build_messages(prev_state, trajectory=trajectory)
 
-        # Prior actions a0, a1, a2 should still be present
         full_text = "\n".join(m.content for m in messages)
         assert "a0" in full_text
         assert "a1" in full_text
         assert "a2" in full_text
-        # Plus all new actions
         for i in range(5):
             assert f"new_action_{i}" in full_text
-        # Current obs is the last new one
         assert "new_obs_4" in full_text
 
     # -- Edge cases --
@@ -1811,7 +2078,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner()
         messages = runner._build_messages(state, trajectory=trajectory)
 
-        # Normal step-0 behavior, no reconstruction
         full_text = "\n".join(m.content for m in messages)
         assert "should not appear" not in full_text
         assert "Initial." in full_text
@@ -1824,7 +2090,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner()
         messages = runner._build_messages(state, trajectory=trajectory)
 
-        # Just task + current obs, no reconstruction
         user_msgs = [m for m in messages if m.role == "user"]
         assert len(user_msgs) >= 1
         full_text = "\n".join(m.content for m in messages)
@@ -1862,7 +2127,6 @@ class TestStructuredMessagesWithPriorHistory:
         runner = self._make_runner(history_fn=last_n_history(2))
         messages = runner._build_messages(new_state, trajectory=trajectory)
 
-        # Combined history: old_action, recent_action, new_action → last 2 = recent_action + new_action
         full_text = "\n".join(m.content for m in messages)
         assert "recent_action" in full_text
         assert "new_action" in full_text
@@ -1896,7 +2160,6 @@ class TestStructuredMessagesWithPriorHistory:
         """run_batch_from_states from mid-episode → prompts include prior history."""
         from unittest.mock import MagicMock
 
-        from llenvs.evaluation.runner import TrajectoryRunner
         from llenvs.inference.protocol import SamplingParams
 
         mock_env = MagicMock()
@@ -1920,7 +2183,6 @@ class TestStructuredMessagesWithPriorHistory:
             metadata=StateMetadata(step=1, episode_id="test", is_terminal=False),
         )
 
-        # Capture prompts sent to generate_chat_batch
         captured_prompts = []
 
         def _gen_batch(msgs_batch, params):
@@ -1933,7 +2195,6 @@ class TestStructuredMessagesWithPriorHistory:
         mock_backend = MagicMock()
         mock_backend.generate_chat_batch.side_effect = _gen_batch
 
-        # Step returns terminal state
         terminal = State(
             observation=Observation(
                 prompt="Task.",
@@ -1959,7 +2220,6 @@ class TestStructuredMessagesWithPriorHistory:
         )
         runner.run_batch_from_states([restored_state], max_steps=1)
 
-        # The prompt sent to the model should include the prior history
         assert len(captured_prompts) >= 1
         first_prompt = captured_prompts[0]
         prompt_text = "\n".join(m.content for m in first_prompt)
@@ -1969,7 +2229,6 @@ class TestStructuredMessagesWithPriorHistory:
         """run_batch_from_state_actions from mid-episode → prior history in prompts."""
         from unittest.mock import MagicMock
 
-        from llenvs.evaluation.runner import TrajectoryRunner
         from llenvs.inference.protocol import SamplingParams
 
         mock_env = MagicMock()
@@ -1993,7 +2252,6 @@ class TestStructuredMessagesWithPriorHistory:
             metadata=StateMetadata(step=1, episode_id="test", is_terminal=False),
         )
 
-        # Step from the forced action
         after_action = State(
             observation=Observation(
                 prompt="Task.",
@@ -2003,7 +2261,6 @@ class TestStructuredMessagesWithPriorHistory:
             hidden=None,
             metadata=StateMetadata(step=2, episode_id="test", is_terminal=False),
         )
-        # Terminal step
         terminal = State(
             observation=Observation(
                 prompt="Task.",
@@ -2057,7 +2314,6 @@ class TestStructuredMessagesWithPriorHistory:
             max_steps=2,
         )
 
-        # The prompt for the second step should include prior history
         assert len(captured_prompts) >= 1
         prompt_text = "\n".join(m.content for m in captured_prompts[0])
         assert "go north" in prompt_text

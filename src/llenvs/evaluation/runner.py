@@ -46,11 +46,18 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     ModelBackend,
+    PartialBatchError,
+    PromptTooLongError,
+    RecoverableInputError,
+    RetryExhaustedTransientError,
     SamplingParams,
     StopReason,
 )
 
 logger = logging.getLogger(__name__)
+
+_TRANSIENT_RETRY_MAX_RETRIES = 3
+_TRANSIENT_RETRY_BASE_DELAY = 2.0
 
 
 def _runner_now_monotonic() -> float:
@@ -253,6 +260,10 @@ class _ActiveTrajectory:
     error: str | None = None
     step_count: int = 0
     failed: bool = False
+
+
+class _AbortGenerationBatch(Exception):
+    """Internal signal used when a callback requests aborting active rollouts."""
 
 
 def _summarize_task_indices(task_indices: Sequence[int], *, limit: int = 8) -> str:
@@ -1393,6 +1404,15 @@ class TrajectoryRunner:
         tools_text = self.tool_call_parser.format_tools(tools)
         modified = self._inject_tools_in_messages(messages, tools_text)
         gen_result = self.backend.generate_chat(modified, self.sampling_params)
+        return self._parse_text_tool_result(gen_result, tools)
+
+    def _parse_text_tool_result(
+        self,
+        gen_result: GenerationResult,
+        tools: tuple[ToolDefinition, ...],
+    ) -> GenerationResult:
+        """Parse tool calls from a text-tool generation result."""
+        assert self.tool_call_parser is not None
 
         parsed = self.tool_call_parser.parse(gen_result.text or "", tools)
 
@@ -1404,6 +1424,516 @@ class TrajectoryRunner:
             prompt_tokens=gen_result.prompt_tokens,
             completion_tokens=gen_result.completion_tokens,
             metadata=gen_result.metadata,
+        )
+
+    @staticmethod
+    def _is_skippable_generation_failure(error: BaseException) -> bool:
+        """Return True for deterministic per-input failures we can safely skip."""
+        return isinstance(error, RecoverableInputError)
+
+    @staticmethod
+    def _is_transient_generation_failure(error: BaseException) -> bool:
+        """Return True for transient provider failures worth retrying."""
+        status = getattr(error, "status_code", None)
+        if not isinstance(status, int):
+            response = getattr(error, "response", None)
+            response_status = getattr(response, "status_code", None)
+            status = response_status if isinstance(response_status, int) else None
+        if status in {429, 500, 502, 503, 529}:
+            return True
+
+        name = type(error).__name__
+        if name in {"APIConnectionError", "APITimeoutError"}:
+            return True
+
+        text = str(error).lower()
+        return any(
+            needle in text
+            for needle in (
+                "rate limited",
+                "rate limit",
+                "temporary failure",
+                "temporarily unavailable",
+                "overloaded",
+            )
+        )
+
+    def _mark_generation_failure(
+        self,
+        trajectory: _ActiveTrajectory,
+        error: BaseException,
+    ) -> None:
+        """Mark a trajectory as failed after an unrecoverable generation error."""
+        trajectory.done = True
+        trajectory.failed = True
+        trajectory.error = f"Generation error: {error}"
+
+    @staticmethod
+    def _raise_partial_batch_contract_error(
+        *,
+        active_count: int,
+        exc: PartialBatchError,
+    ) -> None:
+        raise RuntimeError(
+            "PartialBatchError contract violation during recovery: "
+            f"expected {active_count} result slots, got {len(exc.results)}"
+        )
+
+    @staticmethod
+    def _wrap_retry_exhausted_transient_failure(
+        error: BaseException,
+    ) -> RetryExhaustedTransientError:
+        return RetryExhaustedTransientError(
+            (
+                "Transient generation failure persisted after "
+                f"{_TRANSIENT_RETRY_MAX_RETRIES} retries: {error}"
+            ),
+            original_error=error,
+            retry_count=_TRANSIENT_RETRY_MAX_RETRIES,
+        )
+
+    @staticmethod
+    def _transform_partial_batch_error(
+        exc: PartialBatchError,
+        transform: Callable[[Any], Any],
+    ) -> PartialBatchError:
+        """Map successful partial results through a transformer."""
+        transformed_results = list(exc.results)
+        for idx, value in enumerate(exc.results):
+            if idx in exc.failures or isinstance(value, BaseException):
+                continue
+            transformed_results[idx] = transform(value)
+        return PartialBatchError(transformed_results, exc.failures)
+
+    def _generate_text_tool_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        tools: tuple[ToolDefinition, ...],
+    ) -> list[GenerationResult]:
+        """Generate and parse a text-tool batch, preserving partial successes."""
+        assert self.tool_call_parser is not None
+
+        tools_text = self.tool_call_parser.format_tools(tools)
+        modified_batch = [
+            self._inject_tools_in_messages(messages, tools_text)
+            for messages in messages_batch
+        ]
+        try:
+            raw_results = self.backend.generate_chat_batch(modified_batch, self.sampling_params)
+        except PartialBatchError as exc:
+            raise self._transform_partial_batch_error(
+                exc,
+                lambda raw: self._parse_text_tool_result(raw, tools),
+            ) from exc
+
+        return [self._parse_text_tool_result(raw, tools) for raw in raw_results]
+
+    def _recover_generation_batch(
+        self,
+        items: list[Any],
+        *,
+        run_batch: Callable[[list[Any]], list[Any]],
+        on_skip: Callable[[Any, BaseException], None],
+    ) -> tuple[list[Any], list[Any]]:
+        """Retry partial batches while preserving successful results."""
+        indexed_pending = list(enumerate(items))
+        result_slots: list[Any | None] = [None] * len(items)
+        transient_attempts: dict[int, int] = {}
+
+        while indexed_pending:
+            batch_items = [item for _, item in indexed_pending]
+            try:
+                batch_results = run_batch(batch_items)
+            except PartialBatchError as exc:
+                if len(exc.results) != len(indexed_pending):
+                    self._raise_partial_batch_contract_error(
+                        active_count=len(indexed_pending),
+                        exc=exc,
+                    )
+                if any(idx < 0 or idx >= len(indexed_pending) for idx in exc.failures):
+                    self._raise_partial_batch_contract_error(
+                        active_count=len(indexed_pending),
+                        exc=exc,
+                    )
+
+                next_pending: list[tuple[int, Any]] = []
+                progress_made = False
+                max_retry_attempt = 0
+
+                for pending_idx, (original_idx, item) in enumerate(indexed_pending):
+                    result_value = exc.results[pending_idx]
+                    failure = exc.failures.get(pending_idx)
+                    if failure is None and isinstance(result_value, BaseException):
+                        failure = result_value
+
+                    if failure is not None:
+                        error = failure
+                        if self._is_skippable_generation_failure(error):
+                            on_skip(item, error)
+                            transient_attempts.pop(original_idx, None)
+                            progress_made = True
+                        elif self._is_transient_generation_failure(error):
+                            attempt = transient_attempts.get(original_idx, 0) + 1
+                            transient_attempts[original_idx] = attempt
+                            if attempt <= _TRANSIENT_RETRY_MAX_RETRIES:
+                                next_pending.append((original_idx, item))
+                                max_retry_attempt = max(max_retry_attempt, attempt)
+                            else:
+                                on_skip(
+                                    item,
+                                    self._wrap_retry_exhausted_transient_failure(error),
+                                )
+                                transient_attempts.pop(original_idx, None)
+                                progress_made = True
+                        else:
+                            raise error
+                    else:
+                        if result_value is None:
+                            self._raise_partial_batch_contract_error(
+                                active_count=len(indexed_pending),
+                                exc=exc,
+                            )
+                        result_slots[original_idx] = result_value
+                        transient_attempts.pop(original_idx, None)
+                        progress_made = True
+
+                if not next_pending:
+                    break
+                if max_retry_attempt > 0:
+                    delay = _TRANSIENT_RETRY_BASE_DELAY * (2 ** (max_retry_attempt - 1))
+                    logger.warning(
+                        "Transient generation failure in partial batch, retrying %d items in %.1fs",
+                        len(next_pending),
+                        delay,
+                    )
+                    time.sleep(delay)
+                indexed_pending = next_pending
+                continue
+            except Exception as exc:
+                offending = getattr(exc, "offending_indices", None)
+                if self._is_skippable_generation_failure(exc) and offending:
+                    offending_set = {
+                        idx for idx in offending if 0 <= idx < len(indexed_pending)
+                    }
+                    next_pending = []
+                    progress_made = False
+                    for pending_idx, (original_idx, item) in enumerate(indexed_pending):
+                        if pending_idx in offending_set:
+                            on_skip(item, exc)
+                            transient_attempts.pop(original_idx, None)
+                            progress_made = True
+                        else:
+                            next_pending.append((original_idx, item))
+                    if progress_made:
+                        if not next_pending:
+                            break
+                        indexed_pending = next_pending
+                        continue
+                if self._is_transient_generation_failure(exc):
+                    retryable = []
+                    for original_idx, item in indexed_pending:
+                        attempt = transient_attempts.get(original_idx, 0) + 1
+                        transient_attempts[original_idx] = attempt
+                        if attempt <= _TRANSIENT_RETRY_MAX_RETRIES:
+                            retryable.append((original_idx, item))
+                        else:
+                            on_skip(
+                                item,
+                                self._wrap_retry_exhausted_transient_failure(exc),
+                            )
+                            transient_attempts.pop(original_idx, None)
+                    if retryable:
+                        max_retry_attempt = max(
+                            transient_attempts[original_idx]
+                            for original_idx, _ in retryable
+                        )
+                        delay = _TRANSIENT_RETRY_BASE_DELAY * (2 ** (max_retry_attempt - 1))
+                        logger.warning(
+                            "Transient generation failure, retrying %d items in %.1fs",
+                            len(retryable),
+                            delay,
+                        )
+                        time.sleep(delay)
+                        indexed_pending = retryable
+                        continue
+                    break
+                raise
+            else:
+                for (original_idx, _), result in zip(indexed_pending, batch_results):
+                    result_slots[original_idx] = result
+                    transient_attempts.pop(original_idx, None)
+                break
+
+        successful_items: list[Any] = []
+        successful_results: list[Any] = []
+        for original_idx, item in enumerate(items):
+            if result_slots[original_idx] is None:
+                continue
+            successful_items.append(item)
+            successful_results.append(result_slots[original_idx])
+
+        return successful_items, successful_results
+
+    def _generate_from_states_batch(
+        self,
+        remaining: list[_ActiveTrajectory],
+        *,
+        on_generation_error: Callable[[Exception], str] | None = None,
+    ) -> tuple[list[_ActiveTrajectory], list[GenerationResult]]:
+        """Generate actions for run-from-state rollouts with partial-batch recovery."""
+        messages_batch = [
+            self._build_messages(
+                trajectory.state,
+                trajectory=trajectory.trajectory,
+                task_index=trajectory.task_index,
+            )
+            for trajectory in remaining
+        ]
+        requests = list(zip(remaining, messages_batch, strict=False))
+        first_obs = remaining[0].state.observation if remaining else None
+        tools = list(first_obs.available_tools) if first_obs is not None else []
+        use_native_tools = bool(
+            tools and self.backend.capabilities.supports_function_calling
+        )
+        use_text_tools = bool(
+            tools and not use_native_tools and self.tool_call_parser is not None
+        )
+
+        def _mark_failed(trajectory: _ActiveTrajectory, error: Exception) -> None:
+            trajectory.done = True
+            trajectory.failed = True
+            trajectory.error = str(error)
+
+        def _skip_request(
+            item: tuple[_ActiveTrajectory, list[ChatMessage]],
+            error: BaseException,
+        ) -> None:
+            if not isinstance(error, Exception):
+                raise TypeError(
+                    "on_generation_error expects Exception instances, "
+                    f"got {type(error).__name__}"
+                )
+            decision = on_generation_error(error)
+            if decision not in {"skip", "abort", "raise"}:
+                raise ValueError(
+                    "on_generation_error must return 'skip', 'abort', or 'raise'"
+                )
+            if decision == "raise":
+                raise error
+            if decision == "abort":
+                raise _AbortGenerationBatch()
+            _mark_failed(item[0], error)
+
+        try:
+            if use_native_tools:
+                run_batch = lambda batch: self.backend.generate_with_tools_batch(
+                    [messages for _, messages in batch],
+                    tools,
+                    self.sampling_params,
+                )
+            elif use_text_tools:
+                tool_tuple = tuple(tools)
+                run_batch = lambda batch: self._generate_text_tool_batch(
+                    [messages for _, messages in batch],
+                    tool_tuple,
+                )
+            else:
+                if tools and not hasattr(self, "_from_state_tool_warning_logged"):
+                    logger.warning(
+                        "Environment provides %d tools but backend '%s' does "
+                        "not support function calling and no tool_call_parser "
+                        "is configured. Tools will be ignored.",
+                        len(tools),
+                        type(self.backend).__name__,
+                    )
+                    self._from_state_tool_warning_logged = True  # type: ignore[attr-defined]
+                run_batch = lambda batch: self.backend.generate_chat_batch(
+                    [messages for _, messages in batch],
+                    self.sampling_params,
+                )
+
+            requests, gen_results = self._recover_generation_batch(
+                requests,
+                run_batch=run_batch,
+                on_skip=(
+                    _skip_request
+                    if on_generation_error is not None
+                    else lambda item, error: _mark_failed(
+                        item[0],
+                        error if isinstance(error, Exception) else Exception(str(error)),
+                    )
+                ),
+            )
+        except _AbortGenerationBatch:
+            for trajectory in remaining:
+                trajectory.done = True
+                trajectory.failed = True
+            return [], []
+        except Exception as exc:
+            if on_generation_error is None:
+                raise
+            decision = on_generation_error(exc)
+            if decision not in {"skip", "abort", "raise"}:
+                raise ValueError(
+                    "on_generation_error must return 'skip', 'abort', or 'raise'"
+                )
+            if decision == "raise":
+                raise
+            for trajectory in remaining:
+                _mark_failed(trajectory, exc)
+            return [], []
+
+        return [trajectory for trajectory, _ in requests], gen_results
+
+    def _generate_batch_round(
+        self,
+        remaining: list[_ActiveTrajectory],
+        messages_batch: list[list[ChatMessage]],
+    ) -> tuple[list[_ActiveTrajectory], list[list[ChatMessage]], list[GenerationResult]]:
+        """Generate a batch round, preserving partial successes and retries."""
+        if not remaining:
+            return remaining, messages_batch, []
+
+        requests = list(zip(remaining, messages_batch, strict=False))
+        first_obs = remaining[0].state.observation
+        tools = list(first_obs.available_tools)
+        use_native_tools = bool(
+            tools and self.backend.capabilities.supports_function_calling
+        )
+        use_text_tools = bool(
+            tools and not use_native_tools and self.tool_call_parser is not None
+        )
+
+        if use_native_tools:
+            requests, gen_results = self._recover_generation_batch(
+                requests,
+                run_batch=lambda batch: self.backend.generate_with_tools_batch(
+                    [messages for _, messages in batch],
+                    tools,
+                    self.sampling_params,
+                ),
+                on_skip=lambda item, error: self._mark_generation_failure(item[0], error),
+            )
+        elif use_text_tools:
+            tool_tuple = tuple(tools)
+            requests, gen_results = self._recover_generation_batch(
+                requests,
+                run_batch=lambda batch: self._generate_text_tool_batch(
+                    [messages for _, messages in batch],
+                    tool_tuple,
+                ),
+                on_skip=lambda item, error: self._mark_generation_failure(item[0], error),
+            )
+        else:
+            if tools and not hasattr(self, "_batch_tool_warning_logged"):
+                logger.warning(
+                    "Environment provides %d tools but backend '%s' does "
+                    "not support function calling and no tool_call_parser "
+                    "is configured. Tools will be ignored.",
+                    len(tools),
+                    type(self.backend).__name__,
+                )
+                self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
+            requests, gen_results = self._recover_generation_batch(
+                requests,
+                run_batch=lambda batch: self.backend.generate_chat_batch(
+                    [messages for _, messages in batch],
+                    self.sampling_params,
+                ),
+                on_skip=lambda item, error: self._mark_generation_failure(item[0], error),
+            )
+
+        remaining = [trajectory for trajectory, _ in requests]
+        messages_batch = [messages for _, messages in requests]
+
+        if (
+            not remaining
+            or self.sampling_params.second_elicitation_suffix is None
+        ):
+            return remaining, messages_batch, gen_results
+
+        suffix = self._resolve_elicitation_suffix()
+        elicitation_params = self._elicitation_params()
+        elicitation_items = [
+            (trajectory, messages, gen_result)
+            for (trajectory, messages), gen_result in zip(
+                requests,
+                gen_results,
+                strict=False,
+            )
+            if gen_result.finish_reason == StopReason.MAX_TOKENS
+        ]
+        if not elicitation_items:
+            return remaining, messages_batch, gen_results
+
+        def _run_elicitation(
+            batch: list[tuple[_ActiveTrajectory, list[ChatMessage], GenerationResult]]
+        ) -> list[GenerationResult]:
+            elicitation_msgs = [
+                self._build_elicitation_messages(messages, first_result, suffix)
+                for _, messages, first_result in batch
+            ]
+            try:
+                second_results = self.backend.generate_chat_batch(
+                    elicitation_msgs,
+                    elicitation_params,
+                )
+            except PartialBatchError as exc:
+                transformed_results = list(exc.results)
+                for idx, value in enumerate(exc.results):
+                    if idx in exc.failures or isinstance(value, BaseException):
+                        continue
+                    transformed_results[idx] = self._merge_elicitation(
+                        batch[idx][2],
+                        value,
+                        suffix,
+                    )
+                raise PartialBatchError(transformed_results, exc.failures) from exc
+
+            return [
+                self._merge_elicitation(first_result, second_result, suffix)
+                for (_, _, first_result), second_result in zip(
+                    batch,
+                    second_results,
+                    strict=False,
+                )
+            ]
+
+        elicitation_items, elicited_results = self._recover_generation_batch(
+            elicitation_items,
+            run_batch=_run_elicitation,
+            on_skip=lambda item, error: None,
+        )
+        elicited_by_position = {
+            trajectory.position: result
+            for (trajectory, _, _), result in zip(
+                elicitation_items,
+                elicited_results,
+                strict=False,
+            )
+        }
+
+        filtered_requests: list[tuple[_ActiveTrajectory, list[ChatMessage]]] = []
+        filtered_results: list[GenerationResult] = []
+        for (trajectory, messages), gen_result in zip(
+            requests,
+            gen_results,
+            strict=False,
+        ):
+            if gen_result.finish_reason != StopReason.MAX_TOKENS:
+                filtered_requests.append((trajectory, messages))
+                filtered_results.append(gen_result)
+                continue
+            merged = elicited_by_position.get(trajectory.position)
+            if merged is None:
+                merged = gen_result
+            filtered_requests.append((trajectory, messages))
+            filtered_results.append(merged)
+
+        return (
+            [trajectory for trajectory, _ in filtered_requests],
+            [messages for _, messages in filtered_requests],
+            filtered_results,
         )
 
     def run_trajectory(
@@ -1740,92 +2270,22 @@ class TrajectoryRunner:
                 max(0.0, _runner_now_monotonic() - prompt_build_started_at),
             )
 
-            # Use tool calling if tools available and backend supports it
-            first_obs = remaining[0].state.observation
-            tools = list(first_obs.available_tools)
-            use_native_tools = tools and self.backend.capabilities.supports_function_calling
-            use_text_tools = tools and not use_native_tools and self.tool_call_parser is not None
-
             logger.debug(
                 "Trajectory round %d generation start: tasks=%s",
                 round_index,
                 _summarize_active_trajectories(remaining),
             )
             generation_started_at = _runner_now_monotonic()
-            if use_native_tools:
-                gen_results = self.backend.generate_with_tools_batch(
-                    messages_batch, tools, self.sampling_params
-                )
-            elif use_text_tools:
-                assert self.tool_call_parser is not None
-                tools_text = self.tool_call_parser.format_tools(tuple(tools))
-                modified_batch = [
-                    self._inject_tools_in_messages(msgs, tools_text) for msgs in messages_batch
-                ]
-                raw_results = self.backend.generate_chat_batch(modified_batch, self.sampling_params)
-                gen_results = []
-                for raw in raw_results:
-                    parsed = self.tool_call_parser.parse(raw.text or "", tuple(tools))
-                    gen_results.append(
-                        GenerationResult(
-                            text=parsed.text,
-                            finish_reason=raw.finish_reason,
-                            tool_calls=parsed.tool_calls,
-                            token_logprobs=raw.token_logprobs,
-                            prompt_tokens=raw.prompt_tokens,
-                            completion_tokens=raw.completion_tokens,
-                            metadata=raw.metadata,
-                        )
-                    )
-            else:
-                if tools and not hasattr(self, "_batch_tool_warning_logged"):
-                    logger.warning(
-                        "Environment provides %d tools but backend '%s' does "
-                        "not support function calling and no tool_call_parser "
-                        "is configured. Tools will be ignored.",
-                        len(tools),
-                        type(self.backend).__name__,
-                    )
-                    self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
-                gen_results = self.backend.generate_chat_batch(messages_batch, self.sampling_params)
+            remaining, messages_batch, gen_results = self._generate_batch_round(
+                remaining,
+                messages_batch,
+            )
             logger.debug(
                 "Trajectory round %d generation finished in %.2fs (results=%d)",
                 round_index,
                 max(0.0, _runner_now_monotonic() - generation_started_at),
                 len(gen_results),
             )
-
-            # Second elicitation for truncated outputs in batch
-            if self.sampling_params.second_elicitation_suffix is not None:
-                needs_elicitation = [
-                    (i, gen)
-                    for i, gen in enumerate(gen_results)
-                    if gen.finish_reason == StopReason.MAX_TOKENS
-                ]
-                if needs_elicitation:
-                    elicitation_started_at = _runner_now_monotonic()
-                    logger.debug(
-                        "Trajectory round %d second elicitation start: count=%d",
-                        round_index,
-                        len(needs_elicitation),
-                    )
-                    suffix = self._resolve_elicitation_suffix()
-                    elicitation_msgs = [
-                        self._build_elicitation_messages(messages_batch[i], gen, suffix)
-                        for i, gen in needs_elicitation
-                    ]
-                    elicitation_params = self._elicitation_params()
-                    elicitation_results = self.backend.generate_chat_batch(
-                        elicitation_msgs, elicitation_params
-                    )
-                    for (i, first), second in zip(needs_elicitation, elicitation_results):
-                        gen_results[i] = self._merge_elicitation(first, second, suffix)
-                    logger.debug(
-                        "Trajectory round %d second elicitation finished in %.2fs (count=%d)",
-                        round_index,
-                        max(0.0, _runner_now_monotonic() - elicitation_started_at),
-                        len(needs_elicitation),
-                    )
 
             for t, gen_result in zip(remaining, gen_results):
                 step_started_at = _runner_now_monotonic()
@@ -2063,97 +2523,22 @@ class TrajectoryRunner:
                     max(0.0, _runner_now_monotonic() - prompt_build_started_at),
                 )
 
-                # Use tool calling if tools available and backend supports it
-                first_obs = remaining[0].state.observation
-                tools = list(first_obs.available_tools)
-                use_native_tools = tools and self.backend.capabilities.supports_function_calling
-                use_text_tools = tools and not use_native_tools and self.tool_call_parser is not None
-
                 logger.debug(
                     "Trajectory round %d generation start: tasks=%s",
                     round_index,
                     _summarize_active_trajectories(remaining),
                 )
                 generation_started_at = _runner_now_monotonic()
-                if use_native_tools:
-                    gen_results = self.backend.generate_with_tools_batch(
-                        messages_batch, tools, self.sampling_params
-                    )
-                elif use_text_tools:
-                    assert self.tool_call_parser is not None
-                    tools_text = self.tool_call_parser.format_tools(tuple(tools))
-                    modified_batch = [
-                        self._inject_tools_in_messages(msgs, tools_text)
-                        for msgs in messages_batch
-                    ]
-                    raw_results = self.backend.generate_chat_batch(
-                        modified_batch, self.sampling_params
-                    )
-                    gen_results = []
-                    for raw in raw_results:
-                        parsed = self.tool_call_parser.parse(raw.text or "", tuple(tools))
-                        gen_results.append(
-                            GenerationResult(
-                                text=parsed.text,
-                                finish_reason=raw.finish_reason,
-                                tool_calls=parsed.tool_calls,
-                                token_logprobs=raw.token_logprobs,
-                                prompt_tokens=raw.prompt_tokens,
-                                completion_tokens=raw.completion_tokens,
-                                metadata=raw.metadata,
-                            )
-                        )
-                else:
-                    if tools and not hasattr(self, "_batch_tool_warning_logged"):
-                        logger.warning(
-                            "Environment provides %d tools but backend '%s' does "
-                            "not support function calling and no tool_call_parser "
-                            "is configured. Tools will be ignored.",
-                            len(tools),
-                            type(self.backend).__name__,
-                        )
-                        self._batch_tool_warning_logged = True  # type: ignore[attr-defined]
-                    gen_results = self.backend.generate_chat_batch(
-                        messages_batch, self.sampling_params
-                    )
+                remaining, messages_batch, gen_results = self._generate_batch_round(
+                    remaining,
+                    messages_batch,
+                )
                 logger.debug(
                     "Trajectory round %d generation finished in %.2fs (results=%d)",
                     round_index,
                     max(0.0, _runner_now_monotonic() - generation_started_at),
                     len(gen_results),
                 )
-
-                # Second elicitation for truncated outputs in batch
-                if self.sampling_params.second_elicitation_suffix is not None:
-                    needs_elicitation = [
-                        (i, gen)
-                        for i, gen in enumerate(gen_results)
-                        if gen.finish_reason == StopReason.MAX_TOKENS
-                    ]
-                    if needs_elicitation:
-                        elicitation_started_at = _runner_now_monotonic()
-                        logger.debug(
-                            "Trajectory round %d second elicitation start: count=%d",
-                            round_index,
-                            len(needs_elicitation),
-                        )
-                        suffix = self._resolve_elicitation_suffix()
-                        elicitation_msgs = [
-                            self._build_elicitation_messages(messages_batch[i], gen, suffix)
-                            for i, gen in needs_elicitation
-                        ]
-                        elicitation_params = self._elicitation_params()
-                        elicitation_results = self.backend.generate_chat_batch(
-                            elicitation_msgs, elicitation_params
-                        )
-                        for (i, first), second in zip(needs_elicitation, elicitation_results):
-                            gen_results[i] = self._merge_elicitation(first, second, suffix)
-                        logger.debug(
-                            "Trajectory round %d second elicitation finished in %.2fs (count=%d)",
-                            round_index,
-                            max(0.0, _runner_now_monotonic() - elicitation_started_at),
-                            len(needs_elicitation),
-                        )
 
                 actions_for_step = [gen_result.to_agent_action() for gen_result in gen_results]
                 with ThreadPoolExecutor() as executor:
@@ -2464,7 +2849,9 @@ class TrajectoryRunner:
                 Must return ``"skip"`` (mark offending trajectories as
                 failed and continue), ``"abort"`` (mark all active as
                 failed, keep completed), or ``"raise"`` (re-raise).
-                When ``None``, errors always propagate.
+                When ``None``, recoverable per-input failures are still
+                dropped so sibling rollouts can continue; unrecoverable
+                failures still propagate.
             on_environment_error: Optional callback invoked when a
                 per-rollout restore or environment step raises in the
                 multi-instance path. Must return ``"skip"`` (mark only
@@ -2472,9 +2859,11 @@ class TrajectoryRunner:
                 ``"raise"`` (re-raise). Ignored for single-instance runs.
 
         Returns:
-            List of Trajectory objects (or ``None`` for failed
-            trajectories when *on_generation_error* is used), one per
-            input state, in order.
+            List of Trajectory objects. When *on_generation_error* is
+            provided, failed trajectories are returned as ``None`` in
+            their original positions. Otherwise, recoverable failures are
+            dropped from the returned list and only successful
+            trajectories are returned.
         """
         if not states:
             self.last_environment_errors = {}
@@ -2802,57 +3191,12 @@ class TrajectoryRunner:
                                 t.done = True
 
                 if step_i != 0 or forced_actions is None:
-                    # Generate actions via batched inference
-                    messages_batch = [
-                        self._build_messages(
-                            t.state, trajectory=t.trajectory, task_index=t.task_index,
-                        )
-                        for t in remaining
-                    ]
-                    try:
-                        gen_results = self.backend.generate_chat_batch(
-                            messages_batch, self.sampling_params
-                        )
-                    except Exception as exc:
-                        if on_generation_error is None:
-                            raise
-                        decision = on_generation_error(exc)
-                        if decision == "raise":
-                            raise
-                        offending = getattr(exc, "offending_indices", None)
-                        if decision == "skip" and offending:
-                            for idx in offending:
-                                remaining[idx].done = True
-                                remaining[idx].failed = True
-                            remaining = [t for t in remaining if not t.failed]
-                            if not remaining:
-                                break
-                            messages_batch = [
-                                self._build_messages(
-                                    t.state, trajectory=t.trajectory, task_index=t.task_index,
-                                )
-                                for t in remaining
-                            ]
-                            try:
-                                gen_results = self.backend.generate_chat_batch(
-                                    messages_batch, self.sampling_params,
-                                )
-                            except Exception as retry_exc:
-                                # Re-classify: non-recoverable errors must propagate
-                                if on_generation_error is not None:
-                                    retry_decision = on_generation_error(retry_exc)
-                                    if retry_decision == "raise":
-                                        raise
-                                # Recoverable retry failure — abort all remaining
-                                for t in remaining:
-                                    t.done = True
-                                    t.failed = True
-                                break
-                        else:
-                            for t in remaining:
-                                t.done = True
-                                t.failed = True
-                            break
+                    remaining, gen_results = self._generate_from_states_batch(
+                        remaining,
+                        on_generation_error=on_generation_error,
+                    )
+                    if not remaining:
+                        break
 
                     # Execute steps per-env in parallel
                     actions_for_step = [gen_result.to_agent_action() for gen_result in gen_results]
@@ -3004,60 +3348,12 @@ class TrajectoryRunner:
                         t.done = True
 
             if step_i != 0 or forced_actions is None:
-                # Generate actions via batched inference
-                messages_batch = [
-                    self._build_messages(
-                        t.state, trajectory=t.trajectory, task_index=t.task_index,
-                    )
-                    for t in remaining
-                ]
-                try:
-                    gen_results = self.backend.generate_chat_batch(
-                        messages_batch, self.sampling_params,
-                    )
-                except Exception as exc:
-                    if on_generation_error is None:
-                        raise
-                    decision = on_generation_error(exc)
-                    if decision == "raise":
-                        raise
-                    offending = getattr(exc, "offending_indices", None)
-                    if decision == "skip" and offending:
-                        for idx in offending:
-                            remaining[idx].done = True
-                            remaining[idx].failed = True
-                        # Re-filter remaining and continue lockstep
-                        remaining = [t for t in remaining if not t.failed]
-                        if not remaining:
-                            break
-                        # Rebuild messages and retry this step
-                        messages_batch = [
-                            self._build_messages(
-                                t.state, trajectory=t.trajectory, task_index=t.task_index,
-                            )
-                            for t in remaining
-                        ]
-                        try:
-                            gen_results = self.backend.generate_chat_batch(
-                                messages_batch, self.sampling_params,
-                            )
-                        except Exception as retry_exc:
-                            # Re-classify: non-recoverable errors must propagate
-                            if on_generation_error is not None:
-                                retry_decision = on_generation_error(retry_exc)
-                                if retry_decision == "raise":
-                                    raise
-                            # Recoverable retry failure — abort all remaining
-                            for t in remaining:
-                                t.done = True
-                                t.failed = True
-                            break
-                    else:
-                        # "abort" or "skip" without offending info
-                        for t in remaining:
-                            t.done = True
-                            t.failed = True
-                        break
+                remaining, gen_results = self._generate_from_states_batch(
+                    remaining,
+                    on_generation_error=on_generation_error,
+                )
+                if not remaining:
+                    break
 
                 for t, gen_result in zip(remaining, gen_results):
                     action = gen_result.to_agent_action()
@@ -3141,7 +3437,12 @@ def _run_multi_lockstep(
             )
             for t in remaining
         ]
-        gen_results = backend.generate_chat_batch(messages_batch, sampling_params)
+        try:
+            gen_results = backend.generate_chat_batch(messages_batch, sampling_params)
+        except PartialBatchError as exc:
+            if exc.failures:
+                raise next(iter(exc.failures.values())) from exc
+            raise
 
         for t, gen_result in zip(remaining, gen_results):
             try:

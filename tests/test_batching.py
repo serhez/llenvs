@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
+import httpx
 
 import pytest
+from openai import BadRequestError
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import SignalBundle
@@ -35,6 +37,9 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     ModelBackend,
+    PartialBatchError,
+    PromptTooLongError,
+    RecoverableInputError,
     SamplingParams,
     StopReason,
 )
@@ -57,6 +62,16 @@ def _make_result(text: str) -> GenerationResult:
 def _make_messages(content: str) -> list[ChatMessage]:
     """Create a single-user-message conversation."""
     return [ChatMessage(role="user", content=content)]
+
+
+def _make_openai_bad_request(message: str) -> BadRequestError:
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(
+        400,
+        request=request,
+        json={"error": {"message": message, "code": 400}},
+    )
+    return BadRequestError(message, response=response, body=response.json())
 
 
 class RecordingBackend(ModelBackend):
@@ -366,6 +381,230 @@ class TestOpenAIBatchChat:
         # Async client should have been called 3 times
         assert mock_async_client.chat.completions.create.await_count == 3
 
+    def test_partial_failures_raise_partial_batch_error(self):
+        """When partial-batch mode is enabled, successes are preserved in the error."""
+        from llenvs.inference.backends.api import OpenAIBackend
+
+        backend = object.__new__(OpenAIBackend)
+        backend._model = "gpt-4o"
+        backend._max_concurrency = 10
+        backend._return_partial_batch = True
+
+        def _make_openai_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = text
+            resp.choices[0].finish_reason = "stop"
+            resp.choices[0].logprobs = None
+            resp.usage = MagicMock()
+            resp.usage.prompt_tokens = 5
+            resp.usage.completion_tokens = 3
+            resp.model = "gpt-4o"
+            resp.id = "test-id"
+            return resp
+
+        async def fake_create(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if prompt == "bad":
+                raise RuntimeError("rate limited")
+            return _make_openai_response(f"ok:{prompt}")
+
+        mock_async_client = MagicMock()
+        mock_async_client.chat.completions.create = fake_create
+        backend._async_client = mock_async_client
+
+        messages_batch = [
+            _make_messages("good0"),
+            _make_messages("bad"),
+            _make_messages("good2"),
+        ]
+
+        with pytest.raises(PartialBatchError) as exc_info:
+            backend.generate_chat_batch(messages_batch, SamplingParams())
+
+        exc = exc_info.value
+        assert exc.offending_indices == [1]
+        assert exc.results[0].text == "ok:good0"
+        assert isinstance(exc.results[1], RuntimeError)
+        assert exc.results[2].text == "ok:good2"
+
+    def test_context_limit_error_normalized(self):
+        """Context-limit BadRequest errors map to PromptTooLongError."""
+        from llenvs.inference.backends.api import OpenAIBackend
+
+        backend = object.__new__(OpenAIBackend)
+        backend._model = "gpt-4o"
+        backend._client = MagicMock()
+        backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
+            "This endpoint's maximum context length is 163840 tokens. "
+            "However, you requested about 241981 tokens."
+        )
+
+        with pytest.raises(PromptTooLongError, match="maximum context length"):
+            backend.generate_chat(_make_messages("q"), SamplingParams())
+
+    def test_invalid_media_error_normalized(self):
+        """Deterministic invalid-input errors map to RecoverableInputError."""
+        from llenvs.inference.backends.api import OpenAIBackend
+
+        backend = object.__new__(OpenAIBackend)
+        backend._model = "gpt-4o"
+        backend._client = MagicMock()
+        backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
+            "Invalid image input: unsupported image format"
+        )
+
+        with pytest.raises(RecoverableInputError, match="unsupported image format"):
+            backend.generate_chat(_make_messages("q"), SamplingParams())
+
+    def test_content_policy_error_stays_fatal(self):
+        """Safety/content-policy errors must not be normalized to recoverable."""
+        from llenvs.inference.backends.api import OpenAIBackend
+
+        backend = object.__new__(OpenAIBackend)
+        backend._model = "gpt-4o"
+        backend._client = MagicMock()
+        backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
+            "content_policy_violation: request blocked by safety policy"
+        )
+
+        with pytest.raises(BadRequestError, match="content_policy_violation"):
+            backend.generate_chat(_make_messages("q"), SamplingParams())
+
+
+class TestOpenAIBatchTools:
+    """Test OpenAI generate_with_tools_batch uses async concurrency."""
+
+    def test_partial_failures_raise_partial_batch_error(self):
+        """Tool batches should preserve per-item successes on partial failure."""
+        from llenvs.inference.backends.api import OpenAIBackend
+
+        backend = object.__new__(OpenAIBackend)
+        backend._model = "gpt-4o"
+        backend._max_concurrency = 10
+        backend._return_partial_batch = True
+
+        def _make_openai_response(text: str) -> MagicMock:
+            resp = MagicMock()
+            resp.choices = [MagicMock()]
+            resp.choices[0].message.content = text
+            resp.choices[0].finish_reason = "stop"
+            resp.choices[0].message.tool_calls = []
+            resp.usage = MagicMock()
+            resp.usage.prompt_tokens = 5
+            resp.usage.completion_tokens = 3
+            resp.model = "gpt-4o"
+            resp.id = "test-id"
+            return resp
+
+        async def fake_create(**kwargs):
+            prompt = kwargs["messages"][0]["content"]
+            if prompt == "bad":
+                raise RuntimeError("tool batch failed")
+            return _make_openai_response(f"ok:{prompt}")
+
+        mock_async_client = MagicMock()
+        mock_async_client.chat.completions.create = fake_create
+        backend._async_client = mock_async_client
+
+        messages_batch = [
+            _make_messages("good0"),
+            _make_messages("bad"),
+        ]
+        tools = [ToolDefinition(name="search", description="Search")]
+
+        with pytest.raises(PartialBatchError) as exc_info:
+            backend.generate_with_tools_batch(messages_batch, tools, SamplingParams())
+
+        exc = exc_info.value
+        assert exc.offending_indices == [1]
+        assert exc.results[0].text == "ok:good0"
+        assert isinstance(exc.results[1], RuntimeError)
+
+
+class TestSyncToolExtraForwarding:
+    """Sync tool calls should forward SamplingParams.extra just like batch async paths."""
+
+    def test_openai_generate_with_tools_forwards_extra(self):
+        from llenvs.inference.backends.api import OpenAIBackend
+
+        backend = object.__new__(OpenAIBackend)
+        backend._model = "gpt-4o"
+        backend._client = MagicMock()
+
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "ok"
+        response.choices[0].message.tool_calls = []
+        response.choices[0].finish_reason = "stop"
+        response.usage = MagicMock()
+        response.usage.prompt_tokens = 5
+        response.usage.completion_tokens = 3
+        response.model = "gpt-4o"
+        response.id = "id"
+        backend._client.chat.completions.create.return_value = response
+
+        backend.generate_with_tools(
+            _make_messages("hello"),
+            [ToolDefinition(name="search", description="Search")],
+            SamplingParams(extra={"seed": 7}),
+        )
+
+        assert backend._client.chat.completions.create.call_args.kwargs["seed"] == 7
+
+    def test_anthropic_generate_with_tools_forwards_extra(self):
+        from llenvs.inference.backends.api import AnthropicBackend
+
+        backend = object.__new__(AnthropicBackend)
+        backend._model = "claude-sonnet"
+        backend._client = MagicMock()
+
+        response = MagicMock()
+        response.content = []
+        response.stop_reason = "stop_sequence"
+        response.usage.input_tokens = 5
+        response.usage.output_tokens = 3
+        response.model = "claude-sonnet"
+        response.id = "id"
+        backend._client.messages.create.return_value = response
+
+        backend.generate_with_tools(
+            _make_messages("hello"),
+            [ToolDefinition(name="search", description="Search")],
+            SamplingParams(extra={"metadata": {"run_id": "abc"}}),
+        )
+
+        assert backend._client.messages.create.call_args.kwargs["metadata"] == {
+            "run_id": "abc"
+        }
+
+    def test_openrouter_generate_with_tools_forwards_extra(self):
+        from llenvs.inference.backends.api import OpenRouterBackend
+
+        backend = object.__new__(OpenRouterBackend)
+        backend._model = "openrouter/test"
+        backend._client = MagicMock()
+
+        response = MagicMock()
+        response.choices = [MagicMock()]
+        response.choices[0].message.content = "ok"
+        response.choices[0].message.tool_calls = []
+        response.choices[0].finish_reason = "stop"
+        response.usage = MagicMock()
+        response.usage.prompt_tokens = 5
+        response.usage.completion_tokens = 3
+        response.model = "openrouter/test"
+        response.id = "id"
+        backend._client.chat.completions.create.return_value = response
+
+        backend.generate_with_tools(
+            _make_messages("hello"),
+            [ToolDefinition(name="search", description="Search")],
+            SamplingParams(extra={"seed": 11}),
+        )
+
+        assert backend._client.chat.completions.create.call_args.kwargs["seed"] == 11
+
 
 class TestAnthropicBatchChat:
     """Test Anthropic generate_chat_batch uses async concurrency."""
@@ -443,6 +682,27 @@ class TestAnthropicBatchChat:
         assert len(results) == 2
         assert mock_async_client.messages.create.await_count == 2
 
+    def test_invalid_input_error_normalized(self):
+        """Anthropic-style bad requests normalize to RecoverableInputError."""
+        from llenvs.inference.backends.api import AnthropicBackend
+
+        backend = object.__new__(AnthropicBackend)
+        backend._model = "claude-sonnet"
+        backend._client = MagicMock()
+
+        class _AnthropicBadRequest(RuntimeError):
+            def __init__(self, message: str) -> None:
+                super().__init__(message)
+                self.status_code = 400
+                self.body = {"error": {"message": message}}
+
+        backend._client.messages.create.side_effect = _AnthropicBadRequest(
+            "Invalid image input: image exceeds the maximum allowed size"
+        )
+
+        with pytest.raises(RecoverableInputError, match="maximum allowed size"):
+            backend.generate_chat(_make_messages("q"), SamplingParams())
+
 
 class TestOpenRouterBatchChat:
     """Test OpenRouter generate_chat_batch uses async concurrency."""
@@ -487,6 +747,22 @@ class TestOpenRouterBatchChat:
 
         assert len(results) == 3
         assert call_count == 3
+
+    def test_context_limit_error_normalized(self):
+        """OpenRouter OpenAI-compatible bad requests map to PromptTooLongError."""
+        from llenvs.inference.backends.api import OpenRouterBackend
+
+        backend = object.__new__(OpenRouterBackend)
+        backend._model = "anthropic/claude-sonnet-4-20250514"
+        backend._rate_limit_wait = 0.0
+        backend._rate_limit_max_retries = 0
+        backend._client = MagicMock()
+        backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
+            "Prompt is too long for this model's context length"
+        )
+
+        with pytest.raises(PromptTooLongError, match="Prompt is too long"):
+            backend.generate_chat(_make_messages("q"), SamplingParams())
 
 
 class TestSemaphoreConcurrency:
@@ -1749,6 +2025,32 @@ class TestMultiEvaluation:
             assert mr.metadata["task_index"] == dr.metadata["task_index"]
             assert mr.metadata["num_steps"] == dr.metadata["num_steps"]
             assert mr.success == dr.success
+
+    def test_partial_batch_error_reraises_underlying_failure(self):
+        """Lockstep multi-eval should not leak PartialBatchError to callers."""
+
+        class _PartialFailureBackend(BatchTrackingBackend):
+            def generate_chat_batch(self, messages_batch, params):
+                fatal = RuntimeError("provider boom")
+                raise PartialBatchError(
+                    [_make_result("ok"), fatal],
+                    {1: fatal},
+                )
+
+        env_a = MockSingleTurnEnv(num_tasks=1)
+        env_b = MockSingleTurnEnv(num_tasks=1)
+        backend = _PartialFailureBackend()
+
+        runner_a = TrajectoryRunner(environment=env_a, backend=backend)
+        runner_b = TrajectoryRunner(environment=env_b, backend=backend)
+
+        with pytest.raises(RuntimeError, match="provider boom"):
+            run_multi_evaluation(
+                entries=[
+                    MultiEvalEntry(runner=runner_a, task_indices=[0]),
+                    MultiEvalEntry(runner=runner_b, task_indices=[0]),
+                ],
+            )
 
 
 # ── _run_concurrent error handling ─────────────────────────────
