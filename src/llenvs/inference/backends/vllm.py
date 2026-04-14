@@ -33,7 +33,10 @@ from llenvs.inference.protocol import (
     TokenScore,
 )
 
-# Known VLM model types (checked against model_config.hf_config.model_type)
+# Known VLM model types (checked against model_config.hf_config.model_type).
+# `gemma4` is only recognised by vllm>=0.19 running inside the Singularity
+# container (see docs/guides/singularity.md); older vllm never surfaces that
+# model_type string, so listing it here is safe for both versions.
 _VLM_MODEL_TYPES = frozenset(
     {
         "llava",
@@ -54,6 +57,7 @@ _VLM_MODEL_TYPES = frozenset(
         "idefics3",
         "molmo",
         "aria",
+        "gemma4",
     }
 )
 
