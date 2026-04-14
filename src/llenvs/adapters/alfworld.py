@@ -7,8 +7,11 @@ Agents navigate rooms and manipulate objects using text commands.
 Reference: https://github.com/alfworld/alfworld
 """
 
+import importlib
+import logging
 import os
 import re
+import threading
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
@@ -50,11 +53,74 @@ DEFAULT_ALFWORLD_INVALID_ACTION_OBSERVATION = (
     "described above."
 )
 
+logger = logging.getLogger(__name__)
+
+_ALFWORLD_PATCH_LOCK = threading.Lock()
+_ALFWORLD_FAST_DOWNWARD_PATCHED = False
+
 _SPLIT_DATA_KEYS: dict[str, str] = {
     "train": "data_path",
     "eval_in_distribution": "eval_id_data_path",
     "eval_out_of_distribution": "eval_ood_data_path",
 }
+
+
+def _install_alfworld_fast_downward_cleanup_patch(
+    *,
+    pddl_module_name: str = "textworld.envs.pddl.pddl",
+    fast_downward_module_name: str = "fast_downward",
+) -> None:
+    """Patch TextWorld's PDDL env to unload Fast Downward on close.
+
+    ALFWorld's pure-step adapter repeatedly reconstructs TextWorld PDDL
+    environments. TextWorld loads a fresh Fast Downward shared library handle
+    per ``PddlEnv`` instance but does not close it. This patch makes
+    ``PddlEnv.close()`` unload the instance-owned handle and teaches
+    ``PddlEnv.load()`` to lazily reopen the handle after a close.
+    """
+    global _ALFWORLD_FAST_DOWNWARD_PATCHED
+
+    with _ALFWORLD_PATCH_LOCK:
+        if _ALFWORLD_FAST_DOWNWARD_PATCHED:
+            return
+
+        pddl_module = importlib.import_module(pddl_module_name)
+        fast_downward = importlib.import_module(fast_downward_module_name)
+        pddl_env_cls = pddl_module.PddlEnv
+
+        if getattr(pddl_env_cls, "_llenvs_fast_downward_patch", False):
+            _ALFWORLD_FAST_DOWNWARD_PATCHED = True
+            return
+
+        original_load = pddl_env_cls.load
+        original_close = pddl_env_cls.close
+
+        def _patched_load(self, filename_or_data):
+            if getattr(self, "downward_lib", None) is None:
+                self.downward_lib = fast_downward.load_lib()
+            return original_load(self, filename_or_data)
+
+        def _patched_close(self) -> None:
+            lib = getattr(self, "downward_lib", None)
+            try:
+                original_close(self)
+            finally:
+                if lib is None:
+                    return
+                try:
+                    fast_downward.close_lib(lib)
+                except Exception:
+                    logger.warning(
+                        "Failed to close Fast Downward handle during ALFWorld cleanup",
+                        exc_info=True,
+                    )
+                finally:
+                    self.downward_lib = None
+
+        pddl_env_cls.load = _patched_load
+        pddl_env_cls.close = _patched_close
+        pddl_env_cls._llenvs_fast_downward_patch = True
+        _ALFWORLD_FAST_DOWNWARD_PATCHED = True
 
 
 def _extract_objective(observation: str) -> str:
@@ -359,6 +425,8 @@ class AlfWorldEnvironment:
         Returns:
             Tuple of (gym_env, initial_observation_text, info_dict, images).
         """
+        _install_alfworld_fast_downward_cleanup_patch()
+
         import textworld.gym
 
         if game_file not in self._env_id_cache:

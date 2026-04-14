@@ -1,6 +1,8 @@
 """Tests for the AlfWorld adapter."""
 
+import sys
 from copy import deepcopy
+from types import ModuleType
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +18,7 @@ from llenvs.adapters.alfworld import (
     AlfWorldReward,
     _extract_objective,
     _extract_task_type,
+    _install_alfworld_fast_downward_cleanup_patch,
     _unbatch_admissible_commands,
 )
 from llenvs.core.reward import RewardType
@@ -555,6 +558,79 @@ class TestAlfWorldEnvironment:
     def test_close_when_no_env(self, env: AlfWorldEnvironment):
         """close() is safe to call even before reset."""
         env.close()  # Should not raise
+
+    def test_fast_downward_cleanup_patch_unloads_on_close_and_reloads_on_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        module_name = "test_textworld_pddl_patch"
+        fast_downward_name = "test_fast_downward_patch"
+
+        pddl_module = ModuleType(module_name)
+        fast_downward_module = ModuleType(fast_downward_name)
+
+        class FakePddlEnv:
+            def __init__(self) -> None:
+                self.downward_lib = "initial-lib"
+                self.load_args: list[str] = []
+                self.base_close_calls = 0
+
+            def load(self, filename: str) -> None:
+                self.load_args.append(filename)
+
+            def close(self) -> None:
+                self.base_close_calls += 1
+
+        close_calls: list[str] = []
+        load_calls: list[str] = []
+
+        def fake_close_lib(lib: str) -> None:
+            close_calls.append(lib)
+
+        def fake_load_lib() -> str:
+            token = f"reloaded-{len(load_calls)}"
+            load_calls.append(token)
+            return token
+
+        pddl_module.PddlEnv = FakePddlEnv
+        fast_downward_module.close_lib = fake_close_lib
+        fast_downward_module.load_lib = fake_load_lib
+        monkeypatch.setitem(sys.modules, module_name, pddl_module)
+        monkeypatch.setitem(sys.modules, fast_downward_name, fast_downward_module)
+
+        import llenvs.adapters.alfworld as aw
+
+        monkeypatch.setattr(aw, "_ALFWORLD_PATCH_LOCK", aw.threading.Lock())
+        monkeypatch.setattr(aw, "_ALFWORLD_FAST_DOWNWARD_PATCHED", False)
+
+        _install_alfworld_fast_downward_cleanup_patch(
+            pddl_module_name=module_name,
+            fast_downward_module_name=fast_downward_name,
+        )
+        _install_alfworld_fast_downward_cleanup_patch(
+            pddl_module_name=module_name,
+            fast_downward_module_name=fast_downward_name,
+        )
+
+        env = FakePddlEnv()
+        env.close()
+        assert close_calls == ["initial-lib"]
+        assert env.downward_lib is None
+        assert env.base_close_calls == 1
+
+        env.close()
+        assert close_calls == ["initial-lib"]
+        assert env.downward_lib is None
+        assert env.base_close_calls == 2
+
+        env.load("game-a")
+        assert load_calls == ["reloaded-0"]
+        assert env.downward_lib == "reloaded-0"
+        assert env.load_args == ["game-a"]
+
+        env.load("game-b")
+        assert load_calls == ["reloaded-0"]
+        assert env.downward_lib == "reloaded-0"
+        assert env.load_args == ["game-a", "game-b"]
 
     def test_different_task_indices(self):
         """Resetting with different task indices selects different game files."""
