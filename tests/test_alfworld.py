@@ -2,7 +2,7 @@
 
 import sys
 from copy import deepcopy
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -18,7 +18,6 @@ from llenvs.adapters.alfworld import (
     AlfWorldReward,
     _extract_objective,
     _extract_task_type,
-    _install_alfworld_fast_downward_cleanup_patch,
     _unbatch_admissible_commands,
 )
 from llenvs.core.reward import RewardType
@@ -106,6 +105,78 @@ class MockAlfWorldGymEnv:
 
     def close(self) -> None:
         self._closed = True
+
+
+def _install_fake_textworld_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    env_factory: Any = MockAlfWorldGymEnv,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, Any]]:
+    """Install minimal fake ``textworld`` modules for ``_init_game`` tests."""
+    register_calls: list[dict[str, Any]] = []
+    make_calls: list[str] = []
+    envs_by_id: dict[str, Any] = {}
+
+    fake_textworld = ModuleType("textworld")
+    fake_gym = ModuleType("textworld.gym")
+    fake_alfworld = ModuleType("alfworld")
+    fake_alfworld_agents = ModuleType("alfworld.agents")
+    fake_alfworld_env = ModuleType("alfworld.agents.environment")
+    fake_alfred_tw_env = ModuleType("alfworld.agents.environment.alfred_tw_env")
+
+    class _Wrapper:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.args = args
+            self.kwargs = kwargs
+
+    fake_alfred_tw_env.AlfredDemangler = _Wrapper
+    fake_alfred_tw_env.AlfredInfos = _Wrapper
+    fake_alfworld_env.alfred_tw_env = fake_alfred_tw_env
+    fake_alfworld_agents.environment = fake_alfworld_env
+    fake_alfworld.agents = fake_alfworld_agents
+
+    def fake_register_games(
+        gamefiles: list[str],
+        request_infos: Any = None,
+        max_episode_steps: int | None = None,
+        wrappers: list[Any] | None = None,
+        **_kwargs: Any,
+    ) -> str:
+        env_id = f"fake-env-{len(register_calls)}"
+        register_calls.append({
+            "gamefiles": tuple(gamefiles),
+            "request_infos": request_infos,
+            "max_episode_steps": max_episode_steps,
+            "wrappers": tuple(wrappers or ()),
+            "env_id": env_id,
+        })
+        return env_id
+
+    def fake_make(env_id: str) -> Any:
+        make_calls.append(env_id)
+        env = envs_by_id.get(env_id)
+        if env is None:
+            game_file = register_calls[int(env_id.rsplit("-", 1)[-1])]["gamefiles"][0]
+            env = env_factory(game_file)
+            envs_by_id[env_id] = env
+        return env
+
+    fake_gym.register_games = fake_register_games
+    fake_gym.make = fake_make
+    fake_textworld.EnvInfos = lambda **kwargs: SimpleNamespace(**kwargs)
+    fake_textworld.gym = fake_gym
+
+    monkeypatch.setitem(sys.modules, "textworld", fake_textworld)
+    monkeypatch.setitem(sys.modules, "textworld.gym", fake_gym)
+    monkeypatch.setitem(sys.modules, "alfworld", fake_alfworld)
+    monkeypatch.setitem(sys.modules, "alfworld.agents", fake_alfworld_agents)
+    monkeypatch.setitem(sys.modules, "alfworld.agents.environment", fake_alfworld_env)
+    monkeypatch.setitem(
+        sys.modules,
+        "alfworld.agents.environment.alfred_tw_env",
+        fake_alfred_tw_env,
+    )
+    return register_calls, make_calls, envs_by_id
 
 
 MOCK_GAME_FILES = (
@@ -559,78 +630,66 @@ class TestAlfWorldEnvironment:
         """close() is safe to call even before reset."""
         env.close()  # Should not raise
 
-    def test_fast_downward_cleanup_patch_unloads_on_close_and_reloads_on_load(
+    def test_init_game_reuses_cached_gym_env_per_game_file(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        module_name = "test_textworld_pddl_patch"
-        fast_downward_name = "test_fast_downward_patch"
+        register_calls, make_calls, envs_by_id = _install_fake_textworld_modules(monkeypatch)
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
 
-        pddl_module = ModuleType(module_name)
-        fast_downward_module = ModuleType(fast_downward_name)
+        gym_env_1, raw_obs_1, init_info_1, images_1 = env._init_game(MOCK_GAME_FILES[0])
+        gym_env_2, raw_obs_2, init_info_2, images_2 = env._init_game(MOCK_GAME_FILES[0])
 
-        class FakePddlEnv:
-            def __init__(self) -> None:
-                self.downward_lib = "initial-lib"
-                self.load_args: list[str] = []
-                self.base_close_calls = 0
+        assert gym_env_1 is gym_env_2
+        assert make_calls == ["fake-env-0"]
+        assert len(register_calls) == 1
+        assert env._env_id_cache[MOCK_GAME_FILES[0]] == "fake-env-0"
+        assert env._gym_env_cache[MOCK_GAME_FILES[0]] is gym_env_1
+        assert gym_env_1._step_count == 0
+        assert raw_obs_1 == raw_obs_2
+        assert init_info_1 == init_info_2
+        assert images_1 == images_2 == ()
+        assert not gym_env_1._closed
 
-            def load(self, filename: str) -> None:
-                self.load_args.append(filename)
+        second_env, _, _, _ = env._init_game(MOCK_GAME_FILES[1])
+        assert second_env is envs_by_id["fake-env-1"]
+        assert second_env is not gym_env_1
+        assert make_calls == ["fake-env-0", "fake-env-1"]
+        assert len(register_calls) == 2
 
-            def close(self) -> None:
-                self.base_close_calls += 1
+    def test_close_closes_all_cached_gym_envs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_textworld_modules(monkeypatch)
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
 
-        close_calls: list[str] = []
-        load_calls: list[str] = []
-
-        def fake_close_lib(lib: str) -> None:
-            close_calls.append(lib)
-
-        def fake_load_lib() -> str:
-            token = f"reloaded-{len(load_calls)}"
-            load_calls.append(token)
-            return token
-
-        pddl_module.PddlEnv = FakePddlEnv
-        fast_downward_module.close_lib = fake_close_lib
-        fast_downward_module.load_lib = fake_load_lib
-        monkeypatch.setitem(sys.modules, module_name, pddl_module)
-        monkeypatch.setitem(sys.modules, fast_downward_name, fast_downward_module)
-
-        import llenvs.adapters.alfworld as aw
-
-        monkeypatch.setattr(aw, "_ALFWORLD_PATCH_LOCK", aw.threading.Lock())
-        monkeypatch.setattr(aw, "_ALFWORLD_FAST_DOWNWARD_PATCHED", False)
-
-        _install_alfworld_fast_downward_cleanup_patch(
-            pddl_module_name=module_name,
-            fast_downward_module_name=fast_downward_name,
-        )
-        _install_alfworld_fast_downward_cleanup_patch(
-            pddl_module_name=module_name,
-            fast_downward_module_name=fast_downward_name,
-        )
-
-        env = FakePddlEnv()
-        env.close()
-        assert close_calls == ["initial-lib"]
-        assert env.downward_lib is None
-        assert env.base_close_calls == 1
+        first_env, _, _, _ = env._init_game(MOCK_GAME_FILES[0])
+        second_env, _, _, _ = env._init_game(MOCK_GAME_FILES[1])
+        assert not first_env._closed
+        assert not second_env._closed
 
         env.close()
-        assert close_calls == ["initial-lib"]
-        assert env.downward_lib is None
-        assert env.base_close_calls == 2
 
-        env.load("game-a")
-        assert load_calls == ["reloaded-0"]
-        assert env.downward_lib == "reloaded-0"
-        assert env.load_args == ["game-a"]
+        assert first_env._closed
+        assert second_env._closed
+        assert env._gym_env_cache == {}
+        assert env._env_id_cache == {}
 
-        env.load("game-b")
-        assert load_calls == ["reloaded-0"]
-        assert env.downward_lib == "reloaded-0"
-        assert env.load_args == ["game-a", "game-b"]
+    def test_reused_cached_gym_env_preserves_pure_step_semantics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _install_fake_textworld_modules(monkeypatch)
+        env = AlfWorldEnvironment(game_files=MOCK_GAME_FILES, config={})
+        state, _ = env.reset(options={"task_index": 0})
+
+        first = env.step(state, Action(text="go to shelf 1"))
+        second = env.step(state, Action(text="go to shelf 1"))
+
+        assert first.next_state.observation.state.text == second.next_state.observation.state.text
+        assert first.next_state.hidden.admissible_commands == second.next_state.hidden.admissible_commands
+        assert first.rewards.total == second.rewards.total
+        assert first.done == second.done
+        assert first.next_state.hidden.trajectory == ("go to shelf 1",)
+        assert second.next_state.hidden.trajectory == ("go to shelf 1",)
 
     def test_different_task_indices(self):
         """Resetting with different task indices selects different game files."""
