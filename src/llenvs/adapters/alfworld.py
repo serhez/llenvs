@@ -9,6 +9,7 @@ Reference: https://github.com/alfworld/alfworld
 
 import os
 import re
+import threading
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
@@ -264,6 +265,11 @@ class AlfWorldEnvironment:
 
         # Cache registered env_ids to avoid TextWorld registry leak
         self._env_id_cache: dict[str, str] = {}
+        # Cache one live TextWorld gym env per game file. Access is guarded by
+        # a lock so repeated pure-step reconstruction cannot race on the same
+        # mutable backend instance.
+        self._gym_env_cache: dict[str, Any] = {}
+        self._gym_env_lock = threading.RLock()
 
     @property
     def answer_extractor(self):
@@ -347,11 +353,11 @@ class AlfWorldEnvironment:
     def _init_game(
         self, game_file: str
     ) -> tuple[Any, str, dict[str, Any], tuple[ImageContent, ...]]:
-        """Create a fresh game environment instance.
+        """Reset and return the cached game environment for ``game_file``.
 
         Registers the game file on first encounter (cached), then creates
-        a new gym env and resets it. Caller is responsible for closing
-        the returned gym env.
+        a gym env once and reuses it across resets. The returned ``gym_env``
+        remains owned by this adapter and is closed only from ``close()``.
 
         Args:
             game_file: Path to the game file.
@@ -361,24 +367,36 @@ class AlfWorldEnvironment:
         """
         import textworld.gym
 
-        if game_file not in self._env_id_cache:
-            from alfworld.agents.environment.alfred_tw_env import AlfredDemangler, AlfredInfos
+        with self._gym_env_lock:
+            if game_file not in self._env_id_cache:
+                from alfworld.agents.environment.alfred_tw_env import (
+                    AlfredDemangler,
+                    AlfredInfos,
+                )
 
-            request_infos = textworld.EnvInfos(
-                won=True,
-                admissible_commands=True,
-            )
+                request_infos = textworld.EnvInfos(
+                    won=True,
+                    admissible_commands=True,
+                )
 
-            env_id = textworld.gym.register_games(
-                [game_file],
-                request_infos=request_infos,
-                max_episode_steps=self._max_steps,
-                wrappers=[AlfredDemangler(shuffle=False), AlfredInfos],
-            )
-            self._env_id_cache[game_file] = env_id
+                env_id = textworld.gym.register_games(
+                    [game_file],
+                    request_infos=request_infos,
+                    max_episode_steps=self._max_steps,
+                    wrappers=[AlfredDemangler(shuffle=False), AlfredInfos],
+                )
+                self._env_id_cache[game_file] = env_id
 
-        gym_env = textworld.gym.make(self._env_id_cache[game_file])
-        obs, infos = gym_env.reset()
+            gym_env = self._gym_env_cache.get(game_file)
+            if gym_env is None:
+                gym_env = textworld.gym.make(self._env_id_cache[game_file])
+                self._gym_env_cache[game_file] = gym_env
+
+            try:
+                obs, infos = gym_env.reset()
+            except Exception:
+                self._discard_cached_gym_env_locked(game_file, gym_env)
+                raise
 
         # textworld returns batched results (lists)
         raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
@@ -404,6 +422,16 @@ class AlfWorldEnvironment:
             raw_obs = raw_obs.get("text", str(raw_obs))
 
         return gym_env, raw_obs, info, images
+
+    def _discard_cached_gym_env_locked(self, game_file: str, gym_env: Any) -> None:
+        """Close and evict a cached gym env while holding ``_gym_env_lock``."""
+        cached = self._gym_env_cache.get(game_file)
+        if cached is not gym_env:
+            return
+        try:
+            gym_env.close()
+        finally:
+            self._gym_env_cache.pop(game_file, None)
 
     def _build_observation_prompt(
         self,
@@ -465,7 +493,6 @@ class AlfWorldEnvironment:
 
         # Initialize the game
         gym_env, raw_obs, init_info, images = self._init_game(game_file)
-        gym_env.close()
 
         # Extract objective and task type
         objective = _extract_objective(raw_obs)
@@ -609,30 +636,37 @@ class AlfWorldEnvironment:
         else:
             cmd_for_env = extracted_cmd or action_text
 
-        # Create fresh env and replay trajectory to reach current state
-        gym_env, _, _, _ = self._init_game(state.hidden.game_file)
-        for cmd in state.hidden.trajectory:
-            gym_env.step(cmd)
+        # Reset and replay on a cached TextWorld env. Access is serialized so
+        # no two callers can mutate the same backend instance concurrently.
+        with self._gym_env_lock:
+            gym_env = None
+            try:
+                gym_env, _, _, _ = self._init_game(state.hidden.game_file)
+                for cmd in state.hidden.trajectory:
+                    gym_env.step(cmd)
 
-        if cmd_for_env is not None:
-            # Apply new action
-            obs, scores, dones, infos = gym_env.step(cmd_for_env)
+                if cmd_for_env is not None:
+                    # Apply new action
+                    obs, scores, dones, infos = gym_env.step(cmd_for_env)
 
-            # Unbatch results
-            raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
-            won = False
-            admissible_commands: tuple[str, ...] = ()
+                    # Unbatch results
+                    raw_obs = obs[0] if isinstance(obs, (list, tuple)) else obs
+                    won = False
+                    admissible_commands: tuple[str, ...] = ()
 
-            if isinstance(infos, dict):
-                won_val = infos.get("won", False)
-                won = won_val[0] if isinstance(won_val, (list, tuple)) else won_val
-                ac_val = infos.get("admissible_commands", ())
-                admissible_commands = _unbatch_admissible_commands(ac_val)
-        else:
-            raw_obs = state.observation.state.text if state.observation.state is not None else ""
-            won = False
-            admissible_commands = state.hidden.admissible_commands
-        gym_env.close()
+                    if isinstance(infos, dict):
+                        won_val = infos.get("won", False)
+                        won = won_val[0] if isinstance(won_val, (list, tuple)) else won_val
+                        ac_val = infos.get("admissible_commands", ())
+                        admissible_commands = _unbatch_admissible_commands(ac_val)
+                else:
+                    raw_obs = state.observation.state.text if state.observation.state is not None else ""
+                    won = False
+                    admissible_commands = state.hidden.admissible_commands
+            except Exception:
+                if gym_env is not None:
+                    self._discard_cached_gym_env_locked(state.hidden.game_file, gym_env)
+                raise
 
         # Extract text and images from observation
         images: tuple[ImageContent, ...] = ()
@@ -769,8 +803,22 @@ class AlfWorldEnvironment:
         return SignalBundle(signals=tuple(signals))
 
     def close(self) -> None:
-        """Clean up cached registrations."""
-        self._env_id_cache.clear()
+        """Clean up cached gym envs and registrations."""
+        first_error: Exception | None = None
+        with self._gym_env_lock:
+            cached_envs = list(self._gym_env_cache.values())
+            self._gym_env_cache.clear()
+            self._env_id_cache.clear()
+
+        for gym_env in cached_envs:
+            try:
+                gym_env.close()
+            except Exception as exc:  # pragma: no cover - defensive cleanup
+                if first_error is None:
+                    first_error = exc
+
+        if first_error is not None:
+            raise first_error
 
 
 class AlfWorldAdapter:
