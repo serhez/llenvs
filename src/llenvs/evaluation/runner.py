@@ -1388,6 +1388,12 @@ class TrajectoryRunner:
     @staticmethod
     def _is_transient_generation_failure(error: BaseException) -> bool:
         """Return True for transient provider failures worth retrying."""
+        import json
+
+        # Malformed API response (truncated JSON, proxy error page, etc.)
+        if isinstance(error, json.JSONDecodeError):
+            return True
+
         status = getattr(error, "status_code", None)
         if not isinstance(status, int):
             response = getattr(error, "response", None)

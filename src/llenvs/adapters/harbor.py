@@ -82,7 +82,7 @@ _APPTAINER_ROOTFS_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE_LOCK = threading.Lock()
 _APPTAINER_ROOTFS_PROBE_EVENTS: dict[tuple[Any, ...], threading.Event] = {}
 _RUNTIME_PROBE_TIMEOUT_CAP_SEC = 15
-_VERIFIER_TIMEOUT_CAP_SEC = 120
+_VERIFIER_TIMEOUT_CAP_SEC = 900
 
 
 def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
@@ -515,11 +515,18 @@ def _internal_verifier_timeout_sec(
     exec_timeout: int,
     *,
     command_soft_timeout: int | None = None,
+    task_verifier_timeout: float | None = None,
 ) -> int:
-    candidates = [exec_timeout, _VERIFIER_TIMEOUT_CAP_SEC]
-    if command_soft_timeout is not None:
-        candidates.append(command_soft_timeout)
-    return max(1, min(candidates))
+    """Compute the verifier timeout in seconds.
+
+    When *task_verifier_timeout* (``VerifierConfig.timeout_sec``) is
+    provided, the timeout is ``min(task_verifier_timeout, cap)``.
+    Otherwise falls back to ``min(exec_timeout, cap)``.
+    ``command_soft_timeout`` is intentionally excluded — it governs
+    interactive agent commands, not verification scripts.
+    """
+    base = task_verifier_timeout if task_verifier_timeout is not None else exec_timeout
+    return max(1, min(int(base), _VERIFIER_TIMEOUT_CAP_SEC))
 
 
 def _signal_name(sig: int) -> str:
@@ -4299,9 +4306,8 @@ class HarborEnvironment:
         self._invalid_action_text = invalid_action_text
         self._invalid_action_observation_text = invalid_action_observation
         self._max_observation_chars = max_observation_chars
-        self._verifier_timeout_sec = _internal_verifier_timeout_sec(
+        self._default_verifier_timeout_sec = _internal_verifier_timeout_sec(
             exec_timeout,
-            command_soft_timeout=command_soft_timeout,
         )
         self._soft_timeouts_disabled_depth = 0
         self._trajectory_timeout_disabled_depth = 0
@@ -4797,6 +4803,13 @@ class HarborEnvironment:
         reward_value: float | None = None
         if terminated or (truncated and self._verify_on_truncation):
             if self._verifier_factory is not None:
+                task_vt = getattr(
+                    getattr(getattr(self._current_task, "config", None), "verifier", None),
+                    "timeout_sec", None,
+                )
+                verifier_timeout = _internal_verifier_timeout_sec(
+                    self._exec_timeout, task_verifier_timeout=task_vt,
+                ) if task_vt is not None else self._default_verifier_timeout_sec
                 if debug_enabled:
                     verifier_started_at = _now_monotonic()
                     logger.debug(
@@ -4805,14 +4818,14 @@ class HarborEnvironment:
                         next_step,
                         terminated,
                         truncated,
-                        self._verifier_timeout_sec,
+                        verifier_timeout,
                     )
                 try:
                     rewards = _run_verifier(
                         self._verifier_factory,
                         self._current_task,
                         self._harbor_env,
-                        timeout_sec=self._verifier_timeout_sec,
+                        timeout_sec=verifier_timeout,
                     )
                     reward_value = rewards.get("reward", 0.0)
                     if debug_enabled:
@@ -5032,7 +5045,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         self._verify_on_truncation = verify_on_truncation
         self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
-        self._verifier_timeout_sec = _internal_verifier_timeout_sec(exec_timeout)
+        self._default_verifier_timeout_sec = _internal_verifier_timeout_sec(exec_timeout)
         self._state_capture_mode = _normalize_snapshot_mode(state_capture_mode)
         self._snapshot_artifact_root = (
             None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
@@ -5276,12 +5289,19 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         reward_value: float | None = None
         if terminated or (truncated and self._verify_on_truncation):
             if self._verifier_factory is not None:
+                task_vt = getattr(
+                    getattr(getattr(self._current_task, "config", None), "verifier", None),
+                    "timeout_sec", None,
+                )
+                verifier_timeout = _internal_verifier_timeout_sec(
+                    self._exec_timeout, task_verifier_timeout=task_vt,
+                ) if task_vt is not None else self._default_verifier_timeout_sec
                 try:
                     rewards = _run_verifier(
                         self._verifier_factory,
                         self._current_task,
                         self._harbor_env,
-                        timeout_sec=self._verifier_timeout_sec,
+                        timeout_sec=verifier_timeout,
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:
