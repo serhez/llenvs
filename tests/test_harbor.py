@@ -2701,7 +2701,10 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text=""))
         assert result.terminated is False
 
-    def test_tmux_session_death_detected_in_phase1(self):
+    def test_tmux_session_death_detected_in_phase1(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ):
         """When the shell exits (e.g., `exit 1`), phase 1 detects tmux death
         immediately instead of polling for the full continuation window."""
         from llenvs.adapters.harbor import _TmuxSessionDead
@@ -2743,8 +2746,13 @@ class TestHarborEnvironment:
 
         mock_env._exec_handler = dead_tmux_handler
 
-        with pytest.raises(_TmuxSessionDead, match="tmux session died"):
-            env.step(state, Action(text="exit 1"))
+        with caplog.at_level(logging.ERROR, logger="llenvs.adapters.harbor"):
+            with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+                env.step(state, Action(text="exit 1"))
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor tmux session died during command execution" in message for message in messages)
+        assert any("command=exit 1" in message for message in messages)
 
 
 # ── TestHostSideStatusFiles ──────────────────────────────────────

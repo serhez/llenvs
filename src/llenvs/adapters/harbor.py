@@ -744,6 +744,7 @@ class _HarborTmuxTextSession:
         self._exec_timeout = exec_timeout
         self._bootstrap_if_missing = bootstrap_if_missing
         self._previous_full_buffer = ""
+        self._active_command_preview: str | None = None
         self._prompt_sentinel = f"__LLENVS_PROMPT_{uuid.uuid4().hex[:12]}__> "
         self._continuation_sentinel = f"__LLENVS_CONTINUATION_{uuid.uuid4().hex[:12]}__> "
         self.tmux_bootstrapped = False
@@ -788,130 +789,136 @@ class _HarborTmuxTextSession:
         command_text = command[:-1] if command.endswith("\n") else command
         step_token = _tmux_wait_channel("llenvs_harbor_step")
         effective_timeout = self._exec_timeout if timeout_sec is None else timeout_sec
-        debug_enabled = logger.isEnabledFor(logging.DEBUG)
-        if debug_enabled:
-            logger.debug(
-                "Harbor tmux command start: timeout=%ss chars=%d preview=%s",
-                effective_timeout,
-                len(command_text),
-                _preview_log_text(command_text),
-            )
-            dispatch_started_at = _now_monotonic()
-        used_staged_file = self._send_command(command_text, step_token=step_token)
-        if debug_enabled:
-            logger.debug(
-                "Harbor tmux command dispatched in %.2fs: preview=%s",
-                max(0.0, _now_monotonic() - dispatch_started_at),
-                _preview_log_text(command_text),
-            )
-
-        # Build the wait+capture command.  When the status directory is
-        # host-visible, waiting is done host-side and only the capture is
-        # sent via exec.  Otherwise, a single in-container loop combines
-        # both waiting and capture.
-        status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
-        if self._host_status_dir:
-            capture_cmd = f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
-        else:
-            capture_cmd = (
-                f"while ! test -f {status_path_q}; do sleep 0.1; done"
-                f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
-            )
-        started_at = _now_monotonic()
         try:
-            if used_staged_file:
-                if self._host_status_dir:
-                    deadline = _now_monotonic() + effective_timeout
-                    if not self._wait_for_status_file(
-                        step_token,
-                        timeout_sec=effective_timeout,
-                    ):
-                        raise RuntimeError(
-                            f"apptainer command timed out after {effective_timeout}s"
-                        )
-                    full_buffer = self._capture_after_wait(deadline)
-                else:
-                    result = self._exec(capture_cmd, timeout_sec=effective_timeout)
-                    full_buffer = getattr(result, "stdout", "") or ""
-            else:
-                full_buffer = self._wait_for_direct_command(
-                    command_text,
-                    step_token,
-                    capture_cmd,
-                    timeout_sec=effective_timeout,
-                )
-        except Exception as exc:
-            if not self._is_timeout_error(exc):
-                raise
-            # Check if the command actually completed (signal lost).
-            # The visible screen and status file are checked BEFORE any
-            # recovery attempt.  The status file is the stronger signal:
-            # PROMPT_COMMAND writes it before the prompt is rendered, so
-            # it catches completions where the prompt scrolled off-screen.
-            visible = self._safe_capture(self._capture_visible_screen_raw)
-            status_found = False
-            try:
-                status_found = self._status_file_exists(step_token)
-            except Exception:
-                pass
-            if self._prompt_visible_on_last_line(visible) or status_found:
-                # Command completed but the wait signal was lost (the
-                # in-container polling loop was killed before it noticed
-                # the status file).  Capture the buffer directly.
-                full_buffer = self._safe_capture(self._capture_full_buffer)
+            self._active_command_preview = _preview_log_text(command_text)
+            debug_enabled = logger.isEnabledFor(logging.DEBUG)
+            if debug_enabled:
                 logger.debug(
-                    "Harbor tmux signal lost — salvaged completed command: preview=%s",
-                    _preview_log_text(command_text),
+                    "Harbor tmux command start: timeout=%ss chars=%d preview=%s",
+                    effective_timeout,
+                    len(command_text),
+                    self._active_command_preview,
                 )
-                # Fall through to normal observation extraction below.
-            else:
-                # Genuine timeout — command still running.
-                elapsed_sec = max(0.0, _now_monotonic() - started_at)
-                result = self._handle_timeout(
-                    command_text,
-                    step_token,
-                    exc,
-                    timeout_sec=effective_timeout,
-                    elapsed_sec=elapsed_sec,
+                dispatch_started_at = _now_monotonic()
+            used_staged_file = self._send_command(command_text, step_token=step_token)
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux command dispatched in %.2fs: preview=%s",
+                    max(0.0, _now_monotonic() - dispatch_started_at),
+                    self._active_command_preview,
                 )
-                if isinstance(result, str):
-                    # _handle_timeout detected the prompt was already
-                    # visible (defense-in-depth salvage).  Use the
-                    # returned buffer as if the command completed normally.
-                    full_buffer = result
-                else:
-                    raise result from exc
 
-        # Strip trailing newlines so the prefix-based diff in
-        # _diff_full_buffer works reliably.  tmux pane rows below the
-        # cursor emit variable-length trailing newlines; Docker's exec
-        # transport preserves them while the HPC transport (podman-hpc,
-        # apptainer) already rstrips all whitespace, making this a
-        # no-op there.  Only newlines are stripped (not spaces) so the
-        # prompt's trailing space is preserved at the diff boundary.
-        full_buffer = full_buffer.rstrip("\n")
-        observation = self._diff_full_buffer(full_buffer)
-        observation = self._sanitize_observation(observation, command_text, used_staged_file)
-        if observation == "":
-            exit_code = self._read_exit_status(step_token)
-            if exit_code is not None and exit_code != 0:
-                observation = f"[exit code: {exit_code}]"
-            elif exit_code == 0:
-                observation = "[Command completed successfully with no output]"
+            # Build the wait+capture command.  When the status directory is
+            # host-visible, waiting is done host-side and only the capture is
+            # sent via exec.  Otherwise, a single in-container loop combines
+            # both waiting and capture.
+            status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
+            if self._host_status_dir:
+                capture_cmd = (
+                    f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+                )
             else:
-                observation = "[No output]"
-        else:
-            # Still consume the status file to avoid leaking it
-            self._read_exit_status(step_token)
-        self._previous_full_buffer = full_buffer
-        if debug_enabled:
-            logger.debug(
-                "Harbor tmux command done: duration=%.2fs observation_chars=%d preview=%s",
-                max(0.0, _now_monotonic() - started_at),
-                len(observation),
-                _preview_log_text(command_text),
-            )
-        return observation
+                capture_cmd = (
+                    f"while ! test -f {status_path_q}; do sleep 0.1; done"
+                    f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+                )
+            started_at = _now_monotonic()
+            try:
+                if used_staged_file:
+                    if self._host_status_dir:
+                        deadline = _now_monotonic() + effective_timeout
+                        if not self._wait_for_status_file(
+                            step_token,
+                            timeout_sec=effective_timeout,
+                        ):
+                            raise RuntimeError(
+                                f"apptainer command timed out after {effective_timeout}s"
+                            )
+                        full_buffer = self._capture_after_wait(deadline)
+                    else:
+                        result = self._exec(capture_cmd, timeout_sec=effective_timeout)
+                        full_buffer = getattr(result, "stdout", "") or ""
+                else:
+                    full_buffer = self._wait_for_direct_command(
+                        command_text,
+                        step_token,
+                        capture_cmd,
+                        timeout_sec=effective_timeout,
+                    )
+            except Exception as exc:
+                if not self._is_timeout_error(exc):
+                    raise
+                # Check if the command actually completed (signal lost).
+                # The visible screen and status file are checked BEFORE any
+                # recovery attempt.  The status file is the stronger signal:
+                # PROMPT_COMMAND writes it before the prompt is rendered, so
+                # it catches completions where the prompt scrolled off-screen.
+                visible = self._safe_capture(self._capture_visible_screen_raw)
+                status_found = False
+                try:
+                    status_found = self._status_file_exists(step_token)
+                except Exception:
+                    pass
+                if self._prompt_visible_on_last_line(visible) or status_found:
+                    # Command completed but the wait signal was lost (the
+                    # in-container polling loop was killed before it noticed
+                    # the status file).  Capture the buffer directly.
+                    full_buffer = self._safe_capture(self._capture_full_buffer)
+                    logger.debug(
+                        "Harbor tmux signal lost — salvaged completed command: preview=%s",
+                        self._active_command_preview,
+                    )
+                    # Fall through to normal observation extraction below.
+                else:
+                    # Genuine timeout — command still running.
+                    elapsed_sec = max(0.0, _now_monotonic() - started_at)
+                    result = self._handle_timeout(
+                        command_text,
+                        step_token,
+                        exc,
+                        timeout_sec=effective_timeout,
+                        elapsed_sec=elapsed_sec,
+                    )
+                    if isinstance(result, str):
+                        # _handle_timeout detected the prompt was already
+                        # visible (defense-in-depth salvage).  Use the
+                        # returned buffer as if the command completed normally.
+                        full_buffer = result
+                    else:
+                        raise result from exc
+
+            # Strip trailing newlines so the prefix-based diff in
+            # _diff_full_buffer works reliably.  tmux pane rows below the
+            # cursor emit variable-length trailing newlines; Docker's exec
+            # transport preserves them while the HPC transport (podman-hpc,
+            # apptainer) already rstrips all whitespace, making this a
+            # no-op there.  Only newlines are stripped (not spaces) so the
+            # prompt's trailing space is preserved at the diff boundary.
+            full_buffer = full_buffer.rstrip("\n")
+            observation = self._diff_full_buffer(full_buffer)
+            observation = self._sanitize_observation(observation, command_text, used_staged_file)
+            if observation == "":
+                exit_code = self._read_exit_status(step_token)
+                if exit_code is not None and exit_code != 0:
+                    observation = f"[exit code: {exit_code}]"
+                elif exit_code == 0:
+                    observation = "[Command completed successfully with no output]"
+                else:
+                    observation = "[No output]"
+            else:
+                # Still consume the status file to avoid leaking it
+                self._read_exit_status(step_token)
+            self._previous_full_buffer = full_buffer
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux command done: duration=%.2fs observation_chars=%d preview=%s",
+                    max(0.0, _now_monotonic() - started_at),
+                    len(observation),
+                    self._active_command_preview,
+                )
+            return observation
+        finally:
+            self._active_command_preview = None
 
     def _sanitize_observation(
         self,
@@ -1832,6 +1839,12 @@ class _HarborTmuxTextSession:
                     timeout_sec=5,
                 )
             except Exception:
+                logger.error(
+                    "Harbor tmux session died during command execution: session=%s command=%s capture_error=%s",
+                    self._SESSION_NAME,
+                    self._active_command_preview or "<unknown>",
+                    cap_exc,
+                )
                 raise _TmuxSessionDead("tmux session died during command execution") from cap_exc
             # Session exists; capture failure was transient.
             return ""
