@@ -2594,7 +2594,11 @@ class TestHarborEnvironment:
         # No reward should be set
         assert result.next_state.metadata.info.get("reward") is None
 
-    def test_truncation_verifier_timeout_returns_zero_reward(self, monkeypatch: pytest.MonkeyPatch):
+    def test_truncation_verifier_timeout_returns_zero_reward(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ):
         import llenvs.adapters.harbor as harbor_module
 
         class NeverVerifier:
@@ -2623,15 +2627,20 @@ class TestHarborEnvironment:
                 close = getattr(coro, "close", None)
                 if callable(close):
                     close()
-                raise TimeoutError("Harbor verifier timed out after 120s")
+                raise TimeoutError("Harbor verifier timed out after 120s") from TimeoutError()
             return original_run_with_timeout(coro, timeout, label)
 
         monkeypatch.setattr(harbor_module, "_run_with_timeout", fake_run_with_timeout)
 
-        result = env.step(state, Action(text="cmd"))
+        with caplog.at_level(logging.WARNING, logger="llenvs.adapters.harbor"):
+            result = env.step(state, Action(text="cmd"))
 
         assert result.truncated is True
         assert result.next_state.metadata.info.get("reward") == 0.0
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Verifier failed: Harbor verifier timed out after 120s" in message for message in messages)
+        assert any("cause_type=TimeoutError" in message for message in messages)
+        assert any("cause=TimeoutError()" in message for message in messages)
 
     def test_step_stderr_in_observation(self):
         mock_env = MockHarborEnvironment(

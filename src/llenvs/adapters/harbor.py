@@ -1884,6 +1884,16 @@ def _run_verifier(
     return result.rewards
 
 
+def _log_verifier_failure(exc: Exception) -> None:
+    cause = exc.__cause__ if exc.__cause__ is not None else exc
+    logger.warning(
+        "Verifier failed: %s (cause_type=%s cause=%r)",
+        exc,
+        type(cause).__name__,
+        cause,
+    )
+
+
 def _normalize_container_name(name: str) -> str:
     normalized = name.lower().replace(".", "-")
     return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in normalized)
@@ -4850,8 +4860,7 @@ class HarborEnvironment:
                             reward_value,
                         )
                 except Exception as e:
-                    cause = e.__cause__ if e.__cause__ else e
-                    logger.warning("Verifier failed: %s (cause: %s)", e, cause)
+                    _log_verifier_failure(e)
                     if debug_enabled:
                         logger.debug(
                             "Harbor verifier failed: task=%d episode_step=%d duration=%.2fs",
@@ -5318,8 +5327,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:
-                    cause = e.__cause__ if e.__cause__ else e
-                    logger.warning("Verifier failed: %s (cause: %s)", e, cause)
+                    _log_verifier_failure(e)
                     reward_value = 0.0
 
         # Build next observation via BaseToolEnvironment helper
