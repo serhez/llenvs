@@ -773,7 +773,7 @@ class _HarborTmuxTextSession:
                 )
 
         self._start_session()
-        self._exec(
+        self._exec_tmux_helper(
             f"tmux set-option -t {shlex.quote(self._SESSION_NAME)} history-limit 50000",
             timeout_sec=self._startup_timeout_sec(),
         )
@@ -782,8 +782,15 @@ class _HarborTmuxTextSession:
         self._previous_full_buffer = self._capture_full_buffer()
 
     def resync_after_restore(self) -> None:
-        self._exec(f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}")
-        self._previous_full_buffer = self._capture_full_buffer()
+        capture_cmd = f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+        self._exec_tmux_helper(
+            f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}",
+        )
+        try:
+            self._previous_full_buffer = self._capture_full_buffer()
+        except Exception as exc:
+            self._normalize_tmux_session_dead(exc, helper_command=capture_cmd)
+            raise
 
     def run_command(self, command: str, *, timeout_sec: int | None = None) -> str:
         command_text = command[:-1] if command.endswith("\n") else command
@@ -836,7 +843,10 @@ class _HarborTmuxTextSession:
                             )
                         full_buffer = self._capture_after_wait(deadline)
                     else:
-                        result = self._exec(capture_cmd, timeout_sec=effective_timeout)
+                        result = self._exec_tmux_helper(
+                            capture_cmd,
+                            timeout_sec=effective_timeout,
+                        )
                         full_buffer = getattr(result, "stdout", "") or ""
                 else:
                     full_buffer = self._wait_for_direct_command(
@@ -1066,7 +1076,7 @@ class _HarborTmuxTextSession:
                 now = _now_monotonic()
                 if now >= next_health_check:
                     try:
-                        self._exec(
+                        self._exec_tmux_helper(
                             f"tmux has-session -t {session_q}",
                             timeout_sec=min(5, max(1, deadline - now)),
                         )
@@ -1096,7 +1106,7 @@ class _HarborTmuxTextSession:
     def _capture_after_wait(self, deadline: float) -> str:
         """Capture the full tmux buffer after a host-side status-file wait."""
         remaining = max(5.0, deadline - _now_monotonic())
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=remaining,
         )
@@ -1151,11 +1161,11 @@ class _HarborTmuxTextSession:
             staged = True
 
         control_parts.append(f"tmux send-keys -t {session_q} Enter")
-        self._exec(" && ".join(control_parts), timeout_sec=self._exec_timeout)
+        self._exec_tmux_helper(" && ".join(control_parts), timeout_sec=self._exec_timeout)
         return staged
 
     def _capture_full_buffer(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
@@ -1169,21 +1179,21 @@ class _HarborTmuxTextSession:
         return (getattr(result, "stdout", "") or "").rstrip("\n")
 
     def _capture_visible_screen(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -J -p -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
         return getattr(result, "stdout", "") or ""
 
     def _capture_full_buffer_raw(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
         return getattr(result, "stdout", "") or ""
 
     def _capture_visible_screen_raw(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -p -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
@@ -1289,7 +1299,7 @@ class _HarborTmuxTextSession:
                 f"tmux send-keys -t {session_q} {shlex.quote(f'source {self._HOOK_SCRIPT_FILE}')} Enter",
             ]
         )
-        self._exec(control_cmd, timeout_sec=startup_timeout)
+        self._exec_tmux_helper(control_cmd, timeout_sec=startup_timeout)
         if not self._wait_for_status_file(init_token, timeout_sec=startup_timeout):
             raise self._startup_timeout_error(
                 f"Prompt hook installation timed out after {startup_timeout}s"
@@ -1452,7 +1462,7 @@ class _HarborTmuxTextSession:
                 raise RuntimeError(f"apptainer command timed out after {timeout_sec}s")
             return self._capture_after_wait(deadline_phase2)
         try:
-            result = self._exec(capture_cmd, timeout_sec=remaining)
+            result = self._exec_tmux_helper(capture_cmd, timeout_sec=remaining)
             return getattr(result, "stdout", "") or ""
         except Exception as exc:
             if self._is_timeout_error(exc):
@@ -1741,7 +1751,7 @@ class _HarborTmuxTextSession:
         poll_cmd = f"test -r {ready_file_q} && cat {ready_file_q} || true"
 
         self._safe_exec(f"rm -f {ready_file_q}", timeout_sec=10)
-        self._exec(send_cmd, timeout_sec=10)
+        self._exec_tmux_helper(send_cmd, timeout_sec=10)
         deadline = time.monotonic() + startup_timeout
         next_resend = time.monotonic() + self._READY_RESEND_INTERVAL_SEC
 
@@ -1752,7 +1762,7 @@ class _HarborTmuxTextSession:
                 return
             now = time.monotonic()
             if now >= next_resend:
-                self._exec(send_cmd, timeout_sec=10)
+                self._exec_tmux_helper(send_cmd, timeout_sec=10)
                 next_resend = now + self._READY_RESEND_INTERVAL_SEC
             time.sleep(self._READY_POLL_INTERVAL_SEC)
 
@@ -1821,6 +1831,47 @@ class _HarborTmuxTextSession:
         except Exception:
             return ""
 
+    @staticmethod
+    def _looks_like_tmux_session_dead(exc: BaseException) -> bool:
+        """Return True for tmux helper failures caused by a dead tmux server."""
+        text = str(exc).lower()
+        return (
+            ("no server running" in text and "tmux" in text)
+            or "can't find session" in text
+            or "can't find pane" in text
+        )
+
+    def _normalize_tmux_session_dead(
+        self,
+        exc: BaseException,
+        *,
+        helper_command: str,
+    ) -> None:
+        if isinstance(exc, _TmuxSessionDead):
+            raise exc
+        if not self._looks_like_tmux_session_dead(exc):
+            return
+        logger.error(
+            "Harbor tmux session died during command execution: session=%s command=%s helper_command=%s helper_error=%s",
+            self._SESSION_NAME,
+            self._active_command_preview or "<unknown>",
+            _preview_log_text(helper_command),
+            exc,
+        )
+        raise _TmuxSessionDead("tmux session died during command execution") from exc
+
+    def _exec_tmux_helper(
+        self,
+        command: str,
+        *,
+        timeout_sec: float | int | None = None,
+    ) -> Any:
+        try:
+            return self._exec(command, timeout_sec=timeout_sec)
+        except Exception as exc:
+            self._normalize_tmux_session_dead(exc, helper_command=command)
+            raise
+
     def _capture_visible_or_detect_death(self) -> str:
         """Capture visible screen; raise ``_TmuxSessionDead`` if the session is gone.
 
@@ -1831,21 +1882,19 @@ class _HarborTmuxTextSession:
         """
         try:
             return self._capture_visible_screen_raw()
+        except _TmuxSessionDead:
+            raise
         except Exception as cap_exc:
             # Verify whether the session still exists.
             try:
-                self._exec(
+                self._exec_tmux_helper(
                     f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}",
                     timeout_sec=5,
                 )
-            except Exception:
-                logger.error(
-                    "Harbor tmux session died during command execution: session=%s command=%s capture_error=%s",
-                    self._SESSION_NAME,
-                    self._active_command_preview or "<unknown>",
-                    cap_exc,
-                )
-                raise _TmuxSessionDead("tmux session died during command execution") from cap_exc
+            except _TmuxSessionDead:
+                raise
+            except Exception as probe_exc:
+                raise probe_exc from cap_exc
             # Session exists; capture failure was transient.
             return ""
 
