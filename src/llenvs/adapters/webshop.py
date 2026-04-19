@@ -169,9 +169,78 @@ def _normalize_webshop_instruction(instruction: str) -> str:
     return re.sub(r"^\s*Instruction:\s*", "", instruction).strip()
 
 
-def _wrap_page(raw_obs: str, instruction: str) -> str:
-    """Strip WebShop's embedded instruction header and wrap in <page> tags."""
+_TERMINAL_NOISE_SECTIONS = ("Target", "Reward")
+
+
+def _filter_terminal_page(raw_obs: str) -> str:
+    """Strip noise from WebShop's terminal-state observation dump.
+
+    WebShop's text_rich mode emits a full internal-state summary on terminal
+    steps: an MTurk crowd-sourcing artifact (``Your code: ...``), ``Target``
+    block that duplicates the goal already surfaced in ``obs.task.text``, and
+    a ``Reward`` / ``Reward Details`` block whose numeric score would leak
+    ground truth to Q-value evaluators on the Buy-Now transition (the
+    reward equals Q(s, Buy Now) at terminal). Plus ``None``-valued rows
+    scattered throughout.
+
+    Keep only the episode-complete signal (``Thank you for shopping with
+    us!``) and the ``Purchased`` section with its non-None fields (asin,
+    options, plus anything else WebShop populates).
+    """
+    lines = raw_obs.split("\n")
+    filtered: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+
+        # MTurk block: "Your code: \nNone\n (Paste it in your MTurk
+        # interface.)" — three lines starting with "Your code:".
+        if stripped.startswith("Your code:"):
+            i += 3
+            continue
+
+        # Drop entire "Target" and "Reward" sections — both are noise for
+        # evaluation. Skip until the next top-level section header or EOF.
+        if stripped in _TERMINAL_NOISE_SECTIONS:
+            i += 1
+            while i < n and lines[i].strip() not in (
+                *_TERMINAL_NOISE_SECTIONS,
+                "Reward Details",
+            ):
+                i += 1
+            continue
+
+        # "Reward Details" is always followed by one value line (None or a
+        # breakdown). Drop both.
+        if stripped == "Reward Details":
+            i += 2
+            continue
+
+        # "<label>\nNone" pairs anywhere (e.g. attrs/None inside Purchased).
+        if (
+            stripped
+            and i + 1 < n
+            and lines[i + 1].strip() == "None"
+        ):
+            i += 2
+            continue
+
+        filtered.append(lines[i])
+        i += 1
+
+    return "\n".join(filtered).rstrip()
+
+
+def _wrap_page(raw_obs: str, instruction: str, *, is_terminal: bool = False) -> str:
+    """Strip WebShop's embedded instruction header and wrap in <page> tags.
+
+    When ``is_terminal`` is True, also run ``_filter_terminal_page`` to strip
+    WebShop's noisy terminal-state dump (see that helper's docstring).
+    """
     stripped = _strip_webshop_instruction_prefix(raw_obs, instruction).rstrip()
+    if is_terminal:
+        stripped = _filter_terminal_page(stripped)
     return f"<page>\n{stripped}\n</page>"
 
 
@@ -354,6 +423,7 @@ class WebShopEnvironment:
         instruction: str,
         step: int,
         invalid_action_notice: str | None = None,
+        is_terminal: bool = False,
     ) -> str:
         """Build the full observation prompt for the model.
 
@@ -372,7 +442,7 @@ class WebShopEnvironment:
             parts.append(invalid_action_notice)
             parts.append("")
 
-        parts.append(_wrap_page(raw_obs, instruction))
+        parts.append(_wrap_page(raw_obs, instruction, is_terminal=is_terminal))
 
         hint = self._prompts.get("action_hint", "")
         if hint:
@@ -588,12 +658,15 @@ class WebShopEnvironment:
         notice = (
             self._invalid_action_notice() if invalid_action_format else None
         )
-        page_block = _wrap_page(raw_obs, state.hidden.instruction)
+        page_block = _wrap_page(
+            raw_obs, state.hidden.instruction, is_terminal=done,
+        )
         obs_prompt = self._build_observation_prompt(
             raw_obs,
             state.hidden.instruction,
             next_step,
             invalid_action_notice=notice,
+            is_terminal=done,
         )
 
         # Check truncation

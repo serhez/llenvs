@@ -1289,3 +1289,184 @@ class TestWebShopGoalOnlyInTaskText:
         assert "search[" not in task_text
         assert task_text.startswith("<goal>")
         assert task_text.rstrip().endswith("</goal>")
+
+
+class TestFilterTerminalPage:
+    """``_filter_terminal_page`` strips WebShop's noisy terminal-state dump.
+
+    WebShop's text_rich observation on terminal steps dumps the full
+    internal state summary — most fields are ``None`` or empty labels,
+    plus an MTurk crowd-sourcing artifact, a Target block that duplicates
+    the goal, and a Reward / Reward Details block that would leak GT to
+    Q-value evaluators on the Buy-Now transition. The filter keeps only
+    the episode-complete signal and the purchase details.
+    """
+
+    NOISY_TERMINAL_RAW = (
+        "Thank you for shopping with us!\n"
+        "Your code: \n"
+        "None\n"
+        " (Paste it in your MTurk interface.)\n"
+        "Purchased\n"
+        "asin\n"
+        "B08ZRR3DZT\n"
+        "options\n"
+        "{}\n"
+        "attrs\n"
+        "None\n"
+        "category\n"
+        "None\n"
+        "query\n"
+        "None\n"
+        "product category\n"
+        "None\n"
+        "Target\n"
+        "asin\n"
+        "options\n"
+        "attrs\n"
+        "price upper\n"
+        "instuction text\n"
+        "category\n"
+        "product category\n"
+        "query\n"
+        "Goal \n"
+        "None\n"
+        "Reward\n"
+        "Your score (min 0.0, max 1.0)\n"
+        "0.0\n"
+        "Reward Details \n"
+        "None"
+    )
+
+    def test_keeps_purchase_confirmation(self):
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        out = _filter_terminal_page(self.NOISY_TERMINAL_RAW)
+        assert "Thank you for shopping with us!" in out
+
+    def test_keeps_purchased_asin_and_options(self):
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        out = _filter_terminal_page(self.NOISY_TERMINAL_RAW)
+        assert "Purchased" in out
+        assert "asin" in out
+        assert "B08ZRR3DZT" in out
+        assert "options" in out
+        assert "{}" in out
+
+    def test_drops_mturk_block(self):
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        out = _filter_terminal_page(self.NOISY_TERMINAL_RAW)
+        assert "Your code" not in out
+        assert "MTurk" not in out
+        assert "Paste it" not in out
+
+    def test_drops_target_section(self):
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        out = _filter_terminal_page(self.NOISY_TERMINAL_RAW)
+        # Target header gone, as is everything beneath it until the next section.
+        assert "Target" not in out
+        assert "price upper" not in out  # Target-only label
+        assert "instuction text" not in out  # Target-only label (upstream typo)
+
+    def test_drops_reward_section(self):
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        out = _filter_terminal_page(self.NOISY_TERMINAL_RAW)
+        assert "Reward" not in out
+        assert "Your score" not in out
+        # The numeric reward value should not leak to evaluators either.
+        assert "0.0" not in out
+
+    def test_drops_none_valued_rows_within_purchased(self):
+        """Purchased's label/None rows (attrs, category, query, product
+        category) should all disappear, leaving only non-None pairs."""
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        out = _filter_terminal_page(self.NOISY_TERMINAL_RAW)
+        # No bare "None" token survives anywhere.
+        assert "\nNone" not in out
+        # Specific None-valued labels from Purchased are gone.
+        assert "attrs" not in out
+        assert "category" not in out
+        assert "query" not in out
+
+    def test_preserves_non_none_purchased_fields(self):
+        """If attrs / category have actual values (non-None), they survive."""
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        raw = (
+            "Thank you for shopping with us!\n"
+            "Purchased\n"
+            "asin\n"
+            "B01\n"
+            "options\n"
+            "{'size': 'small', 'color': 'blue'}\n"
+            "attrs\n"
+            "['cotton', 'machine washable']\n"
+        )
+        out = _filter_terminal_page(raw)
+        assert "attrs" in out
+        assert "['cotton', 'machine washable']" in out
+        assert "{'size': 'small', 'color': 'blue'}" in out
+
+    def test_simple_terminal_passthrough(self):
+        """A minimal terminal obs (no noise sections) passes through unchanged."""
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        raw = "Thank you for your purchase!"
+        assert _filter_terminal_page(raw) == raw
+
+    def test_empty_input(self):
+        from llenvs.adapters.webshop import _filter_terminal_page
+
+        assert _filter_terminal_page("") == ""
+
+
+class TestTerminalPageIntegration:
+    """End-to-end: terminal-step observation in ``state.text`` is filtered."""
+
+    @pytest.fixture
+    def noisy_mock_env(self, mock_webshop_env):
+        """Mock env that returns WebShop's noisy terminal dump on Buy Now."""
+        noisy = TestFilterTerminalPage.NOISY_TERMINAL_RAW
+        original_step = mock_webshop_env.step
+
+        def patched_step(action):
+            obs, reward, done, info = original_step(action)
+            if done:
+                return noisy, reward, done, info
+            return obs, reward, done, info
+
+        mock_webshop_env.step = patched_step
+        return mock_webshop_env
+
+    def test_terminal_state_text_filters_noise(self, noisy_mock_env):
+        env = WebShopEnvironment(webshop_env=noisy_mock_env)
+        state0, _ = env.reset()
+        r1 = env.step(state0, Action(text="search[red headphones]"))
+        r2 = env.step(r1.next_state, Action(text="click[Product 1 - Red Headphones $45]"))
+        r3 = env.step(r2.next_state, Action(text="click[Buy Now]"))
+
+        text = r3.next_state.observation.state.text
+        assert r3.terminated is True
+        # Useful signal survives
+        assert "Thank you for shopping" in text
+        assert "B08ZRR3DZT" in text
+        # Noise does not
+        assert "Your code" not in text
+        assert "Target" not in text
+        assert "Reward" not in text
+        assert "\nNone" not in text
+
+    def test_non_terminal_state_text_unchanged(self, mock_webshop_env):
+        """Filter only applies to terminal steps; search/click pages pass through."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state0, _ = env.reset()
+        r1 = env.step(state0, Action(text="search[red headphones]"))
+        # Non-terminal search-results page; should be wrapped as-is (no filter).
+        text = r1.next_state.observation.state.text
+        assert "<page>" in text
+        assert "Product 1 - Red Headphones $45" in text
