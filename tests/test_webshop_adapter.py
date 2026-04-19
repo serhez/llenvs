@@ -1,6 +1,5 @@
 """Tests for the WebShop adapter."""
 
-import pickle
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -12,6 +11,9 @@ from llenvs.adapters.webshop import (
     WebShopEnvironment,
     WebShopHidden,
     WebShopReward,
+    _classify_webshop_command,
+    _normalize_webshop_instruction,
+    _strip_webshop_instruction_prefix,
     webshop_restore,
 )
 from llenvs.core.reward import RewardType
@@ -40,9 +42,13 @@ class MockWebShopEnv:
 
         # Mock clickable elements
         self.text_to_clickable = {
-            "Search": "search_button",
-            "Back to Search": "back_button",
+            "search": "search_button",
+            "back to search": "back_button",
         }
+
+        # Whether the current page has a search bar. Real WebShop derives this
+        # from ``find(id='search_input')`` in ``get_available_actions``.
+        self.has_search_bar = True
 
         self._step_count = 0
         self._done = False
@@ -59,6 +65,11 @@ class MockWebShopEnv:
         """Reset the mock environment."""
         self._step_count = 0
         self._done = False
+        self.has_search_bar = True
+        self.text_to_clickable = {
+            "search": "search_button",
+            "back to search": "back_button",
+        }
 
         if instruction_text:
             self.state["instruction_text"] = instruction_text
@@ -91,10 +102,11 @@ class MockWebShopEnv:
                 "[button] Back to Search [button_]"
             )
             self.text_to_clickable = {
-                "Product 1 - Red Headphones $45": "product_1",
-                "Product 2 - Blue Headphones $30": "product_2",
-                "Back to Search": "back_button",
+                "product 1 - red headphones $45": "product_1",
+                "product 2 - blue headphones $30": "product_2",
+                "back to search": "back_button",
             }
+            self.has_search_bar = False
             return obs, 0.0, False, None
 
         elif action.startswith("click["):
@@ -110,15 +122,17 @@ class MockWebShopEnv:
                     "[button] Back to Search [button_]"
                 )
                 self.text_to_clickable = {
-                    "Buy Now": "buy_button",
-                    "Back to Search": "back_button",
+                    "buy now": "buy_button",
+                    "back to search": "back_button",
                 }
+                self.has_search_bar = False
                 return obs, 0.0, False, None
 
             elif element == "Buy Now":
                 # Purchase - episode ends with reward
                 obs = "Thank you for your purchase!"
                 self._done = True
+                self.has_search_bar = False
                 # Reward based on match quality (mocked as 0.8)
                 return obs, 0.8, True, None
 
@@ -131,6 +145,13 @@ class MockWebShopEnv:
             # Invalid action
             obs = "Invalid action format. Use search[query] or click[element]."
             return obs, 0.0, False, None
+
+    def get_available_actions(self) -> dict[str, Any]:
+        """Mirror WebShop's ``get_available_actions`` contract."""
+        return {
+            "has_search_bar": self.has_search_bar,
+            "clickables": list(self.text_to_clickable.keys()),
+        }
 
 
 class SimpleTagExtractor:
@@ -203,37 +224,6 @@ class TestWebShopHidden:
         )
         assert hidden.trajectory == ()
 
-    def test_gym_snapshot_default(self):
-        """Test gym_snapshot defaults to None."""
-        hidden = WebShopHidden(
-            instruction="test",
-            session_id="0",
-            task_index=0,
-            task_name="test",
-            episode_step=0,
-            last_action=None,
-            available_actions=(),
-        )
-        assert hidden.gym_snapshot is None
-
-    def test_trajectory_and_snapshot_stored(self):
-        """Test trajectory and snapshot can be stored."""
-        snapshot_data = pickle.dumps({"some": "state"})
-        hidden = WebShopHidden(
-            instruction="test",
-            session_id="0",
-            task_index=0,
-            task_name="test",
-            episode_step=2,
-            last_action="click[Buy Now]",
-            available_actions=(),
-            trajectory=("search[test]", "click[Buy Now]"),
-            gym_snapshot=snapshot_data,
-        )
-        assert hidden.trajectory == ("search[test]", "click[Buy Now]")
-        assert hidden.gym_snapshot == snapshot_data
-
-
 class TestWebShopReward:
     """Tests for WebShopReward."""
 
@@ -282,8 +272,9 @@ class TestWebShopEnvironment:
 
         # Check observation
         assert isinstance(state.observation, Observation)
-        assert "Instruction:" in state.observation.prompt
+        assert "<goal>" in state.observation.prompt
         assert "red wireless headphone" in state.observation.prompt.lower()
+        assert "<page>" in state.observation.prompt
 
         # Check hidden state
         assert isinstance(state.hidden, WebShopHidden)
@@ -391,8 +382,8 @@ class TestWebShopEnvironment:
         )
         state, _ = env.reset()
 
-        # Instruction should be in observation
-        assert "Instruction:" in state.observation.prompt
+        # Instruction surfaces inside a <goal> tag, not as bare text
+        assert "<goal>" in state.observation.prompt
         assert "red wireless headphone" in state.observation.prompt.lower()
 
     def test_observation_no_step_number(self, mock_webshop_env):
@@ -687,8 +678,8 @@ class TestWebShopPrompts:
         state, _ = env.reset(options={"task_index": 0})
 
         assert "Your goal:" in state.observation.prompt
-        # Default "Instruction:" should NOT appear
-        assert not state.observation.prompt.startswith("Instruction:")
+        # Default <goal>...</goal> wrapper should NOT appear when overridden
+        assert "<goal>" not in state.observation.prompt
 
     def test_custom_action_hint(self, mock_webshop_env):
         """Test custom action hint appears in observation."""
@@ -748,7 +739,6 @@ class TestWebShopAnswerExtractor:
         assert result.next_state.metadata.step == 1
         assert result.next_state.hidden.last_action == "__invalid_action_noop__"
         assert result.next_state.hidden.trajectory == ("__invalid_action_noop__",)
-        assert result.next_state.hidden.gym_snapshot is not None
         assert "invalid" in result.next_state.observation.state.text.lower()
         assert "Invalid action format" in result.next_state.observation.state.text
 
@@ -832,75 +822,8 @@ class TestWebShopTrajectoryTracking:
         assert current.metadata.is_terminal is True
 
 
-class TestWebShopSnapshotCapture:
-    """Tests for gym_snapshot capture via state_capture_mode."""
-
-    def test_no_snapshot_by_default(self, mock_webshop_env):
-        """No snapshot captured when state_capture_mode is None."""
-        env = WebShopEnvironment(webshop_env=mock_webshop_env)
-        state, _ = env.reset(options={"task_index": 0})
-
-        result = env.step(state, Action(text="search[headphones]"))
-        assert result.next_state.hidden.gym_snapshot is None
-
-    def test_snapshot_captured_when_enabled(self, mock_webshop_env):
-        """Snapshot captured at each step when state_capture_mode='snapshot'."""
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            state_capture_mode="snapshot",
-        )
-        state, _ = env.reset(options={"task_index": 0})
-
-        result = env.step(state, Action(text="search[headphones]"))
-        assert result.next_state.hidden.gym_snapshot is not None
-        assert isinstance(result.next_state.hidden.gym_snapshot, bytes)
-
-    def test_snapshot_is_picklable(self, mock_webshop_env):
-        """Snapshot bytes can be unpickled back to a gym env."""
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            state_capture_mode="snapshot",
-        )
-        state, _ = env.reset(options={"task_index": 0})
-
-        result = env.step(state, Action(text="search[headphones]"))
-        restored_gym = pickle.loads(result.next_state.hidden.gym_snapshot)
-        assert hasattr(restored_gym, "state")
-        assert hasattr(restored_gym, "text_to_clickable")
-
-    def test_snapshot_captures_state_after_step(self, mock_webshop_env):
-        """Snapshot reflects the state after the step, not before."""
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            state_capture_mode="snapshot",
-        )
-        state, _ = env.reset(options={"task_index": 0})
-
-        result = env.step(state, Action(text="search[headphones]"))
-        restored_gym = pickle.loads(result.next_state.hidden.gym_snapshot)
-
-        # After search, text_to_clickable should have product entries
-        assert "Product 1 - Red Headphones $45" in restored_gym.text_to_clickable
-
-    def test_snapshot_differs_per_step(self, mock_webshop_env):
-        """Each step captures a different snapshot."""
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            state_capture_mode="snapshot",
-        )
-        state, _ = env.reset(options={"task_index": 0})
-
-        r1 = env.step(state, Action(text="search[headphones]"))
-        r2 = env.step(
-            r1.next_state,
-            Action(text="click[Product 1 - Red Headphones $45]"),
-        )
-
-        assert r1.next_state.hidden.gym_snapshot != r2.next_state.hidden.gym_snapshot
-
-
 class TestWebShopRestore:
-    """Tests for webshop_restore() dual-mode function."""
+    """Tests for webshop_restore() (replay-based)."""
 
     def _run_trajectory(self, env, actions):
         """Helper: reset and step through a list of actions."""
@@ -923,43 +846,6 @@ class TestWebShopRestore:
 
         assert restored.hidden.episode_step == original_state.hidden.episode_step
         assert restored.observation.state.text == original_state.observation.state.text
-
-    def test_restore_from_snapshot(self, mock_webshop_env):
-        """Snapshot-based restore reaches same observation."""
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            state_capture_mode="snapshot",
-        )
-        actions = ["search[headphones]", "click[Product 1 - Red Headphones $45]"]
-        original_state = self._run_trajectory(env, actions)
-
-        # Verify snapshot exists
-        assert original_state.hidden.gym_snapshot is not None
-
-        # Create fresh env and restore via snapshot
-        fresh_env = WebShopEnvironment(webshop_env=MockWebShopEnv())
-        restored = webshop_restore(fresh_env, original_state)
-
-        assert restored.hidden.episode_step == original_state.hidden.episode_step
-        # Snapshot path returns the saved state directly
-        assert restored.hidden.task_name == original_state.hidden.task_name
-
-    def test_restore_snapshot_sets_gym_env(self, mock_webshop_env):
-        """Snapshot restore replaces the gym env on the wrapper."""
-        env = WebShopEnvironment(
-            webshop_env=mock_webshop_env,
-            state_capture_mode="snapshot",
-        )
-        state, _ = env.reset(options={"task_index": 0})
-        result = env.step(state, Action(text="search[headphones]"))
-        snapshot_state = result.next_state
-
-        fresh_gym = MockWebShopEnv()
-        fresh_env = WebShopEnvironment(webshop_env=fresh_gym)
-        webshop_restore(fresh_env, snapshot_state)
-
-        # After snapshot restore, the gym env should have the post-search clickables
-        assert "Product 1 - Red Headphones $45" in fresh_env._env.text_to_clickable
 
     def test_restore_validates_instruction(self, mock_webshop_env):
         """Restore raises ValueError on instruction mismatch."""
@@ -1046,23 +932,6 @@ class TestWebShopPureStep:
         result = env.step(state_0, Action(text="search[shoes]"))
         assert result.next_state.hidden.episode_step == 1
 
-    def test_pure_step_auto_captures_snapshot_on_reset(self, mock_webshop_env):
-        """Reset captures gym snapshot when pure_step=True."""
-        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
-        state, _ = env.reset()
-
-        assert state.hidden.gym_snapshot is not None
-        assert isinstance(state.hidden.gym_snapshot, bytes)
-
-    def test_pure_step_auto_captures_snapshot_on_step(self, mock_webshop_env):
-        """Step captures gym snapshot when pure_step=True."""
-        env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
-        state, _ = env.reset()
-
-        result = env.step(state, Action(text="search[headphones]"))
-        assert result.next_state.hidden.gym_snapshot is not None
-        assert isinstance(result.next_state.hidden.gym_snapshot, bytes)
-
     def test_pure_step_branch_from_earlier_state(self, mock_webshop_env):
         """Branching from an earlier state produces correct independent results."""
         env = WebShopEnvironment(webshop_env=mock_webshop_env, pure_step=True)
@@ -1090,3 +959,333 @@ class TestWebShopPureStep:
 
         with pytest.raises(NotImplementedError, match="pure_step=False"):
             env.step(state_0, Action(text="search[shoes]"))
+
+
+class TestStripWebShopInstructionPrefix:
+    """Unit tests for ``_strip_webshop_instruction_prefix``.
+
+    Exercises the concrete text_rich formats WebShop emits (derived from its
+    Jinja templates): search_page has ``WebShop\\n`` + ``Instruction: \\n``,
+    other pages use ``Instruction:\\n`` with no leading title.
+    """
+
+    INSTR = "i am looking for blue color toothbrushes under 50 dollars"
+
+    def test_homepage_search_page_has_trailing_space(self):
+        raw = (
+            "WebShop\n"
+            f"Instruction: \n{self.INSTR}\n"
+            "[button] Search [button_]\n"
+        )
+        out = _strip_webshop_instruction_prefix(raw, self.INSTR)
+        assert "Instruction:" not in out
+        assert self.INSTR not in out
+        assert out == "WebShop\n[button] Search [button_]\n"
+
+    def test_results_page_no_trailing_space(self):
+        raw = (
+            f"Instruction:\n{self.INSTR}\n"
+            "[button] Back to Search [button_]\n"
+            "Page 1 (Total results: 50)\n"
+        )
+        out = _strip_webshop_instruction_prefix(raw, self.INSTR)
+        assert "Instruction:" not in out
+        assert self.INSTR not in out
+        assert out.startswith("[button] Back to Search [button_]\n")
+
+    def test_text_mode_sep_format(self):
+        raw = f"Instruction: [SEP] {self.INSTR} [SEP] some page content"
+        out = _strip_webshop_instruction_prefix(raw, self.INSTR)
+        assert out == "some page content"
+
+    def test_empty_instruction_returns_unchanged(self):
+        raw = "Instruction:\nsomething\n[button] X [button_]\n"
+        assert _strip_webshop_instruction_prefix(raw, "") == raw
+
+    def test_no_match_returns_unchanged(self):
+        raw = "[button] Buy Now [button_]\n"
+        assert _strip_webshop_instruction_prefix(raw, self.INSTR) == raw
+
+
+class TestNormalizeWebShopInstruction:
+    """Unit tests for ``_normalize_webshop_instruction``.
+
+    WebShop's ``get_instruction_text()`` returns the entire
+    ``<h4>Instruction:<br>{text}</h4>`` element via ``.text``, so the value
+    it surfaces includes the ``"Instruction: "`` label concatenated with
+    the goal. The adapter must strip the label before using the string as
+    the episode instruction; otherwise the strip in
+    ``_strip_webshop_instruction_prefix`` can't match.
+    """
+
+    def test_strips_label_with_space(self):
+        raw = "Instruction: find a red shirt under $20"
+        assert _normalize_webshop_instruction(raw) == "find a red shirt under $20"
+
+    def test_strips_label_without_space(self):
+        raw = "Instruction:find a red shirt"
+        assert _normalize_webshop_instruction(raw) == "find a red shirt"
+
+    def test_strips_leading_whitespace_before_label(self):
+        raw = "   Instruction: find me a thing"
+        assert _normalize_webshop_instruction(raw) == "find me a thing"
+
+    def test_no_label_returns_trimmed(self):
+        assert _normalize_webshop_instruction("find me a thing  ") == "find me a thing"
+
+    def test_empty_string(self):
+        assert _normalize_webshop_instruction("") == ""
+
+
+class TestWebShopLabeledInstructionIntegration:
+    """End-to-end check that the adapter cleanly handles a WebShop-style
+    ``instruction_text`` value (``"Instruction: <goal>"``).
+
+    Under the real WebShop env, this is the shape the adapter receives.
+    The adapter must: (1) normalize to the pure goal, (2) surface a single
+    ``<goal>…</goal>`` tag in ``obs.task.text``, (3) strip the duplicated
+    header from inside ``<page>…</page>`` in ``obs.state.text``.
+    """
+
+    def test_reset_handles_prefixed_instruction_and_homepage_obs(self):
+        env_mock = MagicMock()
+        env_mock.reset.return_value = (
+            "WebShop\nInstruction: \nfind me a red shirt\n[button] Search [button_]\n",
+            None,
+        )
+        env_mock.state = {
+            "instruction_text": "Instruction: find me a red shirt",
+            "url": "http://x",
+        }
+        env_mock.text_to_clickable = {}
+
+        env = WebShopEnvironment(webshop_env=env_mock)
+        state, _ = env.reset(options={"task_index": 0})
+
+        task_text = state.observation.task.text
+        assert "<goal>find me a red shirt</goal>" in task_text
+
+        state_text = state.observation.state.text
+        assert "<goal>" not in state_text
+        assert "<page>" in state_text and "</page>" in state_text
+        page_block = state_text[state_text.index("<page>"): state_text.index("</page>") + len("</page>")]
+        assert "Instruction:" not in page_block
+        assert "find me a red shirt" not in page_block
+        assert state.hidden.instruction == "find me a red shirt"
+
+
+class TestClassifyWebShopCommand:
+    """Unit tests for ``_classify_webshop_command``.
+
+    Mirrors WebShop's own step() validity check
+    (``web_agent_text_env.py:99-112``): verb ∈ {search, click}, non-empty arg,
+    search requires a search bar, click target must be in text_to_clickable.
+    """
+
+    def test_valid_search_with_search_bar(self, mock_webshop_env):
+        mock_webshop_env.has_search_bar = True
+        assert _classify_webshop_command("search[red shoes]", mock_webshop_env) == "valid"
+
+    def test_valid_click_existing_target(self, mock_webshop_env):
+        mock_webshop_env.text_to_clickable = {"buy now": "btn", "search": "btn"}
+        assert _classify_webshop_command("click[Buy Now]", mock_webshop_env) == "valid"
+
+    def test_click_case_insensitive(self, mock_webshop_env):
+        """WebShop lowercases the click arg before key lookup."""
+        mock_webshop_env.text_to_clickable = {"buy now": "btn"}
+        assert _classify_webshop_command("click[BUY NOW]", mock_webshop_env) == "valid"
+
+    def test_unknown_verb(self, mock_webshop_env):
+        assert _classify_webshop_command("buy[now]", mock_webshop_env) == "unknown_verb"
+
+    def test_no_brackets_is_unknown_verb(self, mock_webshop_env):
+        assert _classify_webshop_command("foo", mock_webshop_env) == "unknown_verb"
+
+    def test_empty_search_arg(self, mock_webshop_env):
+        assert _classify_webshop_command("search[]", mock_webshop_env) == "empty_arg"
+
+    def test_whitespace_search_arg(self, mock_webshop_env):
+        assert _classify_webshop_command("search[   ]", mock_webshop_env) == "empty_arg"
+
+    def test_search_without_search_bar(self, mock_webshop_env):
+        mock_webshop_env.has_search_bar = False
+        assert _classify_webshop_command("search[red shoes]", mock_webshop_env) == "no_search_bar"
+
+    def test_click_target_not_on_page(self, mock_webshop_env):
+        mock_webshop_env.text_to_clickable = {"buy now": "btn"}
+        assert _classify_webshop_command("click[B00NOTAREALPRODUCT]", mock_webshop_env) == "target_missing"
+
+
+class TestWebShopSemanticInvalidAction:
+    """Tests that semantically invalid actions (verb/arg wrong, click target
+    missing, search without a search bar) flow through the same invalid-action
+    machinery as extraction failure.
+
+    Baseline today: adapter only flags extraction failure; semantically
+    invalid commands reach WebShop's step() which silently no-ops, so the
+    agent sees no feedback. These tests assert the new behavior.
+    """
+
+    @pytest.fixture
+    def env(self, mock_webshop_env):
+        # No answer_extractor: action.text is forwarded verbatim, so only the
+        # new semantic classifier decides validity.
+        return WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            answer_extractor=None,
+            invalid_action_text="[invalid action]",
+            invalid_action_observation="NOTICE: bad action.",
+            advance_on_invalid="__invalid_action_noop__",
+        )
+
+    def test_valid_search_no_notice(self, env):
+        state, _ = env.reset()
+        result = env.step(state, Action(text="search[red headphones]"))
+        assert result.next_state.metadata.info.get("invalid_action_format") is False
+        assert "NOTICE: bad action." not in result.next_state.observation.state.text
+
+    def test_valid_click_no_notice(self, env, mock_webshop_env):
+        state, _ = env.reset()
+        # Homepage has "search" clickable
+        result = env.step(state, Action(text="click[Search]"))
+        assert result.next_state.metadata.info.get("invalid_action_format") is False
+
+    def test_unknown_verb_flags_invalid(self, env):
+        state, _ = env.reset()
+        result = env.step(state, Action(text="buy[now]"))
+        assert result.next_state.metadata.info["invalid_action_format"] is True
+        assert "NOTICE: bad action." in result.next_state.observation.state.text
+
+    def test_no_brackets_flags_invalid(self, env):
+        state, _ = env.reset()
+        result = env.step(state, Action(text="foo"))
+        assert result.next_state.metadata.info["invalid_action_format"] is True
+
+    def test_empty_search_flags_invalid(self, env):
+        state, _ = env.reset()
+        result = env.step(state, Action(text="search[]"))
+        assert result.next_state.metadata.info["invalid_action_format"] is True
+
+    def test_click_target_missing_flags_invalid(self, env):
+        state, _ = env.reset()
+        result = env.step(state, Action(text="click[NONEXISTENT]"))
+        assert result.next_state.metadata.info["invalid_action_format"] is True
+        assert "NOTICE: bad action." in result.next_state.observation.state.text
+
+    def test_search_without_search_bar_flags_invalid(self, env, mock_webshop_env):
+        """After clicking a product, item page has no search bar."""
+        state, _ = env.reset()
+        r1 = env.step(state, Action(text="search[red headphones]"))
+        r2 = env.step(r1.next_state, Action(text="click[Product 1 - Red Headphones $45]"))
+        # Now on item page, no search bar
+        r3 = env.step(r2.next_state, Action(text="search[anything]"))
+        assert r3.next_state.metadata.info["invalid_action_format"] is True
+
+    def test_invalid_action_sends_advance_sentinel(self, env, mock_webshop_env):
+        """The sentinel (not the agent's bad command) is what reaches WebShop."""
+        state, _ = env.reset()
+        observed: list[str] = []
+        original_step = mock_webshop_env.step
+
+        def spy(action_str):
+            observed.append(action_str)
+            return original_step(action_str)
+
+        mock_webshop_env.step = spy
+        env.step(state, Action(text="click[NONEXISTENT]"))
+        assert observed == ["__invalid_action_noop__"]
+
+    def test_invalid_history_text_in_assistant_message(self, env):
+        """History assistant message stores the invalid_action_text sentinel."""
+        state, _ = env.reset()
+        result = env.step(state, Action(text="foo"))
+        messages = result.next_state.observation.messages
+        assistant_msgs = [
+            m for m in messages
+            if (m.get("role") if isinstance(m, dict) else m.role) == "assistant"
+        ]
+        assert assistant_msgs
+        last = assistant_msgs[-1]
+        content = last.get("content") if isinstance(last, dict) else last.content
+        assert content == "[invalid action]"
+
+    def test_extraction_failure_still_flags_invalid(self, mock_webshop_env):
+        """Regression: extraction-failure path still works alongside the new
+        semantic path (same end-state)."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            answer_extractor=SimpleTagExtractor(),
+            invalid_action_text="[invalid action]",
+            invalid_action_observation="NOTICE: bad action.",
+            advance_on_invalid="__invalid_action_noop__",
+        )
+        state, _ = env.reset()
+        # No <answer> tag at all → extractor returns None → invalid.
+        result = env.step(state, Action(text="here is some prose with no tag"))
+        assert result.next_state.metadata.info["invalid_action_format"] is True
+
+
+class TestWebShopGoalOnlyInTaskText:
+    """Goal never appears in ``obs.state.text`` — only in ``obs.task.text``.
+
+    ``state.text`` is ``<page>...</page>`` on every turn (plus the
+    invalid-action notice when applicable). The goal lives in
+    ``obs.task.text`` (per-episode static). Evaluator/ranking prompts in
+    value-bench opt in to prepend ``task.text`` at the top of user prompts
+    via the ``inject_task_text_in_prompts`` env-context flag; the adapter
+    itself is agnostic to that.
+    """
+
+    def test_turn_0_state_omits_goal(self, mock_webshop_env):
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset()
+        assert "<goal>" not in state.observation.state.text
+        assert "</goal>" not in state.observation.state.text
+
+    def test_turn_1_state_omits_goal(self, mock_webshop_env):
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset()
+        result = env.step(state, Action(text="search[red headphones]"))
+        assert "<goal>" not in result.next_state.observation.state.text
+        assert "</goal>" not in result.next_state.observation.state.text
+
+    def test_turn_2_state_omits_goal(self, mock_webshop_env):
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state0, _ = env.reset()
+        r1 = env.step(state0, Action(text="search[red headphones]"))
+        r2 = env.step(r1.next_state, Action(text="click[Product 1 - Red Headphones $45]"))
+        assert "<goal>" not in r2.next_state.observation.state.text
+
+    def test_invalid_action_turn_still_omits_goal(self, mock_webshop_env):
+        """Invalid-action notice appears in state.text but goal still does not."""
+        env = WebShopEnvironment(
+            webshop_env=mock_webshop_env,
+            answer_extractor=None,
+            invalid_action_observation="NOTICE",
+        )
+        state, _ = env.reset()
+        result = env.step(state, Action(text="click[NONEXISTENT]"))
+        text = result.next_state.observation.state.text
+        assert "NOTICE" in text
+        assert "<goal>" not in text
+
+    def test_task_text_still_carries_goal(self, mock_webshop_env):
+        """obs.task.text keeps the goal on every turn (stable, llenvs-style)."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state0, _ = env.reset()
+        r1 = env.step(state0, Action(text="search[red headphones]"))
+        assert "<goal>" in state0.observation.task.text
+        assert "<goal>" in r1.next_state.observation.task.text
+
+    def test_task_text_is_goal_only(self, mock_webshop_env):
+        """obs.task.text is strictly ``<goal>…</goal>`` — no action hint, no
+        other content. The system prompt covers action grammar; duplicating
+        it in task.text would double-print once value-bench injects task
+        text at the top of evaluator prompts."""
+        env = WebShopEnvironment(webshop_env=mock_webshop_env)
+        state, _ = env.reset()
+        task_text = state.observation.task.text
+        assert "Actions:" not in task_text
+        assert "search[" not in task_text
+        assert task_text.startswith("<goal>")
+        assert task_text.rstrip().endswith("</goal>")
