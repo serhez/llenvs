@@ -1160,6 +1160,19 @@ class OpenAppsAdapter:
             task_obj: Task = hydra.utils.instantiate(
                 all_tasks_cfg[task_name], _convert_="all"
             )
+            # Patch: for AddEventTask, normalise the `invitees` field to
+            # the comma-separated string format the Calendar backend
+            # actually stores.  Without this, the task's target state
+            # carries ``invitees=["Einstein"]`` (from the yaml list)
+            # while the saved event stores ``invitees="Einstein"`` (the
+            # raw textbox contents), so DeepDiff in
+            # ``AppStateComparison.compare`` reports a mismatch and
+            # ``check_if_task_is_complete`` always returns False —
+            # making the task unsolvable through the UI.
+            if isinstance(task_obj, AddEventTask) and isinstance(
+                task_obj.invitees, list
+            ):
+                task_obj.invitees = ", ".join(task_obj.invitees)
             register_tasks_with_browsergym(tasks=[task_obj])
             task_id = task_obj.task_id
 
