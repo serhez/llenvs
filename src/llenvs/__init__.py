@@ -4,7 +4,7 @@ Key capabilities:
 - State history & rollback (checkpoint and branch trajectories)
 - Step-level rewards (per-turn signals, not just outcomes)
 - Partial generation control (stop mid-response for reward probing)
-- Multiple inference backends (vLLM, OpenAI, Anthropic, OpenRouter)
+- Multiple inference backends (vLLM, OpenAI, Anthropic, OpenRouter, Codex CLI)
 """
 
 from llenvs.adapters.iterative import IterativeEnvironment

@@ -26,6 +26,7 @@ sessions. Repeated `close()` calls are safe.
 | OpenAI | `openai` | Logprobs, batching (concurrent), streaming, function calling, vision |
 | Anthropic | `anthropic` | Batching (concurrent), prefix continuation (prefill), streaming, vision |
 | OpenRouter | `openai` | Batching (concurrent), access to multiple models, vision |
+| Codex CLI | `codex` | Chat, batching (subprocess concurrency), isolated temp workspace, read-only sandbox |
 
 ## vLLM (Local Inference)
 
@@ -240,6 +241,39 @@ backend = OpenRouterBackend(
     max_concurrency=32,  # Max concurrent API requests (default: 64)
 )
 ```
+
+## Codex CLI
+
+```python
+from llenvs.inference.backends import CodexCLIBackend
+
+backend = CodexCLIBackend(
+    model="codex-mini-latest",
+    max_concurrency=4,  # Recommended: keep this small; each request spawns a CLI process
+    timeout=600.0,
+    profile="default",
+)
+```
+
+### Notes
+
+- Runs `codex exec` in a fresh temporary directory for every request.
+- Locks Codex to `--sandbox read-only` and disables session persistence with `--ephemeral`.
+- Supports chat generation only. Native tool calling, vision, logprobs, prefix continuation, and full scoring are not available.
+- `SamplingParams.max_tokens` is accepted but ignored because `codex exec` does not expose a direct equivalent.
+- Use the backend constructor's `config_overrides` argument to pass Codex-specific `-c key=value` overrides when your local Codex CLI/config supports them.
+
+### Capabilities
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| logprobs | ✗ | Not exposed by the CLI |
+| prefix_continuation | ✗ | Stateless transcript replay only |
+| batching | ✓ | Parallel subprocess calls |
+| streaming | ✗ | Returns one final assistant message |
+| chat | ✓ | Transcript rendered into each request |
+| function_calling | ✗ | Native tool calls unsupported |
+| vision | ✗ | Text-only |
 
 ## Sampling Parameters
 

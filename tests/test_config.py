@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from llenvs.core.config import (
     EnvironmentConfig,
@@ -378,6 +379,29 @@ class TestCreateSamplingParams:
 
         assert params.temperature == 0.7
         assert params.extra == {"repetition_penalty": 1.2, "num_beams": 4}
+
+
+class TestBackendFactory:
+    """Tests for backend factory dispatch."""
+
+    def test_create_codex_backend(self):
+        from llenvs.core.config import BackendFactory
+
+        with patch("llenvs.inference.backends.codex_cli.CodexCLIBackend") as mock_backend:
+            BackendFactory.create(
+                ModelConfig(
+                    backend="codex",
+                    model="codex-mini-latest",
+                    max_concurrency=4,
+                    params={"timeout": 123.0},
+                )
+            )
+
+        mock_backend.assert_called_once_with(
+            model="codex-mini-latest",
+            max_concurrency=4,
+            timeout=123.0,
+        )
 
 
 class TestExtractorsChainConfig:
