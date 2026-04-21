@@ -314,6 +314,12 @@ def make_v1_thinking_processor_class() -> type | None:
     registered at ``LLM()`` init time. Per-request budgets are passed via
     ``SamplingParams.extra_args["thinking_budget"]``.
 
+    The returned class has ``__module__`` and ``__qualname__`` rewritten to
+    match the module-level ``V1ThinkingBudgetProcessor`` attribute, so pickle
+    can resolve it by qualified name. This is required for vLLM's spawn-based
+    multiprocessing, which pickles ``logits_processors`` to the EngineCore
+    subprocess.
+
     Returns:
         The processor class, or ``None`` if the vLLM V1 API is not available
         (e.g. vLLM <0.8 or not installed).
@@ -433,4 +439,16 @@ def make_v1_thinking_processor_class() -> type | None:
             )
             return proc.vllm_processor
 
+    # Rewrite qualified name so pickle can resolve the class via
+    # ``getattr(llenvs.inference.thinking, "V1ThinkingBudgetProcessor")``
+    # rather than the closure-local path it would otherwise carry.
+    V1ThinkingBudgetProcessor.__module__ = __name__
+    V1ThinkingBudgetProcessor.__qualname__ = "V1ThinkingBudgetProcessor"
     return V1ThinkingBudgetProcessor
+
+
+# Eagerly create the class at module import time when vLLM is available. This
+# is what makes pickle work across process boundaries: both parent and child
+# (spawn) see ``V1ThinkingBudgetProcessor`` as a real module-level attribute.
+# ``None`` when vLLM V1 isn't installed — same as the factory return value.
+V1ThinkingBudgetProcessor = make_v1_thinking_processor_class()

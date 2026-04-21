@@ -303,6 +303,20 @@ class TestV1ProcessorClass:
         cls = make_v1_thinking_processor_class()
         assert cls is None
 
+    def test_class_has_pickle_compatible_qualname(self):
+        """V1ThinkingBudgetProcessor carries a qualname pickle can resolve.
+
+        vLLM's spawn-based multiprocessing pickles ``logits_processors`` to
+        send them to the EngineCore subprocess. Pickle serializes classes by
+        ``(__module__, __qualname__)``, so a closure-local qualname like
+        ``make_v1_thinking_processor_class.<locals>.V1ThinkingBudgetProcessor``
+        would fail. The factory must rewrite these to match the module-level
+        attribute.
+        """
+        cls, _ = self._make_v1_class()
+        assert cls.__qualname__ == "V1ThinkingBudgetProcessor"
+        assert cls.__module__ == "llenvs.inference.thinking"
+
     def test_validate_params_accepts_valid(self):
         """validate_params accepts valid thinking_budget int."""
         cls, _ = self._make_v1_class()
