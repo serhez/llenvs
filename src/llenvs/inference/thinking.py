@@ -307,22 +307,12 @@ class ThinkingBudgetProcessor:
         return 0
 
 
-def make_v1_thinking_processor_class() -> type | None:
-    """Create a vLLM V1-compatible thinking budget processor class.
+def _build_v1_thinking_processor_class() -> type | None:
+    """Construct the V1 processor class (or ``None`` when vLLM is missing).
 
-    Returns a class subclassing ``AdapterLogitsProcessor`` that can be
-    registered at ``LLM()`` init time. Per-request budgets are passed via
-    ``SamplingParams.extra_args["thinking_budget"]``.
-
-    The returned class has ``__module__`` and ``__qualname__`` rewritten to
-    match the module-level ``V1ThinkingBudgetProcessor`` attribute, so pickle
-    can resolve it by qualified name. This is required for vLLM's spawn-based
-    multiprocessing, which pickles ``logits_processors`` to the EngineCore
-    subprocess.
-
-    Returns:
-        The processor class, or ``None`` if the vLLM V1 API is not available
-        (e.g. vLLM <0.8 or not installed).
+    Factored out from :func:`make_v1_thinking_processor_class` so tests can
+    build a fresh class against a mocked ``AdapterLogitsProcessor`` base
+    without disturbing the cached module-level attribute that pickle relies on.
     """
     try:
         from vllm.v1.sample.logits_processor import AdapterLogitsProcessor
@@ -447,8 +437,23 @@ def make_v1_thinking_processor_class() -> type | None:
     return V1ThinkingBudgetProcessor
 
 
-# Eagerly create the class at module import time when vLLM is available. This
-# is what makes pickle work across process boundaries: both parent and child
-# (spawn) see ``V1ThinkingBudgetProcessor`` as a real module-level attribute.
-# ``None`` when vLLM V1 isn't installed — same as the factory return value.
-V1ThinkingBudgetProcessor = make_v1_thinking_processor_class()
+# Build once at module load. Both parent and spawn-subprocess must see the
+# same module-level ``V1ThinkingBudgetProcessor`` attribute for pickle's
+# identity check to pass when vLLM ships logits processors across processes.
+V1ThinkingBudgetProcessor = _build_v1_thinking_processor_class()
+
+
+def make_v1_thinking_processor_class() -> type | None:
+    """Return the V1-compatible thinking budget processor class.
+
+    Returns the cached module-level :data:`V1ThinkingBudgetProcessor` (or
+    ``None`` if the vLLM V1 API wasn't importable at module load). Returning
+    the cached object — rather than building a fresh class per call — is
+    required so that the class pickle sees in ``logits_processors`` is the
+    same object as ``llenvs.inference.thinking.V1ThinkingBudgetProcessor``,
+    which is how pickle resolves it across spawn-subprocess boundaries.
+
+    Returns:
+        The processor class, or ``None`` if vLLM V1 is not available.
+    """
+    return V1ThinkingBudgetProcessor

@@ -281,9 +281,9 @@ class TestV1ProcessorClass:
         mock_module.AdapterLogitsProcessor = MockAdapterLogitsProcessor
         sys.modules["vllm.v1.sample.logits_processor"] = mock_module
 
-        from llenvs.inference.thinking import make_v1_thinking_processor_class
+        from llenvs.inference.thinking import _build_v1_thinking_processor_class
 
-        cls = make_v1_thinking_processor_class()
+        cls = _build_v1_thinking_processor_class()
 
         # Clean up
         del sys.modules["vllm.v1.sample.logits_processor"]
@@ -310,12 +310,28 @@ class TestV1ProcessorClass:
         send them to the EngineCore subprocess. Pickle serializes classes by
         ``(__module__, __qualname__)``, so a closure-local qualname like
         ``make_v1_thinking_processor_class.<locals>.V1ThinkingBudgetProcessor``
-        would fail. The factory must rewrite these to match the module-level
-        attribute.
+        would fail. The build helper must rewrite these to match the
+        module-level attribute.
         """
         cls, _ = self._make_v1_class()
         assert cls.__qualname__ == "V1ThinkingBudgetProcessor"
         assert cls.__module__ == "llenvs.inference.thinking"
+
+    def test_factory_returns_cached_module_attribute(self):
+        """Public factory returns the module-level cached class.
+
+        Pickle's ``save_global`` verifies that the class being pickled is the
+        same object as ``getattr(module, qualname)``. If the factory returned
+        a fresh class per call, that identity check would fail with
+        ``"not the same object as ..."`` when vLLM pickles logits processors
+        across a spawn subprocess.
+        """
+        from llenvs.inference import thinking
+
+        cls1 = thinking.make_v1_thinking_processor_class()
+        cls2 = thinking.make_v1_thinking_processor_class()
+        assert cls1 is cls2
+        assert cls1 is thinking.V1ThinkingBudgetProcessor
 
     def test_validate_params_accepts_valid(self):
         """validate_params accepts valid thinking_budget int."""
@@ -825,9 +841,9 @@ class TestV1EarlyStopping:
         mock_module.AdapterLogitsProcessor = MockAdapterLogitsProcessor
         sys.modules["vllm.v1.sample.logits_processor"] = mock_module
 
-        from llenvs.inference.thinking import make_v1_thinking_processor_class
+        from llenvs.inference.thinking import _build_v1_thinking_processor_class
 
-        cls = make_v1_thinking_processor_class()
+        cls = _build_v1_thinking_processor_class()
         del sys.modules["vllm.v1.sample.logits_processor"]
         return cls
 
