@@ -232,7 +232,9 @@ class _BrowserGymProxy:
     own Playwright — giving true concurrent browser execution.
     """
 
-    _CALL_TIMEOUT = 300  # seconds per operation
+    _CALL_TIMEOUT = 60  # seconds per operation; trajectories that hang
+    # longer (e.g. because an epsilon-random click landed on a broken
+    # page) abort quickly instead of burning 5 min of wall clock each.
 
     def __init__(self, env_factory: Any) -> None:
         self._cmd_q: queue.Queue = queue.Queue()
@@ -362,6 +364,7 @@ class OpenAppsEnvironment:
         omit_axtree_text: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         initial_task_index: int = 0,
+        server: "_OpenAppsServer | None" = None,
     ) -> None:
         """Initialize an OpenApps environment over a collection of tasks.
 
@@ -412,6 +415,12 @@ class OpenAppsEnvironment:
         self._use_screenshot = use_screenshot
         self._screenshot_with_som = screenshot_with_som
         self._omit_axtree_text = omit_axtree_text
+        # Holding a reference to the server keeps it alive as long as
+        # the env is alive. When the env is GC'd (e.g. between
+        # trajectory-collection batches), the server's __del__ fires and
+        # the FastHTML subprocess is stopped — so the env_factory pattern
+        # that discards adapters between calls doesn't leak subprocesses.
+        self._server_ref = server
 
         self._native_rewards: tuple[RewardFunction, ...] = (OpenAppsReward(),)
         self._extra_rewards = extra_rewards
@@ -429,6 +438,33 @@ class OpenAppsEnvironment:
         self._envs_by_name: dict[str, tuple[Any, Any]] = {
             self._task_name: (initial_task, initial_env),
         }
+
+    def close(self) -> None:
+        """Release browser + server resources.
+
+        Called by the runner at the end of each batch. Closes every
+        cached BrowserGym proxy (each owns a Playwright/Chromium
+        instance and a daemon thread) and stops the OpenApps FastHTML
+        server if we own it. Idempotent.
+
+        Without this, per-batch ``env_factory()`` calls leak both the
+        browser context AND the FastHTML subprocess — over long runs the
+        machine accumulates hundreds of orphans which port-starves new
+        spawns and causes BrowserGym ``step`` calls to hang for the
+        full proxy timeout.
+        """
+        for _task, proxy in self._envs_by_name.values():
+            try:
+                proxy.close()
+            except Exception:
+                pass
+        self._envs_by_name.clear()
+        if self._server_ref is not None:
+            try:
+                self._server_ref.stop()
+            except Exception:
+                pass
+            self._server_ref = None
 
     def __len__(self) -> int:
         return len(self._task_names)
@@ -945,6 +981,21 @@ class _OpenAppsServer:
                 self._process.wait()
             self._process = None
 
+    def __del__(self) -> None:
+        """Stop the subprocess when the last reference is dropped.
+
+        Ties the FastHTML process lifetime to the Python object's
+        reference graph — as long as some OpenAppsEnvironment holds a
+        reference to this server, it stays running. When the env is
+        discarded (e.g. between trajectory-collection batches), the
+        server shuts down cleanly instead of leaking.
+        """
+        try:
+            self.stop()
+        except Exception:
+            # __del__ must never raise
+            pass
+
     @property
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -988,6 +1039,12 @@ class OpenAppsAdapter:
         self._open_apps_path = open_apps_path
         self._server: _OpenAppsServer | None = None
         self._server_lock = threading.Lock()
+        # Server lifetime is tied to whatever holds a reference to the
+        # ``_OpenAppsServer`` object — typically the
+        # ``OpenAppsEnvironment`` returned from ``get_environment``. The
+        # server's own ``__del__`` calls ``stop()`` when its last
+        # reference is dropped, so discarding an env between collection
+        # batches also stops its server.
 
     @property
     def name(self) -> str:
@@ -1123,7 +1180,11 @@ class OpenAppsAdapter:
         import hydra
         from omegaconf import OmegaConf
 
-        # Start server if needed
+        # Start server if needed. The returned env holds a reference to
+        # this server object, so the FastHTML subprocess stays alive for
+        # the env's lifetime and is cleaned up (via
+        # ``_OpenAppsServer.__del__``) when the env is discarded.
+        server: "_OpenAppsServer | None" = None
         if base_url is None:
             server = self._ensure_server(config_overrides)
             base_url = server.url
@@ -1206,6 +1267,7 @@ class OpenAppsAdapter:
             omit_axtree_text=omit_axtree_text,
             extra_rewards=extra_rewards,
             initial_task_index=initial_task_index,
+            server=server,
         )
 
     def get_default_system_prompt(self, name: str) -> str | None:
