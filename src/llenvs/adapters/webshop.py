@@ -7,9 +7,8 @@ webpages using search and click actions to find and purchase products.
 Reference: https://github.com/princeton-nlp/WebShop
 """
 
-import pickle
+import re
 import uuid
-import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,7 +31,6 @@ class WebShopHidden:
         last_action: The last action taken (for context).
         available_actions: Currently available clickable elements.
         trajectory: Accumulated action history for replay-based restore.
-        gym_snapshot: Pickled gym env state for snapshot-based restore.
     """
 
     instruction: str
@@ -43,7 +41,6 @@ class WebShopHidden:
     last_action: str | None
     available_actions: tuple[str, ...]
     trajectory: tuple[str, ...] = ()
-    gym_snapshot: bytes | None = None
 
 
 @dataclass
@@ -83,7 +80,7 @@ class WebShopReward:
 
 
 DEFAULT_WEBSHOP_PROMPTS: dict[str, str] = {
-    "instruction_prefix": "Instruction: {instruction}",
+    "instruction_prefix": "<goal>{instruction}</goal>",
     "action_hint": "Actions: search[keywords] or click[element]",
 }
 
@@ -94,6 +91,157 @@ DEFAULT_WEBSHOP_INVALID_ACTION_OBSERVATION = (
     "Provide exactly one action in the required format and use a valid action "
     "described above."
 )
+
+
+def _strip_webshop_instruction_prefix(raw_obs: str, instruction: str) -> str:
+    """Remove WebShop's own "Instruction:…<text>…" header from raw_obs.
+
+    WebShop's text_rich renderer emits an ``Instruction:[ \\t]*\\n<text>\\n``
+    block on most pages (homepage additionally prefixed by ``WebShop\\n``
+    and uses a trailing space in the label). text mode uses a single-line
+    ``Instruction: [SEP] <text> [SEP] `` prefix. The adapter surfaces the
+    instruction once via ``<goal>…</goal>`` in task text and doesn't want
+    it duplicated inside ``<page>…</page>``. Returns raw_obs unchanged if
+    no matching block is found.
+    """
+    if not instruction:
+        return raw_obs
+    text_mode_prefix = f"Instruction: [SEP] {instruction} [SEP] "
+    if raw_obs.startswith(text_mode_prefix):
+        return raw_obs[len(text_mode_prefix):]
+    pattern = re.compile(rf"Instruction:[ \t]*\n{re.escape(instruction)}\n")
+    return pattern.sub("", raw_obs, count=1)
+
+
+def _classify_webshop_command(cmd: str, env: Any) -> str:
+    """Classify a parsed WebShop command against the current page's validity.
+
+    Mirrors WebShop's step() validity check (``web_agent_text_env.py:99-112``):
+    verb ∈ {search, click}, non-empty arg, search requires a search bar,
+    click target must be in ``env.text_to_clickable`` (case-insensitive).
+
+    Returns one of: ``"valid"``, ``"unknown_verb"``, ``"empty_arg"``,
+    ``"no_search_bar"``, ``"target_missing"``. A ``"valid"`` result promises
+    the command will not be silently no-op'd by WebShop's step().
+    """
+    try:
+        # WebShop's engine exports parse_action(action) -> (verb, arg).
+        from web_agent_site.engine.engine import parse_action as _parse
+    except ImportError:
+        _parse = None
+
+    if _parse is not None:
+        verb, arg = _parse(cmd)
+    else:
+        # Fallback parser matching the WebShop regex: '(.+)\[(.+)\]'. Kept so
+        # tests using MockWebShopEnv don't require the upstream repo to be
+        # importable.
+        m = re.match(r"(.+)\[(.*)\]", cmd)
+        if m is None:
+            verb, arg = cmd, None
+        else:
+            verb, arg = m.group(1), m.group(2)
+
+    if verb not in ("search", "click") or arg is None:
+        return "unknown_verb"
+    if not arg.strip():
+        return "empty_arg"
+
+    avail = env.get_available_actions()
+    has_search_bar = bool(avail.get("has_search_bar", False))
+
+    if verb == "search":
+        return "valid" if has_search_bar else "no_search_bar"
+
+    # verb == "click"
+    clickables = {k.lower() for k in env.text_to_clickable.keys()}
+    return "valid" if arg.lower() in clickables else "target_missing"
+
+
+def _normalize_webshop_instruction(instruction: str) -> str:
+    """Strip WebShop's "Instruction:" label from the returned instruction.
+
+    WebShop's ``get_instruction_text()`` extracts ``<h4>Instruction:<br>
+    {text}</h4>`` via BeautifulSoup's ``.text``, which concatenates the
+    ``"Instruction:"`` label with the actual goal. Strip the label so the
+    stored instruction is the pure goal text.
+    """
+    return re.sub(r"^\s*Instruction:\s*", "", instruction).strip()
+
+
+_TERMINAL_NOISE_SECTIONS = ("Target", "Reward")
+
+
+def _filter_terminal_page(raw_obs: str) -> str:
+    """Strip noise from WebShop's terminal-state observation dump.
+
+    WebShop's text_rich mode emits a full internal-state summary on terminal
+    steps: an MTurk crowd-sourcing artifact (``Your code: ...``), ``Target``
+    block that duplicates the goal already surfaced in ``obs.task.text``, and
+    a ``Reward`` / ``Reward Details`` block whose numeric score would leak
+    ground truth to Q-value evaluators on the Buy-Now transition (the
+    reward equals Q(s, Buy Now) at terminal). Plus ``None``-valued rows
+    scattered throughout.
+
+    Keep only the episode-complete signal (``Thank you for shopping with
+    us!``) and the ``Purchased`` section with its non-None fields (asin,
+    options, plus anything else WebShop populates).
+    """
+    lines = raw_obs.split("\n")
+    filtered: list[str] = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+
+        # MTurk block: "Your code: \nNone\n (Paste it in your MTurk
+        # interface.)" — three lines starting with "Your code:".
+        if stripped.startswith("Your code:"):
+            i += 3
+            continue
+
+        # Drop entire "Target" and "Reward" sections — both are noise for
+        # evaluation. Skip until the next top-level section header or EOF.
+        if stripped in _TERMINAL_NOISE_SECTIONS:
+            i += 1
+            while i < n and lines[i].strip() not in (
+                *_TERMINAL_NOISE_SECTIONS,
+                "Reward Details",
+            ):
+                i += 1
+            continue
+
+        # "Reward Details" is always followed by one value line (None or a
+        # breakdown). Drop both.
+        if stripped == "Reward Details":
+            i += 2
+            continue
+
+        # "<label>\nNone" pairs anywhere (e.g. attrs/None inside Purchased).
+        if (
+            stripped
+            and i + 1 < n
+            and lines[i + 1].strip() == "None"
+        ):
+            i += 2
+            continue
+
+        filtered.append(lines[i])
+        i += 1
+
+    return "\n".join(filtered).rstrip()
+
+
+def _wrap_page(raw_obs: str, instruction: str, *, is_terminal: bool = False) -> str:
+    """Strip WebShop's embedded instruction header and wrap in <page> tags.
+
+    When ``is_terminal`` is True, also run ``_filter_terminal_page`` to strip
+    WebShop's noisy terminal-state dump (see that helper's docstring).
+    """
+    stripped = _strip_webshop_instruction_prefix(raw_obs, instruction).rstrip()
+    if is_terminal:
+        stripped = _filter_terminal_page(stripped)
+    return f"<page>\n{stripped}\n</page>"
 
 
 class WebShopEnvironment:
@@ -133,7 +281,6 @@ class WebShopEnvironment:
         include_instruction_in_obs: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
-        state_capture_mode: str | None = None,
         num_tasks: int | None = None,
         pure_step: bool = False,
         answer_extractor: AnswerExtractor | None = None,
@@ -155,12 +302,12 @@ class WebShopEnvironment:
             extra_rewards: Additional reward functions appended after native rewards.
             prompts: Override default prompt components. Keys:
                 instruction_prefix, step_format, action_hint.
-            state_capture_mode: Controls gym env snapshot capture.
-                None (default): no snapshots, trajectory-only.
-                "snapshot": pickle gym env after each step for fast restore.
             num_tasks: Number of tasks available. Required for __len__.
-            pure_step: When True, step() saves/restores gym env state
-                via pickle, enabling branching from arbitrary states.
+            pure_step: When True, step() replays the trajectory on the gym
+                env before executing, enabling branching from arbitrary
+                states. WebShop's gym env is not picklable (Cython
+                __cinit__ in pyjnius/pyserini) so replay is the only
+                mechanism — expect O(N) step cost.
             answer_extractor: Extractor applied to raw action text before
                 sending to WebShop. Strips reasoning tokens, etc.
             invalid_action_text: Assistant history text stored when no
@@ -180,7 +327,6 @@ class WebShopEnvironment:
         self._prompts = {**DEFAULT_WEBSHOP_PROMPTS}
         if prompts:
             self._prompts.update(prompts)
-        self._state_capture_mode = state_capture_mode
         self._num_tasks = num_tasks
         self._pure_step = pure_step
         self._answer_extractor = answer_extractor
@@ -257,10 +403,13 @@ class WebShopEnvironment:
         """
         actions: list[str] = []
 
-        # In text_rich mode, clickables are tagged with [button] or similar
-        # Also check the environment's text_to_clickable mapping
-        if hasattr(self._env, "text_to_clickable"):
-            actions.extend(self._env.text_to_clickable.keys())
+        # In text_rich mode, clickables are tagged with [button] or similar.
+        # Also check the environment's text_to_clickable mapping — the attr
+        # exists but is None until the first page is rendered, so hasattr()
+        # alone isn't enough to guard the .keys() call.
+        text_to_clickable = getattr(self._env, "text_to_clickable", None)
+        if text_to_clickable is not None:
+            actions.extend(text_to_clickable.keys())
 
         # Search is always available
         if "search" not in [a.lower() for a in actions]:
@@ -268,16 +417,19 @@ class WebShopEnvironment:
 
         return tuple(actions)
 
-    def _build_observation_prompt(self, raw_obs: str, instruction: str, step: int) -> str:
+    def _build_observation_prompt(
+        self,
+        raw_obs: str,
+        instruction: str,
+        step: int,
+        invalid_action_notice: str | None = None,
+        is_terminal: bool = False,
+    ) -> str:
         """Build the full observation prompt for the model.
 
-        Args:
-            raw_obs: Raw observation from WebShop.
-            instruction: The shopping instruction.
-            step: Current step number.
-
-        Returns:
-            Formatted observation string.
+        Layout: ``<goal>…</goal>`` (optional), the invalid-action notice if
+        any, ``<page>…</page>`` with WebShop's own duplicated instruction
+        header stripped, and the static action hint.
         """
         parts = []
 
@@ -286,7 +438,11 @@ class WebShopEnvironment:
             parts.append(prefix.format(instruction=instruction))
             parts.append("")
 
-        parts.append(raw_obs.rstrip())
+        if invalid_action_notice:
+            parts.append(invalid_action_notice)
+            parts.append("")
+
+        parts.append(_wrap_page(raw_obs, instruction, is_terminal=is_terminal))
 
         hint = self._prompts.get("action_hint", "")
         if hint:
@@ -332,6 +488,7 @@ class WebShopEnvironment:
             instruction = self._env.state.get("instruction_text", "")
         elif hasattr(self._env, "instruction_text"):
             instruction = self._env.instruction_text
+        instruction = _normalize_webshop_instruction(instruction)
 
         self._current_instruction = instruction
 
@@ -341,19 +498,10 @@ class WebShopEnvironment:
         # Build observation
         obs_prompt = self._build_observation_prompt(raw_obs, instruction, 0)
 
-        # Task = static instruction + action hint; State = dynamic step content
-        task_parts = []
-        prefix = self._prompts["instruction_prefix"]
-        task_parts.append(prefix.format(instruction=instruction))
-        hint = self._prompts.get("action_hint", "")
-        if hint:
-            task_parts.append(hint)
-        task_text = "\n".join(task_parts)
-
-        state_text = raw_obs
-
-        # Capture gym env snapshot for pure_step
-        gym_snapshot = _capture_gym_snapshot(self._env) if self._pure_step else None
+        # Task = static <goal>…</goal> for the whole episode.
+        # State = dynamic page content, same shape on every turn.
+        task_text = self._prompts["instruction_prefix"].format(instruction=instruction)
+        state_text = _wrap_page(raw_obs, instruction)
 
         hidden = WebShopHidden(
             instruction=instruction,
@@ -363,7 +511,6 @@ class WebShopEnvironment:
             episode_step=0,
             last_action=None,
             available_actions=available,
-            gym_snapshot=gym_snapshot,
         )
 
         observation = Observation(
@@ -468,9 +615,29 @@ class WebShopEnvironment:
         else:
             cmd_for_env = extracted_cmd or action_text
 
-        # Restore gym env from snapshot for pure_step
+        # For pure_step, replay the trajectory on a fresh gym env to reach
+        # `state` before executing this step. WebShop's env isn't picklable,
+        # so replay (O(N)) is the only mechanism.
         if self._pure_step:
-            self._env = pickle.loads(state.hidden.gym_snapshot)
+            reset_kwargs = (
+                {"session": state.hidden.session_id}
+                if state.hidden.session_id is not None
+                else {}
+            )
+            self._env.reset(**reset_kwargs)
+            for past_action in state.hidden.trajectory:
+                self._env.step(past_action)
+
+        # Semantic validation: WebShop silently no-ops unknown verbs, empty
+        # args, searches without a search bar, and clicks on targets that
+        # aren't on the current page. Classify here so the adapter can
+        # surface meta-feedback via invalid_action_text/observation instead.
+        # Skipped if the extraction layer already flagged the turn.
+        if not invalid_action_format and cmd_for_env is not None:
+            classification = _classify_webshop_command(cmd_for_env, self._env)
+            if classification != "valid":
+                invalid_action_format = True
+                cmd_for_env = self._advance_on_invalid
 
         if cmd_for_env is not None:
             # Step WebShop environment
@@ -484,22 +651,26 @@ class WebShopEnvironment:
         # Extract available actions from new observation
         available = self._extract_available_actions(raw_obs)
 
-        # Build next observation
+        # Build next observation. Page content is wrapped in <page> tags;
+        # the invalid-action notice (if any) is rendered outside the page
+        # block so it reads as our meta-feedback, not WebShop's page output.
         next_step = state.hidden.episode_step + 1
-        obs_text = (
-            self._combine_invalid_observation(raw_obs)
-            if invalid_action_format
-            else raw_obs
+        notice = (
+            self._invalid_action_notice() if invalid_action_format else None
         )
-        obs_prompt = self._build_observation_prompt(obs_text, state.hidden.instruction, next_step)
+        page_block = _wrap_page(
+            raw_obs, state.hidden.instruction, is_terminal=done,
+        )
+        obs_prompt = self._build_observation_prompt(
+            raw_obs,
+            state.hidden.instruction,
+            next_step,
+            invalid_action_notice=notice,
+            is_terminal=done,
+        )
 
         # Check truncation
         truncated = next_step >= self._max_steps and not done
-
-        # Capture gym env snapshot if enabled or pure_step
-        gym_snapshot: bytes | None = None
-        if self._pure_step or self._state_capture_mode == "snapshot":
-            gym_snapshot = _capture_gym_snapshot(self._env)
 
         new_hidden = WebShopHidden(
             instruction=state.hidden.instruction,
@@ -514,10 +685,9 @@ class WebShopEnvironment:
                 if cmd_for_env is not None
                 else state.hidden.trajectory
             ),
-            gym_snapshot=gym_snapshot,
         )
 
-        state_text = obs_text
+        state_text = f"{notice}\n\n{page_block}" if notice else page_block
 
         new_messages = tuple(state.observation.messages) + (
             {
@@ -597,29 +767,14 @@ class WebShopEnvironment:
         return SignalBundle(signals=tuple(signals))
 
 
-def _capture_gym_snapshot(gym_env: Any) -> bytes | None:
-    """Pickle the gym env for later restoration.
-
-    Returns None and warns if the gym env is not picklable.
-    """
-    try:
-        return pickle.dumps(gym_env)
-    except (pickle.PicklingError, TypeError, AttributeError) as e:
-        warnings.warn(
-            f"WebShop gym env is not picklable ({e}); "
-            "snapshot capture disabled, falling back to replay-only restore",
-            stacklevel=3,
-        )
-        return None
-
-
 def webshop_restore(
     env: WebShopEnvironment,
     state: State[WebShopHidden],
 ) -> State[WebShopHidden]:
-    """Restore a WebShop env to a saved state.
+    """Restore a WebShop env to a saved state via action replay.
 
-    Uses snapshot if available (O(1)), falls back to action replay (O(N)).
+    WebShop's gym env is not picklable, so this is the only mechanism
+    available — O(N) in the trajectory length.
 
     Args:
         env: A fresh WebShopEnvironment instance (from env_factory).
@@ -631,38 +786,7 @@ def webshop_restore(
     Raises:
         ValueError: If instruction at task_index doesn't match the saved state.
     """
-    if state.hidden.gym_snapshot is not None:
-        return _restore_from_snapshot(env, state)
     return _restore_from_replay(env, state)
-
-
-def _restore_from_snapshot(
-    env: WebShopEnvironment,
-    state: State[WebShopHidden],
-) -> State[WebShopHidden]:
-    """Restore by loading a pickled gym env snapshot."""
-    # Reset to initialize shared state (product catalog, search index)
-    current, _ = env.reset(
-        options={
-            "task_index": state.hidden.task_index,
-            "session": state.hidden.session_id,
-            "episode_id": state.metadata.episode_id,
-        }
-    )
-
-    # Validate instruction identity
-    if state.hidden.task_name and current.hidden.task_name:
-        if state.hidden.task_name != current.hidden.task_name:
-            raise ValueError(
-                f"Instruction mismatch at task_index {state.hidden.task_index}: "
-                f"expected {state.hidden.task_name!r}, "
-                f"got {current.hidden.task_name!r}"
-            )
-
-    # Replace gym env with snapshot
-    env._env = pickle.loads(state.hidden.gym_snapshot)
-    env._state_tracker.track(state)
-    return state
 
 
 def _restore_from_replay(
@@ -805,10 +929,14 @@ class WebShopAdapter:
                 f"Invalid observation_mode: {observation_mode}. Must be one of: {valid_modes}"
             )
 
-        # Create WebShop gym environment
+        # Create WebShop gym environment. WebAgentTextEnv predates gym 0.26's
+        # requirement that envs declare `action_space`, so the PassiveEnvChecker
+        # that gym.make wraps envs in by default trips an AssertionError on
+        # construction. Bypass it; WebShop defines its own action parser.
         env_kwargs = {
             "observation_mode": observation_mode,
             "human_goals": human_goals,
+            "disable_env_checker": True,
             **kwargs,
         }
         if num_products is not None:

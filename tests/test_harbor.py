@@ -2594,7 +2594,11 @@ class TestHarborEnvironment:
         # No reward should be set
         assert result.next_state.metadata.info.get("reward") is None
 
-    def test_truncation_verifier_timeout_returns_zero_reward(self, monkeypatch: pytest.MonkeyPatch):
+    def test_truncation_verifier_timeout_returns_zero_reward(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ):
         import llenvs.adapters.harbor as harbor_module
 
         class NeverVerifier:
@@ -2623,15 +2627,20 @@ class TestHarborEnvironment:
                 close = getattr(coro, "close", None)
                 if callable(close):
                     close()
-                raise TimeoutError("Harbor verifier timed out after 120s")
+                raise TimeoutError("Harbor verifier timed out after 120s") from TimeoutError()
             return original_run_with_timeout(coro, timeout, label)
 
         monkeypatch.setattr(harbor_module, "_run_with_timeout", fake_run_with_timeout)
 
-        result = env.step(state, Action(text="cmd"))
+        with caplog.at_level(logging.WARNING, logger="llenvs.adapters.harbor"):
+            result = env.step(state, Action(text="cmd"))
 
         assert result.truncated is True
         assert result.next_state.metadata.info.get("reward") == 0.0
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Verifier failed: Harbor verifier timed out after 120s" in message for message in messages)
+        assert any("cause_type=TimeoutError" in message for message in messages)
+        assert any("cause=TimeoutError()" in message for message in messages)
 
     def test_step_stderr_in_observation(self):
         mock_env = MockHarborEnvironment(
@@ -2701,7 +2710,10 @@ class TestHarborEnvironment:
         result = env.step(state, Action(text=""))
         assert result.terminated is False
 
-    def test_tmux_session_death_detected_in_phase1(self):
+    def test_tmux_session_death_detected_in_phase1(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ):
         """When the shell exits (e.g., `exit 1`), phase 1 detects tmux death
         immediately instead of polling for the full continuation window."""
         from llenvs.adapters.harbor import _TmuxSessionDead
@@ -2743,8 +2755,115 @@ class TestHarborEnvironment:
 
         mock_env._exec_handler = dead_tmux_handler
 
+        with caplog.at_level(logging.ERROR, logger="llenvs.adapters.harbor"):
+            with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+                env.step(state, Action(text="exit 1"))
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor tmux session died during command execution" in message for message in messages)
+        assert any("command=exit 1" in message for message in messages)
+
+    def test_phase1_transport_failure_remains_fatal(self):
+        """A dead container in direct-command polling must not be downgraded to tmux death."""
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        baseline = len(mock_env._exec_history)
+        original_handler = mock_env._exec_handler
+
+        def transport_failure_handler(command, **kwargs):
+            if len(mock_env._exec_history) <= baseline:
+                return original_handler(command, **kwargs)
+            if "test -f" in command and "/tmp/.llenvs_harbor_tmux_status/" in command:
+                return MockExecResult(stdout="")
+            if "tmux capture-pane -p -t" in command:
+                raise RuntimeError("apptainer instance not running")
+            if "tmux has-session" in command and "tmux send-keys" not in command:
+                raise RuntimeError("apptainer instance not running")
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = transport_failure_handler
+
+        with pytest.raises(RuntimeError, match="apptainer instance not running"):
+            env.step(state, Action(text="pwd"))
+
+    def test_start_set_option_normalizes_dead_tmux_session(self):
+        """A dead tmux server during startup option setup is normalized."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        original_handler = mock_env._exec_handler
+
+        def dead_set_option_handler(command, **kwargs):
+            if "tmux set-option -t llenvs-harbor history-limit 50000" in command:
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux set-option -t llenvs-harbor history-limit 50000\n"
+                    "stdout: \n"
+                    "stderr: no server running on /tmp/tmux-0/default"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_set_option_handler
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+
         with pytest.raises(_TmuxSessionDead, match="tmux session died"):
-            env.step(state, Action(text="exit 1"))
+            _reset_env(env)
+
+    def test_start_initial_capture_normalizes_dead_tmux_session(self):
+        """A dead tmux server during the initial full-buffer capture is normalized."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        original_handler = mock_env._exec_handler
+
+        def dead_initial_capture_handler(command, **kwargs):
+            if "tmux capture-pane -J -p -S - -t llenvs-harbor" in command:
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux capture-pane -J -p -S - -t llenvs-harbor\n"
+                    "stdout: \n"
+                    "stderr: no server running on /tmp/tmux-0/default"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_initial_capture_handler
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+
+        with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+            _reset_env(env)
+
+    def test_diff_full_buffer_fallback_normalizes_dead_tmux_session(self):
+        """Visible-capture fallback in ``_diff_full_buffer`` should normalize dead tmux."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        _reset_env(env)
+        text_session = getattr(env, "_text_session")
+
+        original_handler = mock_env._exec_handler
+
+        def dead_visible_capture_handler(command, **kwargs):
+            if "tmux capture-pane -J -p -t llenvs-harbor" in command:
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux capture-pane -J -p -t llenvs-harbor\n"
+                    "stdout: \n"
+                    "stderr: no server running on /tmp/tmux-0/default"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_visible_capture_handler
+        text_session._previous_full_buffer = "prefix that is not present"
+
+        with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+            text_session._diff_full_buffer("different buffer entirely")
 
 
 # ── TestHostSideStatusFiles ──────────────────────────────────────
@@ -2970,6 +3089,119 @@ class TestHostSideStatusFiles:
 
         with pytest.raises(RuntimeError, match="apptainer instance not running"):
             env.step(state, Action(text="slow-command"))
+
+    def test_host_side_wait_normalizes_dead_tmux_session(self, tmp_path, caplog):
+        """Health-check tmux death becomes ``_TmuxSessionDead`` instead of a raw helper error."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        env, runtime, mock_env = _make_host_side_env(
+            tmp_path,
+            runtime_kwargs={
+                "visible_buffers": ["bash$ "] * 10,
+            },
+            env_kwargs={"command_soft_timeout": 10},
+        )
+        state, _ = _reset_env(env)
+        text_session = getattr(env, "_text_session")
+        text_session._HOST_WAIT_HEALTH_CHECK_INTERVAL_SEC = 0.05
+        text_session._DIRECT_CONTINUATION_POLL_WINDOW_SEC = 0.1
+        runtime.pending_command_timeout = True
+
+        baseline = len(mock_env._exec_history)
+        original_handler = mock_env._exec_handler
+
+        def dead_tmux_handler(command, **kwargs):
+            if (
+                "tmux has-session" in command
+                and "tmux send-keys" not in command
+                and len(mock_env._exec_history) > baseline
+            ):
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux has-session -t llenvs-harbor\n"
+                    "stdout: \n"
+                    "stderr: no server running on /tmp/tmux-0/default"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_tmux_handler
+
+        with caplog.at_level(logging.ERROR, logger="llenvs.adapters.harbor"):
+            with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+                env.step(state, Action(text="slow-command"))
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor tmux session died during command execution" in message for message in messages)
+        assert any("command=slow-command" in message for message in messages)
+
+    def test_host_side_capture_after_wait_normalizes_dead_tmux_session(self, tmp_path, caplog):
+        """A post-wait capture-pane failure with dead tmux is normalized."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        env, runtime, mock_env = _make_host_side_env(tmp_path)
+        state, _ = _reset_env(env)
+
+        baseline = len(mock_env._exec_history)
+        original_handler = mock_env._exec_handler
+
+        def dead_capture_handler(command, **kwargs):
+            if (
+                len(mock_env._exec_history) > baseline
+                and "tmux capture-pane -J -p -S -" in command
+            ):
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux capture-pane -J -p -S - -t llenvs-harbor\n"
+                    "stdout: \n"
+                    "stderr: no server running on /tmp/tmux-0/default"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_capture_handler
+
+        with caplog.at_level(logging.ERROR, logger="llenvs.adapters.harbor"):
+            with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+                env.step(state, Action(text="echo line1\necho line2"))
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor tmux session died during command execution" in message for message in messages)
+        assert any("command=echo line1 echo line2" in message for message in messages)
+
+    def test_send_command_normalizes_dead_tmux_session(self, caplog):
+        """A dead tmux server during dispatch becomes ``_TmuxSessionDead``."""
+        from llenvs.adapters.harbor import _TmuxSessionDead
+
+        runtime = _FakeTmuxRuntime()
+        mock_env = MockHarborEnvironment(exec_handler=runtime)
+        env = _make_env(harbor_env=mock_env, text_exec_mode="tmux_session")
+        state, _ = _reset_env(env)
+
+        baseline = len(mock_env._exec_history)
+        original_handler = mock_env._exec_handler
+
+        def dead_send_handler(command, **kwargs):
+            if (
+                len(mock_env._exec_history) > baseline
+                and "tmux has-session" in command
+                and "tmux send-keys" in command
+            ):
+                raise RuntimeError(
+                    "Harbor tmux helper command failed (exit 1): "
+                    "tmux has-session -t llenvs-harbor\n"
+                    "stdout: \n"
+                    "stderr: no server running on /tmp/tmux-0/default"
+                )
+            return original_handler(command, **kwargs)
+
+        mock_env._exec_handler = dead_send_handler
+
+        with caplog.at_level(logging.ERROR, logger="llenvs.adapters.harbor"):
+            with pytest.raises(_TmuxSessionDead, match="tmux session died"):
+                env.step(state, Action(text="pwd"))
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("Harbor tmux session died during command execution" in message for message in messages)
+        assert any("command=pwd" in message for message in messages)
 
 
 # ── TestHarborToolEnvironment (Tool Mode) ───────────────────────

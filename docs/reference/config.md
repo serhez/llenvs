@@ -115,6 +115,38 @@ backend = OpenRouterBackend(
 )
 ```
 
+### Codex CLI
+
+```python
+from llenvs.inference.backends import CodexCLIBackend
+
+backend = CodexCLIBackend(
+    model="codex-mini-latest",
+    max_concurrency=4,        # Recommended: each request spawns a local CLI process
+    timeout=600.0,
+    profile="default",        # Optional Codex profile
+    # config_overrides={...}, # Optional `codex exec -c key=value` passthrough
+)
+```
+
+YAML:
+
+```yaml
+model:
+  backend: codex
+  model: codex-mini-latest
+  max_concurrency: 4
+  params:
+    timeout: 600.0
+    profile: default
+```
+
+Notes:
+
+- Each request runs in a fresh temporary directory with `codex exec --sandbox read-only --ephemeral --skip-git-repo-check`.
+- `SamplingParams.max_tokens` is accepted but ignored because the Codex CLI does not expose a direct equivalent.
+- Use `model.params.config_overrides` to pass Codex-specific `-c key=value` overrides when your local Codex CLI/config supports them.
+
 ## Backend Capabilities
 
 | Backend | Logprobs | Prefix Continuation | Batching | Tool Calling |
@@ -124,6 +156,7 @@ backend = OpenRouterBackend(
 | OpenAI | ✅ | ❌ | ✅ (concurrent) | ✅ |
 | Anthropic | ❌ | ✅ (prefill) | ✅ (concurrent) | ✅ |
 | OpenRouter | varies | ❌ | ✅ (concurrent) | varies |
+| Codex CLI | ❌ | ❌ | ✅ (subprocess) | ❌ |
 
 Check programmatically:
 

@@ -82,7 +82,7 @@ _APPTAINER_ROOTFS_PROBE_CACHE: dict[tuple[Any, ...], bool] = {}
 _APPTAINER_ROOTFS_PROBE_CACHE_LOCK = threading.Lock()
 _APPTAINER_ROOTFS_PROBE_EVENTS: dict[tuple[Any, ...], threading.Event] = {}
 _RUNTIME_PROBE_TIMEOUT_CAP_SEC = 15
-_VERIFIER_TIMEOUT_CAP_SEC = 120
+_VERIFIER_TIMEOUT_CAP_SEC = 900
 
 
 def _run_with_timeout(coro: Any, timeout: int | None, label: str) -> Any:
@@ -515,11 +515,18 @@ def _internal_verifier_timeout_sec(
     exec_timeout: int,
     *,
     command_soft_timeout: int | None = None,
+    task_verifier_timeout: float | None = None,
 ) -> int:
-    candidates = [exec_timeout, _VERIFIER_TIMEOUT_CAP_SEC]
-    if command_soft_timeout is not None:
-        candidates.append(command_soft_timeout)
-    return max(1, min(candidates))
+    """Compute the verifier timeout in seconds.
+
+    When *task_verifier_timeout* (``VerifierConfig.timeout_sec``) is
+    provided, the timeout is ``min(task_verifier_timeout, cap)``.
+    Otherwise falls back to ``min(exec_timeout, cap)``.
+    ``command_soft_timeout`` is intentionally excluded — it governs
+    interactive agent commands, not verification scripts.
+    """
+    base = task_verifier_timeout if task_verifier_timeout is not None else exec_timeout
+    return max(1, min(int(base), _VERIFIER_TIMEOUT_CAP_SEC))
 
 
 def _signal_name(sig: int) -> str:
@@ -737,6 +744,7 @@ class _HarborTmuxTextSession:
         self._exec_timeout = exec_timeout
         self._bootstrap_if_missing = bootstrap_if_missing
         self._previous_full_buffer = ""
+        self._active_command_preview: str | None = None
         self._prompt_sentinel = f"__LLENVS_PROMPT_{uuid.uuid4().hex[:12]}__> "
         self._continuation_sentinel = f"__LLENVS_CONTINUATION_{uuid.uuid4().hex[:12]}__> "
         self.tmux_bootstrapped = False
@@ -765,7 +773,7 @@ class _HarborTmuxTextSession:
                 )
 
         self._start_session()
-        self._exec(
+        self._exec_tmux_helper(
             f"tmux set-option -t {shlex.quote(self._SESSION_NAME)} history-limit 50000",
             timeout_sec=self._startup_timeout_sec(),
         )
@@ -774,137 +782,153 @@ class _HarborTmuxTextSession:
         self._previous_full_buffer = self._capture_full_buffer()
 
     def resync_after_restore(self) -> None:
-        self._exec(f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}")
-        self._previous_full_buffer = self._capture_full_buffer()
+        capture_cmd = f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+        self._exec_tmux_helper(
+            f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}",
+        )
+        try:
+            self._previous_full_buffer = self._capture_full_buffer()
+        except Exception as exc:
+            self._normalize_tmux_session_dead(exc, helper_command=capture_cmd)
+            raise
 
     def run_command(self, command: str, *, timeout_sec: int | None = None) -> str:
         command_text = command[:-1] if command.endswith("\n") else command
         step_token = _tmux_wait_channel("llenvs_harbor_step")
         effective_timeout = self._exec_timeout if timeout_sec is None else timeout_sec
-        debug_enabled = logger.isEnabledFor(logging.DEBUG)
-        if debug_enabled:
-            logger.debug(
-                "Harbor tmux command start: timeout=%ss chars=%d preview=%s",
-                effective_timeout,
-                len(command_text),
-                _preview_log_text(command_text),
-            )
-            dispatch_started_at = _now_monotonic()
-        used_staged_file = self._send_command(command_text, step_token=step_token)
-        if debug_enabled:
-            logger.debug(
-                "Harbor tmux command dispatched in %.2fs: preview=%s",
-                max(0.0, _now_monotonic() - dispatch_started_at),
-                _preview_log_text(command_text),
-            )
-
-        # Build the wait+capture command.  When the status directory is
-        # host-visible, waiting is done host-side and only the capture is
-        # sent via exec.  Otherwise, a single in-container loop combines
-        # both waiting and capture.
-        status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
-        if self._host_status_dir:
-            capture_cmd = f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
-        else:
-            capture_cmd = (
-                f"while ! test -f {status_path_q}; do sleep 0.1; done"
-                f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
-            )
-        started_at = _now_monotonic()
         try:
-            if used_staged_file:
-                if self._host_status_dir:
-                    deadline = _now_monotonic() + effective_timeout
-                    if not self._wait_for_status_file(
-                        step_token,
-                        timeout_sec=effective_timeout,
-                    ):
-                        raise RuntimeError(
-                            f"apptainer command timed out after {effective_timeout}s"
-                        )
-                    full_buffer = self._capture_after_wait(deadline)
-                else:
-                    result = self._exec(capture_cmd, timeout_sec=effective_timeout)
-                    full_buffer = getattr(result, "stdout", "") or ""
-            else:
-                full_buffer = self._wait_for_direct_command(
-                    command_text,
-                    step_token,
-                    capture_cmd,
-                    timeout_sec=effective_timeout,
-                )
-        except Exception as exc:
-            if not self._is_timeout_error(exc):
-                raise
-            # Check if the command actually completed (signal lost).
-            # The visible screen and status file are checked BEFORE any
-            # recovery attempt.  The status file is the stronger signal:
-            # PROMPT_COMMAND writes it before the prompt is rendered, so
-            # it catches completions where the prompt scrolled off-screen.
-            visible = self._safe_capture(self._capture_visible_screen_raw)
-            status_found = False
-            try:
-                status_found = self._status_file_exists(step_token)
-            except Exception:
-                pass
-            if self._prompt_visible_on_last_line(visible) or status_found:
-                # Command completed but the wait signal was lost (the
-                # in-container polling loop was killed before it noticed
-                # the status file).  Capture the buffer directly.
-                full_buffer = self._safe_capture(self._capture_full_buffer)
+            self._active_command_preview = _preview_log_text(command_text)
+            debug_enabled = logger.isEnabledFor(logging.DEBUG)
+            if debug_enabled:
                 logger.debug(
-                    "Harbor tmux signal lost — salvaged completed command: preview=%s",
-                    _preview_log_text(command_text),
+                    "Harbor tmux command start: timeout=%ss chars=%d preview=%s",
+                    effective_timeout,
+                    len(command_text),
+                    self._active_command_preview,
                 )
-                # Fall through to normal observation extraction below.
-            else:
-                # Genuine timeout — command still running.
-                elapsed_sec = max(0.0, _now_monotonic() - started_at)
-                result = self._handle_timeout(
-                    command_text,
-                    step_token,
-                    exc,
-                    timeout_sec=effective_timeout,
-                    elapsed_sec=elapsed_sec,
+                dispatch_started_at = _now_monotonic()
+            used_staged_file = self._send_command(command_text, step_token=step_token)
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux command dispatched in %.2fs: preview=%s",
+                    max(0.0, _now_monotonic() - dispatch_started_at),
+                    self._active_command_preview,
                 )
-                if isinstance(result, str):
-                    # _handle_timeout detected the prompt was already
-                    # visible (defense-in-depth salvage).  Use the
-                    # returned buffer as if the command completed normally.
-                    full_buffer = result
-                else:
-                    raise result from exc
 
-        # Strip trailing newlines so the prefix-based diff in
-        # _diff_full_buffer works reliably.  tmux pane rows below the
-        # cursor emit variable-length trailing newlines; Docker's exec
-        # transport preserves them while the HPC transport (podman-hpc,
-        # apptainer) already rstrips all whitespace, making this a
-        # no-op there.  Only newlines are stripped (not spaces) so the
-        # prompt's trailing space is preserved at the diff boundary.
-        full_buffer = full_buffer.rstrip("\n")
-        observation = self._diff_full_buffer(full_buffer)
-        observation = self._sanitize_observation(observation, command_text, used_staged_file)
-        if observation == "":
-            exit_code = self._read_exit_status(step_token)
-            if exit_code is not None and exit_code != 0:
-                observation = f"[exit code: {exit_code}]"
-            elif exit_code == 0:
-                observation = "[Command completed successfully with no output]"
+            # Build the wait+capture command.  When the status directory is
+            # host-visible, waiting is done host-side and only the capture is
+            # sent via exec.  Otherwise, a single in-container loop combines
+            # both waiting and capture.
+            status_path_q = shlex.quote(f"{self._STATUS_DIR}/{step_token}")
+            if self._host_status_dir:
+                capture_cmd = (
+                    f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+                )
             else:
-                observation = "[No output]"
-        else:
-            # Still consume the status file to avoid leaking it
-            self._read_exit_status(step_token)
-        self._previous_full_buffer = full_buffer
-        if debug_enabled:
-            logger.debug(
-                "Harbor tmux command done: duration=%.2fs observation_chars=%d preview=%s",
-                max(0.0, _now_monotonic() - started_at),
-                len(observation),
-                _preview_log_text(command_text),
-            )
-        return observation
+                capture_cmd = (
+                    f"while ! test -f {status_path_q}; do sleep 0.1; done"
+                    f" && tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}"
+                )
+            started_at = _now_monotonic()
+            try:
+                if used_staged_file:
+                    if self._host_status_dir:
+                        deadline = _now_monotonic() + effective_timeout
+                        if not self._wait_for_status_file(
+                            step_token,
+                            timeout_sec=effective_timeout,
+                        ):
+                            raise RuntimeError(
+                                f"apptainer command timed out after {effective_timeout}s"
+                            )
+                        full_buffer = self._capture_after_wait(deadline)
+                    else:
+                        result = self._exec_tmux_helper(
+                            capture_cmd,
+                            timeout_sec=effective_timeout,
+                        )
+                        full_buffer = getattr(result, "stdout", "") or ""
+                else:
+                    full_buffer = self._wait_for_direct_command(
+                        command_text,
+                        step_token,
+                        capture_cmd,
+                        timeout_sec=effective_timeout,
+                    )
+            except Exception as exc:
+                if not self._is_timeout_error(exc):
+                    raise
+                # Check if the command actually completed (signal lost).
+                # The visible screen and status file are checked BEFORE any
+                # recovery attempt.  The status file is the stronger signal:
+                # PROMPT_COMMAND writes it before the prompt is rendered, so
+                # it catches completions where the prompt scrolled off-screen.
+                visible = self._safe_capture(self._capture_visible_screen_raw)
+                status_found = False
+                try:
+                    status_found = self._status_file_exists(step_token)
+                except Exception:
+                    pass
+                if self._prompt_visible_on_last_line(visible) or status_found:
+                    # Command completed but the wait signal was lost (the
+                    # in-container polling loop was killed before it noticed
+                    # the status file).  Capture the buffer directly.
+                    full_buffer = self._safe_capture(self._capture_full_buffer)
+                    logger.debug(
+                        "Harbor tmux signal lost — salvaged completed command: preview=%s",
+                        self._active_command_preview,
+                    )
+                    # Fall through to normal observation extraction below.
+                else:
+                    # Genuine timeout — command still running.
+                    elapsed_sec = max(0.0, _now_monotonic() - started_at)
+                    result = self._handle_timeout(
+                        command_text,
+                        step_token,
+                        exc,
+                        timeout_sec=effective_timeout,
+                        elapsed_sec=elapsed_sec,
+                    )
+                    if isinstance(result, str):
+                        # _handle_timeout detected the prompt was already
+                        # visible (defense-in-depth salvage).  Use the
+                        # returned buffer as if the command completed normally.
+                        full_buffer = result
+                    else:
+                        raise result from exc
+
+            # Strip trailing newlines so the prefix-based diff in
+            # _diff_full_buffer works reliably.  tmux pane rows below the
+            # cursor emit variable-length trailing newlines; Docker's exec
+            # transport preserves them while the HPC transport (podman-hpc,
+            # apptainer) already rstrips all whitespace, making this a
+            # no-op there.  Only newlines are stripped (not spaces) so the
+            # prompt's trailing space is preserved at the diff boundary.
+            full_buffer = full_buffer.rstrip("\n")
+            observation = self._diff_full_buffer(full_buffer)
+            observation = self._sanitize_observation(observation, command_text, used_staged_file)
+            if observation == "":
+                exit_code = self._read_exit_status(step_token)
+                if exit_code is not None and exit_code != 0:
+                    observation = f"[exit code: {exit_code}]"
+                elif exit_code == 0:
+                    observation = "[Command completed successfully with no output]"
+                else:
+                    observation = "[No output]"
+            else:
+                # Still consume the status file to avoid leaking it
+                self._read_exit_status(step_token)
+            self._previous_full_buffer = full_buffer
+            if debug_enabled:
+                logger.debug(
+                    "Harbor tmux command done: duration=%.2fs observation_chars=%d preview=%s",
+                    max(0.0, _now_monotonic() - started_at),
+                    len(observation),
+                    self._active_command_preview,
+                )
+            return observation
+        finally:
+            self._active_command_preview = None
 
     def _sanitize_observation(
         self,
@@ -1052,7 +1076,7 @@ class _HarborTmuxTextSession:
                 now = _now_monotonic()
                 if now >= next_health_check:
                     try:
-                        self._exec(
+                        self._exec_tmux_helper(
                             f"tmux has-session -t {session_q}",
                             timeout_sec=min(5, max(1, deadline - now)),
                         )
@@ -1082,7 +1106,7 @@ class _HarborTmuxTextSession:
     def _capture_after_wait(self, deadline: float) -> str:
         """Capture the full tmux buffer after a host-side status-file wait."""
         remaining = max(5.0, deadline - _now_monotonic())
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=remaining,
         )
@@ -1137,11 +1161,11 @@ class _HarborTmuxTextSession:
             staged = True
 
         control_parts.append(f"tmux send-keys -t {session_q} Enter")
-        self._exec(" && ".join(control_parts), timeout_sec=self._exec_timeout)
+        self._exec_tmux_helper(" && ".join(control_parts), timeout_sec=self._exec_timeout)
         return staged
 
     def _capture_full_buffer(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -J -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
@@ -1155,21 +1179,21 @@ class _HarborTmuxTextSession:
         return (getattr(result, "stdout", "") or "").rstrip("\n")
 
     def _capture_visible_screen(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -J -p -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
         return getattr(result, "stdout", "") or ""
 
     def _capture_full_buffer_raw(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -p -S - -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
         return getattr(result, "stdout", "") or ""
 
     def _capture_visible_screen_raw(self) -> str:
-        result = self._exec(
+        result = self._exec_tmux_helper(
             f"tmux capture-pane -p -t {shlex.quote(self._SESSION_NAME)}",
             timeout_sec=self._exec_timeout,
         )
@@ -1275,7 +1299,7 @@ class _HarborTmuxTextSession:
                 f"tmux send-keys -t {session_q} {shlex.quote(f'source {self._HOOK_SCRIPT_FILE}')} Enter",
             ]
         )
-        self._exec(control_cmd, timeout_sec=startup_timeout)
+        self._exec_tmux_helper(control_cmd, timeout_sec=startup_timeout)
         if not self._wait_for_status_file(init_token, timeout_sec=startup_timeout):
             raise self._startup_timeout_error(
                 f"Prompt hook installation timed out after {startup_timeout}s"
@@ -1438,7 +1462,7 @@ class _HarborTmuxTextSession:
                 raise RuntimeError(f"apptainer command timed out after {timeout_sec}s")
             return self._capture_after_wait(deadline_phase2)
         try:
-            result = self._exec(capture_cmd, timeout_sec=remaining)
+            result = self._exec_tmux_helper(capture_cmd, timeout_sec=remaining)
             return getattr(result, "stdout", "") or ""
         except Exception as exc:
             if self._is_timeout_error(exc):
@@ -1727,7 +1751,7 @@ class _HarborTmuxTextSession:
         poll_cmd = f"test -r {ready_file_q} && cat {ready_file_q} || true"
 
         self._safe_exec(f"rm -f {ready_file_q}", timeout_sec=10)
-        self._exec(send_cmd, timeout_sec=10)
+        self._exec_tmux_helper(send_cmd, timeout_sec=10)
         deadline = time.monotonic() + startup_timeout
         next_resend = time.monotonic() + self._READY_RESEND_INTERVAL_SEC
 
@@ -1738,7 +1762,7 @@ class _HarborTmuxTextSession:
                 return
             now = time.monotonic()
             if now >= next_resend:
-                self._exec(send_cmd, timeout_sec=10)
+                self._exec_tmux_helper(send_cmd, timeout_sec=10)
                 next_resend = now + self._READY_RESEND_INTERVAL_SEC
             time.sleep(self._READY_POLL_INTERVAL_SEC)
 
@@ -1807,6 +1831,47 @@ class _HarborTmuxTextSession:
         except Exception:
             return ""
 
+    @staticmethod
+    def _looks_like_tmux_session_dead(exc: BaseException) -> bool:
+        """Return True for tmux helper failures caused by a dead tmux server."""
+        text = str(exc).lower()
+        return (
+            ("no server running" in text and "tmux" in text)
+            or "can't find session" in text
+            or "can't find pane" in text
+        )
+
+    def _normalize_tmux_session_dead(
+        self,
+        exc: BaseException,
+        *,
+        helper_command: str,
+    ) -> None:
+        if isinstance(exc, _TmuxSessionDead):
+            raise exc
+        if not self._looks_like_tmux_session_dead(exc):
+            return
+        logger.error(
+            "Harbor tmux session died during command execution: session=%s command=%s helper_command=%s helper_error=%s",
+            self._SESSION_NAME,
+            self._active_command_preview or "<unknown>",
+            _preview_log_text(helper_command),
+            exc,
+        )
+        raise _TmuxSessionDead("tmux session died during command execution") from exc
+
+    def _exec_tmux_helper(
+        self,
+        command: str,
+        *,
+        timeout_sec: float | int | None = None,
+    ) -> Any:
+        try:
+            return self._exec(command, timeout_sec=timeout_sec)
+        except Exception as exc:
+            self._normalize_tmux_session_dead(exc, helper_command=command)
+            raise
+
     def _capture_visible_or_detect_death(self) -> str:
         """Capture visible screen; raise ``_TmuxSessionDead`` if the session is gone.
 
@@ -1817,15 +1882,19 @@ class _HarborTmuxTextSession:
         """
         try:
             return self._capture_visible_screen_raw()
+        except _TmuxSessionDead:
+            raise
         except Exception as cap_exc:
             # Verify whether the session still exists.
             try:
-                self._exec(
+                self._exec_tmux_helper(
                     f"tmux has-session -t {shlex.quote(self._SESSION_NAME)}",
                     timeout_sec=5,
                 )
-            except Exception:
-                raise _TmuxSessionDead("tmux session died during command execution") from cap_exc
+            except _TmuxSessionDead:
+                raise
+            except Exception as probe_exc:
+                raise probe_exc from cap_exc
             # Session exists; capture failure was transient.
             return ""
 
@@ -1862,6 +1931,16 @@ def _run_verifier(
         "Harbor verifier",
     )
     return result.rewards
+
+
+def _log_verifier_failure(exc: Exception) -> None:
+    cause = exc.__cause__ if exc.__cause__ is not None else exc
+    logger.warning(
+        "Verifier failed: %s (cause_type=%s cause=%r)",
+        exc,
+        type(cause).__name__,
+        cause,
+    )
 
 
 def _normalize_container_name(name: str) -> str:
@@ -4299,9 +4378,8 @@ class HarborEnvironment:
         self._invalid_action_text = invalid_action_text
         self._invalid_action_observation_text = invalid_action_observation
         self._max_observation_chars = max_observation_chars
-        self._verifier_timeout_sec = _internal_verifier_timeout_sec(
+        self._default_verifier_timeout_sec = _internal_verifier_timeout_sec(
             exec_timeout,
-            command_soft_timeout=command_soft_timeout,
         )
         self._soft_timeouts_disabled_depth = 0
         self._trajectory_timeout_disabled_depth = 0
@@ -4797,6 +4875,13 @@ class HarborEnvironment:
         reward_value: float | None = None
         if terminated or (truncated and self._verify_on_truncation):
             if self._verifier_factory is not None:
+                task_vt = getattr(
+                    getattr(getattr(self._current_task, "config", None), "verifier", None),
+                    "timeout_sec", None,
+                )
+                verifier_timeout = _internal_verifier_timeout_sec(
+                    self._exec_timeout, task_verifier_timeout=task_vt,
+                ) if task_vt is not None else self._default_verifier_timeout_sec
                 if debug_enabled:
                     verifier_started_at = _now_monotonic()
                     logger.debug(
@@ -4805,14 +4890,14 @@ class HarborEnvironment:
                         next_step,
                         terminated,
                         truncated,
-                        self._verifier_timeout_sec,
+                        verifier_timeout,
                     )
                 try:
                     rewards = _run_verifier(
                         self._verifier_factory,
                         self._current_task,
                         self._harbor_env,
-                        timeout_sec=self._verifier_timeout_sec,
+                        timeout_sec=verifier_timeout,
                     )
                     reward_value = rewards.get("reward", 0.0)
                     if debug_enabled:
@@ -4824,8 +4909,7 @@ class HarborEnvironment:
                             reward_value,
                         )
                 except Exception as e:
-                    cause = e.__cause__ if e.__cause__ else e
-                    logger.warning("Verifier failed: %s (cause: %s)", e, cause)
+                    _log_verifier_failure(e)
                     if debug_enabled:
                         logger.debug(
                             "Harbor verifier failed: task=%d episode_step=%d duration=%.2fs",
@@ -5032,7 +5116,7 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         self._verify_on_truncation = verify_on_truncation
         self._start_timeout = start_timeout
         self._exec_timeout = exec_timeout
-        self._verifier_timeout_sec = _internal_verifier_timeout_sec(exec_timeout)
+        self._default_verifier_timeout_sec = _internal_verifier_timeout_sec(exec_timeout)
         self._state_capture_mode = _normalize_snapshot_mode(state_capture_mode)
         self._snapshot_artifact_root = (
             None if snapshot_artifact_root is None else Path(snapshot_artifact_root).resolve()
@@ -5276,17 +5360,23 @@ class HarborToolEnvironment(BaseToolEnvironment[HarborHidden]):
         reward_value: float | None = None
         if terminated or (truncated and self._verify_on_truncation):
             if self._verifier_factory is not None:
+                task_vt = getattr(
+                    getattr(getattr(self._current_task, "config", None), "verifier", None),
+                    "timeout_sec", None,
+                )
+                verifier_timeout = _internal_verifier_timeout_sec(
+                    self._exec_timeout, task_verifier_timeout=task_vt,
+                ) if task_vt is not None else self._default_verifier_timeout_sec
                 try:
                     rewards = _run_verifier(
                         self._verifier_factory,
                         self._current_task,
                         self._harbor_env,
-                        timeout_sec=self._verifier_timeout_sec,
+                        timeout_sec=verifier_timeout,
                     )
                     reward_value = rewards.get("reward", 0.0)
                 except Exception as e:
-                    cause = e.__cause__ if e.__cause__ else e
-                    logger.warning("Verifier failed: %s (cause: %s)", e, cause)
+                    _log_verifier_failure(e)
                     reward_value = 0.0
 
         # Build next observation via BaseToolEnvironment helper
