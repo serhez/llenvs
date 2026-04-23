@@ -24,6 +24,7 @@ from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
     GenerationResult,
+    LogprobsNotReturnedError,
     ModelBackend,
     PromptTooLongError,
     SamplingParams,
@@ -426,6 +427,14 @@ class VLLMBackend(ModelBackend):
             completion = output.outputs[0]
             token_logprobs = self._extract_logprobs(completion)
 
+            if params.logprobs and not token_logprobs:
+                raise LogprobsNotReturnedError(
+                    "vLLM VLM path returned no token logprobs despite "
+                    f"logprobs=True for model {self._model_path!r}.",
+                    backend_name="VLLMBackend",
+                    model_name=self._model_path,
+                )
+
             results.append(
                 GenerationResult(
                     text=completion.text,
@@ -491,6 +500,14 @@ class VLLMBackend(ModelBackend):
 
             # Extract logprobs if available
             token_logprobs = self._extract_logprobs(completion)
+
+            if params.logprobs and not token_logprobs:
+                raise LogprobsNotReturnedError(
+                    "vLLM returned no token logprobs despite logprobs=True for "
+                    f"model {self._model_path!r}.",
+                    backend_name="VLLMBackend",
+                    model_name=self._model_path,
+                )
 
             results.append(
                 GenerationResult(
@@ -624,6 +641,15 @@ class VLLMBackend(ModelBackend):
         results = []
         for completion in outputs[0].outputs:
             token_logprobs = self._extract_logprobs(completion)
+
+            if multi_params.logprobs and not token_logprobs:
+                raise LogprobsNotReturnedError(
+                    "vLLM returned no token logprobs during prefix continuation "
+                    f"despite logprobs=True for model {self._model_path!r}.",
+                    backend_name="VLLMBackend",
+                    model_name=self._model_path,
+                )
+
             results.append(
                 GenerationResult(
                     text=completion.text,
@@ -689,6 +715,15 @@ class VLLMBackend(ModelBackend):
         for output in outputs:
             completion = output.outputs[0]
             token_logprobs = self._extract_logprobs(completion)
+
+            if params.logprobs and not token_logprobs:
+                raise LogprobsNotReturnedError(
+                    "vLLM returned no token logprobs during batched chat prefix "
+                    f"continuation despite logprobs=True for model {self._model_path!r}.",
+                    backend_name="VLLMBackend",
+                    model_name=self._model_path,
+                )
+
             results.append(
                 GenerationResult(
                     text=completion.text,
