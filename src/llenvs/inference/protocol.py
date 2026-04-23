@@ -70,6 +70,16 @@ class PromptTooLongError(RecoverableInputError):
         self.offending_prompts = offending_prompts or []
 
 
+class QuotaExhaustedError(Exception):
+    """Raised when a backend reports a quota / rate-limit window exhaustion.
+
+    This is distinct from short-lived 429 transient retries handled inside
+    SDKs; it signals that the current usage window (for example, the Codex
+    CLI 5-hour window) has been depleted and the caller should either wait
+    a long period before retrying or abort gracefully.
+    """
+
+
 class RetryExhaustedTransientError(Exception):
     """Raised when item-local transient retries were exhausted.
 

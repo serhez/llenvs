@@ -21,6 +21,7 @@ from llenvs.inference.protocol import (
     ModelBackend,
     PartialBatchError,
     PromptTooLongError,
+    QuotaExhaustedError,
     SamplingParams,
     StopReason,
 )
@@ -403,8 +404,9 @@ class CodexCLIBackend(ModelBackend):
                     cwd=tmpdir,
                 )
             except subprocess.TimeoutExpired as exc:
-                raise TimeoutError(
-                    f"codex exec timed out after {self._timeout:.1f}s"
+                raise QuotaExhaustedError(
+                    f"codex exec timed out after {self._timeout:.1f}s "
+                    "(treated as quota-exhausted)"
                 ) from exc
 
             events, parse_errors = _parse_jsonl(completed.stdout)
@@ -419,15 +421,16 @@ class CodexCLIBackend(ModelBackend):
                         model_name=self._model,
                         offending_indices=[0],
                     )
-                raise RuntimeError(
+                raise QuotaExhaustedError(
                     f"codex exec failed with exit code {completed.returncode}: {diagnostic}"
                 )
 
             try:
                 text = output_path.read_text(encoding="utf-8")
             except OSError as exc:
-                raise RuntimeError(
-                    "codex exec succeeded but did not produce the last-message file"
+                raise QuotaExhaustedError(
+                    "codex exec succeeded but did not produce the last-message file "
+                    "(treated as quota-exhausted)"
                 ) from exc
 
             return GenerationResult(
