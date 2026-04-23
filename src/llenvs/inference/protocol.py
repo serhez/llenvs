@@ -129,6 +129,41 @@ class PartialBatchError(Exception):
         )
 
 
+class MalformedResponseError(Exception):
+    """Raised when a provider returns HTTP 200 but a structurally invalid body.
+
+    The canonical case is OpenRouter responding 200 OK with ``choices: null``
+    (or an empty list) plus a top-level ``error`` field, typically when the
+    selected upstream provider was rate-limited, timed out, or declined the
+    request. The SDK doesn't raise — it hands back a response object that
+    breaks downstream parsing.
+
+    Treated as transient: the same request may succeed on retry (e.g.,
+    OpenRouter may route to a different provider).
+
+    Attributes:
+        backend_name: Identifier of the backend that raised.
+        model_name: Underlying model id for diagnostics.
+        provider_error: Raw provider-side error payload when present
+            (OpenRouter's top-level ``error`` field), useful for logging
+            and for classifiers that want to distinguish transient from
+            terminal upstream conditions.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend_name: str = "",
+        model_name: str = "",
+        provider_error: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.backend_name = backend_name
+        self.model_name = model_name
+        self.provider_error = provider_error
+
+
 class LogprobsNotReturnedError(RuntimeError):
     """Raised when a backend was asked for logprobs but none came back.
 

@@ -13,6 +13,7 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     LogprobsNotReturnedError,
+    MalformedResponseError,
     ModelBackend,
     PartialBatchError,
     PromptTooLongError,
@@ -146,6 +147,25 @@ def _is_invalid_input_error(error: BaseException) -> bool:
             "unsupported audio",
         )
     )
+
+
+def _format_no_choices_message(provider_error: Any) -> str:
+    """Build a diagnostic message for an HTTP-200 response with no choices.
+
+    If the provider returned a top-level ``error`` object (as OpenRouter
+    does when routing-time upstream failures can't be surfaced as an HTTP
+    error), include its ``code`` and ``message`` so the classifier and
+    the operator both see why the request was rejected.
+    """
+    if isinstance(provider_error, dict):
+        code = provider_error.get("code")
+        message = provider_error.get("message")
+        parts = [p for p in (code, message) if p]
+        if parts:
+            return "Provider returned no choices: " + " — ".join(str(p) for p in parts)
+    if provider_error is not None:
+        return f"Provider returned no choices: {provider_error}"
+    return "Provider returned a response with no choices."
 
 
 def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseException:
@@ -1410,8 +1430,7 @@ class OpenRouterBackend(ModelBackend):
 
         return kwargs
 
-    @staticmethod
-    def _chat_result(response: Any) -> GenerationResult:
+    def _chat_result(self, response: Any) -> GenerationResult:
         """Convert an OpenAI-compatible ChatCompletion to GenerationResult.
 
         Logprobs follow the OpenAI response shape — OpenRouter's OpenAPI
@@ -1420,7 +1439,16 @@ class OpenRouterBackend(ModelBackend):
         ``top_logprobs: [{token, logprob, bytes}]``), so the same
         extraction works.
         """
-        choice = response.choices[0]
+        choices = getattr(response, "choices", None)
+        if not choices:
+            provider_error = getattr(response, "error", None)
+            raise MalformedResponseError(
+                _format_no_choices_message(provider_error),
+                backend_name="OpenRouterBackend",
+                model_name=self._model,
+                provider_error=provider_error,
+            )
+        choice = choices[0]
 
         token_logprobs = None
         if getattr(choice, "logprobs", None) and getattr(choice.logprobs, "content", None):
@@ -1485,11 +1513,13 @@ class OpenRouterBackend(ModelBackend):
             try:
                 try:
                     response = self._client.chat.completions.create(**kwargs)
+                    return self._ensure_logprobs_if_requested(
+                        self._chat_result(response), params
+                    )
+                except RateLimitError:
+                    raise
                 except Exception as exc:
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
-                return self._ensure_logprobs_if_requested(
-                    self._chat_result(response), params
-                )
             except RateLimitError as exc:
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
                     raise
@@ -1520,11 +1550,13 @@ class OpenRouterBackend(ModelBackend):
             try:
                 try:
                     response = await self._async_client.chat.completions.create(**kwargs)
+                    return self._ensure_logprobs_if_requested(
+                        self._chat_result(response), params
+                    )
+                except RateLimitError:
+                    raise
                 except Exception as exc:
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
-                return self._ensure_logprobs_if_requested(
-                    self._chat_result(response), params
-                )
             except RateLimitError as exc:
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
                     raise
