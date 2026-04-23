@@ -23,6 +23,7 @@ from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
     GenerationResult,
+    LogprobsNotReturnedError,
     ModelBackend,
     SamplingParams,
     StopReason,
@@ -483,6 +484,14 @@ class HuggingFaceBackend(ModelBackend):
                     batch_scores, generated_ids, params.num_logprobs
                 )
 
+            if params.logprobs and not token_logprobs:
+                raise LogprobsNotReturnedError(
+                    "HuggingFace backend returned no token logprobs despite "
+                    f"logprobs=True for model {self._model_path!r}.",
+                    backend_name="HuggingFaceBackend",
+                    model_name=self._model_path,
+                )
+
             results.append(
                 GenerationResult(
                     text=generated_text,
@@ -663,6 +672,15 @@ class HuggingFaceBackend(ModelBackend):
                 batch_scores = tuple(s[i : i + 1] for s in scores)
                 token_logprobs = self._extract_logprobs(
                     batch_scores, generated_ids, params.num_logprobs
+                )
+
+            if params.logprobs and not token_logprobs:
+                raise LogprobsNotReturnedError(
+                    "HuggingFace backend returned no token logprobs despite "
+                    f"logprobs=True for model {self._model_path!r} during "
+                    "prefix continuation.",
+                    backend_name="HuggingFaceBackend",
+                    model_name=self._model_path,
                 )
 
             results.append(

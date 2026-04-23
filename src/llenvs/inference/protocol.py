@@ -70,6 +70,16 @@ class PromptTooLongError(RecoverableInputError):
         self.offending_prompts = offending_prompts or []
 
 
+class QuotaExhaustedError(Exception):
+    """Raised when a backend reports a quota / rate-limit window exhaustion.
+
+    This is distinct from short-lived 429 transient retries handled inside
+    SDKs; it signals that the current usage window (for example, the Codex
+    CLI 5-hour window) has been depleted and the caller should either wait
+    a long period before retrying or abort gracefully.
+    """
+
+
 class RetryExhaustedTransientError(Exception):
     """Raised when item-local transient retries were exhausted.
 
@@ -117,6 +127,38 @@ class PartialBatchError(Exception):
         super().__init__(
             f"Concurrent batch had {len(failures)}/{len(results)} failed items"
         )
+
+
+class LogprobsNotReturnedError(RuntimeError):
+    """Raised when a backend was asked for logprobs but none came back.
+
+    Triggered when ``params.logprobs=True`` was set on a request but the
+    resulting ``GenerationResult`` has no usable ``token_logprobs`` — for
+    example when an OpenRouter route goes to a provider that drops
+    logprobs, or when a caller requests ``num_logprobs`` beyond what the
+    backend can satisfy.
+
+    Intentionally **not** a ``RecoverableInputError``: this is a
+    capability/response-shape mismatch, not a per-point input problem, so
+    callers (e.g. the prediction pipeline) should skip the affected
+    method and continue with other methods rather than dropping
+    individual points.
+
+    Attributes:
+        backend_name: Identifier of the backend that raised.
+        model_name: Underlying model id for diagnostics.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        backend_name: str = "",
+        model_name: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.backend_name = backend_name
+        self.model_name = model_name
 
 
 class StopReason(Enum):

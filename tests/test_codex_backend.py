@@ -17,6 +17,7 @@ from llenvs.inference import (
     GenerationResult,
     PartialBatchError,
     PromptTooLongError,
+    QuotaExhaustedError,
     SamplingParams,
     StopReason,
 )
@@ -207,7 +208,7 @@ class TestCodexCLIBackendGeneration:
             with pytest.raises(PromptTooLongError, match="maximum context length exceeded"):
                 backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
 
-    def test_missing_output_file_raises_runtime_error(self):
+    def test_missing_output_file_is_quota_exhausted(self):
         backend = _make_backend()
 
         def fake_run(cmd, **kwargs):
@@ -219,7 +220,32 @@ class TestCodexCLIBackendGeneration:
             )
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
-            with pytest.raises(RuntimeError, match="last-message file"):
+            with pytest.raises(QuotaExhaustedError, match="last-message file"):
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+
+    def test_generic_nonzero_exit_is_quota_exhausted(self):
+        backend = _make_backend()
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr="usage limit reached; please wait",
+            )
+
+        with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
+            with pytest.raises(QuotaExhaustedError, match="exit code 1"):
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+
+    def test_timeout_is_quota_exhausted(self):
+        backend = _make_backend()
+
+        def fake_run(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=backend._timeout)
+
+        with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
+            with pytest.raises(QuotaExhaustedError, match="timed out"):
                 backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
 
     def test_batch_partial_failures_raise_partial_batch_error(self):

@@ -12,6 +12,7 @@ from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
     GenerationResult,
+    LogprobsNotReturnedError,
     ModelBackend,
     PartialBatchError,
     PromptTooLongError,
@@ -414,6 +415,14 @@ class OpenAIBackend(ModelBackend):
                 )
             token_logprobs = tuple(logprobs)
 
+        if params.logprobs and not token_logprobs:
+            raise LogprobsNotReturnedError(
+                "OpenAI returned no token logprobs despite logprobs=True for "
+                f"model {self._model!r}.",
+                backend_name="OpenAIBackend",
+                model_name=self._model,
+            )
+
         return GenerationResult(
             text=choice.message.content or "",
             finish_reason=_openai_stop_reason(choice.finish_reason),
@@ -477,6 +486,14 @@ class OpenAIBackend(ModelBackend):
                     )
                 )
             token_logprobs = tuple(logprobs)
+
+        if params.logprobs and not token_logprobs:
+            raise LogprobsNotReturnedError(
+                "OpenAI returned no token logprobs despite logprobs=True for "
+                f"model {self._model!r}.",
+                backend_name="OpenAIBackend",
+                model_name=self._model,
+            )
 
         return GenerationResult(
             text=choice.message.content or "",
@@ -1298,9 +1315,16 @@ class OpenRouterBackend(ModelBackend):
 
     @property
     def capabilities(self) -> BackendCapabilities:
-        """OpenRouter capabilities (conservative estimate)."""
+        """OpenRouter capabilities.
+
+        ``supports_logprobs=True`` because OpenRouter accepts the OpenAI
+        logprobs fields (``logprobs`` bool + ``top_logprobs`` int, cap 20).
+        Whether the upstream model actually returns logprobs is
+        provider-dependent — when it doesn't, the backend raises
+        ``LogprobsNotReturnedError`` at call time.
+        """
         return BackendCapabilities(
-            supports_logprobs=False,  # Varies by model
+            supports_logprobs=True,
             supports_prefix_continuation=False,
             supports_batching=True,
             supports_streaming=True,
@@ -1345,6 +1369,10 @@ class OpenRouterBackend(ModelBackend):
             results.append(result)
         return results
 
+    # OpenRouter documents an explicit cap of 20 on ``top_logprobs`` (OpenAPI
+    # schema ``ChatRequest.top_logprobs`` at openrouter.ai/openapi.json).
+    _TOP_LOGPROBS_MAX = 20
+
     def _chat_kwargs(
         self,
         messages: list[ChatMessage],
@@ -1366,6 +1394,17 @@ class OpenRouterBackend(ModelBackend):
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
 
+        if params.logprobs:
+            if params.num_logprobs > self._TOP_LOGPROBS_MAX:
+                raise LogprobsNotReturnedError(
+                    f"OpenRouter caps top_logprobs at {self._TOP_LOGPROBS_MAX}; "
+                    f"requested num_logprobs={params.num_logprobs}.",
+                    backend_name="OpenRouterBackend",
+                    model_name=self._model,
+                )
+            kwargs["logprobs"] = True
+            kwargs["top_logprobs"] = params.num_logprobs
+
         if params.extra:
             kwargs.update(params.extra)
 
@@ -1373,12 +1412,37 @@ class OpenRouterBackend(ModelBackend):
 
     @staticmethod
     def _chat_result(response: Any) -> GenerationResult:
-        """Convert an OpenAI ChatCompletion to GenerationResult."""
+        """Convert an OpenAI-compatible ChatCompletion to GenerationResult.
+
+        Logprobs follow the OpenAI response shape — OpenRouter's OpenAPI
+        schema ``ChatTokenLogprobs`` at ``choices[i].logprobs.content[]``
+        matches OpenAI field-for-field (``token``, ``logprob``,
+        ``top_logprobs: [{token, logprob, bytes}]``), so the same
+        extraction works.
+        """
         choice = response.choices[0]
+
+        token_logprobs = None
+        if getattr(choice, "logprobs", None) and getattr(choice.logprobs, "content", None):
+            logprobs: list[TokenLogprob] = []
+            for token_info in choice.logprobs.content:
+                top_lps: dict[str, float] | None = None
+                if token_info.top_logprobs:
+                    top_lps = {lp.token: lp.logprob for lp in token_info.top_logprobs}
+                logprobs.append(
+                    TokenLogprob(
+                        token=token_info.token,
+                        token_id=0,  # OpenRouter/OpenAI do not return token IDs
+                        logprob=token_info.logprob,
+                        top_logprobs=top_lps,
+                    )
+                )
+            token_logprobs = tuple(logprobs)
+
         return GenerationResult(
             text=choice.message.content or "",
             finish_reason=_openai_stop_reason(choice.finish_reason),
-            token_logprobs=None,
+            token_logprobs=token_logprobs,
             prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
             completion_tokens=response.usage.completion_tokens if response.usage else 0,
             metadata={
@@ -1386,6 +1450,22 @@ class OpenRouterBackend(ModelBackend):
                 "id": response.id,
             },
         )
+
+    def _ensure_logprobs_if_requested(
+        self,
+        result: GenerationResult,
+        params: SamplingParams,
+    ) -> GenerationResult:
+        """Raise ``LogprobsNotReturnedError`` if logprobs were asked for but absent."""
+        if params.logprobs and not result.token_logprobs:
+            raise LogprobsNotReturnedError(
+                "OpenRouter returned no token logprobs despite logprobs=True. "
+                "The underlying provider likely does not expose logprobs for "
+                f"model {self._model!r}.",
+                backend_name="OpenRouterBackend",
+                model_name=self._model,
+            )
+        return result
 
     def generate_chat(
         self,
@@ -1407,7 +1487,9 @@ class OpenRouterBackend(ModelBackend):
                     response = self._client.chat.completions.create(**kwargs)
                 except Exception as exc:
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
-                return self._chat_result(response)
+                return self._ensure_logprobs_if_requested(
+                    self._chat_result(response), params
+                )
             except RateLimitError as exc:
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
                     raise
@@ -1440,7 +1522,9 @@ class OpenRouterBackend(ModelBackend):
                     response = await self._async_client.chat.completions.create(**kwargs)
                 except Exception as exc:
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
-                return self._chat_result(response)
+                return self._ensure_logprobs_if_requested(
+                    self._chat_result(response), params
+                )
             except RateLimitError as exc:
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
                     raise
