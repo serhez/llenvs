@@ -1424,6 +1424,16 @@ class OpenRouterBackend(ModelBackend):
                 )
             kwargs["logprobs"] = True
             kwargs["top_logprobs"] = params.num_logprobs
+            # OpenRouter's default router picks any provider with
+            # capacity — several (e.g. DeepInfra for Gemma) silently
+            # drop ``logprobs`` and return text only. ``provider.
+            # require_parameters`` restricts routing to providers that
+            # actually honour every requested param, so the request
+            # either gets logprobs back or fails with a routing error
+            # we can surface instead of silently losing them.
+            extra_body = kwargs.setdefault("extra_body", {})
+            provider_cfg = extra_body.setdefault("provider", {})
+            provider_cfg.setdefault("require_parameters", True)
 
         if params.extra:
             kwargs.update(params.extra)
