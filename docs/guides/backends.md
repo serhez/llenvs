@@ -242,6 +242,27 @@ backend = OpenRouterBackend(
 )
 ```
 
+### Reasoning / Thinking Budget
+
+`SamplingParams.thinking_budget` is forwarded as
+`extra_body.reasoning.max_tokens` on the chat-completion request, which
+OpenRouter routes to the upstream provider's native budget knob
+(Anthropic `thinking.budget_tokens`, Gemini thinking budget, Qwen
+`thinking_budget`); for effort-only models (OpenAI o-series, Grok)
+OpenRouter derives an effort bucket from the token count. Non-reasoning
+models silently ignore the field. The other thinking-budget knobs
+(`thinking_budget_per_block`, `thinking_budget_suffix`,
+`thinking_budget_soft_ratio`) require token-level logits intervention
+and are inert on this backend — they only take effect for `vllm` and
+`huggingface`.
+
+To override the derived `reasoning` block (e.g. send `effort` instead
+of `max_tokens`, or add `exclude: true`), pass
+`extra={"extra_body": {"reasoning": {...}}}` on `SamplingParams`. The
+caller-supplied dict shallow-merges over the derived one and wins on
+key collisions, so it is also the escape hatch for
+`reasoning.effort`/`reasoning.exclude`/`reasoning.enabled`.
+
 ## Codex CLI
 
 ```python
@@ -365,6 +386,15 @@ backend = VLLMBackend(
 The kwargs are spread into every `apply_chat_template()` call — both `generate_chat()` and `generate_chat_batch()`.
 
 ### Thinking Budget
+
+This section describes the in-process logits-processor implementation
+used by `vllm` and `huggingface` — those backends own token generation
+and can intervene per-step. For OpenRouter the same `thinking_budget`
+field is accepted but flows through the provider's reasoning API
+(`reasoning.max_tokens`); see the OpenRouter section above for the
+behavior and limitations there. Pure HTTP backends without a reasoning
+API (OpenAI, Anthropic direct, Codex CLI, vllm_singularity) ignore
+these fields entirely.
 
 For models that produce `<think>...</think>` reasoning blocks (e.g., Qwen3 with `enable_thinking=True`), you can cap the number of tokens generated inside each thinking block using `thinking_budget` on `InferenceConfig`:
 
