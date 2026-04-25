@@ -6577,6 +6577,108 @@ class TestApptainerHPCEnvironment:
         assert not env._host_tmp_dir.exists()
         assert not env._host_var_tmp_dir.exists()
 
+    def test_stop_cleans_up_when_not_started(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+        )
+        # _started=False simulates a start that raised before completing
+        # (e.g., apptainer instance start exit 255). Trial dirs already
+        # exist on disk because _prepare_trial_rootfs / _prepare_runtime_dirs
+        # ran before the failure.
+        assert env._started is False
+        env._sandbox_rootfs_dir.mkdir(parents=True)
+        (env._sandbox_rootfs_dir / "marker").write_text("present")
+        env._binds_dir.mkdir(parents=True)
+        env._staging_dir.mkdir(parents=True)
+        env._host_tmp_dir.mkdir(parents=True)
+        env._host_var_tmp_dir.mkdir(parents=True)
+        # _make_trial_paths already created verifier/ and agent/.
+        verifier_dir = env._trial_dir / "verifier"
+        agent_dir = env._trial_dir / "agent"
+        assert verifier_dir.exists()
+        assert agent_dir.exists()
+
+        calls: list[list[str]] = []
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            calls.append(list(cmd))
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+        run_async(env.stop(delete=True))
+
+        # No instance stop is attempted when nothing was started.
+        assert calls == []
+        # All leaked dirs must be cleaned up.
+        assert not env._sandbox_rootfs_dir.exists()
+        assert not env._binds_dir.exists()
+        assert not env._staging_dir.exists()
+        assert not env._host_tmp_dir.exists()
+        assert not env._host_var_tmp_dir.exists()
+        assert not verifier_dir.exists()
+        assert not agent_dir.exists()
+
+    def test_start_sandbox_failure_triggers_cleanup(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path
+    ):
+        from llenvs.adapters.harbor import ApptainerHPCEnvironment
+        from llenvs.core.async_utils import run_async
+
+        (tmp_path / "Dockerfile").write_text("FROM ubuntu:latest\n")
+        sif_dir = tmp_path / "sif_cache"
+        sif_dir.mkdir()
+        trial = tmp_path / "trial"
+        env = ApptainerHPCEnvironment(
+            environment_dir=tmp_path,
+            environment_name="task_01",
+            session_id="session-1",
+            trial_paths=self._make_trial_paths(trial),
+            task_env_config=self._make_task_env_config(),
+            sif_cache_dir=str(sif_dir),
+            rootfs_mode="sandbox",
+        )
+
+        rootfs_dir = env._sandbox_rootfs_dir
+
+        def fake_prepare_rootfs() -> Path:
+            rootfs_dir.mkdir(parents=True, exist_ok=True)
+            (rootfs_dir / "marker").write_text("present")
+            return rootfs_dir
+
+        monkeypatch.setattr(env, "_prepare_trial_rootfs", fake_prepare_rootfs)
+
+        async def fake_run(cmd, *, check=True, timeout_sec=None):
+            if "instance" in cmd and "start" in cmd:
+                raise RuntimeError("apptainer command failed (exit 255)")
+            return MockExecResult(stdout="ok")
+
+        monkeypatch.setattr(env, "_run_apptainer_command", fake_run)
+
+        with pytest.raises(RuntimeError, match="apptainer command failed"):
+            run_async(env._start_sandbox_instance())
+
+        assert env._started is False
+        assert not rootfs_dir.exists()
+        assert not env._staging_dir.exists()
+        assert not env._host_tmp_dir.exists()
+        assert not env._host_var_tmp_dir.exists()
+        assert not (env._trial_dir / "verifier").exists()
+        assert not (env._trial_dir / "agent").exists()
+
     def test_concurrent_overlay_probe_runs_only_once(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path
     ):
