@@ -75,7 +75,7 @@ class ModelConfig:
     """Configuration for a model backend.
 
     Attributes:
-        backend: Backend type (vllm, openai, anthropic, openrouter, codex).
+        backend: Backend type (vllm, openai, anthropic, openrouter, codex, claude-code).
         model: Model path or name.
         max_concurrency: Maximum concurrent requests for API backends.
         params: Backend-specific parameters.
@@ -831,6 +831,15 @@ class BackendFactory:
             from llenvs.inference.backends.codex_cli import CodexCLIBackend
 
             return CodexCLIBackend(
+                model=config.model,
+                max_concurrency=config.max_concurrency,
+                **config.params,
+            )
+
+        elif backend_type == "claude-code":
+            from llenvs.inference.backends.claude_code import ClaudeCodeBackend
+
+            return ClaudeCodeBackend(
                 model=config.model,
                 max_concurrency=config.max_concurrency,
                 **config.params,

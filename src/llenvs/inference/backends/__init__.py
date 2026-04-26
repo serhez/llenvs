@@ -5,6 +5,7 @@ from llenvs.inference.backends.api import (
     OpenAIBackend,
     OpenRouterBackend,
 )
+from llenvs.inference.backends.claude_code import ClaudeCodeBackend
 from llenvs.inference.backends.codex_cli import CodexCLIBackend
 from llenvs.inference.backends.huggingface import HuggingFaceBackend
 from llenvs.inference.backends.vllm import VLLMBackend
@@ -16,4 +17,5 @@ __all__ = [
     "AnthropicBackend",
     "OpenRouterBackend",
     "CodexCLIBackend",
+    "ClaudeCodeBackend",
 ]
