@@ -75,6 +75,39 @@ def _extract_objective(observation: str) -> str:
     return ""
 
 
+def _resolve_game_file_path(game_file: str) -> str:
+    """Normalize a game-file path against the local ``ALFWORLD_DATA`` root.
+
+    Datasets collected on another machine carry absolute paths baked into
+    ``state.hidden.game_file`` (e.g. ``/home/other/.cache/alfworld/
+    json_2.1.1/valid_unseen/<game>/game.tw-pddl``). On the current machine
+    those paths don't exist, but the same game tree lives under
+    ``$ALFWORLD_DATA``. When the stored path is unreadable and
+    ``ALFWORLD_DATA`` is set, rewrite the prefix up to the first
+    ``json_*/`` segment to point at the local root so MC rollouts can
+    replay cross-machine-collected datasets.
+
+    Paths that already resolve locally are returned unchanged.
+    """
+    if os.path.exists(game_file):
+        return game_file
+    root = os.environ.get("ALFWORLD_DATA")
+    if not root:
+        return game_file
+    # Split on the json_<version>/ segment common to both paths. The
+    # regex captures that segment and everything after so we can re-anchor
+    # under the local root.
+    import re as _re
+
+    match = _re.search(r"(json_[^/]+/.*)$", game_file)
+    if not match:
+        return game_file
+    candidate = os.path.join(root, match.group(1))
+    if os.path.exists(candidate):
+        return candidate
+    return game_file
+
+
 def _extract_task_type(game_file: str) -> str:
     """Extract the task type from a game file path.
 
@@ -229,6 +262,7 @@ class AlfWorldEnvironment:
         include_objective_in_obs: bool = True,
         visual: bool = False,
         expert_plan: bool = False,
+        expose_expert_plan_in_obs: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         answer_extractor: AnswerExtractor | None = None,
@@ -258,6 +292,14 @@ class AlfWorldEnvironment:
                 TextWorld (non-visual) path; Thor's expert returns a single
                 next action which is intentionally rejected. Raises
                 ``ValueError`` if combined with ``visual=True``.
+            expose_expert_plan_in_obs: When True (requires
+                ``expert_plan=True``), prepend a parseable line
+                ``[expert_plan_next: <command>]`` to the state text so a
+                scripted policy that only sees the text observation can
+                replay the handcoded plan deterministically. Off by
+                default to keep actor prompts clean; flip on when
+                constructing the env for MC rollouts with an expert
+                scripted policy.
             extra_rewards: Additional reward functions appended after
                 native rewards.
             prompts: Override default prompt components. Keys:
@@ -288,6 +330,12 @@ class AlfWorldEnvironment:
                 "be combined. Thor's single-action expert is inferior to "
                 "TextWorld's handcoded multi-step planner; run two parallel "
                 "envs (one for each) instead."
+            )
+        self._expose_expert_plan_in_obs = expose_expert_plan_in_obs
+        if self._expose_expert_plan_in_obs and not self._expert_plan:
+            raise ValueError(
+                "AlfWorldEnvironment: expose_expert_plan_in_obs=True requires "
+                "expert_plan=True (nothing to expose otherwise)."
             )
         self._native_rewards: tuple[RewardFunction, ...] = (AlfWorldReward(),)
         self._extra_rewards = extra_rewards
@@ -402,6 +450,8 @@ class AlfWorldEnvironment:
             Tuple of (gym_env, initial_observation_text, info_dict, images).
         """
         import textworld.gym
+
+        game_file = _resolve_game_file_path(game_file)
 
         with self._gym_env_lock:
             if game_file not in self._env_id_cache:
@@ -577,6 +627,8 @@ class AlfWorldEnvironment:
             state_parts.append(commands_prefix)
             for cmd in admissible_commands:
                 state_parts.append(f"  - {cmd}")
+        if self._expose_expert_plan_in_obs and hidden.expert_plan:
+            state_parts.insert(0, f"[expert_plan_next: {hidden.expert_plan[0]}]")
         state_text = "\n".join(state_parts)
 
         observation = Observation(
@@ -787,6 +839,8 @@ class AlfWorldEnvironment:
             state_parts.append(commands_prefix)
             for cmd in admissible_commands:
                 state_parts.append(f"  - {cmd}")
+        if self._expose_expert_plan_in_obs and expert_plan:
+            state_parts.insert(0, f"[expert_plan_next: {expert_plan[0]}]")
         state_text = "\n".join(state_parts)
 
         new_observation = Observation(
@@ -1017,6 +1071,7 @@ class AlfWorldAdapter:
         include_objective_in_obs: bool = True,
         visual: bool = False,
         expert_plan: bool = False,
+        expose_expert_plan_in_obs: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         prompts: dict[str, str] | None = None,
         answer_extractor: AnswerExtractor | None = None,
@@ -1133,6 +1188,7 @@ class AlfWorldAdapter:
             include_objective_in_obs=include_objective_in_obs,
             visual=visual,
             expert_plan=expert_plan,
+            expose_expert_plan_in_obs=expose_expert_plan_in_obs,
             extra_rewards=extra_rewards,
             prompts=prompts,
             answer_extractor=answer_extractor,
