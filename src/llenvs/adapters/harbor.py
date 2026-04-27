@@ -3740,60 +3740,69 @@ class ApptainerHPCEnvironment:
         return verifier_dir, agent_dir
 
     async def _start_overlay_instance(self) -> None:
-        verifier_dir, agent_dir = self._prepare_runtime_dirs()
-        self._prepare_trial_bind_dirs()
+        try:
+            verifier_dir, agent_dir = self._prepare_runtime_dirs()
+            self._prepare_trial_bind_dirs()
 
-        if not self._writable_tmpfs:
-            self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
-            await self._run_apptainer_command(
+            if not self._writable_tmpfs:
+                self._overlay_path.parent.mkdir(parents=True, exist_ok=True)
+                await self._run_apptainer_command(
+                    [
+                        self._apptainer,
+                        "overlay",
+                        "create",
+                        "--size",
+                        str(self._overlay_size_mb),
+                        str(self._overlay_path),
+                    ]
+                )
+
+            cmd = [self._apptainer, "instance", "start"]
+            if self._writable_tmpfs:
+                cmd.append("--writable-tmpfs")
+            else:
+                cmd.extend(["--overlay", str(self._overlay_path)])
+            cmd.extend(
                 [
-                    self._apptainer,
-                    "overlay",
-                    "create",
-                    "--size",
-                    str(self._overlay_size_mb),
-                    str(self._overlay_path),
+                    "--cleanenv",
+                    "--contain",
+                    "--no-home",
                 ]
             )
-
-        cmd = [self._apptainer, "instance", "start"]
-        if self._writable_tmpfs:
-            cmd.append("--writable-tmpfs")
-        else:
-            cmd.extend(["--overlay", str(self._overlay_path)])
-        cmd.extend(
-            [
-                "--cleanenv",
-                "--contain",
-                "--no-home",
-            ]
-        )
-        if self._fakeroot:
-            cmd.append("--fakeroot")
-        cmd.extend(
-            [
-                "--bind",
-                f"{self._host_tmp_dir}:/tmp",
-                "--bind",
-                f"{self._host_var_tmp_dir}:/var/tmp",
-                "--bind",
-                f"{self._staging_dir}:/staging",
-                "--bind",
-                f"{self._app_bind_dir}:/app",
-                "--bind",
-                f"{self._tests_bind_dir}:/tests",
-                "--bind",
-                f"{verifier_dir}:/logs/verifier",
-                "--bind",
-                f"{agent_dir}:/logs/agent",
-                str(self._sif_path),
-                self._instance_name,
-            ]
-        )
-        await self._run_apptainer_command(cmd)
-        await self._bootstrap_log_dirs()
-        self._started = True
-        self._active_rootfs_mode = "overlay"
+            if self._fakeroot:
+                cmd.append("--fakeroot")
+            cmd.extend(
+                [
+                    "--bind",
+                    f"{self._host_tmp_dir}:/tmp",
+                    "--bind",
+                    f"{self._host_var_tmp_dir}:/var/tmp",
+                    "--bind",
+                    f"{self._staging_dir}:/staging",
+                    "--bind",
+                    f"{self._app_bind_dir}:/app",
+                    "--bind",
+                    f"{self._tests_bind_dir}:/tests",
+                    "--bind",
+                    f"{verifier_dir}:/logs/verifier",
+                    "--bind",
+                    f"{agent_dir}:/logs/agent",
+                    str(self._sif_path),
+                    self._instance_name,
+                ]
+            )
+            await self._run_apptainer_command(cmd)
+            await self._bootstrap_log_dirs()
+            self._started = True
+            self._active_rootfs_mode = "overlay"
+        except BaseException:
+            try:
+                await self.stop(delete=True)
+            except Exception:
+                self.logger.exception(
+                    "Cleanup after failed overlay start raised; partial state may remain"
+                )
+            raise
 
     async def _start_sandbox_from_rootfs(self, rootfs_dir: Path) -> None:
         """Start sandbox instance from an existing rootfs directory."""
@@ -3845,7 +3854,16 @@ class ApptainerHPCEnvironment:
 
     async def _start_sandbox_instance(self) -> None:
         rootfs_dir = self._prepare_trial_rootfs()
-        await self._start_sandbox_from_rootfs(rootfs_dir)
+        try:
+            await self._start_sandbox_from_rootfs(rootfs_dir)
+        except BaseException:
+            try:
+                await self.stop(delete=True)
+            except Exception:
+                self.logger.exception(
+                    "Cleanup after failed sandbox start raised; partial state may remain"
+                )
+            raise
 
     async def start(self, force_build: bool = False) -> None:
         await self._log_runtime_info()
@@ -3918,28 +3936,30 @@ class ApptainerHPCEnvironment:
                 self._finish_overlay_probe(probe_result)
 
     async def stop(self, delete: bool = True) -> None:
-        if not self._started:
-            return
         try:
-            await self._run_apptainer_command(
-                [self._apptainer, "instance", "stop", self._instance_name],
-                check=False,
-            )
+            if self._started:
+                await self._run_apptainer_command(
+                    [self._apptainer, "instance", "stop", self._instance_name],
+                    check=False,
+                )
         finally:
             self._started = False
             self._active_rootfs_mode = None
             if delete:
                 if self._overlay_path.exists():
                     self._overlay_path.unlink()
-                if self._binds_dir.exists():
-                    shutil.rmtree(self._binds_dir, ignore_errors=True)
-                if self._sandbox_rootfs_dir.exists():
-                    shutil.rmtree(self._sandbox_rootfs_dir, ignore_errors=True)
-                if self._staging_dir.exists():
-                    shutil.rmtree(self._staging_dir, ignore_errors=True)
-                for tmp_dir in (self._host_tmp_dir, self._host_var_tmp_dir):
-                    if tmp_dir.exists():
-                        shutil.rmtree(tmp_dir, ignore_errors=True)
+                cleanup_targets = (
+                    self._binds_dir,
+                    self._sandbox_rootfs_dir,
+                    self._staging_dir,
+                    self._host_tmp_dir,
+                    self._host_var_tmp_dir,
+                    self._trial_dir / "verifier",
+                    self._trial_dir / "agent",
+                )
+                for target in cleanup_targets:
+                    if target.exists():
+                        shutil.rmtree(target, ignore_errors=True)
 
     async def export_checkpoint(
         self,

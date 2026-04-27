@@ -27,6 +27,7 @@ sessions. Repeated `close()` calls are safe.
 | Anthropic | `anthropic` | Batching (concurrent), prefix continuation (prefill), streaming, vision |
 | OpenRouter | `openai` | Batching (concurrent), access to multiple models, vision |
 | Codex CLI | `codex` | Chat, batching (subprocess concurrency), isolated temp workspace, read-only sandbox |
+| Claude Code CLI | `claude` (Claude Code v2.1+) | Chat, batching (subprocess concurrency), isolated temp workspace, tools disabled, reasoning effort |
 
 ## vLLM (Local Inference)
 
@@ -242,6 +243,27 @@ backend = OpenRouterBackend(
 )
 ```
 
+### Reasoning / Thinking Budget
+
+`SamplingParams.thinking_budget` is forwarded as
+`extra_body.reasoning.max_tokens` on the chat-completion request, which
+OpenRouter routes to the upstream provider's native budget knob
+(Anthropic `thinking.budget_tokens`, Gemini thinking budget, Qwen
+`thinking_budget`); for effort-only models (OpenAI o-series, Grok)
+OpenRouter derives an effort bucket from the token count. Non-reasoning
+models silently ignore the field. The other thinking-budget knobs
+(`thinking_budget_per_block`, `thinking_budget_suffix`,
+`thinking_budget_soft_ratio`) require token-level logits intervention
+and are inert on this backend — they only take effect for `vllm` and
+`huggingface`.
+
+To override the derived `reasoning` block (e.g. send `effort` instead
+of `max_tokens`, or add `exclude: true`), pass
+`extra={"extra_body": {"reasoning": {...}}}` on `SamplingParams`. The
+caller-supplied dict shallow-merges over the derived one and wins on
+key collisions, so it is also the escape hatch for
+`reasoning.effort`/`reasoning.exclude`/`reasoning.enabled`.
+
 ## Codex CLI
 
 ```python
@@ -262,6 +284,42 @@ backend = CodexCLIBackend(
 - Supports chat generation only. Native tool calling, vision, logprobs, prefix continuation, and full scoring are not available.
 - `SamplingParams.max_tokens` is accepted but ignored because `codex exec` does not expose a direct equivalent.
 - Use the backend constructor's `config_overrides` argument to pass Codex-specific `-c key=value` overrides when your local Codex CLI/config supports them.
+
+### Capabilities
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| logprobs | ✗ | Not exposed by the CLI |
+| prefix_continuation | ✗ | Stateless transcript replay only |
+| batching | ✓ | Parallel subprocess calls |
+| streaming | ✗ | Returns one final assistant message |
+| chat | ✓ | Transcript rendered into each request |
+| function_calling | ✗ | Native tool calls unsupported |
+| vision | ✗ | Text-only |
+
+## Claude Code CLI
+
+```python
+from llenvs.inference.backends import ClaudeCodeBackend
+
+backend = ClaudeCodeBackend(
+    model="sonnet",       # alias, or a full name like "claude-sonnet-4-6"
+    max_concurrency=4,    # Recommended: keep this small; each request spawns a CLI process
+    timeout=600.0,
+    effort="low",         # "low" | "medium" | "high" | "xhigh" | "max"
+    max_budget_usd=0.10,  # per-call USD safety cap
+)
+```
+
+### Notes
+
+- Runs `claude --print --output-format json` in a fresh temporary directory for every request.
+- Always passes `--no-session-persistence` and `--strict-mcp-config`. By default `--tools ""` is sent so the spawned CLI cannot run Bash/Edit/Read tools — the backend behaves as a pure text-completion wrapper.
+- `--bare` is **off by default** so the CLI can use the same OAuth/keychain login as the interactive TUI (e.g. a Claude Pro/Max subscription). Pass `bare=True` to force `ANTHROPIC_API_KEY` / `apiKeyHelper` auth and skip auto-discovery — recommended for reproducible CI.
+- Supports chat generation only. Native tool calling, vision, logprobs, prefix continuation, and full scoring are not available.
+- `SamplingParams.max_tokens` is accepted but ignored because the Claude Code CLI does not expose a direct equivalent. Use `effort` to control reasoning level and `max_budget_usd` as a per-call USD cap.
+- Errors from the underlying Anthropic API are classified into `PromptTooLongError` (context-limit messages), `RuntimeError` (auth failures — not retryable), or `QuotaExhaustedError` (everything else, including `is_error: true` payloads, rate limits, server overload, timeouts, and unparseable output). The CLI itself retries 10× internally before surfacing errors (configurable via `CLAUDE_CODE_MAX_RETRIES`).
+- Use the backend constructor's `extra_args` argument (a list of strings) to pass any Claude Code flag this backend does not model directly.
 
 ### Capabilities
 
@@ -365,6 +423,15 @@ backend = VLLMBackend(
 The kwargs are spread into every `apply_chat_template()` call — both `generate_chat()` and `generate_chat_batch()`.
 
 ### Thinking Budget
+
+This section describes the in-process logits-processor implementation
+used by `vllm` and `huggingface` — those backends own token generation
+and can intervene per-step. For OpenRouter the same `thinking_budget`
+field is accepted but flows through the provider's reasoning API
+(`reasoning.max_tokens`); see the OpenRouter section above for the
+behavior and limitations there. Pure HTTP backends without a reasoning
+API (OpenAI, Anthropic direct, Codex CLI, Claude Code CLI, vllm_singularity) ignore
+these fields entirely.
 
 For models that produce `<think>...</think>` reasoning blocks (e.g., Qwen3 with `enable_thinking=True`), you can cap the number of tokens generated inside each thinking block using `thinking_budget` on `InferenceConfig`:
 

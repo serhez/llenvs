@@ -1454,8 +1454,27 @@ class OpenRouterBackend(ModelBackend):
             for key, value in default_provider.items():
                 provider_cfg.setdefault(key, value)
 
-        if params.extra:
-            kwargs.update(params.extra)
+        # OpenRouter's unified ``reasoning`` block lives at the top level of
+        # the request body, but the OpenAI SDK doesn't know that field — it
+        # has to ride through ``extra_body``. Map ``thinking_budget`` onto
+        # ``reasoning.max_tokens`` (covers Anthropic ``thinking.budget_tokens``,
+        # Gemini thinking budget, Qwen ``thinking_budget``; effort-only models
+        # get a derived effort bucket on the OpenRouter side). Caller-supplied
+        # ``extra.extra_body`` shallow-merges on top so the explicit escape
+        # hatch wins on key collisions.
+        # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+        extra_body: dict[str, Any] = {}
+        if params.thinking_budget is not None:
+            extra_body["reasoning"] = {"max_tokens": params.thinking_budget}
+
+        user_extras = dict(params.extra) if params.extra else {}
+        user_extra_body = user_extras.pop("extra_body", None)
+        if user_extra_body:
+            extra_body = {**extra_body, **user_extra_body}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if user_extras:
+            kwargs.update(user_extras)
 
         return kwargs
 
