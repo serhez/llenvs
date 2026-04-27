@@ -149,6 +149,47 @@ def _is_invalid_input_error(error: BaseException) -> bool:
     )
 
 
+def _is_rate_limit_text(text: str) -> bool:
+    text = text.lower()
+    return any(
+        needle in text
+        for needle in (
+            "rate increased too quickly",
+            "too many requests",
+            "rate limit",
+            "rate_limit",
+            "throttl",
+            "request limit",
+        )
+    )
+
+
+def _is_rate_limit_malformed(exc: BaseException) -> bool:
+    """True iff ``exc`` is a ``MalformedResponseError`` whose provider error
+    text matches a rate-limit pattern.
+
+    Some providers (notably Alibaba) surface their own 429 as an HTTP-200
+    body with ``choices=null`` plus a textual rate-limit message in the
+    OpenRouter top-level ``error``. The OpenAI SDK's ``RateLimitError``
+    path therefore never fires, and the retry loop would otherwise let
+    these abort the batch immediately.
+    """
+    if not isinstance(exc, MalformedResponseError):
+        return False
+    parts = [str(exc)]
+    provider_error = getattr(exc, "provider_error", None)
+    if isinstance(provider_error, dict):
+        msg = provider_error.get("message")
+        if isinstance(msg, str):
+            parts.append(msg)
+        code = provider_error.get("code")
+        if isinstance(code, str):
+            parts.append(code)
+    elif isinstance(provider_error, str):
+        parts.append(provider_error)
+    return _is_rate_limit_text(" ".join(parts))
+
+
 def _format_no_choices_message(provider_error: Any) -> str:
     """Build a diagnostic message for an HTTP-200 response with no choices.
 
@@ -1278,9 +1319,15 @@ class OpenRouterBackend(ModelBackend):
             app_name: Your app name for rankings.
             max_concurrency: Maximum concurrent requests for batch generation.
             rate_limit_wait: Seconds to wait before retrying after a rate-limit
-                (429) error.  When set to ``0`` (the default) the SDK's
-                built-in retry/backoff handles 429s.  Set to e.g. ``60`` for
-                free-tier models with strict per-minute caps.
+                error.  When set to ``0`` (the default) the SDK's built-in
+                retry/backoff handles 429s.  Set to e.g. ``60`` for free-tier
+                models with strict per-minute caps. The retry path covers both
+                ``RateLimitError`` (HTTP 429) and ``MalformedResponseError``
+                whose provider message is rate-limit-shaped — some providers
+                (notably Alibaba) surface their own 429 as an HTTP-200 with
+                ``choices=null`` plus a textual rate-limit message in the
+                OpenRouter top-level ``error``, which would otherwise bypass
+                the SDK's rate-limit handling.
             rate_limit_max_retries: Maximum number of rate-limit retries before
                 giving up and re-raising the error.
             timeout: Connect timeout in seconds.  The overall read timeout
@@ -1589,7 +1636,7 @@ class OpenRouterBackend(ModelBackend):
         from openai import RateLimitError
 
         kwargs = self._chat_kwargs(messages, params)
-        last_exc: RateLimitError | None = None
+        last_exc: BaseException | None = None
 
         for attempt in range(self._rate_limit_max_retries + 1):
             try:
@@ -1598,19 +1645,22 @@ class OpenRouterBackend(ModelBackend):
                     return self._ensure_logprobs_if_requested(
                         self._chat_result(response), params
                     )
-                except RateLimitError:
+                except (RateLimitError, MalformedResponseError):
                     raise
                 except Exception as exc:
                     translated = self._translate_router_404_for_logprobs(exc, params)
                     if translated is not exc:
                         raise translated from exc
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
-            except RateLimitError as exc:
+            except (RateLimitError, MalformedResponseError) as exc:
+                if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
+                    raise
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
                     raise
                 last_exc = exc
                 logging.getLogger(__name__).warning(
-                    "Rate limited, waiting %.0fs (attempt %d/%d)",
+                    "Rate limited (%s), waiting %.0fs (attempt %d/%d)",
+                    type(exc).__name__,
                     self._rate_limit_wait, attempt + 1, self._rate_limit_max_retries,
                 )
                 time.sleep(self._rate_limit_wait)
@@ -1629,7 +1679,7 @@ class OpenRouterBackend(ModelBackend):
         from openai import RateLimitError
 
         kwargs = self._chat_kwargs(messages, params)
-        last_exc: RateLimitError | None = None
+        last_exc: BaseException | None = None
 
         for attempt in range(self._rate_limit_max_retries + 1):
             try:
@@ -1638,19 +1688,22 @@ class OpenRouterBackend(ModelBackend):
                     return self._ensure_logprobs_if_requested(
                         self._chat_result(response), params
                     )
-                except RateLimitError:
+                except (RateLimitError, MalformedResponseError):
                     raise
                 except Exception as exc:
                     translated = self._translate_router_404_for_logprobs(exc, params)
                     if translated is not exc:
                         raise translated from exc
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
-            except RateLimitError as exc:
+            except (RateLimitError, MalformedResponseError) as exc:
+                if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
+                    raise
                 if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
                     raise
                 last_exc = exc
                 logging.getLogger(__name__).warning(
-                    "Rate limited, waiting %.0fs (attempt %d/%d)",
+                    "Rate limited (%s), waiting %.0fs (attempt %d/%d)",
+                    type(exc).__name__,
                     self._rate_limit_wait, attempt + 1, self._rate_limit_max_retries,
                 )
                 await asyncio.sleep(self._rate_limit_wait)

@@ -28,7 +28,10 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
-from llenvs.inference.backends.api import OpenRouterBackend
+from llenvs.inference.backends.api import (
+    OpenRouterBackend,
+    _is_rate_limit_malformed,
+)
 from llenvs.inference.protocol import (
     ChatMessage,
     MalformedResponseError,
@@ -187,6 +190,218 @@ class TestMalformedResponseAsync:
 # ---------------------------------------------------------------------------
 # Fix 2: errors raised from inside _chat_result must be normalized
 # ---------------------------------------------------------------------------
+
+
+class TestIsRateLimitMalformed:
+    """Classification of rate-limit-shaped MalformedResponseError instances.
+
+    Some upstream providers (e.g. Alibaba, observed live on 2026-04-27)
+    surface their own 429 as an HTTP-200 with ``choices=null`` plus an
+    OpenRouter top-level ``error`` of HTTP 502 wrapping a textual rate-limit
+    message. The retry loop only catches ``RateLimitError``, so these slip
+    through. ``_is_rate_limit_malformed`` is the helper that classifies
+    those cases for the retry path.
+    """
+
+    def test_returns_false_for_non_malformed(self) -> None:
+        assert _is_rate_limit_malformed(ValueError("rate limit")) is False
+
+    def test_detects_alibaba_rate_increased_too_quickly(self) -> None:
+        exc = MalformedResponseError(
+            "Provider returned no choices: 502 — Upstream error from Alibaba: "
+            "Request rate increased too quickly. To ensure system stability, "
+            "please adjust your client logic to scale requests more smoothly "
+            "over time.",
+            backend_name="OpenRouterBackend",
+            model_name="qwen/qwen3.5-27b",
+            provider_error={
+                "code": 502,
+                "message": (
+                    "Upstream error from Alibaba: Request rate increased too "
+                    "quickly. To ensure system stability, please adjust your "
+                    "client logic to scale requests more smoothly over time."
+                ),
+            },
+        )
+        assert _is_rate_limit_malformed(exc) is True
+
+    def test_detects_too_many_requests(self) -> None:
+        exc = MalformedResponseError(
+            "no choices",
+            provider_error={"message": "429 Too Many Requests"},
+        )
+        assert _is_rate_limit_malformed(exc) is True
+
+    def test_does_not_match_top_logprobs_cap_error(self) -> None:
+        """The cap-mismatch error from Alibaba must NOT be retried — it's
+        a permanent input rejection that retrying would just re-trigger."""
+        exc = MalformedResponseError(
+            "Provider returned no choices: 502 — Upstream error from Alibaba: "
+            "<400> InternalError.Algo.InvalidParameter: Range of top_logprobs "
+            "should be [0, 5]",
+            provider_error={
+                "code": 502,
+                "message": (
+                    "Upstream error from Alibaba: <400> "
+                    "InternalError.Algo.InvalidParameter: Range of top_logprobs "
+                    "should be [0, 5]"
+                ),
+            },
+        )
+        assert _is_rate_limit_malformed(exc) is False
+
+    def test_does_not_match_unrelated_failure(self) -> None:
+        exc = MalformedResponseError(
+            "Provider returned no choices: upstream timeout",
+            provider_error={"code": 503, "message": "upstream timeout"},
+        )
+        assert _is_rate_limit_malformed(exc) is False
+
+
+class TestRateLimitMalformedRetry:
+    """OpenRouterBackend retry loop must treat rate-limit-shaped
+    MalformedResponseError the same as RateLimitError: sleep and retry up to
+    ``rate_limit_max_retries`` times. Non-rate-limit MalformedResponseError
+    must still propagate immediately, since retrying a 4xx-equivalent is
+    wasteful.
+    """
+
+    def _rate_limit_response(self) -> SimpleNamespace:
+        err = {
+            "code": 502,
+            "message": (
+                "Upstream error from Alibaba: Request rate increased too "
+                "quickly. Please scale requests more smoothly."
+            ),
+        }
+        return _no_choices_response(choices=None, error=err)
+
+    def _cap_mismatch_response(self) -> SimpleNamespace:
+        err = {
+            "code": 502,
+            "message": (
+                "Upstream error from Alibaba: <400> "
+                "InternalError.Algo.InvalidParameter: Range of top_logprobs "
+                "should be [0, 5]"
+            ),
+        }
+        return _no_choices_response(choices=None, error=err)
+
+    def test_sync_retries_until_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._rate_limit_wait = 0.01
+        backend._rate_limit_max_retries = 2
+
+        sleeps: list[float] = []
+        monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+        responses = [self._rate_limit_response(), _valid_response()]
+        backend._client.chat.completions.create = MagicMock(side_effect=responses)
+
+        result = backend.generate_chat(
+            [ChatMessage(role="user", content="hi")], SamplingParams()
+        )
+        assert result.text == "ok"
+        assert backend._client.chat.completions.create.call_count == 2
+        assert sleeps == [0.01]
+
+    def test_sync_does_not_retry_non_rate_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._rate_limit_wait = 0.01
+        backend._rate_limit_max_retries = 2
+
+        sleeps: list[float] = []
+        monkeypatch.setattr("time.sleep", lambda s: sleeps.append(s))
+
+        backend._client.chat.completions.create = MagicMock(
+            return_value=self._cap_mismatch_response()
+        )
+
+        with pytest.raises(MalformedResponseError):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")], SamplingParams()
+            )
+        assert backend._client.chat.completions.create.call_count == 1
+        assert sleeps == []
+
+    def test_sync_exhausts_retries_then_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._rate_limit_wait = 0.01
+        backend._rate_limit_max_retries = 2
+
+        monkeypatch.setattr("time.sleep", lambda s: None)
+
+        backend._client.chat.completions.create = MagicMock(
+            return_value=self._rate_limit_response()
+        )
+
+        with pytest.raises(MalformedResponseError):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")], SamplingParams()
+            )
+        # Initial attempt + 2 retries = 3 total calls.
+        assert backend._client.chat.completions.create.call_count == 3
+
+    def test_async_retries_until_success(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._rate_limit_wait = 0.01
+        backend._rate_limit_max_retries = 2
+
+        sleeps: list[float] = []
+
+        async def _fake_async_sleep(s: float) -> None:
+            sleeps.append(s)
+
+        monkeypatch.setattr("asyncio.sleep", _fake_async_sleep)
+
+        responses = [self._rate_limit_response(), _valid_response()]
+        backend._async_client.chat.completions.create = AsyncMock(side_effect=responses)
+
+        # The batch path goes through _generate_chat_async, which has its
+        # own copy of the retry loop. One item, one rate-limit response,
+        # one success.
+        results = backend.generate_chat_batch(
+            [[ChatMessage(role="user", content="hi")]], SamplingParams()
+        )
+        assert len(results) == 1
+        assert results[0].text == "ok"
+        assert backend._async_client.chat.completions.create.call_count == 2
+        assert sleeps == [0.01]
+
+    def test_async_does_not_retry_non_rate_limit(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._rate_limit_wait = 0.01
+        backend._rate_limit_max_retries = 2
+
+        sleeps: list[float] = []
+
+        async def _fake_async_sleep(s: float) -> None:
+            sleeps.append(s)
+
+        monkeypatch.setattr("asyncio.sleep", _fake_async_sleep)
+
+        backend._async_client.chat.completions.create = AsyncMock(
+            return_value=self._cap_mismatch_response()
+        )
+
+        with pytest.raises(PartialBatchError) as exc_info:
+            backend.generate_chat_batch(
+                [[ChatMessage(role="user", content="hi")]], SamplingParams()
+            )
+        failure = next(iter(exc_info.value.failures.values()))
+        assert isinstance(failure, MalformedResponseError)
+        assert backend._async_client.chat.completions.create.call_count == 1
+        assert sleeps == []
 
 
 class TestChatResultErrorsAreNormalized:
