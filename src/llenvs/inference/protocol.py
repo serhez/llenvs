@@ -70,6 +70,31 @@ class PromptTooLongError(RecoverableInputError):
         self.offending_prompts = offending_prompts or []
 
 
+class RefusedByPolicyError(RecoverableInputError):
+    """Raised when a backend refuses a specific request on content-policy grounds.
+
+    Deterministic per-input: retrying the same prompt produces the same
+    refusal, so callers should treat the offending item as a permanent
+    failure rather than waiting on a quota window.
+
+    Attributes:
+        subtype: Upstream error subtype when known (e.g., the Claude Code
+            JSON payload's ``subtype`` field). ``None`` when the refusal
+            was inferred from non-JSON output.
+        offending_indices: Batch-local indices for failed items when known.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        subtype: str | None = None,
+        offending_indices: list[int] | None = None,
+    ) -> None:
+        super().__init__(message, offending_indices=offending_indices)
+        self.subtype = subtype
+
+
 class QuotaExhaustedError(Exception):
     """Raised when a backend reports a quota / rate-limit window exhaustion.
 
