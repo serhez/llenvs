@@ -22,6 +22,7 @@ from llenvs.inference.protocol import (
     PartialBatchError,
     PromptTooLongError,
     QuotaExhaustedError,
+    RefusedByPolicyError,
     SamplingParams,
     StopReason,
 )
@@ -59,6 +60,10 @@ _AUTH_ERROR_NEEDLES = (
     "not logged in",
     "please run /login",
     "unauthorized",
+)
+_AUP_REFUSAL_NEEDLES = (
+    "usage policy",
+    "anthropic.com/legal/aup",
 )
 
 
@@ -140,6 +145,11 @@ def _is_context_limit_text(text: str) -> bool:
 def _is_auth_error_text(text: str) -> bool:
     lowered = text.lower()
     return any(needle in lowered for needle in _AUTH_ERROR_NEEDLES)
+
+
+def _is_aup_refusal_text(text: str) -> bool:
+    lowered = text.lower()
+    return any(needle in lowered for needle in _AUP_REFUSAL_NEEDLES)
 
 
 def _diagnostic_summary(stderr: str, stdout: str) -> str:
@@ -453,7 +463,7 @@ class ClaudeCodeBackend(ModelBackend):
         diagnostic = _diagnostic_summary(stderr, stdout)
         if completed.returncode == 0:
             raise QuotaExhaustedError(f"claude --print returned non-JSON output: {diagnostic}")
-        raise self._classify_error_text(diagnostic, completed.returncode)
+        raise self._classify_error_text(diagnostic, completed.returncode, subtype=None)
 
     def _handle_json_payload(
         self,
@@ -467,9 +477,10 @@ class ClaudeCodeBackend(ModelBackend):
         if is_error:
             error_text = text or stderr or "<unknown>"
             subtype = payload.get("subtype")
-            if isinstance(subtype, str):
-                error_text = f"[subtype={subtype}] {error_text}"
-            raise self._classify_error_text(error_text, returncode)
+            subtype_str = subtype if isinstance(subtype, str) else None
+            if subtype_str is not None:
+                error_text = f"[subtype={subtype_str}] {error_text}"
+            raise self._classify_error_text(error_text, returncode, subtype=subtype_str)
 
         if text is None:
             keys = ", ".join(sorted(payload)[:20])
@@ -507,7 +518,13 @@ class ClaudeCodeBackend(ModelBackend):
             metadata=metadata,
         )
 
-    def _classify_error_text(self, text: str, returncode: int) -> BaseException:
+    def _classify_error_text(
+        self,
+        text: str,
+        returncode: int,
+        *,
+        subtype: str | None,
+    ) -> BaseException:
         if _is_context_limit_text(text):
             return PromptTooLongError(
                 text,
@@ -516,6 +533,12 @@ class ClaudeCodeBackend(ModelBackend):
             )
         if _is_auth_error_text(text):
             return RuntimeError(f"ClaudeCodeBackend: authentication failed: {text}")
+        if _is_aup_refusal_text(text):
+            return RefusedByPolicyError(
+                f"ClaudeCodeBackend: refused by Anthropic Usage Policy: {text}",
+                subtype=subtype,
+                offending_indices=[0],
+            )
         if returncode != 0:
             return QuotaExhaustedError(f"claude --print failed with exit code {returncode}: {text}")
         return QuotaExhaustedError(f"claude --print reported is_error=true: {text}")

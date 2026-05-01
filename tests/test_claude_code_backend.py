@@ -18,6 +18,7 @@ from llenvs.inference import (
     PartialBatchError,
     PromptTooLongError,
     QuotaExhaustedError,
+    RefusedByPolicyError,
     SamplingParams,
     StopReason,
 )
@@ -528,6 +529,70 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="no recognized text field"):
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+
+    def test_aup_refusal_via_is_error_payload_subtype_success(self) -> None:
+        backend = _make_backend()
+        payload = _error_payload(
+            "API Error: Claude Code is unable to respond to this request, "
+            "which appears to violate our Usage Policy "
+            "(https://www.anthropic.com/legal/aup). Try rephrasing the request.",
+            subtype="success",
+        )
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps(payload), stderr="")
+
+        with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
+            with pytest.raises(RefusedByPolicyError, match="Usage Policy") as excinfo:
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+        assert excinfo.value.subtype == "success"
+
+    def test_aup_refusal_via_anthropic_legal_url(self) -> None:
+        backend = _make_backend()
+        payload = _error_payload(
+            "Refused: see https://www.anthropic.com/legal/aup for details.",
+            subtype="error_during_execution",
+        )
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps(payload), stderr="")
+
+        with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
+            with pytest.raises(RefusedByPolicyError) as excinfo:
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+        assert excinfo.value.subtype == "error_during_execution"
+
+    def test_aup_refusal_via_nonzero_exit_stderr(self) -> None:
+        backend = _make_backend()
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd,
+                1,
+                stdout="",
+                stderr="API Error: appears to violate our Usage Policy",
+            )
+
+        with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
+            with pytest.raises(RefusedByPolicyError, match="Usage Policy") as excinfo:
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+        # Non-JSON path: no subtype available.
+        assert excinfo.value.subtype is None
+
+    def test_aup_refusal_takes_precedence_over_quota_classification(self) -> None:
+        """AUP text mixed with quota-ish text still classifies as refusal, not quota."""
+        backend = _make_backend()
+        payload = _error_payload(
+            "Request rejected: violates our Usage Policy. (Note: 429 capacity issue mentioned)",
+            subtype="success",
+        )
+
+        def fake_run(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, 1, stdout=json.dumps(payload), stderr="")
+
+        with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
+            with pytest.raises(RefusedByPolicyError):
                 backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
 
 
