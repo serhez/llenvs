@@ -826,9 +826,9 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
 
         observation = Observation(
             prompt=prompt,
-            images=images,
             available_tools=self._tools,
             task=ObservationContent(text=prompt),
+            state=ObservationContent(text="", images=images),
         )
         state = State(observation=observation, hidden=hidden, metadata=metadata)
         self._state_tracker.track(state)
@@ -915,22 +915,11 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 else None,
             )
             state_parts.append(state_text)
-            # Add images to the observation
-            next_obs = Observation(
-                prompt=next_obs.prompt,
-                messages=next_obs.messages,
-                tool_results=next_obs.tool_results,
-                available_tools=next_obs.available_tools,
-                images=images,
-                task=next_obs.task,
-                state=next_obs.state,
-            )
         else:
             next_obs = Observation(
                 prompt=state.observation.prompt,
                 messages=state.observation.messages,
                 available_tools=self._tools,
-                images=images,
                 task=state.observation.task,
                 state=ObservationContent(
                     images=images,
@@ -957,7 +946,6 @@ class MolmoSpacesEnvironment(BaseToolEnvironment[MolmoSpacesHidden]):
                 messages=tuple(messages),
                 tool_results=next_obs.tool_results,
                 available_tools=next_obs.available_tools,
-                images=next_obs.images,
                 task=next_obs.task,
                 state=ObservationContent(
                     text=combined_state_text, images=images, data=combined_data

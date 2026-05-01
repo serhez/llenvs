@@ -204,17 +204,25 @@ class Trajectory[HiddenT]:
         Returns:
             New Trajectory with empty images in all observations.
         """
-        from llenvs.core.state import Observation
+        from llenvs.core.state import Observation, ObservationContent
+
+        def _strip_content(content: ObservationContent | None) -> ObservationContent | None:
+            if content is None or not content.images:
+                return content
+            return ObservationContent(text=content.text, data=content.data)
 
         def _strip_obs(obs: Observation) -> Observation:
-            if not obs.images:
+            new_state = _strip_content(obs.state)
+            new_task = _strip_content(obs.task)
+            if new_state is obs.state and new_task is obs.task:
                 return obs
             return Observation(
                 prompt=obs.prompt,
                 messages=obs.messages,
                 tool_results=obs.tool_results,
                 available_tools=obs.available_tools,
-                images=(),
+                task=new_task,
+                state=new_state,
             )
 
         def _strip_state(state: State[HiddenT]) -> State[HiddenT]:

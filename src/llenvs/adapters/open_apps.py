@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
@@ -44,6 +44,10 @@ OPEN_APPS_TASKS: list[str] = [
     "message_bob_to_meet",
     "save_paris_to_my_favorite_places",
 ]
+
+# Wait time injected after reset() to let the welcome-screen fade-in
+# animation complete before the actor sees the first observation.
+_HOME_FADE_IN_WAIT_MS: int = 1500
 
 # Available application modules in OpenApps
 OPEN_APPS_MODULES: list[str] = [
@@ -228,7 +232,9 @@ class _BrowserGymProxy:
     own Playwright — giving true concurrent browser execution.
     """
 
-    _CALL_TIMEOUT = 300  # seconds per operation
+    _CALL_TIMEOUT = 60  # seconds per operation; trajectories that hang
+    # longer (e.g. because an epsilon-random click landed on a broken
+    # page) abort quickly instead of burning 5 min of wall clock each.
 
     def __init__(self, env_factory: Any) -> None:
         self._cmd_q: queue.Queue = queue.Queue()
@@ -349,26 +355,119 @@ class OpenAppsEnvironment:
 
     def __init__(
         self,
-        browsergym_env: Any,
-        task: Any,
-        task_name: str,
+        task_names: tuple[str, ...],
+        task_factory: Callable[[str], tuple[Any, Any]],
         base_url: str,
         max_steps: int = 30,
         use_screenshot: bool = False,
+        screenshot_with_som: bool = False,
+        omit_axtree_text: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
+        initial_task_index: int = 0,
+        server: "_OpenAppsServer | None" = None,
     ) -> None:
-        self._env = browsergym_env
-        self._task = task
-        self._task_name = task_name
+        """Initialize an OpenApps environment over a collection of tasks.
+
+        Mirrors :class:`AlfWorldEnvironment`'s shape: the env is constructed
+        with the full collection of tasks it can serve (``task_names``) and
+        a builder for the per-task BrowserGym proxy (``task_factory``).
+        ``reset(options={"task_index": N})`` looks up
+        ``task_names[N % len(task_names)]`` and switches to that task.
+
+        Unlike alfworld, the per-task BrowserGym proxies are **lazily
+        cached** rather than rebuilt on every reset: each proxy owns a
+        dedicated daemon thread, a Playwright instance and a Chromium
+        browser context, which take several seconds to spin up.  The
+        initial task (``initial_task_index``) is built eagerly so the env
+        is immediately usable.
+
+        Args:
+            task_names: Tuple of task names this env can serve.  Indexing
+                via ``task_index`` is taken modulo ``len(task_names)``.
+            task_factory: Callable mapping a task name to ``(task,
+                browsergym_proxy)``.
+            base_url: URL of the OpenApps server (shared across tasks).
+            max_steps: Maximum browser interactions per episode.
+            use_screenshot: Include screenshots in observations.
+            screenshot_with_som: When ``True`` (and ``use_screenshot`` is
+                also ``True``), render Set-of-Marks bid number tags on
+                each screenshot so a vision-only actor can read element
+                bids directly from the image.  Implies a SoM-enabled
+                vision condition; harmless to set with text-only actors
+                because they ignore images.
+            omit_axtree_text: When ``True``, replace the accessibility
+                tree text in ``state.text`` with a short stub.  Use this
+                with ``screenshot_with_som=True`` to run a true
+                vision-only condition where the actor can only read
+                element bids off the SoM-annotated screenshot.
+            extra_rewards: Additional reward functions appended after the
+                native task-completion reward.
+            initial_task_index: Index of the task to activate eagerly.
+                Defaults to 0.
+        """
+        if not task_names:
+            raise ValueError("OpenAppsEnvironment requires at least one task name")
+
+        self._task_names = tuple(task_names)
+        self._task_factory = task_factory
         self._base_url = base_url
         self._max_steps = max_steps
         self._use_screenshot = use_screenshot
+        self._screenshot_with_som = screenshot_with_som
+        self._omit_axtree_text = omit_axtree_text
+        # Holding a reference to the server keeps it alive as long as
+        # the env is alive. When the env is GC'd (e.g. between
+        # trajectory-collection batches), the server's __del__ fires and
+        # the FastHTML subprocess is stopped — so the env_factory pattern
+        # that discards adapters between calls doesn't leak subprocesses.
+        self._server_ref = server
 
         self._native_rewards: tuple[RewardFunction, ...] = (OpenAppsReward(),)
         self._extra_rewards = extra_rewards
 
         self._state_tracker = _StateContinuityTracker()
-        self._current_task_index = 0
+
+        # Eagerly build the initial task so the env is immediately usable;
+        # other tasks are built lazily on first reference and cached.
+        initial_idx = initial_task_index % len(self._task_names)
+        self._current_task_index = initial_idx
+        self._task_name = self._task_names[initial_idx]
+        initial_task, initial_env = self._task_factory(self._task_name)
+        self._task = initial_task
+        self._env = initial_env
+        self._envs_by_name: dict[str, tuple[Any, Any]] = {
+            self._task_name: (initial_task, initial_env),
+        }
+
+    def close(self) -> None:
+        """Release browser + server resources.
+
+        Called by the runner at the end of each batch. Closes every
+        cached BrowserGym proxy (each owns a Playwright/Chromium
+        instance and a daemon thread) and stops the OpenApps FastHTML
+        server if we own it. Idempotent.
+
+        Without this, per-batch ``env_factory()`` calls leak both the
+        browser context AND the FastHTML subprocess — over long runs the
+        machine accumulates hundreds of orphans which port-starves new
+        spawns and causes BrowserGym ``step`` calls to hang for the
+        full proxy timeout.
+        """
+        for _task, proxy in self._envs_by_name.values():
+            try:
+                proxy.close()
+            except Exception:
+                pass
+        self._envs_by_name.clear()
+        if self._server_ref is not None:
+            try:
+                self._server_ref.stop()
+            except Exception:
+                pass
+            self._server_ref = None
+
+    def __len__(self) -> int:
+        return len(self._task_names)
 
     @property
     def answer_extractor(self):
@@ -398,9 +497,12 @@ class OpenAppsEnvironment:
             observation_type=Observation,
             action_type=Action,
             is_multi_turn=True,
+            supports_task_index=True,
+            supports_len=True,
             metadata={
                 "base_url": self._base_url,
                 "description": f"OpenApps task: {self._task_name}",
+                "task_names": list(self._task_names),
             },
         )
 
@@ -430,7 +532,15 @@ class OpenAppsEnvironment:
 
         axtree_obj = raw_obs.get("axtree_object")
         extra_props = raw_obs.get("extra_element_properties", {})
-        if axtree_obj is not None:
+        if self._omit_axtree_text:
+            # Vision-only condition: hide the accessibility tree from the
+            # actor.  The screenshot (with SoM overlays) is the only
+            # source of element bids in this mode.
+            obs_text = (
+                "[accessibility tree omitted — element bids are labelled "
+                "on the screenshot via Set-of-Marks overlays]"
+            )
+        elif axtree_obj is not None:
             obs_text = flatten_axtree_to_str(
                 axtree_obj,
                 extra_properties=extra_props,
@@ -446,7 +556,13 @@ class OpenAppsEnvironment:
         if self._use_screenshot and "screenshot" in raw_obs:
             screenshot = raw_obs["screenshot"]
             if screenshot is not None:
-                images = (ImageContent(data=screenshot, media_type="image/png"),)
+                from llenvs.core.image_utils import pixels_to_image_content
+
+                if self._screenshot_with_som:
+                    from browsergym.utils.obs import overlay_som
+
+                    screenshot = overlay_som(screenshot, extra_props)
+                images = (pixels_to_image_content(screenshot),)
 
         task_content: ObservationContent
         state_content = ObservationContent(text=obs_text, images=images)
@@ -470,8 +586,45 @@ class OpenAppsEnvironment:
             messages=messages,
             task=task_content,
             state=state_content,
-            images=images,
         )
+
+    # -- Fade-in settle helpers --------------------------------------------
+
+    def _is_home_screen(self, raw_obs: dict[str, Any]) -> bool:
+        """Detect the OpenApps welcome page by URL.
+
+        The welcome page is the only screen that plays a fade-in
+        animation on each visit — both on initial reset and whenever
+        the agent navigates back to it during an episode.  We detect it
+        by URL because the URL is cheap to read and unaffected by the
+        in-flight animation, unlike the accessibility tree.
+        """
+        url = raw_obs.get("url", "") or ""
+        if not url:
+            return False
+        # Strip query/fragment, then compare path to the home routes.
+        # OpenApps serves the welcome page from "/" (and sometimes "").
+        from urllib.parse import urlparse
+        path = urlparse(url).path or "/"
+        return path in ("", "/", "/home", "/index.html")
+
+    def _settle_home_fade_in(self, raw_obs: dict[str, Any]) -> dict[str, Any]:
+        """If the current page is the home screen, wait for the fade-in.
+
+        Replaces ``raw_obs`` with the post-wait observation so the
+        accessibility tree and screenshot reflect the fully-opaque app
+        cards.  The injected ``noop(ms)`` only calls Playwright's
+        ``page.wait_for_timeout`` — no side effects beyond advancing
+        time — and the resulting step's reward/terminated/info are
+        discarded because this is a visual settle, not part of the
+        episode.
+        """
+        if not self._is_home_screen(raw_obs):
+            return raw_obs
+        new_obs, _r, _term, _trunc, _info = self._env.step(
+            f"noop({_HOME_FADE_IN_WAIT_MS})"
+        )
+        return new_obs
 
     # -- MDP interface ------------------------------------------------------
 
@@ -481,12 +634,31 @@ class OpenAppsEnvironment:
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[State[OpenAppsHidden], dict[str, Any]]:
-        """Reset the environment and return the initial state."""
+        """Reset the environment and return the initial state.
+
+        ``options["task_index"]`` selects which task in
+        ``self._task_names`` to activate, mirroring alfworld and the
+        other multi-task adapters.  Indexing is taken modulo the number
+        of tasks.  Per-task BrowserGym proxies are built lazily on first
+        reference and cached for subsequent resets to avoid paying
+        Playwright/Chromium startup costs more than once per task.
+        """
         options = options or {}
         task_index = options.get("task_index", self._current_task_index)
         self._current_task_index = task_index
 
+        target_name = self._task_names[task_index % len(self._task_names)]
+        if target_name != self._task_name:
+            cached = self._envs_by_name.get(target_name)
+            if cached is None:
+                cached = self._task_factory(target_name)
+                self._envs_by_name[target_name] = cached
+            self._task, self._env = cached
+            self._task_name = target_name
+
         raw_obs, info = self._env.reset()
+        # reset() always lands on the home page → settle the fade-in.
+        raw_obs = self._settle_home_fade_in(raw_obs)
 
         goal = self._task.goal
         initial_app_state = _get_app_state(self._base_url)
@@ -532,6 +704,10 @@ class OpenAppsEnvironment:
         self._state_tracker.validate(state, "OpenAppsEnvironment")
 
         raw_obs, reward, terminated, truncated, info = self._env.step(action.text)
+        # If the action navigated back to the home screen (e.g. via
+        # go_back), the welcome page replays its fade-in animation —
+        # settle it before the actor sees the next observation.
+        raw_obs = self._settle_home_fade_in(raw_obs)
 
         next_step = state.hidden.episode_step + 1
 
@@ -805,6 +981,21 @@ class _OpenAppsServer:
                 self._process.wait()
             self._process = None
 
+    def __del__(self) -> None:
+        """Stop the subprocess when the last reference is dropped.
+
+        Ties the FastHTML process lifetime to the Python object's
+        reference graph — as long as some OpenAppsEnvironment holds a
+        reference to this server, it stays running. When the env is
+        discarded (e.g. between trajectory-collection batches), the
+        server shuts down cleanly instead of leaking.
+        """
+        try:
+            self.stop()
+        except Exception:
+            # __del__ must never raise
+            pass
+
     @property
     def is_running(self) -> bool:
         return self._process is not None and self._process.poll() is None
@@ -848,6 +1039,12 @@ class OpenAppsAdapter:
         self._open_apps_path = open_apps_path
         self._server: _OpenAppsServer | None = None
         self._server_lock = threading.Lock()
+        # Server lifetime is tied to whatever holds a reference to the
+        # ``_OpenAppsServer`` object — typically the
+        # ``OpenAppsEnvironment`` returned from ``get_environment``. The
+        # server's own ``__del__`` calls ``stop()`` when its last
+        # reference is dropped, so discarding an env between collection
+        # batches also stops its server.
 
     @property
     def name(self) -> str:
@@ -927,24 +1124,41 @@ class OpenAppsAdapter:
         name: str,
         max_steps: int = 30,
         use_screenshot: bool = False,
+        screenshot_with_som: bool = False,
+        omit_axtree_text: bool = False,
         base_url: str | None = None,
         headless: bool = True,
         extra_rewards: tuple[RewardFunction, ...] = (),
         config_overrides: dict[str, Any] | None = None,
+        task_names: tuple[str, ...] | None = None,
         **kwargs: Any,
     ) -> OpenAppsEnvironment:
-        """Create an OpenApps environment for the given task.
+        """Create an OpenApps environment.
+
+        The returned environment knows about *all* tasks in ``task_names``
+        (defaults to :data:`OPEN_APPS_TASKS`) and switches between them
+        on ``reset(options={"task_index": N})``, mirroring alfworld and
+        the other multi-task adapters.  ``name`` selects which task is
+        active eagerly so the env is immediately usable before any
+        explicit task-index switch.
 
         Args:
-            name: Task name (one of :data:`OPEN_APPS_TASKS`).
+            name: Initial task name (one of :data:`OPEN_APPS_TASKS`).
             max_steps: Maximum browser interactions per episode.
             use_screenshot: Include screenshots in observations.
+            screenshot_with_som: Render Set-of-Marks bid number tags on
+                each screenshot (requires ``use_screenshot=True``).
+            omit_axtree_text: Replace the accessibility tree text with
+                a stub.  Pair with ``screenshot_with_som=True`` for a
+                vision-only condition.
             base_url: URL of an already-running OpenApps server.
                 If *None*, the adapter will launch one automatically.
             headless: Run the browser in headless mode.
             extra_rewards: Additional reward functions.
             config_overrides: Hydra config overrides for the server.
-            **kwargs: Extra keyword arguments forwarded to the task.
+            task_names: Subset of tasks the env should serve.  Defaults
+                to all of :data:`OPEN_APPS_TASKS`.
+            **kwargs: Extra keyword arguments forwarded to BrowserGym.
 
         Returns:
             Configured :class:`OpenAppsEnvironment`.
@@ -966,7 +1180,11 @@ class OpenAppsAdapter:
         import hydra
         from omegaconf import OmegaConf
 
-        # Start server if needed
+        # Start server if needed. The returned env holds a reference to
+        # this server object, so the FastHTML subprocess stays alive for
+        # the env's lifetime and is cleaned up (via
+        # ``_OpenAppsServer.__del__``) when the env is discarded.
+        server: "_OpenAppsServer | None" = None
         if base_url is None:
             server = self._ensure_server(config_overrides)
             base_url = server.url
@@ -981,41 +1199,75 @@ class OpenAppsAdapter:
                 f"Unknown task '{name}'. Available: {list(all_tasks_cfg.keys())}"
             )
 
-        task_cfg = all_tasks_cfg[name]
-        task: Task = hydra.utils.instantiate(task_cfg)
-
-        # Register with BrowserGym
-        register_tasks_with_browsergym(tasks=[task])
-
-        # Create the BrowserGym env on a dedicated proxy thread.
-        # Playwright's sync API binds greenlets to the creating thread,
-        # so each env gets its own thread with its own Playwright instance.
-        # Multiple envs run truly in parallel on separate threads.
+        # Closure that builds (task, BrowserGym proxy) for any task_name in
+        # all_tasks_cfg.  Used both for the initial environment and for
+        # lazy task switching via reset(options={"task_index": ...}).
         import gymnasium as gym
 
-        task_id = task.task_id
         _base_url = base_url
         _headless = headless
         _extra_kw = dict(kwargs)
 
-        def _make_browsergym_env() -> Any:
-            return gym.make(
-                f"browsergym/{task_id}",
-                task_kwargs={"base_url": _base_url},
-                headless=_headless,
-                **_extra_kw,
+        def _build_task_env(task_name: str) -> tuple[Any, Any]:
+            if task_name not in all_tasks_cfg:
+                raise ValueError(
+                    f"Unknown task '{task_name}'. Available: "
+                    f"{list(all_tasks_cfg.keys())}"
+                )
+            # _convert_="all" strips omegaconf wrappers so task dataclass
+            # fields are plain list/dict — needed because tasks like
+            # add_paper_reading_meeting_with_einstein have non-empty
+            # `invitees` lists that later flow into JSON comparisons.
+            task_obj: Task = hydra.utils.instantiate(
+                all_tasks_cfg[task_name], _convert_="all"
             )
+            # Patch: for AddEventTask, normalise the `invitees` field to
+            # the comma-separated string format the Calendar backend
+            # actually stores.  Without this, the task's target state
+            # carries ``invitees=["Einstein"]`` (from the yaml list)
+            # while the saved event stores ``invitees="Einstein"`` (the
+            # raw textbox contents), so DeepDiff in
+            # ``AppStateComparison.compare`` reports a mismatch and
+            # ``check_if_task_is_complete`` always returns False —
+            # making the task unsolvable through the UI.
+            if isinstance(task_obj, AddEventTask) and isinstance(
+                task_obj.invitees, list
+            ):
+                task_obj.invitees = ", ".join(task_obj.invitees)
+            register_tasks_with_browsergym(tasks=[task_obj])
+            task_id = task_obj.task_id
 
-        browsergym_env = _BrowserGymProxy(_make_browsergym_env)
+            def _make_browsergym_env() -> Any:
+                return gym.make(
+                    f"browsergym/{task_id}",
+                    task_kwargs={"base_url": _base_url},
+                    headless=_headless,
+                    **_extra_kw,
+                )
+
+            return task_obj, _BrowserGymProxy(_make_browsergym_env)
+
+        # Resolve the task list this env will serve and validate `name`.
+        env_task_names: tuple[str, ...] = (
+            tuple(task_names) if task_names is not None else tuple(OPEN_APPS_TASKS)
+        )
+        if name not in env_task_names:
+            raise ValueError(
+                f"Initial task {name!r} is not in task_names {list(env_task_names)}"
+            )
+        initial_task_index = env_task_names.index(name)
 
         return OpenAppsEnvironment(
-            browsergym_env=browsergym_env,
-            task=task,
-            task_name=name,
+            task_names=env_task_names,
+            task_factory=_build_task_env,
             base_url=base_url,
             max_steps=max_steps,
             use_screenshot=use_screenshot,
+            screenshot_with_som=screenshot_with_som,
+            omit_axtree_text=omit_axtree_text,
             extra_rewards=extra_rewards,
+            initial_task_index=initial_task_index,
+            server=server,
         )
 
     def get_default_system_prompt(self, name: str) -> str | None:

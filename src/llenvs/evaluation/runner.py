@@ -924,7 +924,7 @@ class TrajectoryRunner:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
 
         obs = state.observation
-        messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
+        messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.get_images().all))
 
         for msg in obs.messages:
             role = msg.get("role", "user")
@@ -1101,7 +1101,7 @@ class TrajectoryRunner:
         if self.system_prompt:
             messages.append(ChatMessage(role="system", content=self.system_prompt))
 
-        messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.images))
+        messages.append(ChatMessage(role="user", content=obs.prompt, images=obs.get_images().all))
 
         if not obs.messages:
             return messages

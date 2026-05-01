@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from llenvs.core.state import ImageContent, Observation, State, StateMetadata
+from llenvs.core.state import ImageContent, Observation, ObservationContent, State, StateMetadata
 from llenvs.inference.protocol import BackendCapabilities, ChatMessage
 
 # ---------------------------------------------------------------------------
@@ -40,19 +40,19 @@ class TestImageContent:
 class TestObservationImages:
     def test_default_empty(self):
         obs = Observation(prompt="Hello")
-        assert obs.images == ()
+        assert obs.get_images().all == ()
 
     def test_with_images(self):
         img1 = ImageContent(data="img1")
         img2 = ImageContent(data="img2")
-        obs = Observation(prompt="Hello", images=(img1, img2))
-        assert len(obs.images) == 2
-        assert obs.images[0].data == "img1"
+        obs = Observation(prompt="Hello", state=ObservationContent(text="", images=(img1, img2)))
+        assert len(obs.state.images) == 2
+        assert obs.state.images[0].data == "img1"
 
     def test_frozen_with_images(self):
-        obs = Observation(prompt="Hello", images=(ImageContent(data="a"),))
+        obs = Observation(prompt="Hello", state=ObservationContent(text="", images=(ImageContent(data="a"),)))
         with pytest.raises(AttributeError):
-            obs.images = ()  # type: ignore[misc]
+            obs.state = None  # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +176,7 @@ class TestRunnerImagePropagation:
         from llenvs.evaluation.runner import TrajectoryRunner
 
         img = ImageContent(data="abc")
-        obs = Observation(prompt="What is in this image?", images=(img,))
+        obs = Observation(prompt="What is in this image?", state=ObservationContent(text="", images=(img,)))
         state = State(
             observation=obs,
             hidden=None,
@@ -193,7 +193,9 @@ class TestRunnerImagePropagation:
         # First non-system message should be user with images
         user_msgs = [m for m in messages if m.role == "user"]
         assert len(user_msgs) == 1
-        assert user_msgs[0].images == (img,)
+        assert len(user_msgs[0].images) == 1
+        assert user_msgs[0].images[0].data == img.data
+        assert user_msgs[0].images[0].source == "state"
         assert user_msgs[0].content == "What is in this image?"
 
     def test_history_user_messages_carry_images(self):
@@ -203,7 +205,7 @@ class TestRunnerImagePropagation:
 
         obs = Observation(
             prompt="Initial prompt",
-            images=(ImageContent(data="init_img"),),
+            state=ObservationContent(text="", images=(ImageContent(data="init_img"),)),
             messages=(
                 {"role": "assistant", "content": "I see the image"},
                 {
@@ -309,38 +311,39 @@ class TestContainerImageSerialization:
         from llenvs.container.serialization import serialize_observation
 
         img = ImageContent(data="abc", media_type="image/jpeg")
-        obs = Observation(prompt="Hi", images=(img,))
+        obs = Observation(prompt="Hi", state=ObservationContent(text="", images=(img,)))
         d = serialize_observation(obs)
-        assert "images" in d
-        assert len(d["images"]) == 1
-        assert d["images"][0]["data"] == "abc"
-        assert d["images"][0]["media_type"] == "image/jpeg"
+        assert "state" in d
+        assert len(d["state"]["images"]) == 1
+        assert d["state"]["images"][0]["data"] == "abc"
+        assert d["state"]["images"][0]["media_type"] == "image/jpeg"
 
     def test_serialize_observation_empty_images(self):
         from llenvs.container.serialization import serialize_observation
 
         obs = Observation(prompt="Hi")
         d = serialize_observation(obs)
-        assert d["images"] == []
+        assert "state" not in d
 
     def test_deserialize_observation_with_images(self):
         from llenvs.container.serialization import deserialize_observation
 
         data = {
             "prompt": "Hi",
-            "images": [{"data": "abc", "media_type": "image/jpeg"}],
+            "state": {"text": "", "images": [{"data": "abc", "media_type": "image/jpeg"}]},
         }
         obs = deserialize_observation(data)
-        assert len(obs.images) == 1
-        assert obs.images[0].data == "abc"
-        assert obs.images[0].media_type == "image/jpeg"
+        assert obs.state is not None
+        assert len(obs.state.images) == 1
+        assert obs.state.images[0].data == "abc"
+        assert obs.state.images[0].media_type == "image/jpeg"
 
     def test_deserialize_observation_no_images_key(self):
         from llenvs.container.serialization import deserialize_observation
 
         data = {"prompt": "Hi"}
         obs = deserialize_observation(data)
-        assert obs.images == ()
+        assert obs.get_images().all == ()
 
     def test_round_trip(self):
         from llenvs.container.serialization import (
@@ -350,12 +353,13 @@ class TestContainerImageSerialization:
 
         img1 = ImageContent(data="img1", media_type="image/png")
         img2 = ImageContent(data="img2", media_type="image/jpeg")
-        obs = Observation(prompt="Test", images=(img1, img2))
+        obs = Observation(prompt="Test", state=ObservationContent(text="", images=(img1, img2)))
         restored = deserialize_observation(serialize_observation(obs))
         assert restored.prompt == "Test"
-        assert len(restored.images) == 2
-        assert restored.images[0].data == "img1"
-        assert restored.images[1].media_type == "image/jpeg"
+        assert restored.state is not None
+        assert len(restored.state.images) == 2
+        assert restored.state.images[0].data == "img1"
+        assert restored.state.images[1].media_type == "image/jpeg"
 
 
 # ---------------------------------------------------------------------------

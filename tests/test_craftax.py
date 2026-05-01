@@ -972,17 +972,17 @@ class TestCraftaxEnvironmentPixels:
 
     def test_pixel_observation_has_images(self, pixel_env):
         state, _ = pixel_env.reset(options={"task_index": 0})
-        assert len(state.observation.images) == 1
-        assert state.observation.images[0].media_type == "image/png"
+        assert len(state.observation.state.images) == 1
+        assert state.observation.state.images[0].media_type == "image/png"
         # Data should be base64 encoded
-        assert isinstance(state.observation.images[0].data, str)
+        assert isinstance(state.observation.state.images[0].data, str)
 
     def test_pixel_step_has_images(self, pixel_env):
         state, _ = pixel_env.reset(options={"task_index": 0})
         result = pixel_env.step(state, Action(text="0"))
         # Find user message with image reference
         # The step observation should have images
-        assert len(result.next_state.observation.images) >= 0  # May or may not carry forward
+        assert len(result.next_state.observation.state.images) >= 0  # May or may not carry forward
 
 
 class TestCraftaxEnvironmentText:

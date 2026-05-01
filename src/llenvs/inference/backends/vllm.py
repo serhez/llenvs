@@ -34,7 +34,10 @@ from llenvs.inference.protocol import (
 
 logger = logging.getLogger(__name__)
 
-# Known VLM model types (checked against model_config.hf_config.model_type)
+# Known VLM model types (checked against model_config.hf_config.model_type).
+# `gemma4` is only recognised by vllm>=0.19 running inside the Singularity
+# container (see docs/guides/singularity.md); older vllm never surfaces that
+# model_type string, so listing it here is safe for both versions.
 _VLM_MODEL_TYPES = frozenset(
     {
         "llava",
@@ -55,6 +58,7 @@ _VLM_MODEL_TYPES = frozenset(
         "idefics3",
         "molmo",
         "aria",
+        "gemma4",
     }
 )
 
@@ -471,14 +475,10 @@ class VLLMBackend(ModelBackend):
             if "longer than the maximum model length" in str(exc):
                 # Compute per-prompt token lengths for diagnostics
                 prompt_lengths = [
-                    len(self._tokenizer.encode(p, add_special_tokens=False))
-                    for p in prompts
+                    len(self._tokenizer.encode(p, add_special_tokens=False)) for p in prompts
                 ]
                 max_len = self._max_context_length or 0
-                offending = [
-                    i for i, length in enumerate(prompt_lengths)
-                    if length > max_len
-                ]
+                offending = [i for i, length in enumerate(prompt_lengths) if length > max_len]
                 raise PromptTooLongError(
                     str(exc),
                     model_name=self._model_path,
@@ -745,9 +745,7 @@ class VLLMBackend(ModelBackend):
     ) -> ScoringResult:
         """Extract continuation-token logprobs from vLLM prompt logprobs."""
         if len(full_ids) <= prompt_len:
-            return ScoringResult(
-                token_scores=(), prompt_tokens=prompt_len, scored_tokens=0
-            )
+            return ScoringResult(token_scores=(), prompt_tokens=prompt_len, scored_tokens=0)
         if prompt_logprobs is None:
             raise LogprobsNotReturnedError(
                 "vLLM returned no prompt logprobs during continuation scoring "
@@ -824,9 +822,7 @@ class VLLMBackend(ModelBackend):
         full_token_ids: list[list[int]] = []
         empty_results: dict[int, ScoringResult] = {}
 
-        for index, (messages, continuation) in enumerate(
-            zip(messages_batch, continuations)
-        ):
+        for index, (messages, continuation) in enumerate(zip(messages_batch, continuations)):
             prompt_text = self._tokenizer.apply_chat_template(
                 [m.to_dict() for m in messages],
                 tokenize=False,
@@ -869,9 +865,7 @@ class VLLMBackend(ModelBackend):
             if "longer than the maximum model length" in str(exc):
                 max_len = self._max_context_length or 0
                 lengths = [len(ids) for ids in full_token_ids]
-                offending = [
-                    i for i, length in enumerate(lengths) if length > max_len
-                ]
+                offending = [i for i, length in enumerate(lengths) if length > max_len]
                 raise PromptTooLongError(
                     str(exc),
                     model_name=self._model_path,
@@ -889,9 +883,7 @@ class VLLMBackend(ModelBackend):
                 full_ids=full_ids,
                 prompt_logprobs=output.prompt_logprobs,
             )
-            for output, prompt_len, full_ids in zip(
-                outputs, prompt_lengths, full_token_ids
-            )
+            for output, prompt_len, full_ids in zip(outputs, prompt_lengths, full_token_ids)
         )
 
         results: list[ScoringResult] = []

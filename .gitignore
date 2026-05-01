@@ -18,3 +18,5 @@ site/
 
 # Dev
 .vscode/
+*.log
+*.out

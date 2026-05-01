@@ -25,6 +25,7 @@ from llenvs.core.state import (
     ImageContent,
     Observation,
     ObservationContent,
+    ObservationImages,
     State,
     StateMetadata,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "StateMetadata",
     "Observation",
     "ObservationContent",
+    "ObservationImages",
     "Action",
     "ImageContent",
     # Rewards

@@ -542,6 +542,10 @@ class FrozenLakeObservationMapper:
         desc: Any,
         agent_char: str = "@",
     ) -> None:
+        self._agent_char = agent_char
+        self._set_desc(desc)
+
+    def _set_desc(self, desc: Any) -> None:
         # Convert numpy byte array to list of strings
         if hasattr(desc, "dtype"):
             self._rows = [
@@ -551,7 +555,6 @@ class FrozenLakeObservationMapper:
             self._rows = [str(row) for row in desc]
         self._nrows = len(self._rows)
         self._ncols = len(self._rows[0]) if self._rows else 0
-        self._agent_char = agent_char
 
     def map(self, obs: Any, info: dict[str, Any]) -> str:
         """Render the grid with the agent at the given position.
@@ -592,6 +595,249 @@ class FrozenLakeObservationMapper:
             f"Grid size: {self._nrows}x{self._ncols}."
         )
         return f"{grid_text}\n\n{legend}"
+
+
+def _frozen_lake_rebuild_transition_matrix(
+    unwrapped: Any,
+    *,
+    is_slippery: bool,
+    success_rate: float,
+    reward_schedule: tuple[float, float, float],
+) -> None:
+    """Rebuild ``unwrapped.P`` to match the current ``unwrapped.desc``.
+
+    Mirrors gymnasium's own FrozenLakeEnv constructor logic.  Needed
+    after we mutate ``desc`` in-place at reset time so transitions reflect
+    the new map. ``reward_schedule`` is ``(goal, hole, frozen)``.
+    """
+    LEFT, DOWN, RIGHT, UP = 0, 1, 2, 3
+    nrow = unwrapped.nrow
+    ncol = unwrapped.ncol
+    nA = 4
+    nS = nrow * ncol
+    fail_rate = (1.0 - success_rate) / 2.0
+    unwrapped.P = {s: {a: [] for a in range(nA)} for s in range(nS)}
+
+    def to_s(row: int, col: int) -> int:
+        return row * ncol + col
+
+    def inc(row: int, col: int, a: int) -> tuple[int, int]:
+        if a == LEFT:
+            col = max(col - 1, 0)
+        elif a == DOWN:
+            row = min(row + 1, nrow - 1)
+        elif a == RIGHT:
+            col = min(col + 1, ncol - 1)
+        elif a == UP:
+            row = max(row - 1, 0)
+        return row, col
+
+    def update(row: int, col: int, action: int) -> tuple[int, float, bool]:
+        new_row, new_col = inc(row, col, action)
+        new_state = to_s(new_row, new_col)
+        new_letter = unwrapped.desc[new_row, new_col]
+        terminated = bytes(new_letter) in b"GH"
+        idx = b"GHF".index(new_letter if new_letter in b"GHF" else b"F")
+        return new_state, reward_schedule[idx], terminated
+
+    for row in range(nrow):
+        for col in range(ncol):
+            s = to_s(row, col)
+            letter = unwrapped.desc[row, col]
+            for a in range(nA):
+                bucket = unwrapped.P[s][a]
+                if letter in b"GH":
+                    bucket.append((1.0, s, 0, True))
+                    continue
+                if is_slippery:
+                    for b in [(a - 1) % 4, a, (a + 1) % 4]:
+                        bucket.append(
+                            (
+                                success_rate if b == a else fail_rate,
+                                *update(row, col, b),
+                            )
+                        )
+                else:
+                    bucket.append((1.0, *update(row, col, a)))
+
+
+class FrozenLakeMapCycler:
+    """Gym Wrapper that cycles through pre-generated FrozenLake maps.
+
+    Pre-generates ``num_maps`` random maps via gymnasium's
+    ``generate_random_map`` (seeded by ``map_seed``), and on each
+    ``reset()`` swaps the wrapped env's ``desc`` / ``nrow`` / ``ncol``
+    / ``initial_state_distrib`` / ``P`` to the next map in the cycle
+    (deterministic, by trajectory index).
+
+    Optionally refreshes a bound ``FrozenLakeObservationMapper`` so the
+    text rendering tracks the current map.
+
+    Args:
+        env: Underlying ``FrozenLake-v1`` gym env (must support
+            ``env.unwrapped.desc``).
+        num_maps: Number of distinct maps to pre-generate.
+        map_size: Grid side length (e.g., 8 for 8x8).
+        map_seed: RNG seed for map generation. Same seed → same maps.
+        is_slippery: Forwarded to transition-matrix rebuild.
+        success_rate: Slippery-step success probability.
+        reward_schedule: ``(goal, hole, frozen)`` rewards.
+        text_mapper: Optional ``FrozenLakeObservationMapper`` to refresh
+            on each reset so text observations track the current map.
+    """
+
+    def __init__(
+        self,
+        env: Any,
+        *,
+        num_maps: int,
+        map_size: int,
+        map_seed: int,
+        is_slippery: bool = False,
+        success_rate: float = 1.0 / 3.0,
+        reward_schedule: tuple[float, float, float] = (1.0, 0.0, 0.0),
+        text_mapper: FrozenLakeObservationMapper | None = None,
+    ) -> None:
+        try:
+            from gymnasium.envs.toy_text.frozen_lake import generate_random_map
+        except ImportError as e:
+            raise ImportError(
+                "FrozenLakeMapCycler requires gymnasium[toy-text]"
+            ) from e
+
+        self.env = env
+        self._num_maps = num_maps
+        self._is_slippery = is_slippery
+        self._success_rate = success_rate
+        self._reward_schedule = reward_schedule
+        self._text_mapper = text_mapper
+        self._counter = 0
+        self._last_map_index: int | None = None
+
+        rng = np.random.RandomState(map_seed)
+        self._maps: list[list[str]] = [
+            generate_random_map(size=map_size, seed=int(rng.randint(0, 2**31 - 1)))
+            for _ in range(num_maps)
+        ]
+
+    # --- gym.Wrapper-style passthrough ---
+    @property
+    def unwrapped(self) -> Any:
+        return self.env.unwrapped
+
+    @property
+    def observation_space(self) -> Any:
+        return self.env.observation_space
+
+    @property
+    def action_space(self) -> Any:
+        return self.env.action_space
+
+    @property
+    def render_mode(self) -> Any:
+        return getattr(self.env, "render_mode", None)
+
+    @property
+    def spec(self) -> Any:
+        return getattr(self.env, "spec", None)
+
+    @property
+    def metadata(self) -> Any:
+        return getattr(self.env, "metadata", {})
+
+    def step(self, action: Any) -> Any:
+        return self.env.step(action)
+
+    def render(self, *args: Any, **kwargs: Any) -> Any:
+        return self.env.render(*args, **kwargs)
+
+    def close(self) -> Any:
+        return self.env.close()
+
+    # --- Map cycling ---
+    @property
+    def current_map(self) -> list[str]:
+        return self._maps[(self._counter - 1) % self._num_maps] if self._counter else self._maps[0]
+
+    def reset(self, **kwargs: Any) -> Any:
+        unwrapped = self.env.unwrapped
+        # Honor task_index from reset options when present (set by the
+        # llenvs runner). This makes map selection deterministic per task,
+        # which matters when the runner constructs a fresh env per task
+        # (e.g., when pure_step is disabled by use_images): otherwise
+        # every fresh env starts at counter=0 and only map[0] is ever used.
+        options = kwargs.get("options") or {}
+        task_index = options.get("task_index")
+        if task_index is not None:
+            self._last_map_index = int(task_index) % self._num_maps
+        else:
+            self._last_map_index = self._counter % self._num_maps
+        self._counter += 1
+        new_desc = self._maps[self._last_map_index]
+
+        unwrapped.desc = np.asarray(new_desc, dtype="c")
+        unwrapped.nrow, unwrapped.ncol = unwrapped.desc.shape
+        unwrapped.initial_state_distrib = (
+            np.array(unwrapped.desc == b"S").astype("float64").ravel()
+        )
+        total = unwrapped.initial_state_distrib.sum()
+        if total > 0:
+            unwrapped.initial_state_distrib /= total
+
+        _frozen_lake_rebuild_transition_matrix(
+            unwrapped,
+            is_slippery=self._is_slippery,
+            success_rate=self._success_rate,
+            reward_schedule=self._reward_schedule,
+        )
+
+        if self._text_mapper is not None:
+            self._text_mapper._set_desc(unwrapped.desc)
+
+        return self.env.reset(**kwargs)
+
+
+def frozen_lake_restore(env: Any, state: Any) -> Any:
+    """Restore a FrozenLake GymnasiumEnvironment to an arbitrary mid-trajectory state.
+
+    Used as the ``restore_fn`` for GT / ranking rollouts when the env cannot
+    support ``pure_step=True`` — e.g., when ``use_images=True`` attaches a
+    pygame Surface renderer that cannot be pickled.
+
+    FrozenLake is a deterministic MDP whose observable state collapses to a
+    single integer (agent position). Restoration is therefore cheap:
+      1. ``env.reset(seed, options={"task_index": ...})`` rebuilds the same
+         map via ``FrozenLakeMapCycler``.
+      2. The underlying gym env's ``s`` (current position) is written
+         directly. Subsequent ``env.step(...)`` calls compute from this
+         position using the map's transition matrix ``P``.
+
+    Args:
+        env: Freshly-constructed ``GymnasiumEnvironment`` (from env_factory).
+        state: Target ``State[GymnasiumHidden]`` to restore to. Only
+            ``state.hidden.{task_index, seed, raw_observation, last_action}``
+            is read.
+
+    Returns:
+        The ``state`` argument unchanged. The env's internal position is
+        now consistent with it, so the runner can step forward from here.
+    """
+    hidden = state.hidden
+    env.reset(seed=hidden.seed, options={"task_index": hidden.task_index})
+    inner = env._gym_env.unwrapped
+    inner.s = int(hidden.raw_observation)
+    # lastaction is used only by the renderer for agent-facing highlights;
+    # it's not needed for correctness of step() but keeps renders consistent.
+    if hidden.last_action is not None and hasattr(inner, "lastaction"):
+        # Safe fallback: leave None since we'd need action_names to map
+        # the string back to an int.
+        inner.lastaction = None
+    # Update the continuity tracker so subsequent step(state) validates —
+    # otherwise it would reject the target_state (different episode_id /
+    # non-zero step) against the tracker entry left by reset().
+    if env._state_tracker is not None:
+        env._state_tracker.track(state)
+    return state
 
 
 # =============================================================================
@@ -673,6 +919,53 @@ class ImageObservationMapper:
     def describe(self) -> str:
         """Describe the visual observation space."""
         return "Visual observation rendered as an image."
+
+
+class TextPlusImageGymnasiumMapper:
+    """Composes a text ObservationMapper with `env.render()` RGB output.
+
+    Use when an env has a meaningful symbolic/text observation AND a
+    pixel rendering, and downstream consumers want both in the same
+    `ObservationContent`. Generic across gym envs — knows nothing about
+    the underlying environment beyond what the wrapped text mapper and
+    the supplied `render_callable` provide.
+
+    Args:
+        text_mapper: The base text-only mapper (e.g.,
+            `FrozenLakeObservationMapper`, `AutoObservationMapper`).
+        render_callable: Zero-arg callable returning an HxWx3 uint8
+            numpy array (typically `gym_env.render` after the env is
+            constructed with `render_mode="rgb_array"`). May return None
+            if the env is in a non-renderable state; in that case only
+            text is emitted.
+    """
+
+    _multimodal = True
+
+    def __init__(
+        self,
+        text_mapper: ObservationMapper,
+        render_callable: "Any",
+    ) -> None:
+        self._text_mapper = text_mapper
+        self._render_callable = render_callable
+
+    def map(
+        self, obs: Any, info: dict[str, Any]
+    ) -> tuple[str, tuple[ImageContent, ...]]:
+        from llenvs.core.image_utils import pixels_to_image_content
+
+        text = self._text_mapper.map(obs, info)
+        try:
+            frame = self._render_callable()
+        except Exception:
+            frame = None
+        if frame is None:
+            return text, ()
+        return text, (pixels_to_image_content(np.asarray(frame)),)
+
+    def describe(self) -> str:
+        return self._text_mapper.describe()
 
 
 # =============================================================================
@@ -1076,11 +1369,18 @@ class GymnasiumEnvironment:
         task_index = options.get("task_index", 0)
         resolved_seed = self._resolve_seed(seed, task_index)
 
-        # Reset gymnasium env
-        reset_kwargs: dict[str, Any] = {}
+        # Reset gymnasium env. Forward options so wrappers (e.g.,
+        # FrozenLakeMapCycler) can read ``task_index`` for deterministic
+        # per-task selection. Stock gym envs ignore unknown options.
+        reset_kwargs: dict[str, Any] = {"options": dict(options)}
         if resolved_seed is not None:
             reset_kwargs["seed"] = resolved_seed
-        raw_obs, info = self._gym_env.reset(**reset_kwargs)
+        try:
+            raw_obs, info = self._gym_env.reset(**reset_kwargs)
+        except TypeError:
+            # Fallback for envs that don't accept options=
+            reset_kwargs.pop("options", None)
+            raw_obs, info = self._gym_env.reset(**reset_kwargs)
 
         # Render observation
         obs_text, obs_images = self._render_observation(raw_obs, info)
@@ -1118,7 +1418,6 @@ class GymnasiumEnvironment:
         observation = Observation(
             prompt=prompt,
             messages=initial_messages,
-            images=obs_images,
             task=task_content,
             state=state_content,
         )
@@ -1242,7 +1541,6 @@ class GymnasiumEnvironment:
         new_observation = Observation(
             prompt=state.observation.prompt,
             messages=new_messages,
-            images=obs_images,
             task=state.observation.task,
             state=state_content,
         )
@@ -1476,6 +1774,7 @@ class GymnasiumAdapter:
         render_mode: str | None = None,
         pure_step: bool = False,
         invalid_action_text: str | None = "[invalid action]",
+        use_images: bool = False,
         **make_kwargs: Any,
     ) -> GymnasiumEnvironment:
         """Create a gymnasium environment.
@@ -1530,17 +1829,35 @@ class GymnasiumAdapter:
         if prompts:
             merged_prompts.update(prompts)
 
+        # Honor preset-level use_images default if caller didn't pass one.
+        # Allows presets to declare image rendering as the default.
+        if not use_images and preset.get("use_images"):
+            use_images = True
+
+        # rgb_array renderers (e.g., FrozenLake's pygame backend) produce
+        # objects that are not picklable. pure_step requires pickling the
+        # gym env on every reset/step, so the two are mutually exclusive.
+        # Silently disable pure_step when use_images is set.
+        if use_images and pure_step:
+            pure_step = False
+
+        # Merge make_kwargs and pull out FL cycler kwargs (not gym args).
+        merged_make_kwargs: dict[str, Any] = dict(preset.get("make_kwargs", {}))
+        merged_make_kwargs.update(make_kwargs)
+        num_maps = merged_make_kwargs.pop("num_maps", None)
+        map_seed = merged_make_kwargs.pop("map_seed", None)
+        map_size = merged_make_kwargs.pop("map_size", None)
+
         # Create gym env if not provided
         if gym_env is None:
             gymnasium = self._get_gymnasium()
-            # Merge make_kwargs: preset defaults + user overrides
-            make_kwargs_final: dict[str, Any] = dict(preset.get("make_kwargs", {}))
-            make_kwargs_final.update(make_kwargs)
             if use_ansi_render and render_mode is None:
-                make_kwargs_final["render_mode"] = "ansi"
+                merged_make_kwargs["render_mode"] = "ansi"
             elif render_mode is not None:
-                make_kwargs_final["render_mode"] = render_mode
-            gym_env = gymnasium.make(env_id, **make_kwargs_final)
+                merged_make_kwargs["render_mode"] = render_mode
+            elif use_images and "render_mode" not in merged_make_kwargs:
+                merged_make_kwargs["render_mode"] = "rgb_array"
+            gym_env = gymnasium.make(env_id, **merged_make_kwargs)
 
         # Auto-create FrozenLake observation mapper when no explicit mapper
         if observation_mapper is None and env_id == "FrozenLake-v1":
@@ -1548,6 +1865,50 @@ class GymnasiumAdapter:
             desc = getattr(unwrapped, "desc", None)
             if desc is not None:
                 observation_mapper = FrozenLakeObservationMapper(desc=desc)
+
+        # FL map cycling: wrap gym env so each reset() picks the next
+        # pre-generated map. Refreshes the observation mapper to track it.
+        if env_id == "FrozenLake-v1" and num_maps and num_maps > 1:
+            unwrapped = getattr(gym_env, "unwrapped", gym_env)
+            if map_size is None:
+                map_name = merged_make_kwargs.get("map_name")
+                if map_name and "x" in str(map_name):
+                    try:
+                        map_size = int(str(map_name).split("x")[0])
+                    except ValueError:
+                        map_size = None
+                if map_size is None:
+                    map_size = int(getattr(unwrapped, "nrow", 4))
+            text_mapper_for_cycler = (
+                observation_mapper
+                if isinstance(observation_mapper, FrozenLakeObservationMapper)
+                else None
+            )
+            gym_env = FrozenLakeMapCycler(
+                gym_env,
+                num_maps=int(num_maps),
+                map_size=int(map_size),
+                map_seed=int(map_seed if map_seed is not None else 0),
+                is_slippery=bool(merged_make_kwargs.get("is_slippery", False)),
+                text_mapper=text_mapper_for_cycler,
+            )
+
+        # Wrap text mapper with image rendering when use_images is set.
+        # Skipped if the mapper is already multimodal (e.g., ImageObservationMapper).
+        if use_images and not isinstance(
+            observation_mapper, MultimodalObservationMapper
+        ):
+            if observation_mapper is None:
+                # Construct the same default GymnasiumEnvironment would build,
+                # so the vision wrap can compose around it.
+                observation_mapper = AutoObservationMapper(
+                    gym_env.observation_space,
+                    labels=observation_labels,
+                )
+            observation_mapper = TextPlusImageGymnasiumMapper(
+                text_mapper=observation_mapper,
+                render_callable=gym_env.render,
+            )
 
         return GymnasiumEnvironment(
             gym_env=gym_env,

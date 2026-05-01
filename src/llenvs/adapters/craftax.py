@@ -946,7 +946,6 @@ class CraftaxEnvironment:
         observation = Observation(
             prompt=prompt,
             messages=initial_messages,
-            images=images,
             task=task_content,
             state=state_content,
         )
@@ -1048,7 +1047,6 @@ class CraftaxEnvironment:
         new_observation = Observation(
             prompt=state.observation.prompt,
             messages=new_messages,
-            images=images,
             task=state.observation.task,
             state=state_content,
         )

@@ -1307,6 +1307,7 @@ class OpenRouterBackend(ModelBackend):
         rate_limit_max_retries: int = 2,
         timeout: float | None = None,
         max_retries: int | None = None,
+        provider: dict[str, Any] | None = None,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenRouter backend.
@@ -1334,6 +1335,13 @@ class OpenRouterBackend(ModelBackend):
             max_retries: Maximum SDK-level retries for transient errors
                 (timeouts, connection errors, 5xx).  ``None`` uses SDK
                 default (2).
+            provider: Default ``extra_body.provider`` routing dict sent with
+                every request (e.g. ``{"order": ["Parasail"],
+                "allow_fallbacks": true}``).  Per-request overrides via
+                ``params.extra`` still take precedence.  Useful when a model
+                has several OpenRouter providers with diverging per-prompt
+                image caps and we want to pin to one that accepts our
+                workload.
             **client_kwargs: Additional kwargs for OpenAI client.
 
         Raises:
@@ -1352,6 +1360,7 @@ class OpenRouterBackend(ModelBackend):
         self._max_concurrency = max_concurrency
         self._rate_limit_wait = rate_limit_wait
         self._rate_limit_max_retries = rate_limit_max_retries
+        self._default_provider = dict(provider) if provider else None
         self._return_partial_batch = True
 
         # OpenRouter uses OpenAI-compatible API
@@ -1471,6 +1480,26 @@ class OpenRouterBackend(ModelBackend):
                 )
             kwargs["logprobs"] = True
             kwargs["top_logprobs"] = params.num_logprobs
+            # OpenRouter's default router picks any provider with
+            # capacity — several (e.g. DeepInfra for Gemma) silently
+            # drop ``logprobs`` and return text only. ``provider.
+            # require_parameters`` restricts routing to providers that
+            # actually honour every requested param, so the request
+            # either gets logprobs back or fails with a routing error
+            # we can surface instead of silently losing them.
+            extra_body = kwargs.setdefault("extra_body", {})
+            provider_cfg = extra_body.setdefault("provider", {})
+            provider_cfg.setdefault("require_parameters", True)
+
+        # Backend-level default provider routing (e.g. pinning to a
+        # vision-capable provider with a generous per-prompt image cap).
+        # Per-request ``params.extra`` still wins via the update() below.
+        default_provider = getattr(self, "_default_provider", None)
+        if default_provider:
+            extra_body = kwargs.setdefault("extra_body", {})
+            provider_cfg = extra_body.setdefault("provider", {})
+            for key, value in default_provider.items():
+                provider_cfg.setdefault(key, value)
 
         # OpenRouter's unified ``reasoning`` block lives at the top level of
         # the request body, but the OpenAI SDK doesn't know that field — it
@@ -1561,6 +1590,40 @@ class OpenRouterBackend(ModelBackend):
             )
         return result
 
+    def _translate_router_404_for_logprobs(
+        self,
+        exc: BaseException,
+        params: SamplingParams,
+    ) -> BaseException:
+        """Translate OpenRouter's "no endpoints can handle params" 404 into
+        :class:`LogprobsNotReturnedError` when logprobs were requested.
+
+        With ``provider.require_parameters=True`` set for every logprobs
+        request, OpenRouter returns a 404 if no provider supports the full
+        set of requested parameters.  From the caller's perspective this
+        is the same failure mode as a provider silently dropping
+        logprobs, so we surface it with the graceful-skip exception type
+        instead of a raw :class:`openai.NotFoundError`.
+        """
+        try:
+            from openai import NotFoundError
+        except ImportError:
+            return exc
+        if (
+            params.logprobs
+            and isinstance(exc, NotFoundError)
+            and "no endpoints found" in str(exc).lower()
+        ):
+            return LogprobsNotReturnedError(
+                "OpenRouter could not route this request: no provider "
+                "supports the full set of requested parameters (logprobs "
+                f"+ everything else in the payload) for model {self._model!r}. "
+                "Original error: " + str(exc),
+                backend_name="OpenRouterBackend",
+                model_name=self._model,
+            )
+        return exc
+
     def generate_chat(
         self,
         messages: list[ChatMessage],
@@ -1585,6 +1648,9 @@ class OpenRouterBackend(ModelBackend):
                 except (RateLimitError, MalformedResponseError):
                     raise
                 except Exception as exc:
+                    translated = self._translate_router_404_for_logprobs(exc, params)
+                    if translated is not exc:
+                        raise translated from exc
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
             except (RateLimitError, MalformedResponseError) as exc:
                 if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
@@ -1625,6 +1691,9 @@ class OpenRouterBackend(ModelBackend):
                 except (RateLimitError, MalformedResponseError):
                     raise
                 except Exception as exc:
+                    translated = self._translate_router_404_for_logprobs(exc, params)
+                    if translated is not exc:
+                        raise translated from exc
                     raise _normalize_provider_error(exc, model_name=self._model) from exc
             except (RateLimitError, MalformedResponseError) as exc:
                 if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):

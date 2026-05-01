@@ -1270,15 +1270,15 @@ class TestAtariPresets:
 
         # Reset and check observation has images
         state, _ = env.reset()
-        assert len(state.observation.images) == 1
+        assert len(state.observation.state.images) == 1
 
         from llenvs.core.state import ImageContent
 
-        assert isinstance(state.observation.images[0], ImageContent)
+        assert isinstance(state.observation.state.images[0], ImageContent)
 
         # Step and check images
         result = env.step(state, Action(text="fire"))
-        assert len(result.next_state.observation.images) == 1
+        assert len(result.next_state.observation.state.images) == 1
 
     def test_atari_preset_max_steps_merges(self, import_adapter):
         """Preset max_steps should be used when not explicitly overridden."""
@@ -1791,3 +1791,247 @@ class TestPureStep:
         adapter = import_adapter.GymnasiumAdapter()
         env = adapter.get_environment("test", gym_env=gym_env, num_tasks=1, pure_step=True)
         assert env.spec.pure_step is True
+
+
+# =============================================================================
+# Generic text+image vision wrapper
+# =============================================================================
+
+
+@pytest.fixture
+def real_gymnasium_adapter():
+    """Restore the real gymnasium module (overriding the autouse mock) and
+    reload the adapter so it picks it up.
+
+    On teardown, restores the captured mocked modules and reloads the adapter
+    so its module-level state rebinds to the mock — otherwise subsequent
+    tests that import third-party packages depending on `gym.Env` (e.g.
+    browsergym in test_open_apps_adapter) hit a metaclass conflict between
+    real and mocked gym.
+    """
+    import importlib
+    import sys
+
+    saved_gymnasium = sys.modules.get("gymnasium")
+    saved_gymnasium_spaces = sys.modules.get("gymnasium.spaces")
+
+    sys.modules.pop("gymnasium", None)
+    sys.modules.pop("gymnasium.spaces", None)
+    import gymnasium  # noqa: F401  (re-imports the real package)
+
+    import llenvs.adapters.gymnasium as mod
+
+    importlib.reload(mod)
+    try:
+        yield mod
+    finally:
+        if saved_gymnasium is not None:
+            sys.modules["gymnasium"] = saved_gymnasium
+        else:
+            sys.modules.pop("gymnasium", None)
+        if saved_gymnasium_spaces is not None:
+            sys.modules["gymnasium.spaces"] = saved_gymnasium_spaces
+        else:
+            sys.modules.pop("gymnasium.spaces", None)
+        importlib.reload(mod)
+
+
+class TestTextPlusImageGymnasiumMapper:
+    """Tests for the generic vision composer (env-agnostic)."""
+
+    def test_frozen_lake_use_images(self, real_gymnasium_adapter):
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+        env = adapter.get_environment("frozen_lake/8x8", use_images=True)
+        state, _ = env.reset(seed=42)
+        images = state.observation.state.images
+        assert len(images) == 1
+        assert images[0].media_type == "image/png"
+        assert len(images[0].data) > 100  # base64 PNG is non-trivial
+        # Text observation must also be present (composed, not replaced)
+        text = state.observation.state.text
+        assert "@" in text  # agent marker
+
+    def test_taxi_use_images_env_agnostic(self, real_gymnasium_adapter):
+        """Same flag works on a different gym env that supports rgb_array."""
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+        # Taxi-v3: not in presets, so passes through gymnasium.make directly.
+        env = adapter.get_environment("Taxi-v3", use_images=True)
+        state, _ = env.reset(seed=42)
+        images = state.observation.state.images
+        assert len(images) == 1
+        assert images[0].media_type == "image/png"
+
+    def test_use_images_false_yields_no_images(self, real_gymnasium_adapter):
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+        env = adapter.get_environment("frozen_lake/8x8", use_images=False)
+        state, _ = env.reset(seed=42)
+        assert state.observation.state.images == ()
+
+    def test_render_failure_falls_back_to_text_only(self):
+        """If env.render() raises, we still get a text observation, no images."""
+        from llenvs.adapters.gymnasium import (
+            FrozenLakeObservationMapper,
+            TextPlusImageGymnasiumMapper,
+        )
+
+        text_mapper = FrozenLakeObservationMapper(
+            desc=[b"SF", b"FG"],
+        )
+
+        def bad_render():
+            raise RuntimeError("render failed")
+
+        wrapper = TextPlusImageGymnasiumMapper(
+            text_mapper=text_mapper, render_callable=bad_render,
+        )
+        text, images = wrapper.map(0, {})
+        assert text  # text mapper still ran
+        assert images == ()
+
+    def test_describe_delegates_to_text_mapper(self):
+        from llenvs.adapters.gymnasium import (
+            FrozenLakeObservationMapper,
+            TextPlusImageGymnasiumMapper,
+        )
+
+        text_mapper = FrozenLakeObservationMapper(desc=[b"SG"])
+        wrapper = TextPlusImageGymnasiumMapper(
+            text_mapper=text_mapper, render_callable=lambda: None,
+        )
+        assert wrapper.describe() == text_mapper.describe()
+
+
+class TestFrozenLakeMapCycler:
+    """Tests for FrozenLakeMapCycler — pre-generated maps cycled per reset."""
+
+    def test_cycles_n_distinct_maps(self, real_gymnasium_adapter):
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+        env = adapter.get_environment(
+            "frozen_lake/8x8", num_maps=4, map_seed=42,
+        )
+        layouts: list[str] = []
+        for _ in range(8):
+            state, _ = env.reset()
+            # Strip agent + start markers so we compare static layout only.
+            stripped = state.observation.state.text.replace("@", "F").replace("S", "F")
+            layouts.append(stripped)
+        # 8 resets across 4 maps → exactly 4 unique static layouts.
+        assert len(set(layouts)) == 4
+
+    def test_seeded_reproducibility(self, real_gymnasium_adapter):
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+
+        def collect_first_3(seed):
+            env = adapter.get_environment(
+                "frozen_lake/8x8", num_maps=4, map_seed=seed,
+            )
+            return [env.reset()[0].observation.state.text for _ in range(3)]
+
+        a = collect_first_3(seed=42)
+        b = collect_first_3(seed=42)
+        c = collect_first_3(seed=999)
+        assert a == b
+        assert a != c
+
+    def test_text_mapper_tracks_current_map(self, real_gymnasium_adapter):
+        """After cycling, the text mapper's grid matches env.unwrapped.desc."""
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+        env = adapter.get_environment(
+            "frozen_lake/8x8", num_maps=3, map_seed=7,
+        )
+        # Cycle through and check text observation matches actual map shape.
+        for _ in range(6):
+            state, _ = env.reset()
+            text = state.observation.state.text
+            # 8x8 grid → 8 rows of 8 chars (space-separated → 15 chars per row)
+            rows = text.split("\n")
+            assert len(rows) == 8
+            assert all(len(r) == 15 for r in rows)
+
+    def test_images_track_current_map(self, real_gymnasium_adapter):
+        """When use_images is on, the rendered image changes with the map."""
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+        env = adapter.get_environment(
+            "frozen_lake/8x8", num_maps=3, map_seed=11, use_images=True,
+        )
+        b64s: set[str] = set()
+        for _ in range(3):
+            state, _ = env.reset()
+            imgs = state.observation.state.images
+            assert len(imgs) == 1
+            b64s.add(imgs[0].data)
+        # Each map renders to a distinct image.
+        assert len(b64s) == 3
+
+
+class TestFrozenLakeRestore:
+    """Tests for the frozen_lake_restore function — replay-free state
+    restoration for GT/ranking on vision FL (which can't use pure_step)."""
+
+    def test_restore_then_step_matches_original(self, real_gymnasium_adapter):
+        """Restore to mid-trajectory, step once, compare to original rollout."""
+        pytest.importorskip("pygame")
+        from llenvs.core.state import Action
+
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+
+        producer = adapter.get_environment(
+            "frozen_lake/8x8", use_images=True, num_maps=4, map_seed=42,
+        )
+        state, _ = producer.reset(seed=7, options={"task_index": 2})
+        for a in ["down", "right", "down"]:
+            state = producer.step(state, Action(text=a)).next_state
+        target = state
+        ref = producer.step(target, Action(text="down"))
+
+        fresh = adapter.get_environment(
+            "frozen_lake/8x8", use_images=True, num_maps=4, map_seed=42,
+        )
+        restored = real_gymnasium_adapter.frozen_lake_restore(fresh, target)
+        # restore_fn returns the target state unchanged
+        assert restored is target
+        # Inner env's agent position matches the target
+        assert fresh._gym_env.unwrapped.s == target.hidden.raw_observation
+        # Stepping from restored produces identical next-state
+        res = fresh.step(restored, Action(text="down"))
+        assert res.next_state.hidden.raw_observation == ref.next_state.hidden.raw_observation
+        # AND identical render (same map, same position → same pixels)
+        assert (
+            res.next_state.observation.state.images[0].data
+            == ref.next_state.observation.state.images[0].data
+        )
+
+    def test_restore_respects_task_index(self, real_gymnasium_adapter):
+        """Restoring to a state from task_index=K puts the fresh env on map[K]."""
+        pytest.importorskip("pygame")
+        adapter = real_gymnasium_adapter.GymnasiumAdapter()
+
+        producer = adapter.get_environment(
+            "frozen_lake/8x8", use_images=True, num_maps=4, map_seed=100,
+        )
+        state_t2, _ = producer.reset(options={"task_index": 2})
+
+        fresh = adapter.get_environment(
+            "frozen_lake/8x8", use_images=True, num_maps=4, map_seed=100,
+        )
+        # Prime fresh with task_index=0 to make the mistake obvious
+        fresh.reset(options={"task_index": 0})
+        real_gymnasium_adapter.frozen_lake_restore(fresh, state_t2)
+
+        # Fresh env's desc should now match map[2] (same seed as producer)
+        assert bytes(fresh._gym_env.unwrapped.desc.tobytes()) != bytes(b"")
+        # Render should match producer's post-reset render (same map + position)
+        fresh_text = fresh._observation_mapper.map(
+            state_t2.hidden.raw_observation, {}
+        )
+        # fresh_text is the composed (text, images) tuple since TextPlusImageMapper
+        if isinstance(fresh_text, tuple):
+            fresh_text = fresh_text[0]
+        producer_text = state_t2.observation.state.text
+        assert fresh_text == producer_text

@@ -800,6 +800,15 @@ class BackendFactory:
 
             return VLLMBackend(model_path=config.model, **config.params)
 
+        elif backend_type == "vllm_singularity":
+            from llenvs.inference.backends.vllm_singularity import (
+                SingularityVLLMBackend,
+            )
+
+            return SingularityVLLMBackend(
+                model_path=config.model, **config.params
+            )
+
         elif backend_type == "openai":
             from llenvs.inference.backends.api import OpenAIBackend
 
