@@ -17,8 +17,6 @@ import logging
 import time
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from llenvs.core.state import ImageContent
 from llenvs.inference.protocol import (
     BackendCapabilities,
@@ -33,6 +31,8 @@ from llenvs.inference.protocol import (
     TokenLogprob,
     TokenScore,
 )
+
+logger = logging.getLogger(__name__)
 
 # Known VLM model types (checked against model_config.hf_config.model_type).
 # `gemma4` is only recognised by vllm>=0.19 running inside the Singularity
@@ -269,9 +269,6 @@ class VLLMBackend(ModelBackend):
 
         self._llm = None
         self._tokenizer = None
-        if hasattr(self, "_scoring_model"):
-            self._scoring_model = None
-
         gc.collect()
         try:
             import torch
@@ -478,14 +475,10 @@ class VLLMBackend(ModelBackend):
             if "longer than the maximum model length" in str(exc):
                 # Compute per-prompt token lengths for diagnostics
                 prompt_lengths = [
-                    len(self._tokenizer.encode(p, add_special_tokens=False))
-                    for p in prompts
+                    len(self._tokenizer.encode(p, add_special_tokens=False)) for p in prompts
                 ]
                 max_len = self._max_context_length or 0
-                offending = [
-                    i for i, length in enumerate(prompt_lengths)
-                    if length > max_len
-                ]
+                offending = [i for i, length in enumerate(prompt_lengths) if length > max_len]
                 raise PromptTooLongError(
                     str(exc),
                     model_name=self._model_path,
@@ -741,162 +734,162 @@ class VLLMBackend(ModelBackend):
 
         return results
 
-    # --- Full-vocabulary scoring ---
+    # --- Continuation scoring ---
 
-    def _ensure_scoring_model(self) -> Any:
-        """Lazily load a HuggingFace model for full-vocabulary scoring.
-
-        The vLLM engine's internal model cannot be used directly for raw
-        forward passes because its attention layers require vLLM-specific
-        execution context (paged attention metadata, KV cache management).
-        Instead, we load a standard HuggingFace ``AutoModelForCausalLM``
-        from the same model path. The model is cached after first load.
-
-        Returns:
-            A HuggingFace ``PreTrainedModel`` in eval mode.
-
-        Raises:
-            ImportError: If ``transformers`` is not installed.
-            RuntimeError: If the model cannot be loaded.
-        """
-        if hasattr(self, "_scoring_model"):
-            return self._scoring_model
-
-        import logging
-
-        import torch
-
-        try:
-            from transformers import AutoModelForCausalLM
-        except ImportError as e:
-            raise ImportError(
-                "HuggingFace transformers is required for full-vocabulary scoring. "
-                "Install with: pip install transformers"
-            ) from e
-
-        logger = logging.getLogger(__name__)
-
-        # Match the dtype used by the vLLM engine
-        model_config = self._llm.llm_engine.model_config
-        dtype = getattr(model_config, "dtype", torch.float16)
-
-        logger.info(
-            "Loading HuggingFace model for full-vocabulary scoring: %s (dtype=%s). "
-            "This model is loaded separately from the vLLM engine and uses "
-            "additional memory.",
-            self._model_path,
-            dtype,
-        )
-
-        try:
-            self._scoring_model = AutoModelForCausalLM.from_pretrained(
-                self._model_path,
-                torch_dtype=dtype,
-                device_map="auto",
-                low_cpu_mem_usage=True,
+    def _score_prompt_logprobs_to_result(
+        self,
+        *,
+        prompt_len: int,
+        full_ids: list[int],
+        prompt_logprobs: Any,
+    ) -> ScoringResult:
+        """Extract continuation-token logprobs from vLLM prompt logprobs."""
+        if len(full_ids) <= prompt_len:
+            return ScoringResult(token_scores=(), prompt_tokens=prompt_len, scored_tokens=0)
+        if prompt_logprobs is None:
+            raise LogprobsNotReturnedError(
+                "vLLM returned no prompt logprobs during continuation scoring "
+                f"for model {self._model_path!r}.",
+                backend_name="VLLMBackend",
+                model_name=self._model_path,
             )
-            logger.info("Scoring model loaded on GPU")
-        except Exception as e:
-            raise RuntimeError(
-                f"Failed to load scoring model on GPU. Lower gpu_memory_utilization "
-                f"on the vLLM backend to free GPU memory for the scoring model: {e}"
-            ) from e
 
-        self._scoring_model.eval()
-        return self._scoring_model
+        token_scores: list[TokenScore] = []
+        for pos in range(prompt_len, len(full_ids)):
+            token_id = full_ids[pos]
+            try:
+                position_logprobs = prompt_logprobs[pos]
+            except IndexError as exc:
+                raise LogprobsNotReturnedError(
+                    "vLLM returned too few prompt logprob positions during "
+                    f"continuation scoring for model {self._model_path!r}.",
+                    backend_name="VLLMBackend",
+                    model_name=self._model_path,
+                ) from exc
+
+            if not position_logprobs or token_id not in position_logprobs:
+                raise LogprobsNotReturnedError(
+                    "vLLM prompt logprobs did not include the continuation token "
+                    f"id {token_id} at position {pos} for model {self._model_path!r}.",
+                    backend_name="VLLMBackend",
+                    model_name=self._model_path,
+                )
+            logprob_obj = position_logprobs[token_id]
+            token_scores.append(
+                TokenScore(
+                    token=(
+                        logprob_obj.decoded_token
+                        if getattr(logprob_obj, "decoded_token", None) is not None
+                        else self._tokenizer.decode([token_id])
+                    ),
+                    token_id=token_id,
+                    logprob=logprob_obj.logprob,
+                )
+            )
+
+        return ScoringResult(
+            token_scores=tuple(token_scores),
+            prompt_tokens=prompt_len,
+            scored_tokens=len(token_scores),
+        )
 
     def score_chat(
         self,
         messages: list[ChatMessage],
         continuation: str,
     ) -> ScoringResult:
-        """Score continuation tokens with full-vocabulary log-probabilities.
+        """Score a continuation using the resident vLLM engine.
 
-        Loads a HuggingFace model (lazily, on first call) from the same
-        model path as the vLLM engine, runs a single forward pass over
-        the chat-templated prompt concatenated with the continuation, and
-        returns per-token full log-probability distributions.
-
-        Args:
-            messages: Chat context.
-            continuation: Text whose tokens are scored.
-
-        Returns:
-            ``ScoringResult`` with per-token ``TokenScore`` entries.
+        The prompt plus continuation is submitted as a prompt-logprobs request.
+        vLLM includes each prompt token's own logprob, so the continuation span
+        can be scored without loading a separate HuggingFace model copy.
         """
-        import torch
-
-        if not continuation:
-            return ScoringResult(token_scores=(), prompt_tokens=0, scored_tokens=0)
-
-        model = self._ensure_scoring_model()
-
-        # Apply chat template
-        prompt_text = self._tokenizer.apply_chat_template(
-            [m.to_dict() for m in messages],
-            tokenize=False,
-            add_generation_prompt=True,
-            **self._chat_template_kwargs,
-        )
-
-        # Tokenize prompt and full text
-        full_text = prompt_text + continuation
-        prompt_ids = self._tokenizer.encode(prompt_text)
-        full_ids = self._tokenizer.encode(full_text)
-        prompt_len = len(prompt_ids)
-
-        if len(full_ids) <= prompt_len:
-            return ScoringResult(
-                token_scores=(), prompt_tokens=prompt_len, scored_tokens=0
-            )
-
-        # Forward pass
-        device = next(model.parameters()).device
-        input_tensor = torch.tensor([full_ids], device=device)
-
-        with torch.no_grad():
-            logits = model(input_tensor).logits  # (1, seq_len, vocab_size)
-
-        # Logit at position t predicts token at t+1.
-        # Continuation tokens occupy positions [prompt_len, total_len-1].
-        # Their predicting logits are at positions [prompt_len-1, total_len-2].
-        total_len = len(full_ids)
-        cont_logits = logits[0, prompt_len - 1 : total_len - 1, :]
-        # Use float32 for numerical stability in log_softmax
-        log_probs = torch.nn.functional.log_softmax(
-            cont_logits.float(), dim=-1
-        ).cpu()
-
-        # Build TokenScore tuples
-        cont_ids = full_ids[prompt_len:]
-        token_scores = tuple(
-            TokenScore(
-                token=self._tokenizer.decode([tid]),
-                token_id=tid,
-                logprob=log_probs[i, tid].item(),
-                log_probs_all=log_probs[i],
-            )
-            for i, tid in enumerate(cont_ids)
-        )
-
-        return ScoringResult(
-            token_scores=token_scores,
-            prompt_tokens=prompt_len,
-            scored_tokens=len(token_scores),
-        )
+        return self.score_chat_batch([messages], [continuation])[0]
 
     def score_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         continuations: list[str],
     ) -> list[ScoringResult]:
-        """Batched scoring via sequential forward passes.
+        """Batched continuation scoring through vLLM prompt logprobs."""
+        if len(messages_batch) != len(continuations):
+            raise ValueError("messages_batch and continuations must have equal length")
+        if not messages_batch:
+            return []
 
-        Each (messages, continuation) pair is scored independently.
-        The self-distillation method controls its own sub-batching,
-        so sequential processing here is acceptable.
-        """
-        return [
-            self.score_chat(msgs, cont)
-            for msgs, cont in zip(messages_batch, continuations)
-        ]
+        full_texts: list[str] = []
+        prompt_lengths: list[int] = []
+        full_token_ids: list[list[int]] = []
+        empty_results: dict[int, ScoringResult] = {}
+
+        for index, (messages, continuation) in enumerate(zip(messages_batch, continuations)):
+            prompt_text = self._tokenizer.apply_chat_template(
+                [m.to_dict() for m in messages],
+                tokenize=False,
+                add_generation_prompt=True,
+                **self._chat_template_kwargs,
+            )
+            prompt_ids = self._tokenizer.encode(prompt_text)
+            if not continuation:
+                empty_results[index] = ScoringResult(
+                    token_scores=(), prompt_tokens=len(prompt_ids), scored_tokens=0
+                )
+                continue
+
+            full_text = prompt_text + continuation
+            full_ids = self._tokenizer.encode(full_text)
+            if len(full_ids) <= len(prompt_ids):
+                empty_results[index] = ScoringResult(
+                    token_scores=(), prompt_tokens=len(prompt_ids), scored_tokens=0
+                )
+                continue
+
+            full_texts.append(full_text)
+            prompt_lengths.append(len(prompt_ids))
+            full_token_ids.append(full_ids)
+
+        if not full_texts:
+            return [empty_results[i] for i in range(len(messages_batch))]
+
+        params = self._VLLMSamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            top_p=1.0,
+            top_k=0,
+            prompt_logprobs=0,
+            detokenize=False,
+        )
+        try:
+            outputs = self._llm.generate(full_texts, params, use_tqdm=False)
+        except ValueError as exc:
+            if "longer than the maximum model length" in str(exc):
+                max_len = self._max_context_length or 0
+                lengths = [len(ids) for ids in full_token_ids]
+                offending = [i for i, length in enumerate(lengths) if length > max_len]
+                raise PromptTooLongError(
+                    str(exc),
+                    model_name=self._model_path,
+                    max_model_len=max_len,
+                    batch_size=len(full_texts),
+                    prompt_token_lengths=lengths,
+                    offending_indices=offending,
+                    offending_prompts=[full_texts[i] for i in offending],
+                ) from exc
+            raise
+
+        scored_iter = iter(
+            self._score_prompt_logprobs_to_result(
+                prompt_len=prompt_len,
+                full_ids=full_ids,
+                prompt_logprobs=output.prompt_logprobs,
+            )
+            for output, prompt_len, full_ids in zip(outputs, prompt_lengths, full_token_ids)
+        )
+
+        results: list[ScoringResult] = []
+        for index in range(len(messages_batch)):
+            if index in empty_results:
+                results.append(empty_results[index])
+            else:
+                results.append(next(scored_iter))
+        return results
