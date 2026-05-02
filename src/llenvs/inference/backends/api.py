@@ -209,6 +209,45 @@ def _format_no_choices_message(provider_error: Any) -> str:
     return "Provider returned a response with no choices."
 
 
+def _to_plain_mapping(value: Any) -> dict[str, Any]:
+    """Return non-None fields from SDK or dict-like objects."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return {str(k): v for k, v in value.items() if v is not None}
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        dumped = model_dump(exclude_none=True)
+        if isinstance(dumped, dict):
+            return dumped
+    if hasattr(value, "__dict__"):
+        return {
+            str(k): v
+            for k, v in vars(value).items()
+            if not k.startswith("_") and v is not None
+        }
+    return {}
+
+
+def _get_field(value: Any, name: str, default: Any = None) -> Any:
+    """Read ``name`` from either a mapping or an SDK object."""
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _reasoning_detail_types(reasoning_details: Any) -> list[str]:
+    """Extract reasoning detail ``type`` values without retaining payloads."""
+    if not isinstance(reasoning_details, (list, tuple)):
+        return []
+    types: list[str] = []
+    for detail in reasoning_details:
+        detail_type = _get_field(detail, "type")
+        if detail_type is not None:
+            types.append(str(detail_type))
+    return types
+
+
 def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseException:
     status = _error_status_code(error)
     if status != 400 or _is_policy_error(error):
@@ -1562,16 +1601,58 @@ class OpenRouterBackend(ModelBackend):
                 )
             token_logprobs = tuple(logprobs)
 
+        usage = getattr(response, "usage", None)
+        message = choice.message
+        metadata: dict[str, Any] = {
+            "model": response.model,
+            "id": response.id,
+        }
+
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason is not None:
+            metadata["finish_reason"] = finish_reason
+        native_finish_reason = getattr(choice, "native_finish_reason", None)
+        if native_finish_reason is not None:
+            metadata["native_finish_reason"] = native_finish_reason
+
+        completion_tokens_details = _to_plain_mapping(
+            _get_field(usage, "completion_tokens_details")
+        )
+        if completion_tokens_details:
+            metadata["completion_tokens_details"] = completion_tokens_details
+            reasoning_tokens = completion_tokens_details.get("reasoning_tokens")
+            if reasoning_tokens is not None:
+                metadata["reasoning_tokens"] = reasoning_tokens
+
+        reasoning = getattr(message, "reasoning", None)
+        if reasoning is None:
+            reasoning = getattr(message, "reasoning_content", None)
+        if reasoning is not None:
+            reasoning_text = str(reasoning)
+            metadata["reasoning_present"] = bool(reasoning_text)
+            metadata["reasoning_chars"] = len(reasoning_text)
+
+        reasoning_details = getattr(message, "reasoning_details", None)
+        if reasoning_details is not None:
+            metadata["reasoning_details_present"] = bool(reasoning_details)
+            metadata["reasoning_details_count"] = (
+                len(reasoning_details)
+                if isinstance(reasoning_details, (list, tuple))
+                else 1
+            )
+            detail_types = _reasoning_detail_types(reasoning_details)
+            if detail_types:
+                metadata["reasoning_details_types"] = tuple(detail_types)
+
         return GenerationResult(
             text=choice.message.content or "",
             finish_reason=_openai_stop_reason(choice.finish_reason),
             token_logprobs=token_logprobs,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
+            prompt_tokens=_get_field(usage, "prompt_tokens", 0) if usage else 0,
+            completion_tokens=(
+                _get_field(usage, "completion_tokens", 0) if usage else 0
+            ),
+            metadata=metadata,
         )
 
     def _ensure_logprobs_if_requested(

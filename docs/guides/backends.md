@@ -264,6 +264,15 @@ caller-supplied dict shallow-merges over the derived one and wins on
 key collisions, so it is also the escape hatch for
 `reasoning.effort`/`reasoning.exclude`/`reasoning.enabled`.
 
+OpenRouter returns hidden reasoning separately from visible assistant
+content. `GenerationResult.text` contains only `message.content`, while
+diagnostics are preserved in `GenerationResult.metadata`: normalized
+`finish_reason`, raw `native_finish_reason` when present,
+`completion_tokens_details`, top-level `reasoning_tokens`, and lightweight
+presence/count/length fields for `message.reasoning` and
+`message.reasoning_details`. The full reasoning payload is not copied into
+metadata.
+
 ## Codex CLI
 
 ```python
