@@ -1,5 +1,6 @@
 """Tests for the OpenApps adapter."""
 
+import copy
 from typing import Any
 
 import pytest
@@ -11,6 +12,8 @@ from llenvs.adapters.open_apps import (
     OpenAppsEnvironment,
     OpenAppsHidden,
     OpenAppsReward,
+    _BrowserGymProxy,
+    _check_task_complete_task_local,
     _get_app_state,
 )
 from llenvs.core.reward import RewardType
@@ -159,6 +162,23 @@ class MockBrowserGymEnv:
         return obs, 0.0, False, False, {}
 
 
+class MockAddTodoTargetTask:
+    """Mock task with OpenApps-style full-state target construction."""
+
+    goal = "Add 'Call Mom' to my todo list."
+    task_id = "mock_add_todo_target"
+
+    def get_target_state(self, initial_state: dict) -> dict:
+        target = copy.deepcopy(initial_state)
+        target["todo"].append({"title": "Call Mom", "done": None})
+        return target
+
+    def check_if_task_is_complete(
+        self, initial_state: dict, current_state: dict
+    ) -> bool:
+        return self.get_target_state(initial_state) == current_state
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -289,6 +309,55 @@ class TestOpenAppsReward:
     def test_reward_type(self):
         reward_fn = OpenAppsReward()
         assert reward_fn.reward_type == RewardType.OUTCOME
+
+
+class TestOpenAppsTaskLocalReward:
+    """Tests for task-local OpenApps completion semantics."""
+
+    def test_ignores_unrelated_app_mutations(self):
+        initial_state = {
+            "todo": [{"title": "Existing", "done": None}],
+            "calendar": [],
+            "map": [{"name": "Central Park", "coords": [1.0, 1.0]}],
+            "messenger": [{"user": "Bob", "messages": []}],
+            "codeeditor": {},
+            "online_shop": [],
+        }
+        task = MockAddTodoTargetTask()
+        current_state = task.get_target_state(initial_state)
+        current_state["map"].append({"name": "Paris", "coords": [2.0, 2.0]})
+
+        complete, relevant = _check_task_complete_task_local(
+            task,
+            "add_call_mom_to_my_todo",
+            initial_state,
+            current_state,
+        )
+
+        assert complete is True
+        assert relevant == ("todo",)
+
+    def test_relevant_app_must_match_target(self):
+        initial_state = {
+            "todo": [{"title": "Existing", "done": None}],
+            "calendar": [],
+            "map": [{"name": "Central Park", "coords": [1.0, 1.0]}],
+            "messenger": [{"user": "Bob", "messages": []}],
+            "codeeditor": {},
+            "online_shop": [],
+        }
+        current_state = copy.deepcopy(initial_state)
+        current_state["map"].append({"name": "Paris", "coords": [2.0, 2.0]})
+
+        complete, relevant = _check_task_complete_task_local(
+            MockAddTodoTargetTask(),
+            "add_call_mom_to_my_todo",
+            initial_state,
+            current_state,
+        )
+
+        assert complete is False
+        assert relevant == ("todo",)
 
 
 # ---------------------------------------------------------------------------
@@ -533,6 +602,32 @@ class TestOpenAppsMultiStepEpisode:
 # ---------------------------------------------------------------------------
 # Tests: OpenAppsAdapter
 # ---------------------------------------------------------------------------
+
+
+class TestBrowserGymProxy:
+    """Tests for BrowserGym proxy behavior that does not require BrowserGym."""
+
+    class _TinyEnv:
+        def reset(self, **kwargs):
+            return {"kwargs": kwargs}
+
+        def step(self, action):
+            return {"action": action}
+
+        def close(self):
+            return None
+
+    def test_custom_call_timeout_is_used(self):
+        proxy = _BrowserGymProxy(lambda: self._TinyEnv(), call_timeout=12.5)
+        try:
+            assert proxy._call_timeout == 12.5
+            assert proxy.step("noop") == {"action": "noop"}
+        finally:
+            proxy.close()
+
+    def test_custom_call_timeout_must_be_positive(self):
+        with pytest.raises(ValueError, match="call_timeout must be positive"):
+            _BrowserGymProxy(lambda: self._TinyEnv(), call_timeout=0)
 
 
 class TestOpenAppsAdapter:

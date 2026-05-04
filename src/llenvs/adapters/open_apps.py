@@ -10,6 +10,8 @@ Reference: https://github.com/facebookresearch/OpenApps
 
 from __future__ import annotations
 
+import copy
+import os
 import queue
 import subprocess
 import threading
@@ -58,6 +60,17 @@ OPEN_APPS_MODULES: list[str] = [
     "codeeditor",
     "onlineshop",
 ]
+
+_TASK_RELEVANT_STATE_KEYS: dict[str, tuple[str, ...]] = {
+    "add_meeting_with_dennis": ("calendar",),
+    "add_christmas_shopping_event": ("calendar",),
+    "add_paper_reading_meeting_with_einstein": ("calendar",),
+    "remove_wacv_abstract_deadline": ("calendar",),
+    "add_call_mom_to_my_todo": ("todo",),
+    "mark_water_plants_as_done": ("todo",),
+    "message_bob_to_meet": ("messenger",),
+    "save_paris_to_my_favorite_places": ("map",),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +182,65 @@ def _get_app_state(base_url: str) -> dict[str, Any]:
     return state
 
 
+def _check_task_complete_task_local(
+    task: Any,
+    task_name: str,
+    initial_state: dict[str, Any],
+    current_state: dict[str, Any],
+) -> tuple[bool, tuple[str, ...]]:
+    """Check OpenApps task completion while ignoring unrelated apps.
+
+    Upstream OpenApps task targets are built by deep-copying the entire
+    reset-time app bundle and mutating only the task-relevant app.  A
+    random exploratory prefix can therefore make an unrelated Todo,
+    Calendar, Messenger, or Map edit that causes full-bundle DeepDiff to
+    fail even after the requested objective is satisfied.  For value-bench
+    recovery rollouts we want the reward to reflect task completion, not
+    whether the agent also reconstructed every unrelated side effect.
+
+    The implementation still uses OpenApps' own ``get_target_state`` and
+    ``AppStateComparison`` normalizer.  It masks non-relevant current app
+    states back to the target values before comparing.
+    """
+    relevant_keys = _TASK_RELEVANT_STATE_KEYS.get(task_name)
+    if not relevant_keys or not hasattr(task, "get_target_state"):
+        return task.check_if_task_is_complete(initial_state, current_state), ()
+
+    from open_apps.tasks.tasks import AppStateComparison
+
+    target_state = task.get_target_state(initial_state)
+    masked_current = copy.deepcopy(target_state)
+    for key in relevant_keys:
+        if key not in current_state or key not in target_state:
+            return task.check_if_task_is_complete(initial_state, current_state), ()
+        masked_current[key] = copy.deepcopy(current_state[key])
+
+    return AppStateComparison(target_state, masked_current).compare(), relevant_keys
+
+
 # ---------------------------------------------------------------------------
 # Thread-safe BrowserGym proxy
 # ---------------------------------------------------------------------------
 
 _pw_patch_lock = threading.Lock()
 _pw_patched = False
+
+
+def _default_browsergym_call_timeout() -> float:
+    raw = os.environ.get("OPEN_APPS_BROWSERGYM_CALL_TIMEOUT")
+    if raw is None:
+        return 60.0
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            "OPEN_APPS_BROWSERGYM_CALL_TIMEOUT must be a positive number"
+        ) from exc
+    if value <= 0:
+        raise ValueError(
+            "OPEN_APPS_BROWSERGYM_CALL_TIMEOUT must be a positive number"
+        )
+    return value
 
 
 def _patch_browsergym_thread_local_pw() -> None:
@@ -232,11 +298,17 @@ class _BrowserGymProxy:
     own Playwright — giving true concurrent browser execution.
     """
 
-    _CALL_TIMEOUT = 60  # seconds per operation; trajectories that hang
+    _DEFAULT_CALL_TIMEOUT = _default_browsergym_call_timeout()
+    # seconds per operation; trajectories that hang
     # longer (e.g. because an epsilon-random click landed on a broken
     # page) abort quickly instead of burning 5 min of wall clock each.
 
-    def __init__(self, env_factory: Any) -> None:
+    def __init__(self, env_factory: Any, *, call_timeout: float | None = None) -> None:
+        if call_timeout is None:
+            call_timeout = self._DEFAULT_CALL_TIMEOUT
+        if call_timeout <= 0:
+            raise ValueError("BrowserGym proxy call_timeout must be positive")
+        self._call_timeout = float(call_timeout)
         self._cmd_q: queue.Queue = queue.Queue()
         self._res_q: queue.Queue = queue.Queue()
         self._ready = threading.Event()
@@ -305,11 +377,11 @@ class _BrowserGymProxy:
             raise RuntimeError("BrowserGym proxy thread is dead")
         self._cmd_q.put((method, args, kwargs))
         try:
-            tag, result = self._res_q.get(timeout=self._CALL_TIMEOUT)
+            tag, result = self._res_q.get(timeout=self._call_timeout)
         except queue.Empty:
             raise TimeoutError(
                 f"BrowserGym proxy: '{method}' timed out after "
-                f"{self._CALL_TIMEOUT}s"
+                f"{self._call_timeout:g}s"
             ) from None
         if tag == "err":
             raise result
@@ -713,8 +785,11 @@ class OpenAppsEnvironment:
 
         # Compute task-level reward via state comparison
         current_app_state = _get_app_state(self._base_url)
-        task_complete = self._task.check_if_task_is_complete(
-            state.hidden.initial_app_state, current_app_state
+        task_complete, reward_relevant_apps = _check_task_complete_task_local(
+            self._task,
+            state.hidden.task_name,
+            state.hidden.initial_app_state,
+            current_app_state,
         )
         task_reward = 1.0 if task_complete else 0.0
 
@@ -751,6 +826,8 @@ class OpenAppsEnvironment:
                 "open_apps_reward": task_reward,
                 "browsergym_reward": reward,
                 "task_complete": task_complete,
+                "reward_relevant_apps": reward_relevant_apps,
+                "reward_scope": "task_local" if reward_relevant_apps else "full_state",
                 "last_action": action.text,
             },
         )
@@ -773,6 +850,8 @@ class OpenAppsEnvironment:
                 "open_apps_reward": task_reward,
                 "browsergym_reward": reward,
                 "task_complete": task_complete,
+                "reward_relevant_apps": reward_relevant_apps,
+                "reward_scope": "task_local" if reward_relevant_apps else "full_state",
                 "action": action.text,
             },
         )
@@ -1128,6 +1207,7 @@ class OpenAppsAdapter:
         omit_axtree_text: bool = False,
         base_url: str | None = None,
         headless: bool = True,
+        browsergym_call_timeout: float | None = None,
         extra_rewards: tuple[RewardFunction, ...] = (),
         config_overrides: dict[str, Any] | None = None,
         task_names: tuple[str, ...] | None = None,
@@ -1154,6 +1234,10 @@ class OpenAppsAdapter:
             base_url: URL of an already-running OpenApps server.
                 If *None*, the adapter will launch one automatically.
             headless: Run the browser in headless mode.
+            browsergym_call_timeout: Per-operation timeout, in seconds,
+                for BrowserGym ``reset``/``step`` calls.  The default is
+                intentionally short for exploratory collection, but GT
+                replay with screenshots can need a larger value.
             extra_rewards: Additional reward functions.
             config_overrides: Hydra config overrides for the server.
             task_names: Subset of tasks the env should serve.  Defaults
@@ -1245,7 +1329,10 @@ class OpenAppsAdapter:
                     **_extra_kw,
                 )
 
-            return task_obj, _BrowserGymProxy(_make_browsergym_env)
+            return task_obj, _BrowserGymProxy(
+                _make_browsergym_env,
+                call_timeout=browsergym_call_timeout,
+            )
 
         # Resolve the task list this env will serve and validate `name`.
         env_task_names: tuple[str, ...] = (
