@@ -1237,7 +1237,15 @@ class TrajectoryRunner:
         """Build continuation messages for second elicitation."""
         continued = list(messages)
         continued.append(ChatMessage(role="assistant", content=(first_result.text or "") + suffix))
-        continued.append(ChatMessage(role="user", content="Please provide your final answer."))
+        continued.append(
+            ChatMessage(
+                role="user",
+                content=(
+                    "Please provide the final answer now. Follow the formatting "
+                    "instructions specified above exactly."
+                ),
+            )
+        )
         return continued
 
     def _elicitation_params(self) -> SamplingParams:
@@ -1245,6 +1253,11 @@ class TrajectoryRunner:
         return replace(
             self.sampling_params,
             max_tokens=self.sampling_params.second_elicitation_max_tokens,
+            thinking_budget=None,
+            thinking_budget_per_block=False,
+            thinking_budget_soft_ratio=None,
+            thinking_budget_suffix=None,
+            disable_thinking=True,
             second_elicitation_suffix=None,
         )
 

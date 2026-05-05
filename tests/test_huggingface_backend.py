@@ -611,6 +611,50 @@ class TestHuggingFaceChatTemplateKwargs:
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
         assert call_kwargs[1].get("enable_thinking") is True
 
+    def test_default_false_preserves_disabled_chat_template_kwargs(self):
+        """disable_thinking=False preserves backend-level no-thinking config."""
+        backend = self._create_mock_backend({"enable_thinking": False})
+
+        with patch.object(
+            backend,
+            "generate",
+            return_value=[
+                GenerationResult(
+                    text="ok",
+                    finish_reason=StopReason.END_OF_TEXT,
+                )
+            ],
+        ):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")],
+                SamplingParams(max_tokens=10),
+            )
+
+        call_kwargs = backend._tokenizer.apply_chat_template.call_args
+        assert call_kwargs[1].get("enable_thinking") is False
+
+    def test_disable_thinking_overrides_chat_template_kwargs(self):
+        """Per-call disable_thinking overrides backend-level thinking config."""
+        backend = self._create_mock_backend({"enable_thinking": True})
+
+        with patch.object(
+            backend,
+            "generate",
+            return_value=[
+                GenerationResult(
+                    text="ok",
+                    finish_reason=StopReason.END_OF_TEXT,
+                )
+            ],
+        ):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")],
+                SamplingParams(max_tokens=10, disable_thinking=True),
+            )
+
+        call_kwargs = backend._tokenizer.apply_chat_template.call_args
+        assert call_kwargs[1].get("enable_thinking") is False
+
     def test_passed_to_generate_chat_batch(self):
         """chat_template_kwargs spread into apply_chat_template in generate_chat_batch."""
         backend = self._create_mock_backend({"enable_thinking": True})
@@ -633,6 +677,28 @@ class TestHuggingFaceChatTemplateKwargs:
         backend._tokenizer.apply_chat_template.assert_called_once()
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
         assert call_kwargs[1].get("enable_thinking") is True
+
+    def test_disable_thinking_overrides_batch_chat_template_kwargs(self):
+        """Batched second elicitation also disables chat-template thinking."""
+        backend = self._create_mock_backend({"enable_thinking": True})
+
+        with patch.object(
+            backend,
+            "generate",
+            return_value=[
+                GenerationResult(
+                    text="ok",
+                    finish_reason=StopReason.END_OF_TEXT,
+                )
+            ],
+        ):
+            backend.generate_chat_batch(
+                [[ChatMessage(role="user", content="hi")]],
+                SamplingParams(max_tokens=10, disable_thinking=True),
+            )
+
+        call_kwargs = backend._tokenizer.apply_chat_template.call_args
+        assert call_kwargs[1].get("enable_thinking") is False
 
     def test_empty_kwargs_no_extra_args(self):
         """Empty chat_template_kwargs doesn't add extra args."""
@@ -701,6 +767,17 @@ class TestHuggingFaceThinkingBudget:
         kwargs = backend._to_generate_kwargs(params)
         assert "logits_processor" in kwargs
         assert len(kwargs["logits_processor"]) == 1
+
+    def test_disable_thinking_skips_thinking_budget_processor(self):
+        """disable_thinking suppresses local thinking-budget intervention."""
+        backend = self._create_mock_backend()
+        params = SamplingParams(
+            max_tokens=100,
+            thinking_budget=512,
+            disable_thinking=True,
+        )
+        kwargs = backend._to_generate_kwargs(params)
+        assert "logits_processor" not in kwargs
 
     def test_thinking_budget_preserves_existing_processors(self):
         """thinking_budget appends to existing logits_processor list."""

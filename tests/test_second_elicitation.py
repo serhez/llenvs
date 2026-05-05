@@ -96,6 +96,14 @@ class TestConfigFields:
         assert sp.extra["some_key"] == 42
         assert sp.second_elicitation_suffix == "Go."
 
+    def test_sampling_params_unpickle_backfills_disable_thinking(self) -> None:
+        """Old serialized SamplingParams get the new field's safe default."""
+        state = SamplingParams().__dict__.copy()
+        state.pop("disable_thinking")
+        restored = SamplingParams.__new__(SamplingParams)
+        restored.__setstate__(state)
+        assert restored.disable_thinking is False
+
 
 # ---------------------------------------------------------------------------
 # Runner unit tests
@@ -204,7 +212,10 @@ class TestSecondElicitation:
 
         user_msg = second_call_msgs[-1]
         assert user_msg.role == "user"
-        assert user_msg.content == "Please provide your final answer."
+        assert (
+            user_msg.content
+            == "Please provide the final answer now. Follow the formatting instructions specified above exactly."
+        )
 
         # Check merged text
         assert result.text == "thinking..." + custom_suffix + "42"
@@ -233,6 +244,7 @@ class TestSecondElicitation:
         assert second_call_params.max_tokens == 64
         # And that second_elicitation is disabled (no recursion)
         assert second_call_params.second_elicitation_suffix is None
+        assert second_call_params.disable_thinking is True
 
     def test_merged_metadata(self) -> None:
         """Combined result has second_elicitation: True in metadata."""
@@ -313,7 +325,10 @@ class TestBatchSecondElicitation:
         for msgs in elicitation_msgs:
             assert msgs[-2].role == "assistant"
             assert msgs[-1].role == "user"
-            assert msgs[-1].content == "Please provide your final answer."
+            assert (
+                msgs[-1].content
+                == "Please provide the final answer now. Follow the formatting instructions specified above exactly."
+            )
 
         # Merge
         for (i, first_gen), second_gen in zip(needs_elicitation, elicitation_results):
@@ -347,18 +362,32 @@ class TestBatchSecondElicitation:
         ]
         assert len(needs) == 0
 
-    def test_elicitation_params_disable_recursion(self) -> None:
-        """Elicitation params disable second_elicitation to prevent recursion."""
+    def test_elicitation_params_disable_recursion_and_thinking(self) -> None:
+        """Elicitation params disable recursion and all thinking controls."""
         params = SamplingParams(
             max_tokens=4096,
             temperature=0.5,
             second_elicitation_suffix="wrap up",
             second_elicitation_max_tokens=128,
             thinking_budget=512,
+            thinking_budget_per_block=True,
+            thinking_budget_soft_ratio=0.8,
+            thinking_budget_suffix="done",
+            extra={"extra_body": {"provider": {"order": ["anthropic"]}}},
         )
         runner = _make_runner(sampling_params=params)
         ep = runner._elicitation_params()
         assert ep.max_tokens == 128
         assert ep.temperature == 0.5
         assert ep.second_elicitation_suffix is None
-        assert ep.thinking_budget == 512
+        assert ep.thinking_budget is None
+        assert ep.thinking_budget_per_block is False
+        assert ep.thinking_budget_soft_ratio is None
+        assert ep.thinking_budget_suffix is None
+        assert ep.disable_thinking is True
+        assert ep.extra == {"extra_body": {"provider": {"order": ["anthropic"]}}}
+
+    def test_default_sampling_params_do_not_disable_thinking(self) -> None:
+        """Ordinary sampling params leave backend thinking behavior unchanged."""
+        params = SamplingParams()
+        assert params.disable_thinking is False

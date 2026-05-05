@@ -141,3 +141,45 @@ class TestExtraMergeSemantics:
         )
         kwargs = _capture_kwargs(backend, params)
         assert kwargs["extra_body"] == {"provider": {"order": ["anthropic"]}}
+
+    def test_disable_thinking_without_other_reasoning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``disable_thinking`` explicitly disables OpenRouter reasoning."""
+        backend = _openrouter_backend(monkeypatch)
+        params = SamplingParams(disable_thinking=True)
+        kwargs = _capture_kwargs(backend, params)
+        assert kwargs["extra_body"] == {"reasoning": {"effort": "none"}}
+
+    def test_disable_thinking_overrides_reasoning_and_preserves_provider(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-call disable wins over all reasoning knobs, without dropping routing."""
+        backend = _openrouter_backend(monkeypatch)
+        params = SamplingParams(
+            thinking_budget=2048,
+            disable_thinking=True,
+            extra={
+                "extra_body": {
+                    "provider": {"order": ["anthropic"]},
+                    "reasoning": {"effort": "high"},
+                }
+            },
+        )
+        kwargs = _capture_kwargs(backend, params)
+        assert kwargs["extra_body"] == {
+            "provider": {"order": ["anthropic"]},
+            "reasoning": {"effort": "none"},
+        }
+
+    def test_default_provider_coexists_with_derived_reasoning(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Backend-level provider routing is preserved with thinking budgets."""
+        backend = _openrouter_backend(monkeypatch)
+        backend._default_provider = {"order": ["anthropic"]}
+        kwargs = _capture_kwargs(backend, SamplingParams(thinking_budget=1024))
+        assert kwargs["extra_body"] == {
+            "provider": {"order": ["anthropic"]},
+            "reasoning": {"max_tokens": 1024},
+        }

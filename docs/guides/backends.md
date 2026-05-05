@@ -582,7 +582,7 @@ inference:
 When a generation is truncated (`MAX_TOKENS`), the runner:
 
 1. Appends the truncated output + suffix as an assistant message
-2. Appends `"Please provide your final answer."` as a user message
+2. Appends `"Please provide the final answer now. Follow the formatting instructions specified above exactly."` as a user message
 3. Calls the backend with `second_elicitation_max_tokens` as the token budget
 4. Merges the two results: concatenated text, summed token counts, second call's finish reason
 
@@ -612,7 +612,12 @@ model:
 
 ### Interaction with Thinking Budget
 
-Second elicitation and thinking budget are complementary. Thinking budget caps reasoning *within* a generation; second elicitation rescues the *output* when the overall token limit is hit. Both can be enabled simultaneously.
+Second elicitation and thinking budget are complementary for the first generation, but the follow-up call is forced into no-thinking mode. The runner clears local thinking-budget fields, sets `SamplingParams.disable_thinking=True`, and backends that support per-call thinking control honor that request:
+
+- vLLM and HuggingFace call the chat template with `enable_thinking=False` and skip thinking-budget logits processors.
+- OpenRouter sends `extra_body.reasoning = {"effort": "none"}` while preserving unrelated request body fields such as provider routing.
+
+This keeps the rescue call focused on producing the final answer in the required format instead of spending its smaller token budget on another reasoning trace.
 
 ## Batch Generation
 

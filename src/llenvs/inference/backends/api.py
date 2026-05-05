@@ -1505,6 +1505,7 @@ class OpenRouterBackend(ModelBackend):
             "presence_penalty": params.presence_penalty,
             "frequency_penalty": params.frequency_penalty,
         }
+        extra_body: dict[str, Any] = {}
 
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
@@ -1526,7 +1527,6 @@ class OpenRouterBackend(ModelBackend):
             # actually honour every requested param, so the request
             # either gets logprobs back or fails with a routing error
             # we can surface instead of silently losing them.
-            extra_body = kwargs.setdefault("extra_body", {})
             provider_cfg = extra_body.setdefault("provider", {})
             provider_cfg.setdefault("require_parameters", True)
 
@@ -1535,7 +1535,6 @@ class OpenRouterBackend(ModelBackend):
         # Per-request ``params.extra`` still wins via the update() below.
         default_provider = getattr(self, "_default_provider", None)
         if default_provider:
-            extra_body = kwargs.setdefault("extra_body", {})
             provider_cfg = extra_body.setdefault("provider", {})
             for key, value in default_provider.items():
                 provider_cfg.setdefault(key, value)
@@ -1549,14 +1548,15 @@ class OpenRouterBackend(ModelBackend):
         # ``extra.extra_body`` shallow-merges on top so the explicit escape
         # hatch wins on key collisions.
         # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
-        extra_body: dict[str, Any] = {}
-        if params.thinking_budget is not None:
+        if params.thinking_budget is not None and not params.disable_thinking:
             extra_body["reasoning"] = {"max_tokens": params.thinking_budget}
 
         user_extras = dict(params.extra) if params.extra else {}
         user_extra_body = user_extras.pop("extra_body", None)
         if user_extra_body:
             extra_body = {**extra_body, **user_extra_body}
+        if params.disable_thinking:
+            extra_body["reasoning"] = {"effort": "none"}
         if extra_body:
             kwargs["extra_body"] = extra_body
         if user_extras:

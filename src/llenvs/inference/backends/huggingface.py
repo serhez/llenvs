@@ -340,7 +340,7 @@ class HuggingFaceBackend(ModelBackend):
             kwargs.update(params.extra)
 
         # Thinking budget
-        if params.thinking_budget is not None:
+        if params.thinking_budget is not None and not params.disable_thinking:
             from llenvs.inference.thinking import ThinkingBudgetProcessor
 
             processor = ThinkingBudgetProcessor(
@@ -354,6 +354,12 @@ class HuggingFaceBackend(ModelBackend):
             kwargs["logits_processor"] = list(processors) + [processor.hf_processor]
 
         return kwargs
+
+    def _chat_template_kwargs_for(self, params: SamplingParams) -> dict[str, Any]:
+        """Return chat-template kwargs for one generation call."""
+        if not params.disable_thinking:
+            return self._chat_template_kwargs
+        return {**self._chat_template_kwargs, "enable_thinking": False}
 
     def _extract_logprobs(
         self,
@@ -524,7 +530,7 @@ class HuggingFaceBackend(ModelBackend):
                     [m.to_dict() for m in msgs],
                     tokenize=False,
                     add_generation_prompt=True,
-                    **self._chat_template_kwargs,
+                    **self._chat_template_kwargs_for(params),
                 )
                 for msgs in messages_batch
             ]
@@ -574,7 +580,7 @@ class HuggingFaceBackend(ModelBackend):
                 message_dicts,
                 tokenize=False,
                 add_generation_prompt=True,
-                **self._chat_template_kwargs,
+                **self._chat_template_kwargs_for(params),
             )
         else:
             # Fallback for base models without chat templates (e.g., GPT-2)
@@ -596,7 +602,7 @@ class HuggingFaceBackend(ModelBackend):
                 message_dicts,
                 tokenize=False,
                 add_generation_prompt=True,
-                **self._chat_template_kwargs,
+                **self._chat_template_kwargs_for(params),
             )
         else:
             prompt = self._format_messages_fallback(messages)
