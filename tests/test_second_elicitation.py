@@ -158,6 +158,23 @@ class TestSecondElicitation:
         )
         assert runner.backend.generate_chat.call_count == 1
 
+    def test_no_elicitation_when_result_already_elicited(self) -> None:
+        """Backend-level elicitation should not trigger a runner-level repeat."""
+        params = SamplingParams(second_elicitation_suffix="wrap up")
+        runner = _make_runner(sampling_params=params)
+        first = _gen_result(metadata={"second_elicitation": True})
+        runner.backend.generate_chat.return_value = first
+
+        action, result = runner._generate_action(
+            MagicMock(
+                observation=MagicMock(available_tools=[]),
+                metadata=MagicMock(is_terminal=False),
+            )
+        )
+
+        assert runner.backend.generate_chat.call_count == 1
+        assert result is first
+
     def test_elicitation_on_max_tokens(self) -> None:
         """Enabled + MAX_TOKENS → second call, texts concatenated."""
         params = SamplingParams(

@@ -265,7 +265,7 @@ class TestGenerationErrorCallback:
                     [_gen_result("ok0"), transient],
                     {1: transient},
                 )
-            if len(call_sizes) <= 4:
+            if len(call_sizes) <= 11:
                 raise PartialBatchError([transient], {0: transient})
             raise AssertionError("unexpected extra retry")
 
@@ -281,7 +281,7 @@ class TestGenerationErrorCallback:
 
         assert len(results) == 1
         assert results[0] is not None
-        assert call_sizes == [2, 1, 1, 1]
+        assert call_sizes == [2] + [1] * 10
 
     def test_retry_exhausted_partial_failure_wraps_error_for_callback(self) -> None:
         exc_cls = getattr(inference_protocol, "RetryExhaustedTransientError", None)
@@ -318,10 +318,10 @@ class TestGenerationErrorCallback:
         assert len(results) == 2
         assert results[0] is not None
         assert results[1] is None
-        assert call_sizes == [2, 1, 1, 1]
+        assert call_sizes == [2] + [1] * 10
         assert len(seen_errors) == 1
         assert isinstance(seen_errors[0], exc_cls)
-        assert getattr(seen_errors[0], "retry_count", None) == 3
+        assert getattr(seen_errors[0], "retry_count", None) == 10
         assert isinstance(getattr(seen_errors[0], "original_error", None), RuntimeError)
 
     def test_retry_exhausted_whole_batch_failure_wraps_error_for_callback(self) -> None:
@@ -341,7 +341,11 @@ class TestGenerationErrorCallback:
         mock_backend.generate_chat_batch.side_effect = side_effect
         runner, _ = _make_runner(mock_backend, max_steps=1)
 
-        with patch("llenvs.evaluation.runner.time.sleep", lambda *_: None):
+        delays: list[float] = []
+        with patch(
+            "llenvs.evaluation.runner.time.sleep",
+            lambda delay: delays.append(delay),
+        ):
             results = runner.run_batch_from_states(
                 [_make_state("s0")],
                 on_generation_error=lambda exc: (
@@ -351,10 +355,11 @@ class TestGenerationErrorCallback:
             )
 
         assert results == [None]
-        assert call_count == 4
+        assert call_count == 11
+        assert delays == [2.0, 4.0, 8.0] + [8.0] * 7
         assert len(seen_errors) == 1
         assert isinstance(seen_errors[0], exc_cls)
-        assert getattr(seen_errors[0], "retry_count", None) == 3
+        assert getattr(seen_errors[0], "retry_count", None) == 10
 
     def test_chunked_batch_with_callback(self) -> None:
         """Error in one chunk doesn't affect other chunks."""
@@ -624,7 +629,7 @@ class TestRunBatchPartialRecovery:
 
         assert [tr.success for tr in result.trajectory_results] == [True, False]
         assert "Generation error" in result.trajectory_results[1].metadata["error"]
-        assert call_sizes == [2, 1, 1, 1]
+        assert call_sizes == [2] + [1] * 10
 
     def test_partial_native_tool_batch_uses_generate_with_tools_batch(self) -> None:
         backend = MagicMock()
