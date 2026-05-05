@@ -86,6 +86,35 @@ def _valid_response() -> SimpleNamespace:
     )
 
 
+def _reasoning_response() -> SimpleNamespace:
+    """OpenRouter response with hidden-reasoning diagnostics."""
+    message = SimpleNamespace(
+        content="",
+        reasoning="private chain of thought",
+        reasoning_details=[
+            {"type": "reasoning.text", "text": "step one"},
+            {"type": "reasoning.encrypted", "data": "opaque"},
+        ],
+    )
+    choice = SimpleNamespace(
+        message=message,
+        finish_reason="length",
+        native_finish_reason="MAX_TOKENS",
+        logprobs=None,
+    )
+    usage = SimpleNamespace(
+        prompt_tokens=9,
+        completion_tokens=8192,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=6144),
+    )
+    return SimpleNamespace(
+        choices=[choice],
+        model="google/gemma-4-26b-a4b-it",
+        id="gen-stub",
+        usage=usage,
+    )
+
+
 _DUMMY_REQUEST = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
 
 
@@ -427,3 +456,52 @@ class TestChatResultErrorsAreNormalized:
             backend.generate_chat(
                 [ChatMessage(role="user", content="hi")], SamplingParams()
             )
+
+
+class TestOpenRouterReasoningMetadata:
+    def test_chat_result_records_finish_and_reasoning_diagnostics(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._client.chat.completions.create = MagicMock(
+            return_value=_reasoning_response()
+        )
+
+        result = backend.generate_chat(
+            [ChatMessage(role="user", content="hi")], SamplingParams()
+        )
+
+        assert result.text == ""
+        assert result.prompt_tokens == 9
+        assert result.completion_tokens == 8192
+        assert result.metadata == {
+            "model": "google/gemma-4-26b-a4b-it",
+            "id": "gen-stub",
+            "finish_reason": "length",
+            "native_finish_reason": "MAX_TOKENS",
+            "reasoning_present": True,
+            "reasoning_chars": 24,
+            "reasoning_details_present": True,
+            "reasoning_details_count": 2,
+            "reasoning_details_types": ("reasoning.text", "reasoning.encrypted"),
+            "completion_tokens_details": {"reasoning_tokens": 6144},
+            "reasoning_tokens": 6144,
+        }
+
+    def test_chat_result_omits_absent_reasoning_metadata(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._client.chat.completions.create = MagicMock(
+            return_value=_valid_response()
+        )
+
+        result = backend.generate_chat(
+            [ChatMessage(role="user", content="hi")], SamplingParams()
+        )
+
+        assert result.metadata == {
+            "model": "openrouter/stub-model",
+            "id": "chatcmpl-stub",
+            "finish_reason": "stop",
+        }

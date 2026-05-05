@@ -324,7 +324,7 @@ class VLLMBackend(ModelBackend):
             kwargs.update(params.extra)
 
         # Thinking budget
-        if params.thinking_budget is not None:
+        if params.thinking_budget is not None and not params.disable_thinking:
             if self._is_v1:
                 if not self._has_v1_thinking_processor:
                     raise ValueError(
@@ -356,6 +356,12 @@ class VLLMBackend(ModelBackend):
                 kwargs["logits_processors"] = list(processors) + [processor.vllm_processor]
 
         return self._VLLMSamplingParams(**kwargs)
+
+    def _chat_template_kwargs_for(self, params: SamplingParams) -> dict[str, Any]:
+        """Return chat-template kwargs for one generation call."""
+        if not params.disable_thinking:
+            return self._chat_template_kwargs
+        return {**self._chat_template_kwargs, "enable_thinking": False}
 
     def _extract_logprobs(self, output: Any) -> tuple[TokenLogprob, ...] | None:
         """Extract log probabilities from vLLM output."""
@@ -540,7 +546,7 @@ class VLLMBackend(ModelBackend):
                 [m.to_dict() for m in msgs],
                 tokenize=False,
                 add_generation_prompt=True,
-                **self._chat_template_kwargs,
+                **self._chat_template_kwargs_for(params),
             )
             for msgs in messages_batch
         ]
@@ -586,7 +592,7 @@ class VLLMBackend(ModelBackend):
             message_dicts,
             tokenize=False,
             add_generation_prompt=True,
-            **self._chat_template_kwargs,
+            **self._chat_template_kwargs_for(params),
         )
 
         # For VLMs, extract and decode images
@@ -678,7 +684,7 @@ class VLLMBackend(ModelBackend):
             [m.to_dict() for m in messages],
             tokenize=False,
             add_generation_prompt=True,
-            **self._chat_template_kwargs,
+            **self._chat_template_kwargs_for(params),
         )
         full_prefix = prompt + assistant_prefix
         results = self.continue_from_prefix(full_prefix, params, num_continuations=1)
@@ -699,7 +705,7 @@ class VLLMBackend(ModelBackend):
                 [m.to_dict() for m in msgs],
                 tokenize=False,
                 add_generation_prompt=True,
-                **self._chat_template_kwargs,
+                **self._chat_template_kwargs_for(params),
             )
             + prefix
             for msgs, prefix in zip(messages_batch, assistant_prefixes)

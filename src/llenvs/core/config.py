@@ -105,7 +105,8 @@ class InferenceConfig:
         thinking_budget_suffix: Text forced when budget exhausted. None = bare
             ``</think>``. Pass ``DEFAULT_EARLY_STOPPING_SUFFIX`` to enable.
         second_elicitation_suffix: Suffix for follow-up on truncated outputs.
-            None = disabled. When set, enables second elicitation.
+            None = disabled. When set, enables second elicitation. The
+            follow-up call disables thinking/reasoning where supported.
         second_elicitation_max_tokens: Token budget for the follow-up call.
     """
 

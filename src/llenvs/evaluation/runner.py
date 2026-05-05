@@ -56,12 +56,21 @@ from llenvs.inference.protocol import (
 
 logger = logging.getLogger(__name__)
 
-_TRANSIENT_RETRY_MAX_RETRIES = 3
+_TRANSIENT_RETRY_MAX_RETRIES = 10
 _TRANSIENT_RETRY_BASE_DELAY = 2.0
+_TRANSIENT_RETRY_MAX_DELAY = 8.0
 
 
 def _runner_now_monotonic() -> float:
     return time.monotonic()
+
+
+def _transient_retry_delay(retry_number: int) -> float:
+    """Return capped delay for a 1-indexed transient retry attempt."""
+    return min(
+        _TRANSIENT_RETRY_BASE_DELAY * (2 ** (retry_number - 1)),
+        _TRANSIENT_RETRY_MAX_DELAY,
+    )
 
 
 def _raise_with_context(kind: str, task_index: int, error: Exception) -> None:
@@ -1237,7 +1246,15 @@ class TrajectoryRunner:
         """Build continuation messages for second elicitation."""
         continued = list(messages)
         continued.append(ChatMessage(role="assistant", content=(first_result.text or "") + suffix))
-        continued.append(ChatMessage(role="user", content="Please provide your final answer."))
+        continued.append(
+            ChatMessage(
+                role="user",
+                content=(
+                    "Please provide the final answer now. Follow the formatting "
+                    "instructions specified above exactly."
+                ),
+            )
+        )
         return continued
 
     def _elicitation_params(self) -> SamplingParams:
@@ -1245,6 +1262,11 @@ class TrajectoryRunner:
         return replace(
             self.sampling_params,
             max_tokens=self.sampling_params.second_elicitation_max_tokens,
+            thinking_budget=None,
+            thinking_budget_per_block=False,
+            thinking_budget_soft_ratio=None,
+            thinking_budget_suffix=None,
+            disable_thinking=True,
             second_elicitation_suffix=None,
         )
 
@@ -1318,6 +1340,7 @@ class TrajectoryRunner:
         if (
             result.finish_reason == StopReason.MAX_TOKENS
             and self.sampling_params.second_elicitation_suffix is not None
+            and not result.metadata.get("second_elicitation")
         ):
             result = self._second_elicitation(messages, result)
 
@@ -1560,7 +1583,7 @@ class TrajectoryRunner:
                 if not next_pending:
                     break
                 if max_retry_attempt > 0:
-                    delay = _TRANSIENT_RETRY_BASE_DELAY * (2 ** (max_retry_attempt - 1))
+                    delay = _transient_retry_delay(max_retry_attempt)
                     logger.warning(
                         "Transient generation failure in partial batch, retrying %d items in %.1fs",
                         len(next_pending),
@@ -1607,7 +1630,7 @@ class TrajectoryRunner:
                             transient_attempts[original_idx]
                             for original_idx, _ in retryable
                         )
-                        delay = _TRANSIENT_RETRY_BASE_DELAY * (2 ** (max_retry_attempt - 1))
+                        delay = _transient_retry_delay(max_retry_attempt)
                         logger.warning(
                             "Transient generation failure, retrying %d items in %.1fs",
                             len(retryable),
@@ -1818,6 +1841,7 @@ class TrajectoryRunner:
                 strict=False,
             )
             if gen_result.finish_reason == StopReason.MAX_TOKENS
+            and not gen_result.metadata.get("second_elicitation")
         ]
         if not elicitation_items:
             return remaining, messages_batch, gen_results

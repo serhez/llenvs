@@ -7,7 +7,7 @@ and common data structures for generation.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
@@ -316,6 +316,8 @@ class SamplingParams:
         thinking_budget_soft_ratio: Begin boosting ``</think>`` at this ratio.
         thinking_budget_suffix: Text forced when budget exhausted. None = bare
             ``</think>``.
+        disable_thinking: Disable backend thinking/reasoning for this call.
+            Defaults to False and preserves backend/configured thinking behavior.
         second_elicitation_suffix: Suffix for follow-up on truncated outputs.
             None = disabled.
         second_elicitation_max_tokens: Token budget for the follow-up call.
@@ -339,10 +341,24 @@ class SamplingParams:
     thinking_budget_per_block: bool = False
     thinking_budget_soft_ratio: float | None = None
     thinking_budget_suffix: str | None = None
+    disable_thinking: bool = False
     # Second elicitation
     second_elicitation_suffix: str | None = None
     second_elicitation_max_tokens: int = 256
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """Restore pickled params, filling fields added after serialization."""
+        for item in fields(self):
+            if item.name in state:
+                value = state[item.name]
+            elif item.default is not MISSING:
+                value = item.default
+            elif item.default_factory is not MISSING:  # type: ignore[attr-defined]
+                value = item.default_factory()  # type: ignore[misc]
+            else:
+                continue
+            object.__setattr__(self, item.name, value)
 
 
 @dataclass(frozen=True)
