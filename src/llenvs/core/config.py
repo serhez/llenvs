@@ -75,7 +75,8 @@ class ModelConfig:
     """Configuration for a model backend.
 
     Attributes:
-        backend: Backend type (vllm, openai, anthropic, openrouter, codex, claude-code).
+        backend: Backend type (vllm, vllm_singularity, openai, anthropic,
+            openrouter, litellm, codex, claude-code).
         model: Model path or name.
         max_concurrency: Maximum concurrent requests for API backends.
         params: Backend-specific parameters.
@@ -806,9 +807,7 @@ class BackendFactory:
                 SingularityVLLMBackend,
             )
 
-            return SingularityVLLMBackend(
-                model_path=config.model, **config.params
-            )
+            return SingularityVLLMBackend(model_path=config.model, **config.params)
 
         elif backend_type == "openai":
             from llenvs.inference.backends.api import OpenAIBackend
@@ -832,6 +831,15 @@ class BackendFactory:
             from llenvs.inference.backends.api import OpenRouterBackend
 
             return OpenRouterBackend(
+                model=config.model,
+                max_concurrency=config.max_concurrency,
+                **config.params,
+            )
+
+        elif backend_type == "litellm":
+            from llenvs.inference.backends.litellm import LiteLLMBackend
+
+            return LiteLLMBackend(
                 model=config.model,
                 max_concurrency=config.max_concurrency,
                 **config.params,

@@ -26,6 +26,7 @@ sessions. Repeated `close()` calls are safe.
 | OpenAI | `openai` | Logprobs, batching (concurrent), streaming, function calling, vision |
 | Anthropic | `anthropic` | Batching (concurrent), prefix continuation (prefill), streaming, vision |
 | OpenRouter | `openai` | Batching (concurrent), access to multiple models, vision |
+| LiteLLM | `litellm` | Batching (concurrent), 100+ providers via one SDK, function calling, vision, logprobs (provider-dependent), thinking budgets |
 | Codex CLI | `codex` | Chat, batching (subprocess concurrency), isolated temp workspace, read-only sandbox |
 | Claude Code CLI | `claude` (Claude Code v2.1+) | Chat, batching (subprocess concurrency), isolated temp workspace, tools disabled, reasoning effort |
 
@@ -272,6 +273,82 @@ diagnostics are preserved in `GenerationResult.metadata`: normalized
 presence/count/length fields for `message.reasoning` and
 `message.reasoning_details`. The full reasoning payload is not copied into
 metadata.
+
+## LiteLLM
+
+Routes requests through the [litellm](https://docs.litellm.ai) SDK,
+giving unified access to 100+ providers through one interface. Models
+use litellm's `provider/model` format:
+
+```python
+from llenvs.inference.backends import LiteLLMBackend
+
+# Direct provider access — API key read from the provider's native
+# env var (GEMINI_API_KEY, ANTHROPIC_API_KEY, AZURE_API_KEY, ...)
+backend = LiteLLMBackend(model="gemini/gemini-2.5-flash")
+
+# Through a LiteLLM proxy/gateway with a virtual key
+backend = LiteLLMBackend(
+    model="litellm_proxy/Qwen/Qwen3.6-35B-A3B",
+    api_base="https://your-gateway.example.com",
+    api_key="sk-your-virtual-key",
+)
+```
+
+For the `litellm_proxy/` prefix, litellm also reads
+`LITELLM_PROXY_API_KEY` and `LITELLM_PROXY_API_BASE` natively, so both
+constructor params can be omitted.
+
+YAML config:
+
+```yaml
+model:
+  backend: litellm
+  model: litellm_proxy/Qwen/Qwen3.6-35B-A3B
+  max_concurrency: 32
+  params:
+    api_base: https://your-gateway.example.com
+    rate_limit_wait: 30.0
+```
+
+### Parameter Dropping
+
+`drop_params=True` (the default) makes litellm silently drop request
+parameters the target provider does not support (e.g. `presence_penalty`
+on Anthropic) instead of erroring. Set `drop_params=False` on the
+constructor to fail loudly instead. Logprobs keep a hard guarantee
+either way: if `logprobs=True` was requested and the provider returns
+none, the backend raises `LogprobsNotReturnedError`.
+
+### Reasoning / Thinking Budget
+
+`SamplingParams.thinking_budget` maps to litellm's cross-provider
+`thinking={"type": "enabled", "budget_tokens": N}` parameter (Anthropic
+`thinking.budget_tokens`, Gemini thinking budget, Bedrock/Vertex
+equivalents); providers without a budget concept drop it via
+`drop_params`. `disable_thinking=True` sends `reasoning_effort="none"`
+and wins over any other reasoning knob. For effort-style control, pass
+`extra={"reasoning_effort": "high"}` on `SamplingParams` — `params.extra`
+keys flow as top-level kwargs into `litellm.completion()` and override
+derived values. The logits-level thinking knobs
+(`thinking_budget_per_block`, `thinking_budget_suffix`,
+`thinking_budget_soft_ratio`) are inert on this backend — they only take
+effect for `vllm` and `huggingface`.
+
+Reasoning diagnostics land in `GenerationResult.metadata`:
+`completion_tokens_details`, `reasoning_tokens`, and presence/length
+fields for `reasoning_content`. When litellm computes a request cost it
+is surfaced as `metadata["response_cost"]`.
+
+### Rate-Limit Retries
+
+Same knobs as OpenRouter: `rate_limit_wait` (seconds to wait before
+retrying a rate-limited call; `0` disables backend-level retries) and
+`rate_limit_max_retries`. The retry path also covers providers that
+surface their own 429 as an HTTP-200 body with `choices=null` and a
+rate-limit message. litellm's in-SDK retries are available via
+`num_retries` but default to off — the evaluation runner already
+retries transient failures per slot.
 
 ## Codex CLI
 

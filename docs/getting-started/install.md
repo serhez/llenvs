@@ -15,6 +15,7 @@ pip install llenvs[vllm]           # Local inference with vLLM
 pip install llenvs[transformers]   # Local inference with HuggingFace Transformers
 pip install llenvs[openai]         # OpenAI API
 pip install llenvs[anthropic]      # Anthropic API
+pip install llenvs[litellm]        # 100+ providers via LiteLLM
 
 # Everything
 pip install llenvs[all]
@@ -67,6 +68,7 @@ The base package only requires:
 | `transformers` | `transformers>=4.36`, `torch>=2.0`, `accelerate>=0.25` | Local inference with HuggingFace Transformers |
 | `openai` | `openai>=1.0` | OpenAI API access |
 | `anthropic` | `anthropic>=0.20` | Anthropic API access |
+| `litellm` | `litellm>=1.70` | 100+ providers via the LiteLLM SDK |
 | `dev` | pytest, mypy, ruff | Development tools |
 
 ---
@@ -87,6 +89,11 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 # OpenRouter
 export OPENROUTER_API_KEY="sk-or-..."
 ```
+
+The LiteLLM backend reads each provider's native environment variable
+(`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `AZURE_API_KEY`, ...) based on
+the model's `provider/` prefix; for `litellm_proxy/` models it reads
+`LITELLM_PROXY_API_KEY` and `LITELLM_PROXY_API_BASE`.
 
 Or pass keys directly in code:
 

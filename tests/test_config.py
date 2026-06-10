@@ -403,6 +403,29 @@ class TestBackendFactory:
             timeout=123.0,
         )
 
+    def test_create_litellm_backend(self):
+        from llenvs.core.config import BackendFactory
+
+        with patch("llenvs.inference.backends.litellm.LiteLLMBackend") as mock_backend:
+            BackendFactory.create(
+                ModelConfig(
+                    backend="litellm",
+                    model="litellm_proxy/Qwen/Qwen3.6-35B-A3B",
+                    max_concurrency=8,
+                    params={
+                        "api_base": "http://localhost:4000",
+                        "rate_limit_wait": 30.0,
+                    },
+                )
+            )
+
+        mock_backend.assert_called_once_with(
+            model="litellm_proxy/Qwen/Qwen3.6-35B-A3B",
+            max_concurrency=8,
+            api_base="http://localhost:4000",
+            rate_limit_wait=30.0,
+        )
+
 
 class TestExtractorsChainConfig:
     """Tests for the extractors chain in EnvironmentConfig."""

@@ -115,6 +115,35 @@ backend = OpenRouterBackend(
 )
 ```
 
+### LiteLLM
+
+```python
+from llenvs.inference.backends import LiteLLMBackend
+
+backend = LiteLLMBackend(
+    model="gemini/gemini-2.5-flash",  # litellm provider/model format
+    api_key=None,             # Optional, defaults to the provider's native env var
+    api_base=None,            # Optional, e.g. a LiteLLM proxy/gateway URL
+    max_concurrency=64,       # Max concurrent batch requests
+    rate_limit_wait=0.0,      # Seconds to wait before rate-limit retries (0 = off)
+    rate_limit_max_retries=2,
+    timeout=None,             # Per-request timeout in seconds
+    num_retries=None,         # litellm in-SDK transient retries (default off)
+    drop_params=True,         # Drop provider-unsupported params instead of erroring
+)
+```
+
+YAML:
+
+```yaml
+model:
+  backend: litellm
+  model: litellm_proxy/Qwen/Qwen3.6-35B-A3B
+  max_concurrency: 32
+  params:
+    api_base: https://your-gateway.example.com
+```
+
 ### Codex CLI
 
 ```python
@@ -156,6 +185,7 @@ Notes:
 | OpenAI | ✅ | ❌ | ✅ (concurrent) | ✅ |
 | Anthropic | ❌ | ✅ (prefill) | ✅ (concurrent) | ✅ |
 | OpenRouter | varies | ❌ | ✅ (concurrent) | varies |
+| LiteLLM | varies | ❌ | ✅ (concurrent) | varies |
 | Codex CLI | ❌ | ❌ | ✅ (subprocess) | ❌ |
 
 Check programmatically:
