@@ -198,7 +198,8 @@ Available in tool mode:
 | `submit_keyword` | `str` | `"SUBMIT"` | Text mode submit keyword |
 | `exec_timeout` | `int` | `120` | Per-command timeout in seconds |
 | `max_observation_chars` | `int \| None` | `50000` | Cap each text observation and tool-mode step observation with middle truncation before it is stored in prompt history. `None` disables capping |
-| `trajectory_timeout` | `int \| None` | `900` | Text mode only — live per-trajectory wall-clock timeout in seconds. When task metadata provides `recommended_timeout_sec`, the effective live budget is the smaller of the two. `None` disables the global live trajectory cap |
+| `trajectory_timeout` | `int \| None` | `900` | Text mode only — live per-trajectory timeout in seconds (see `timeout_accounting` for what is charged). When task metadata provides `recommended_timeout_sec`, the effective live budget is the smaller of the two. `None` disables the global live trajectory cap |
+| `timeout_accounting` | `str` | `"exec_only"` | What the `trajectory_timeout` budget charges. `exec_only` (default) charges only in-container command execution time, so inter-step model generation/thinking (which runs outside `step()`) never consumes the budget. `wall_clock` charges real time since reset, including generation — matching upstream terminal-bench's protocol. The accumulator is per-instance, so transient envs used to score candidate actions never charge a persistent trajectory's budget |
 | `command_soft_timeout` | `int \| None` | `None` | Text mode only — recoverable per-command timeout for live model-issued commands. On timeout, Harbor escalates through `Ctrl-C`, `Ctrl-\`, and tmux TUI escape attempts (`Esc Esc`, `:qa!`, `q`). Disabled when `None` |
 | `verify_on_truncation` | `bool` | `True` | Run verifier when truncating |
 | `extra_rewards` | `tuple` | `()` | Additional reward functions |
@@ -215,9 +216,15 @@ different phases:
 
 - `command_soft_timeout` governs live model-issued text commands only and can
   recover with a timeout observation after a successful `Ctrl-C`.
-- `trajectory_timeout` bounds the total wall-clock spent on the live text-mode
-  trajectory. Internal replay / restore loops intentionally do not consume this
-  budget.
+- `trajectory_timeout` bounds the live text-mode trajectory. `timeout_accounting`
+  selects what it charges: `exec_only` (default) counts only in-container command
+  execution time — deliberation between steps (model generation/thinking) is free,
+  so a slow or multi-sample agent is bounded by the work its commands do, not by
+  inference latency; `wall_clock` counts real time since reset, charging generation
+  too. Internal replay / restore loops intentionally do not consume this budget and
+  re-anchor it after restore. A future `exec_inference_only` mode (or a public
+  "add tracked time" hook) could let callers fold specific inference steps back into
+  the budget; only command execution is tracked today.
 - Harbor's extra runtime-probe execs and verifier execution are internally
   bounded without exposing separate public timeout knobs.
 - `exec_timeout` remains the hard timeout for non-recoverable Harbor runtime

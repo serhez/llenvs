@@ -4368,9 +4368,15 @@ class HarborEnvironment:
         invalid_action_text: str | None = "[invalid action]",
         invalid_action_observation: str | None = None,
         max_observation_chars: int | None = 50_000,
+        timeout_accounting: str = "exec_only",
     ) -> None:
         if trajectory_timeout is not None and trajectory_timeout <= 0:
             raise ValueError("trajectory_timeout must be > 0")
+        if timeout_accounting not in ("exec_only", "wall_clock"):
+            raise ValueError(
+                "timeout_accounting must be 'exec_only' or 'wall_clock', got "
+                f"{timeout_accounting!r}"
+            )
         if command_soft_timeout is not None and command_soft_timeout <= 0:
             raise ValueError("command_soft_timeout must be > 0")
         if max_observation_chars is not None and max_observation_chars <= 0:
@@ -4403,7 +4409,29 @@ class HarborEnvironment:
         )
         self._soft_timeouts_disabled_depth = 0
         self._trajectory_timeout_disabled_depth = 0
+        # Wall-clock anchor (used by ``timeout_accounting="wall_clock"``).
         self._trajectory_started_at_monotonic: float | None = None
+        # ``timeout_accounting`` selects what the ``trajectory_timeout`` budget
+        # charges:
+        #   "exec_only"  (default) — only in-container command execution time.
+        #     Inter-step model generation/thinking happens outside ``step()`` and
+        #     is never charged, so a slow or multi-sample agent (e.g. test-time
+        #     scaling) is not penalized for deliberation, only for the work its
+        #     commands actually do in the container.
+        #   "wall_clock" — legacy: real time since reset, charging everything
+        #     (generation included). Matches upstream terminal-bench's protocol.
+        # The accumulator is per-instance, so transient envs used to score
+        # candidate actions (value-bench ``include_next_state=True``) never charge
+        # the persistent trajectory's budget — a candidate executed for scoring
+        # and then re-executed as the chosen action is counted once, on whichever
+        # instance ran it.
+        # FUTURE: an ``"exec_inference_only"`` mode (or a public
+        # ``add_tracked_time(seconds)`` / ``track_external_time()`` context
+        # manager) could let callers fold specific inference steps back into the
+        # budget when they explicitly want generation charged. Out of scope for
+        # now — only command execution is tracked.
+        self._timeout_accounting = timeout_accounting
+        self._trajectory_exec_elapsed_sec: float = 0.0
 
         self._native_rewards: tuple[RewardFunction, ...] = (HarborReward(),)
         self._extra_rewards = extra_rewards
@@ -4587,6 +4615,7 @@ class HarborEnvironment:
             runtime_probing=self._runtime_probing,
         )
         self._trajectory_started_at_monotonic = _now_monotonic()
+        self._trajectory_exec_elapsed_sec = 0.0
         self._state_tracker.track(state)
         if debug_enabled:
             logger.debug(
@@ -4711,8 +4740,13 @@ class HarborEnvironment:
 
     def _remaining_trajectory_timeout_sec(self, state: State[HarborHidden]) -> float | None:
         budget = self._trajectory_timeout_budget_sec(state)
+        if budget is None:
+            return None
+        if self._timeout_accounting == "exec_only":
+            # Charge only accumulated in-container command execution time.
+            return budget - self._trajectory_exec_elapsed_sec
         started_at = self._trajectory_started_at_monotonic
-        if budget is None or started_at is None:
+        if started_at is None:
             return None
         return budget - max(0.0, _now_monotonic() - started_at)
 
@@ -4806,6 +4840,11 @@ class HarborEnvironment:
         elif invalid_action_format:
             obs_text = self._invalid_action_observation()
         elif not terminated:
+            # Only the exec-only accounting mode consumes this timer; in
+            # wall_clock mode we make no extra monotonic reads (the accumulator
+            # is unused there).
+            charge_exec = self._timeout_accounting == "exec_only"
+            command_exec_started_at = _now_monotonic() if charge_exec else 0.0
             if self._text_exec_mode == "tmux_session":
                 if self._text_session is None:
                     raise RuntimeError("Harbor tmux text session was not initialized")
@@ -4864,6 +4903,14 @@ class HarborEnvironment:
                 command_timed_out = True
                 command_timeout_elapsed_sec = timeout_exc.elapsed_sec
                 obs_text = self._timeout_observation_text(timeout_exc.timeout_sec)
+            # Charge this command's in-container execution time to the
+            # execution-only budget. Done before the post-command truncation
+            # check below so a single budget-exhausting command truncates on this
+            # step.
+            if charge_exec and command_executed:
+                self._trajectory_exec_elapsed_sec += max(
+                    0.0, _now_monotonic() - command_exec_started_at
+                )
         else:
             obs_text = "Submitting for verification..."
 
@@ -5716,6 +5763,7 @@ class HarborAdapter:
         invalid_action_text: str | None = "[invalid action]",
         invalid_action_observation: str | None = None,
         max_observation_chars: int | None = 50_000,
+        timeout_accounting: str = "exec_only",
         difficulties: set[str] | None = None,
         **kwargs: Any,
     ) -> HarborEnvironment | HarborToolEnvironment:
@@ -5765,6 +5813,11 @@ class HarborAdapter:
                 observation shown instead of the default extractor-aware text.
             max_observation_chars: Cap per-step observation text at this many
                 characters using middle truncation. ``None`` disables capping.
+            timeout_accounting: Text mode only — what the ``trajectory_timeout``
+                budget charges. ``"exec_only"`` (default) counts only in-container
+                command execution time; ``"wall_clock"`` counts real time since
+                reset (including inter-step model generation). Ignored in tool
+                mode (which has no ``trajectory_timeout``).
             difficulties: Filter tasks by difficulty level. Only tasks whose
                 difficulty is in this set are included. ``None`` means no
                 filtering. Tasks without explicit difficulty metadata are
@@ -5885,6 +5938,7 @@ class HarborAdapter:
             invalid_action_text=invalid_action_text,
             invalid_action_observation=invalid_action_observation,
             max_observation_chars=max_observation_chars,
+            timeout_accounting=timeout_accounting,
         )
 
     def get_default_system_prompt(self, name: str) -> str:
@@ -6066,6 +6120,7 @@ def harbor_restore(
             current = result.next_state
 
     env._trajectory_started_at_monotonic = _now_monotonic()
+    env._trajectory_exec_elapsed_sec = 0.0
     return current
 
 
@@ -6109,6 +6164,7 @@ def harbor_snapshot_restore(
                 "Harbor tmux session could not be re-synchronized after snapshot restore"
             ) from exc
     env._trajectory_started_at_monotonic = _now_monotonic()
+    env._trajectory_exec_elapsed_sec = 0.0
     env._state_tracker.track(state)
     return state
 

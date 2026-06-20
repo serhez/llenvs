@@ -217,6 +217,11 @@ def _make_env(
     runtime_probing: bool = False,
     trajectory_timeout: int | None = 900,
     max_observation_chars: int | None = 50_000,
+    # The helper pins the legacy wall-clock accounting so the existing timeout
+    # suite keeps exercising that mode with a controllable fake monotonic clock.
+    # The production constructor default is "exec_only"; exec-only behavior is
+    # covered explicitly by TestTimeoutAccounting.
+    timeout_accounting: str = "wall_clock",
 ):
     """Create a HarborEnvironment with mocks."""
     from llenvs.adapters.harbor import HarborEnvironment
@@ -245,6 +250,7 @@ def _make_env(
         runtime_probing=runtime_probing,
         trajectory_timeout=trajectory_timeout,
         max_observation_chars=max_observation_chars,
+        timeout_accounting=timeout_accounting,
     )
 
 
@@ -8138,3 +8144,195 @@ class TestHarborHiddenDifficultyFields:
         )
         assert result.next_state.hidden.difficulty == "medium"
         assert result.next_state.hidden.recommended_timeout_sec == 900.0
+
+
+class TestTimeoutAccounting:
+    """``timeout_accounting`` controls what the ``trajectory_timeout`` budget charges.
+
+    ``exec_only`` (the production default) charges only in-container command
+    execution time, so inter-step LLM generation/thinking — which happens
+    outside ``step()`` — never consumes the budget. ``wall_clock`` is the legacy
+    behavior (clock runs from reset, charging everything).
+    """
+
+    def test_constructor_defaults_to_exec_only(self):
+        from llenvs.adapters.harbor import HarborEnvironment
+
+        env = HarborEnvironment(
+            tasks=_make_tasks(),
+            harbor_env_factory=_make_harbor_env_factory(MockHarborEnvironment()),
+            verifier_factory=_make_verifier_factory(None),
+        )
+        assert env._timeout_accounting == "exec_only"
+
+    def test_invalid_timeout_accounting_rejected(self):
+        from llenvs.adapters.harbor import HarborEnvironment
+
+        with pytest.raises(ValueError, match="timeout_accounting"):
+            HarborEnvironment(
+                tasks=_make_tasks(),
+                harbor_env_factory=_make_harbor_env_factory(MockHarborEnvironment()),
+                verifier_factory=_make_verifier_factory(None),
+                timeout_accounting="bogus",
+            )
+
+    def test_get_environment_routes_timeout_accounting(self):
+        """The adapter forwards ``timeout_accounting`` to the text-mode env (so it
+        is reachable as a make_kwarg by callers like value-bench)."""
+        from llenvs.adapters.harbor import HarborAdapter
+
+        env = HarborAdapter().get_environment(
+            name="test",
+            tasks=_make_tasks(),
+            env_factory=_make_harbor_env_factory(MockHarborEnvironment()),
+            verify_factory=_make_verifier_factory(),
+            tool_mode=False,
+            timeout_accounting="wall_clock",
+        )
+        assert env._timeout_accounting == "wall_clock"
+
+    def test_get_environment_defaults_timeout_accounting_to_exec_only(self):
+        from llenvs.adapters.harbor import HarborAdapter
+
+        env = HarborAdapter().get_environment(
+            name="test",
+            tasks=_make_tasks(),
+            env_factory=_make_harbor_env_factory(MockHarborEnvironment()),
+            verify_factory=_make_verifier_factory(),
+            tool_mode=False,
+        )
+        assert env._timeout_accounting == "exec_only"
+
+    def test_exec_only_ignores_wall_clock_idle_between_steps(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The key fix: a huge wall-clock gap before a step (slow inference) does
+        not truncate under exec_only, because no command ran during that gap."""
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            now["value"] += 2.0  # command takes 2s of container time
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            trajectory_timeout=900,
+            timeout_accounting="exec_only",
+        )
+        state, _ = _reset_env(env)
+        before_execs = len(env._harbor_env._exec_history)
+
+        # Simulate 5000s of inter-step thinking/generation with no command run.
+        now["value"] = 5000.0
+        result = env.step(state, Action(text="ls"))
+
+        assert result.truncated is False
+        assert result.terminated is False
+        assert result.info["trajectory_timeout_elapsed"] is False
+        assert len(env._harbor_env._exec_history) == before_execs + 1
+        assert result.next_state.hidden.trajectory == ("ls",)
+
+    def test_wall_clock_still_truncates_on_idle(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Same idle gap under wall_clock DOES truncate (legacy behavior preserved)."""
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        mock_env = MockHarborEnvironment()
+        env = _make_env(
+            harbor_env=mock_env,
+            trajectory_timeout=900,
+            timeout_accounting="wall_clock",
+        )
+        state, _ = _reset_env(env)
+        before_execs = len(mock_env._exec_history)
+
+        now["value"] = 5000.0
+        result = env.step(state, Action(text="ls"))
+
+        assert result.truncated is True
+        assert result.info["trajectory_timeout_elapsed"] is True
+        assert len(mock_env._exec_history) == before_execs
+
+    def test_exec_only_accumulates_command_time_and_truncates(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Cumulative command execution time is charged; once it exhausts the
+        budget, the next step truncates *before* executing another command."""
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            now["value"] += 10.0  # each command burns 10s of container time
+            return MockExecResult(stdout=f"ran {command}")
+
+        env = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            trajectory_timeout=5,
+            exec_timeout=120,
+            timeout_accounting="exec_only",
+        )
+        state, _ = _reset_env(env)
+
+        # Step 1: budget unspent at step start, so the command runs (and overruns
+        # the 5s budget). Truncation is detected after execution.
+        result1 = env.step(state, Action(text="first"))
+        assert env._harbor_env._exec_history[-1] == "first"
+        assert result1.truncated is True
+        assert result1.info["trajectory_timeout_elapsed"] is True
+        before_execs = len(env._harbor_env._exec_history)
+
+        # Step 2: budget already exhausted at step start -> truncate without exec.
+        result2 = env.step(result1.next_state, Action(text="second"))
+        assert result2.truncated is True
+        assert result2.info["trajectory_timeout_elapsed"] is True
+        assert len(env._harbor_env._exec_history) == before_execs
+
+    def test_exec_only_budget_is_per_instance_no_double_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Each env instance tracks its own execution budget. Candidate scoring in
+        value-bench steps transient env instances (include_next_state=True), and
+        their executions must never be charged to the persistent trajectory's
+        budget."""
+        import llenvs.adapters.harbor as harbor_module
+
+        now = {"value": 0.0}
+        monkeypatch.setattr(harbor_module, "_now_monotonic", lambda: now["value"])
+
+        def handler(command: str, timeout_sec: int = 120, **_: Any) -> MockExecResult:
+            now["value"] += 3.0
+            return MockExecResult(stdout=f"ran {command}")
+
+        persistent = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            trajectory_timeout=900,
+            timeout_accounting="exec_only",
+        )
+        transient = _make_env(
+            harbor_env=MockHarborEnvironment(exec_handler=handler),
+            trajectory_timeout=900,
+            timeout_accounting="exec_only",
+        )
+        persistent_state, _ = _reset_env(persistent)
+        _reset_env(transient)
+
+        # Run several commands on the transient instance (as candidate scoring
+        # would). The persistent instance's accumulator must stay at zero.
+        ts, _ = _reset_env(transient)
+        for cmd in ("a", "b", "c"):
+            res = transient.step(ts, Action(text=cmd))
+            ts = res.next_state
+
+        assert persistent._trajectory_exec_elapsed_sec == 0.0
+        # The persistent instance charges only its own one command.
+        res = persistent.step(persistent_state, Action(text="real"))
+        assert persistent._trajectory_exec_elapsed_sec == pytest.approx(3.0)
