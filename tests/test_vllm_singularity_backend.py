@@ -238,3 +238,20 @@ class TestSingularityVLLMBackendLifecycle:
             backend._openai.generate_chat.assert_called_with(msgs, params)  # type: ignore[union-attr]
         finally:
             backend.close()
+
+    def test_capabilities_inherit_logprobs_from_inner_openai(self, patched):
+        """Chat calls proxy to an inner OpenAIBackend that supports logprobs;
+        the wrapper must surface that capability, not mask it. Mirrors the
+        inner client both ways so a closed/non-logprob client reads False."""
+        mod = patched["module"]
+        from llenvs.inference.protocol import BackendCapabilities
+
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            backend._openai.capabilities = BackendCapabilities(supports_logprobs=True)
+            assert backend.capabilities.supports_logprobs is True
+
+            backend._openai.capabilities = BackendCapabilities(supports_logprobs=False)
+            assert backend.capabilities.supports_logprobs is False
+        finally:
+            backend.close()

@@ -314,7 +314,10 @@ class SingularityVLLMBackend(ModelBackend):
     def capabilities(self) -> BackendCapabilities:
         base = self._openai.capabilities if self._openai else None
         return BackendCapabilities(
-            supports_logprobs=False,  # vllm-serve supports them but we don't plumb through
+            # vllm serve returns logprobs over its OpenAI-compatible API, and all
+            # chat calls proxy to the inner OpenAIBackend that parses them; surface
+            # whatever that client reports (False only when closed).
+            supports_logprobs=bool(base and base.supports_logprobs),
             supports_prefix_continuation=False,
             supports_batching=True,
             supports_streaming=False,

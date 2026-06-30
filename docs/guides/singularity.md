@@ -141,6 +141,8 @@ Optional fields on `BackendConfig`:
 - `singularity_startup_timeout` — seconds to wait for `/health` (default 900).
 - `singularity_cuda_visible_devices` — pin `vllm serve` to a GPU subset (e.g. `"0,1"`). Lets other workloads on the same node use the remaining GPUs.
 
+All generation proxies to an OpenAI-compatible client talking to the in-container `vllm serve`, so this backend supports token logprobs (used by logprob-decoding methods such as the verifier). `vllm serve` returns up to its `--max-logprobs` top logprobs per position (vLLM's default is 20); pass a larger `--max-logprobs` via `singularity_extra_vllm_args` if you need more.
+
 Then run value-bench normally — **no container wrapping, no special bin scripts**:
 
 ```bash
