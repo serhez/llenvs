@@ -27,18 +27,35 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
-from llenvs.inference.backends.api import OpenAIBackend
+from llenvs.inference.backends.api import OpenAIBackend, _run_concurrent
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
     GenerationResult,
     ModelBackend,
     SamplingParams,
+    ScoringResult,
+)
+from llenvs.inference.scoring_utils import (
+    build_scoring_inputs,
+    parse_prompt_logprobs_http,
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _load_hf_tokenizer(model_path: str) -> Any:
+    """Load the HF tokenizer for scoring-prompt rendering on the host.
+
+    Only the tokenizer is fetched (no weights); it honors ``HF_HOME`` /
+    ``HF_HUB_OFFLINE`` from the ambient environment. Kept module-level so
+    tests can substitute it without a real download.
+    """
+    from transformers import AutoTokenizer
+
+    return AutoTokenizer.from_pretrained(model_path)
 
 
 def _pick_free_port() -> int:
@@ -91,6 +108,7 @@ class SingularityVLLMBackend(ModelBackend):
         startup_timeout: float = 900.0,
         health_poll_interval: float = 2.0,
         max_concurrency: int = 64,
+        chat_template_kwargs: dict | None = None,
         extra_vllm_args: tuple[str, ...] = (),
         extra_singularity_env: dict[str, str] | None = None,
         hf_home: str | None = None,
@@ -145,6 +163,9 @@ class SingularityVLLMBackend(ModelBackend):
             server_log_path: File to tee server stdout+stderr to. Defaults
                 to ``./.llenvs-vllm-serve-<port>-<pid>.log`` in the current
                 working directory.
+            chat_template_kwargs: Extra kwargs for chat-template rendering
+                during continuation scoring (e.g. reasoning toggles). Scoring
+                always forces ``enable_thinking=False`` on top of these.
 
         Raises:
             RuntimeError: if the ``.sif`` can't be located, the subprocess
@@ -155,6 +176,9 @@ class SingularityVLLMBackend(ModelBackend):
         self._proc: subprocess.Popen[bytes] | None = None
         self._log_fh: IO[bytes] | None = None
         self._openai: OpenAIBackend | None = None
+        self._tokenizer: Any = None
+        self._chat_template_kwargs = chat_template_kwargs or {}
+        self._max_concurrency = max_concurrency
 
         # --- resolve sif ---
         sif_resolved = _resolve_default(sif, "LLENVS_SIF") or _resolve_default(None, "LLENVS_VLLM_SIF")
@@ -324,7 +348,9 @@ class SingularityVLLMBackend(ModelBackend):
             supports_chat=True,
             supports_function_calling=False,
             supports_vision=True,
-            supports_full_scoring=False,
+            # Scoring rides the same server via /v1/completions prompt_logprobs
+            # (see score_chat_batch); available only while the server is live.
+            supports_full_scoring=self._openai is not None,
             max_batch_size=None,
             max_context_length=base.max_context_length if base else None,
             max_concurrency=base.max_concurrency if base else None,
@@ -356,6 +382,75 @@ class SingularityVLLMBackend(ModelBackend):
         if self._openai is None:
             raise RuntimeError("SingularityVLLMBackend is closed")
         return self._openai.generate_chat_batch(messages_batch, params)
+
+    def score_chat(
+        self, messages: list[ChatMessage], continuation: str
+    ) -> ScoringResult:
+        return self.score_chat_batch([messages], [continuation])[0]
+
+    def score_chat_batch(
+        self,
+        messages_batch: list[list[ChatMessage]],
+        continuations: list[str],
+    ) -> list[ScoringResult]:
+        """Score continuations via the server's ``prompt_logprobs``.
+
+        Renders each prompt with the chat template (thinking disabled),
+        appends the continuation as raw text, then requests per-position
+        prompt logprobs from ``/v1/completions`` with a token-id prompt —
+        the HTTP analog of the in-process ``VLLMBackend`` scoring path.
+        """
+        if self._openai is None:
+            raise RuntimeError("SingularityVLLMBackend is closed")
+
+        # Scored continuations are answer text, never reasoning: a forced pass
+        # has nowhere to put a thinking block, so render with thinking off.
+        template_kwargs = {**self._chat_template_kwargs, "enable_thinking": False}
+        _full_texts, prompt_lengths, full_token_ids, empty_results = build_scoring_inputs(
+            self._get_tokenizer(), template_kwargs, messages_batch, continuations
+        )
+        if not full_token_ids:
+            return [empty_results[i] for i in range(len(messages_batch))]
+
+        scored = _run_concurrent(
+            lambda item: self._score_one_async(item[0], item[1]),
+            list(zip(prompt_lengths, full_token_ids)),
+            self._max_concurrency,
+        )
+
+        results: list[ScoringResult] = []
+        scored_iter = iter(scored)
+        for index in range(len(messages_batch)):
+            if index in empty_results:
+                results.append(empty_results[index])
+            else:
+                results.append(next(scored_iter))
+        return results
+
+    async def _score_one_async(
+        self, prompt_len: int, full_ids: list[int]
+    ) -> ScoringResult:
+        # Ride the inner OpenAI client's async connection; vLLM's completions
+        # endpoint returns prompt logprobs via the extra_body passthrough.
+        response = await self._openai._async_client.completions.create(
+            model=self._served_model_name,
+            prompt=full_ids,
+            max_tokens=1,
+            temperature=0,
+            extra_body={"prompt_logprobs": 0},
+        )
+        choice = response.choices[0]
+        return parse_prompt_logprobs_http(
+            prompt_len=prompt_len,
+            full_ids=full_ids,
+            prompt_logprobs=getattr(choice, "prompt_logprobs", None),
+            model_name=self._model_path,
+        )
+
+    def _get_tokenizer(self) -> Any:
+        if self._tokenizer is None:
+            self._tokenizer = _load_hf_tokenizer(self._model_path)
+        return self._tokenizer
 
     # ---------- lifecycle ----------
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import signal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -253,5 +254,184 @@ class TestSingularityVLLMBackendLifecycle:
 
             backend._openai.capabilities = BackendCapabilities(supports_logprobs=False)
             assert backend.capabilities.supports_logprobs is False
+        finally:
+            backend.close()
+
+
+class _CharTokenizer:
+    """Deterministic fake tokenizer: fixed prompt, encode = code points."""
+
+    PROMPT = "PROMPT|"
+
+    def __init__(self) -> None:
+        self.template_kwargs_seen: list[dict] = []
+
+    def apply_chat_template(self, conversation, *, tokenize=False,
+                            add_generation_prompt=True, **kwargs) -> str:
+        self.template_kwargs_seen.append(kwargs)
+        return self.PROMPT
+
+    def encode(self, text: str) -> list[int]:
+        return [ord(c) for c in text]
+
+    def decode(self, ids) -> str:
+        return "".join(chr(i) for i in ids)
+
+
+class _FakeCompletions:
+    """Async /v1/completions stub that echoes prompt_logprobs for the prompt.
+
+    Builds an HTTP-shaped prompt_logprobs list from the token-id prompt it
+    receives (one entry per position, string token-id keys), so tests can
+    assert exact span extraction. Records every call for request assertions.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def create(self, *, model, prompt, max_tokens, temperature,
+                     extra_body=None, **kwargs):
+        self.calls.append({
+            "model": model, "prompt": list(prompt), "max_tokens": max_tokens,
+            "temperature": temperature, "extra_body": extra_body, **kwargs,
+        })
+        full_ids = list(prompt)
+        plps: list = [None]
+        for pos in range(1, len(full_ids)):
+            tid = full_ids[pos]
+            plps.append({
+                str(tid): {"logprob": round(-0.1 * pos, 4),
+                           "decoded_token": chr(tid), "rank": 1},
+            })
+        return SimpleNamespace(choices=[SimpleNamespace(prompt_logprobs=plps)])
+
+
+def _msgs(text: str):
+    from llenvs.inference.protocol import ChatMessage
+    return [ChatMessage(role="user", content=text)]
+
+
+def _wire_scoring(backend, tokenizer=None):
+    """Attach a fake tokenizer and fake async completions client."""
+    tok = tokenizer or _CharTokenizer()
+    backend._tokenizer = tok
+    fake = _FakeCompletions()
+    backend._openai._async_client.completions = fake
+    return tok, fake
+
+
+class TestSingularityVLLMBackendScoring:
+    def test_supports_full_scoring_true_when_open_false_when_closed(self, patched):
+        mod = patched["module"]
+        from llenvs.inference.protocol import BackendCapabilities
+
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        backend._openai.capabilities = BackendCapabilities(supports_logprobs=True)
+        assert backend.capabilities.supports_full_scoring is True
+        backend.close()
+        assert backend.capabilities.supports_full_scoring is False
+
+    def test_score_chat_batch_extracts_spans_in_order(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            _wire_scoring(backend)
+            results = backend.score_chat_batch(
+                [_msgs("a"), _msgs("b")], ["AB", "C"],
+            )
+            assert len(results) == 2
+            # item 0: continuation "AB" -> positions 7,8 -> logprobs -0.7,-0.8
+            assert results[0].prompt_tokens == len("PROMPT|")
+            assert results[0].scored_tokens == 2
+            assert [t.logprob for t in results[0].token_scores] == [-0.7, -0.8]
+            assert [t.token_id for t in results[0].token_scores] == [ord("A"), ord("B")]
+            # item 1: continuation "C" -> position 7 -> logprob -0.7
+            assert results[1].scored_tokens == 1
+            assert results[1].token_scores[0].logprob == -0.7
+            assert results[1].token_scores[0].token_id == ord("C")
+        finally:
+            backend.close()
+
+    def test_request_uses_token_id_prompt_and_prompt_logprobs(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            _tok, fake = _wire_scoring(backend)
+            backend.score_chat_batch([_msgs("a")], ["AB"])
+            assert len(fake.calls) == 1
+            call = fake.calls[0]
+            assert call["extra_body"] == {"prompt_logprobs": 0}
+            assert call["max_tokens"] == 1
+            assert call["temperature"] == 0
+            assert call["prompt"] == [ord(c) for c in "PROMPT|AB"]
+            assert call["model"] == backend._served_model_name
+        finally:
+            backend.close()
+
+    def test_thinking_disabled_for_scoring(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            tok, _ = _wire_scoring(backend)
+            backend.score_chat_batch([_msgs("a")], ["AB"])
+            assert tok.template_kwargs_seen
+            assert all(kw.get("enable_thinking") is False
+                       for kw in tok.template_kwargs_seen)
+        finally:
+            backend.close()
+
+    def test_empty_continuation_is_not_sent(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            _tok, fake = _wire_scoring(backend)
+            results = backend.score_chat_batch(
+                [_msgs("a"), _msgs("b")], ["", "AB"],
+            )
+            # Only the non-empty continuation hits the server.
+            assert len(fake.calls) == 1
+            assert results[0].token_scores == ()
+            assert results[0].scored_tokens == 0
+            assert results[1].scored_tokens == 2
+        finally:
+            backend.close()
+
+    def test_all_empty_continuations_make_no_requests(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            _tok, fake = _wire_scoring(backend)
+            results = backend.score_chat_batch([_msgs("a"), _msgs("b")], ["", ""])
+            assert fake.calls == []
+            assert all(r.scored_tokens == 0 for r in results)
+        finally:
+            backend.close()
+
+    def test_score_chat_single_matches_batch(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            _wire_scoring(backend)
+            single = backend.score_chat(_msgs("a"), "AB")
+            assert single.scored_tokens == 2
+            assert [t.logprob for t in single.token_scores] == [-0.7, -0.8]
+        finally:
+            backend.close()
+
+    def test_tokenizer_lazy_loaded_and_memoized(self, patched, monkeypatch):
+        mod = patched["module"]
+        loaded: list[str] = []
+        fake_tok = _CharTokenizer()
+        monkeypatch.setattr(
+            mod, "_load_hf_tokenizer",
+            lambda model_path: (loaded.append(model_path) or fake_tok),
+        )
+        backend = mod.SingularityVLLMBackend(model_path="some/model")
+        try:
+            fake = _FakeCompletions()
+            backend._openai._async_client.completions = fake
+            backend.score_chat_batch([_msgs("a")], ["AB"])
+            backend.score_chat_batch([_msgs("b")], ["CD"])
+            assert loaded == ["some/model"]  # loaded once, then memoized
         finally:
             backend.close()

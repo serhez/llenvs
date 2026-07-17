@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 from llenvs.core.state import ImageContent
+from llenvs.inference.scoring_utils import build_scoring_inputs
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
@@ -818,41 +819,9 @@ class VLLMBackend(ModelBackend):
         continuations: list[str],
     ) -> list[ScoringResult]:
         """Batched continuation scoring through vLLM prompt logprobs."""
-        if len(messages_batch) != len(continuations):
-            raise ValueError("messages_batch and continuations must have equal length")
-        if not messages_batch:
-            return []
-
-        full_texts: list[str] = []
-        prompt_lengths: list[int] = []
-        full_token_ids: list[list[int]] = []
-        empty_results: dict[int, ScoringResult] = {}
-
-        for index, (messages, continuation) in enumerate(zip(messages_batch, continuations)):
-            prompt_text = self._tokenizer.apply_chat_template(
-                [m.to_dict() for m in messages],
-                tokenize=False,
-                add_generation_prompt=True,
-                **self._chat_template_kwargs,
-            )
-            prompt_ids = self._tokenizer.encode(prompt_text)
-            if not continuation:
-                empty_results[index] = ScoringResult(
-                    token_scores=(), prompt_tokens=len(prompt_ids), scored_tokens=0
-                )
-                continue
-
-            full_text = prompt_text + continuation
-            full_ids = self._tokenizer.encode(full_text)
-            if len(full_ids) <= len(prompt_ids):
-                empty_results[index] = ScoringResult(
-                    token_scores=(), prompt_tokens=len(prompt_ids), scored_tokens=0
-                )
-                continue
-
-            full_texts.append(full_text)
-            prompt_lengths.append(len(prompt_ids))
-            full_token_ids.append(full_ids)
+        full_texts, prompt_lengths, full_token_ids, empty_results = build_scoring_inputs(
+            self._tokenizer, self._chat_template_kwargs, messages_batch, continuations
+        )
 
         if not full_texts:
             return [empty_results[i] for i in range(len(messages_batch))]
