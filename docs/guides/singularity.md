@@ -36,7 +36,7 @@ If your model works with the in-process `VLLMBackend`, keep using that — it's 
 3. `subprocess.Popen(argv, env=<with SINGULARITYENV_* forwarding>, start_new_session=True)` — the container process tree is isolated in its own process group so we can SIGTERM-pgroup it cleanly.
 4. Polls `http://127.0.0.1:<port>/health` until 200 (or the subprocess dies, or we hit `startup_timeout`).
 5. Instantiates an inner [`OpenAIBackend`](../../src/llenvs/inference/backends/api.py) pointing at `http://127.0.0.1:<port>/v1` with `api_key="EMPTY"`.
-6. Delegates every `generate` / `generate_chat` / `generate_chat_batch` call to that inner client.
+6. Delegates every `generate` / `generate_chat` / `generate_chat_batch` call to that inner client. Chat calls with `SamplingParams.disable_thinking=True` get `chat_template_kwargs={"enable_thinking": false}` injected into the request body — the server renders the chat template, so this is the only per-request way to switch a hybrid-reasoning model (e.g. Qwen3) out of thinking mode. Caller-supplied `extra["extra_body"]["chat_template_kwargs"]` values win on key collisions.
 
 `close()` terminates the process group (SIGTERM → 30s wait → SIGKILL) and shuts down the HTTP client. `__enter__`/`__exit__`/`__del__`/`atexit` all route to `close()` so crashes don't leak vllm servers.
 

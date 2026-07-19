@@ -692,6 +692,7 @@ model:
 Second elicitation and thinking budget are complementary for the first generation, but the follow-up call is forced into no-thinking mode. The runner clears local thinking-budget fields, sets `SamplingParams.disable_thinking=True`, and backends that support per-call thinking control honor that request:
 
 - vLLM and HuggingFace call the chat template with `enable_thinking=False` and skip thinking-budget logits processors.
+- The Singularity-hosted vLLM server backend injects `chat_template_kwargs={"enable_thinking": false}` into the request body (the server renders the chat template, so the toggle must travel with the request).
 - OpenRouter sends `extra_body.reasoning = {"effort": "none"}` while preserving unrelated request body fields such as provider routing.
 
 This keeps the rescue call focused on producing the final answer in the required format instead of spending its smaller token budget on another reasoning trace.

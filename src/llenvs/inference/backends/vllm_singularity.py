@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import dataclasses
 import logging
 import os
 import shlex
@@ -44,6 +45,28 @@ from llenvs.inference.scoring_utils import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _with_request_thinking_toggle(params: SamplingParams) -> SamplingParams:
+    """Map ``params.disable_thinking`` onto vLLM's ``chat_template_kwargs``.
+
+    The server renders the chat template itself, so the only way to switch a
+    hybrid-reasoning model (e.g. Qwen3) out of thinking mode per request is
+    the ``chat_template_kwargs`` request field. Caller-supplied values in
+    ``params.extra["extra_body"]["chat_template_kwargs"]`` win on key
+    collisions — the explicit escape hatch has priority, matching the
+    ``extra_body`` merge convention of the API backends.
+    """
+    if not params.disable_thinking:
+        return params
+    extra = dict(params.extra) if params.extra else {}
+    extra_body = dict(extra.get("extra_body") or {})
+    extra_body["chat_template_kwargs"] = {
+        "enable_thinking": False,
+        **(extra_body.get("chat_template_kwargs") or {}),
+    }
+    extra["extra_body"] = extra_body
+    return dataclasses.replace(params, extra=extra)
 
 
 def _load_hf_tokenizer(model_path: str) -> Any:
@@ -372,7 +395,9 @@ class SingularityVLLMBackend(ModelBackend):
     ) -> GenerationResult:
         if self._openai is None:
             raise RuntimeError("SingularityVLLMBackend is closed")
-        return self._openai.generate_chat(messages, params)
+        return self._openai.generate_chat(
+            messages, _with_request_thinking_toggle(params)
+        )
 
     def generate_chat_batch(
         self,
@@ -381,7 +406,9 @@ class SingularityVLLMBackend(ModelBackend):
     ) -> list[GenerationResult]:
         if self._openai is None:
             raise RuntimeError("SingularityVLLMBackend is closed")
-        return self._openai.generate_chat_batch(messages_batch, params)
+        return self._openai.generate_chat_batch(
+            messages_batch, _with_request_thinking_toggle(params)
+        )
 
     def score_chat(
         self, messages: list[ChatMessage], continuation: str

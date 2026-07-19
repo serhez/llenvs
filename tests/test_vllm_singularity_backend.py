@@ -258,6 +258,104 @@ class TestSingularityVLLMBackendLifecycle:
             backend.close()
 
 
+class TestSingularityVLLMBackendThinkingToggle:
+    """``disable_thinking`` must reach the server as ``chat_template_kwargs``.
+
+    The server renders the chat template itself, so hybrid-reasoning models
+    (Qwen3) default to thinking unless the request carries
+    ``chat_template_kwargs={"enable_thinking": False}``.
+    """
+
+    def _params(self, **kwargs):
+        from llenvs.inference.protocol import SamplingParams
+        return SamplingParams(max_tokens=8, **kwargs)
+
+    def test_generate_chat_injects_template_kwargs(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            msgs = _msgs("hi")
+            backend.generate_chat(msgs, self._params(disable_thinking=True))
+            (sent_msgs, sent_params), _ = backend._openai.generate_chat.call_args
+            assert sent_msgs == msgs
+            assert sent_params.extra["extra_body"]["chat_template_kwargs"] == {
+                "enable_thinking": False
+            }
+            assert sent_params.disable_thinking is True
+        finally:
+            backend.close()
+
+    def test_generate_chat_batch_injects_template_kwargs(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            batch = [_msgs("a"), _msgs("b")]
+            backend.generate_chat_batch(batch, self._params(disable_thinking=True))
+            (sent_batch, sent_params), _ = (
+                backend._openai.generate_chat_batch.call_args
+            )
+            assert sent_batch == batch
+            assert sent_params.extra["extra_body"]["chat_template_kwargs"] == {
+                "enable_thinking": False
+            }
+        finally:
+            backend.close()
+
+    def test_no_disable_thinking_forwards_params_unchanged(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            params = self._params()
+            backend.generate_chat(_msgs("hi"), params)
+            (_, sent_params), _ = backend._openai.generate_chat.call_args
+            assert sent_params is params
+        finally:
+            backend.close()
+
+    def test_caller_extra_preserved_and_wins_on_collision(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            original_extra = {
+                "top_level": "kept",
+                "extra_body": {
+                    "other_field": "kept",
+                    "chat_template_kwargs": {"enable_thinking": True, "custom": 1},
+                },
+            }
+            params = self._params(disable_thinking=True, extra=original_extra)
+            backend.generate_chat(_msgs("hi"), params)
+            (_, sent_params), _ = backend._openai.generate_chat.call_args
+            assert sent_params.extra["top_level"] == "kept"
+            assert sent_params.extra["extra_body"]["other_field"] == "kept"
+            # Explicit caller values win over the injected default.
+            assert sent_params.extra["extra_body"]["chat_template_kwargs"] == {
+                "enable_thinking": True,
+                "custom": 1,
+            }
+            # The caller's params object and dicts are never mutated.
+            assert params.extra == original_extra
+            assert params.extra["extra_body"]["chat_template_kwargs"] == {
+                "enable_thinking": True,
+                "custom": 1,
+            }
+        finally:
+            backend.close()
+
+    def test_raw_generate_is_not_transformed(self, patched):
+        """``generate`` takes pre-rendered text prompts — no chat template,
+        so there is nothing to toggle and params pass through untouched."""
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            params = self._params(disable_thinking=True)
+            backend.generate(["raw prompt"], params)
+            (_, sent_params), _ = backend._openai.generate.call_args
+            assert sent_params is params
+        finally:
+            backend.close()
+
+
 class _CharTokenizer:
     """Deterministic fake tokenizer: fixed prompt, encode = code points."""
 
