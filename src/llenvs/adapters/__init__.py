@@ -4,6 +4,8 @@ Adapters bridge between third-party libraries and our common interface.
 Available adapters are automatically registered with the environment_registry.
 """
 
+import logging
+
 from llenvs.adapters.agentgym import (
     AgentGymAdapter,
     AgentGymEnvironment,
@@ -115,6 +117,14 @@ from llenvs.adapters.molmospaces import (
     MolmoSpacesSuccessReward,
     MolmoSpacesToolExecutor,
 )
+from llenvs.adapters.open_apps import (
+    OPEN_APPS_MODULES,
+    OPEN_APPS_TASKS,
+    OpenAppsAdapter,
+    OpenAppsEnvironment,
+    OpenAppsHidden,
+    OpenAppsReward,
+)
 from llenvs.adapters.openenv import (
     OpenEnvAdapter,
     OpenEnvEnvironment,
@@ -152,14 +162,6 @@ from llenvs.adapters.verifiers import (
     VerifiersToolEnvironment,
     VerifiersToolExecutor,
     VerifiersToolHidden,
-)
-from llenvs.adapters.open_apps import (
-    OPEN_APPS_MODULES,
-    OPEN_APPS_TASKS,
-    OpenAppsAdapter,
-    OpenAppsEnvironment,
-    OpenAppsHidden,
-    OpenAppsReward,
 )
 from llenvs.adapters.webshop import (
     WebShopAdapter,
@@ -316,221 +318,58 @@ __all__ = [
 ]
 
 
+logger = logging.getLogger(__name__)
+
+
 def _register_adapters() -> None:
     """Register available adapters with the environment registry.
 
-    Called automatically on import. Adapters for libraries that aren't
-    installed are silently skipped.
+    Called automatically on import. Each optional adapter is probed by
+    importing its third-party stack; a probe that fails for any reason —
+    missing package, broken install, or an unavailable system dependency
+    (e.g. pyjnius raising ``RuntimeError`` when no JVM is present) — skips
+    that adapter instead of breaking ``import llenvs``.
     """
     from llenvs.core.registry import environment_registry
 
-    # Register reasoning-gym adapter if available
-    try:
-        adapter = ReasoningGymAdapter()
-        # Test that reasoning-gym is actually importable
-        adapter._get_reasoning_gym()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # reasoning-gym not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
+    # (display name, adapter class, probe importing the third-party stack)
+    optional_adapters: tuple[tuple[str, type, str], ...] = (
+        ("reasoning-gym", ReasoningGymAdapter, "_get_reasoning_gym"),
+        ("HuggingFace datasets", HuggingFaceAdapter, "_get_datasets_library"),
+        ("GEM", GemAdapter, "_get_gem"),
+        ("WebShop", WebShopAdapter, "_get_webshop"),
+        ("AgentGym", AgentGymAdapter, "_get_agentenv"),
+        ("verifiers", VerifiersAdapter, "_get_verifiers"),
+        ("OpenEnv", OpenEnvAdapter, "_get_openenv"),
+        ("gymnasium", GymnasiumAdapter, "_get_gymnasium"),
+        ("AlfWorld", AlfWorldAdapter, "_get_alfworld"),
+        ("InterCode", InterCodeAdapter, "_get_intercode"),
+        ("Jericho", JerichoAdapter, "_get_jericho"),
+        ("LMRL-Gym", LMRLAdapter, "_get_lmrl"),
+        ("Aviary", AviaryAdapter, "_get_aviary"),
+        ("SciAgentGYM", SciAgentGymAdapter, "_get_sciagentgym"),
+        ("MARE", MAREAdapter, "_get_mare"),
+        ("MolmoSpaces", MolmoSpacesAdapter, "_get_molmospaces"),
+        ("tau", TauAdapter, "_get_tau"),
+        ("OpenApps", OpenAppsAdapter, "_get_open_apps"),
+        ("Harbor", HarborAdapter, "_get_harbor_api"),
+        ("Craftax", CraftaxAdapter, "_get_craftax"),
+    )
 
-    # Register HuggingFace datasets adapter if available
-    try:
-        adapter = HuggingFaceAdapter()
-        # Test that datasets library is actually importable
-        adapter._get_datasets_library()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # datasets not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
+    for display_name, adapter_cls, probe_name in optional_adapters:
+        try:
+            adapter = adapter_cls()
+            getattr(adapter, probe_name)()
+            environment_registry.register_adapter(adapter)
+        except ValueError:
+            pass  # Already registered (e.g., during testing)
+        except Exception as exc:
+            logger.debug("Skipping %s adapter registration: %s", display_name, exc)
 
-    # Register GEM adapter if available
-    try:
-        adapter = GemAdapter()
-        # Test that gem is actually importable
-        adapter._get_gem()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # gem not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register WebShop adapter if available
-    try:
-        adapter = WebShopAdapter()
-        # Test that webshop is actually importable
-        adapter._get_webshop()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # webshop not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register AgentGym adapter if available
-    try:
-        adapter = AgentGymAdapter()
-        adapter._get_agentenv()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # agentenv not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register verifiers adapter if available
-    try:
-        adapter = VerifiersAdapter()
-        adapter._get_verifiers()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # verifiers not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register OpenEnv adapter if available
-    try:
-        adapter = OpenEnvAdapter()
-        adapter._get_openenv()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # openenv-core not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register dialogue adapter (no third-party deps)
+    # The dialogue adapter has no third-party deps, so any failure other than
+    # double registration is a real bug and must surface.
     try:
         environment_registry.register_adapter(DialogueAdapter())
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register gymnasium adapter if available
-    try:
-        adapter = GymnasiumAdapter()
-        adapter._get_gymnasium()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # gymnasium not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register AlfWorld adapter if available
-    try:
-        adapter = AlfWorldAdapter()
-        adapter._get_alfworld()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # alfworld not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register InterCode adapter if available
-    try:
-        adapter = InterCodeAdapter()
-        adapter._get_intercode()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # intercode not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register Jericho adapter if available
-    try:
-        adapter = JerichoAdapter()
-        adapter._get_jericho()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # jericho not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register LMRL-Gym adapter if available
-    try:
-        adapter = LMRLAdapter()
-        adapter._get_lmrl()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # LLM_RL not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register Aviary adapter if available
-    try:
-        adapter = AviaryAdapter()
-        adapter._get_aviary()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # fhaviary not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register SciAgentGYM adapter if available
-    try:
-        adapter = SciAgentGymAdapter()
-        adapter._get_sciagentgym()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # SciAgentGYM not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register MARE adapter if available
-    try:
-        adapter = MAREAdapter()
-        adapter._get_mare()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # meta-agents-research-environments not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register MolmoSpaces adapter if available
-    try:
-        adapter = MolmoSpacesAdapter()
-        adapter._get_molmospaces()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # molmospaces not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register tau adapter if available
-    try:
-        adapter = TauAdapter()
-        adapter._get_tau()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # tau2 not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register OpenApps adapter if available
-    try:
-        adapter = OpenAppsAdapter()
-        adapter._get_open_apps()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # open_apps not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register Harbor adapter if available
-    try:
-        adapter = HarborAdapter()
-        adapter._get_harbor_api()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # harbor not installed, skip registration
-    except ValueError:
-        pass  # Already registered (e.g., during testing)
-
-    # Register Craftax adapter if available
-    try:
-        adapter = CraftaxAdapter()
-        adapter._get_craftax()
-        environment_registry.register_adapter(adapter)
-    except ImportError:
-        pass  # craftax not installed, skip registration
     except ValueError:
         pass  # Already registered (e.g., during testing)
 
