@@ -207,6 +207,10 @@ reward_func = make_openrlhf_reward_fn(env)
 
 For multi-turn OpenRLHF training, use the `TrajectoryMasker` directly as a building block.
 
+### miles
+
+miles gets a full connector rather than a thin wrapper: a custom reward model, a prompt-data exporter, an agent function that drives multi-turn episodes against miles' token-in/token-out session server, a rollout data source, and hooks for turn-level credit assignment. See the dedicated [miles Training](miles.md) guide.
+
 ## Configuration-Driven Setup
 
 All integration classes support `from_config()` for YAML-driven setup:

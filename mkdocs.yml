@@ -85,6 +85,7 @@ nav:
     - Parallelization: guides/parallelization.md
     - Containers: guides/containers.md
     - RL Training: guides/rl-training.md
+    - miles Training: guides/miles.md
     - Multimodal Observations: guides/multimodal.md
     - Library Landscape: guides/landscape.md
   - Adapters:
