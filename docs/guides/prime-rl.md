@@ -26,8 +26,8 @@ verifiers resolves plugin ids to installed modules (`llenvs-env` → `llenvs_env
 
 The seat is `--env.agent.*` (model, sampling, `max_turns`, timeouts, harness). The relay's own knob is `--env.max_steps`: environment steps per episode, defaulting to the llenvs spec's `max_steps`, else 100.
 
-!!! warning "Pick the tool-less harness"
-    An unpinned seat runs verifiers' default `bash` harness, which frames the model as a coding agent with shell tools. llenvs environments expect plain replies, so pass `--env.agent.harness.id null` (TOML: `env.agent.harness.id = "null"`). The `null` harness is also the one-model-call-per-turn harness that turn-level credit relies on.
+!!! note "Default harness"
+    verifiers runs an unpinned seat under the taskset's bundled harness when the taskset ships one, else under its `bash` coding-agent harness (shell and edit tools in a sandbox). `llenvs-env` bundles `LLEnvsHarness`, a tool-less chat loop that makes exactly one model call per turn, so no harness flag is needed: llenvs environments get plain replies and turn-level credit gets its one-node-per-turn traces. A pinned seat (`--env.agent.harness.id bash`, TOML `env.agent.harness.id`) still wins.
 
 ## Recipe A — standalone evaluation with `uv run eval`
 
@@ -38,7 +38,6 @@ uv run eval llenvs-env \
     --env.taskset.config /abs/path/config.yaml \
     --env.taskset.env_name leg_counting \
     --env.taskset.num_tasks 100 \
-    --env.agent.harness.id null \
     --env.agent.model <served model> --env.agent.client.base_url <endpoint>
 ```
 
@@ -53,7 +52,6 @@ env.taskset.id = "llenvs-env"
 env.taskset.config = "/abs/path/config.yaml"
 env.taskset.env_name = "leg_counting"      # only when the YAML lists several
 env.taskset.shuffle_seed = 0
-env.agent.harness.id = "null"
 ```
 
 Two processes touch the plugin: the orchestrator loads the taskset (it needs the YAML and every llenvs adapter the config names), and the env-server workers run episodes and score traces (they need the same). Install llenvs with the same optional adapters into both venvs, and use an absolute config path that both hosts can read.
@@ -107,11 +105,11 @@ Tool use is host-side text parsing, no MCP: when the initial observation adverti
 - **Verbatim, append-only history.** The relay only ever calls `turn()`; no history rewriting.
 - **Deterministic `reset(task_index)`.** The prompt the model sees comes from the taskset's reset; the episode's live environment is reset again to the same index.
 - **Fresh environment per episode.** Expensive (containerized) environments pay creation per episode; pooling through verifiers' `Env.start()`/`stop()` is future work.
-- **One model call per turn for turn-level credit.** The `null` harness satisfies this; a tool-looping harness produces several sampled nodes per turn and the credit algorithm falls back to plain GRPO for that trace.
+- **One model call per turn for turn-level credit.** The bundled `LLEnvsHarness` (and verifiers' `null` harness) satisfy this; a tool-looping harness produces several sampled nodes per turn and the credit algorithm falls back to plain GRPO for that trace.
 
 ## Turn-level credit
 
-Stock prime-rl trains on `trace.reward` (GRPO broadcasts one scalar over the trajectory's tokens). Per-decision credit **without any extra forward passes** is a small prime-rl patch: an `llenvs_turn_grpo` algorithm whose `score_group` reads `turn_rewards`, computes per-decision return-to-go with a per-decision discount, normalizes group-relative over the pooled decision returns, and broadcasts each decision's advantage over its turn's sampled tokens through prime-rl's own `assign_advantages`. Nothing on the transport or trainer side changes. The apply-ready patch (module source, config class, registry entry, tests, launch snippet) is specified in `docs/design/prime-rl-integration.md`.
+Stock prime-rl trains on `trace.reward` (GRPO broadcasts one scalar over the trajectory's tokens). Per-decision credit **without any extra forward passes** is a small prime-rl patch: an `llenvs_turn_grpo` algorithm whose `score_group` reads `turn_rewards`, computes per-decision return-to-go with a per-decision discount, normalizes group-relative over the pooled decision returns, and broadcasts each decision's advantage over its turn's sampled tokens through prime-rl's own `assign_advantages`. Nothing on the transport or trainer side changes. The patch (module source, config class, registry entry, tests, launch snippet) is specified in `docs/design/prime-rl-integration.md`, and `docs/design/patches/prime-rl-llenvs-turn-grpo.patch` is the same change as a `git apply`-ready diff against the prime-rl commit named in its header.
 
 ## Testing
 

@@ -88,9 +88,12 @@ def _clean():
 
 class TestPlugin:
     def test_exports(self):
-        assert llenvs_env.__all__ == ["LLEnvsTaskset", "LLEnvsEnv"]
+        from llenvs_env.harness import LLEnvsHarness
+
+        assert llenvs_env.__all__ == ["LLEnvsTaskset", "LLEnvsEnv", "LLEnvsHarness"]
         assert llenvs_env.LLEnvsTaskset is LLEnvsTaskset
         assert llenvs_env.LLEnvsEnv is LLEnvsEnv
+        assert llenvs_env.LLEnvsHarness is LLEnvsHarness
 
     def test_loader_resolves_plugin_by_id(self):
         from verifiers.v1.utils.loaders import environment_class, taskset_config_type
