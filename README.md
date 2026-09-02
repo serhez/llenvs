@@ -41,6 +41,7 @@ LLEnvs connects to multiple benchmark sources through adapters:
 | **Jericho** | Classic interactive fiction games | Zork, Hitchhiker's Guide, Detective |
 | **AgentGym** | 15 multi-turn agent environments | ALFWorld, BabyAI, SciWorld, TextCraft |
 | **Verifiers** | Verifiers library environments | Rubric-scored tasks, tool-enabled envs |
+| **Verifiers v1** | verifiers v1 tasksets & envs (plugin catalog) | Offline-scored tasksets, multi-seat relay envs |
 | **OpenEnv** | OpenEnv session-based environments | MCP tool servers, generic clients |
 | **Aviary** | Aviary tool-calling environments | GSM8K, HotPotQA, LABBench, LFRQA |
 | **LMRL-Gym** | Text-based RL environments for LMs | Wordle, Chess, Maze, Twenty Questions |

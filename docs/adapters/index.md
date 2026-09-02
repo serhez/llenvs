@@ -96,6 +96,14 @@ llenvs wraps 18+ environment libraries through a unified adapter interface. Each
 
     [:octicons-arrow-right-24: Verifiers](verifiers.md)
 
+-   :material-check-decagram:{ .lg .middle } **Verifiers v1**
+
+    ---
+
+    verifiers v1 tasksets and multi-agent envs with offline trace scoring.
+
+    [:octicons-arrow-right-24: Verifiers v1](verifiers-v1.md)
+
 -   :material-cloud-outline:{ .lg .middle } **OpenEnv**
 
     ---

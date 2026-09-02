@@ -163,6 +163,12 @@ from llenvs.adapters.verifiers import (
     VerifiersToolExecutor,
     VerifiersToolHidden,
 )
+from llenvs.adapters.verifiers_v1 import (
+    VerifiersV1Adapter,
+    VerifiersV1Hidden,
+    VerifiersV1SingleTurnEnvironment,
+    VerifiersV1TraceRewards,
+)
 from llenvs.adapters.webshop import (
     WebShopAdapter,
     WebShopEnvironment,
@@ -224,6 +230,11 @@ __all__ = [
     "VerifiersToolExecutor",
     "VerifiersRubricReward",
     "VerifiersAdapter",
+    # Verifiers v1
+    "VerifiersV1SingleTurnEnvironment",
+    "VerifiersV1Hidden",
+    "VerifiersV1TraceRewards",
+    "VerifiersV1Adapter",
     # OpenEnv
     "OpenEnvEnvironment",
     "OpenEnvToolEnvironment",
@@ -340,6 +351,7 @@ def _register_adapters() -> None:
         ("WebShop", WebShopAdapter, "_get_webshop"),
         ("AgentGym", AgentGymAdapter, "_get_agentenv"),
         ("verifiers", VerifiersAdapter, "_get_verifiers"),
+        ("verifiers v1", VerifiersV1Adapter, "_get_verifiers_v1"),
         ("OpenEnv", OpenEnvAdapter, "_get_openenv"),
         ("gymnasium", GymnasiumAdapter, "_get_gymnasium"),
         ("AlfWorld", AlfWorldAdapter, "_get_alfworld"),

@@ -1,6 +1,6 @@
 # Verifiers Adapter
 
-Wraps [verifiers](https://github.com/PrimeIntellect-ai/verifiers) environments as llenvs MDP environments.
+Wraps [verifiers](https://github.com/PrimeIntellect-ai/verifiers) environments (the legacy v0 API: `load_environment()`, rubrics) as llenvs MDP environments. For the verifiers **v1** API — tasksets, traces, multi-agent envs — use the [Verifiers v1 adapter](verifiers-v1.md).
 
 ## Installation
 

@@ -101,6 +101,7 @@ nav:
     - LMRL-Gym: adapters/lmrl.md
     - Aviary: adapters/aviary.md
     - Verifiers: adapters/verifiers.md
+    - Verifiers v1: adapters/verifiers-v1.md
     - OpenEnv: adapters/openenv.md
     - SciAgentGYM: adapters/sciagentgym.md
     - InterCode: adapters/intercode.md
