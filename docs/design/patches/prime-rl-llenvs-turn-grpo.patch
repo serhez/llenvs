@@ -1,0 +1,459 @@
+prime-rl patch: the llenvs_turn_grpo algorithm (per-decision credit from llenvs-env turn rewards).
+Cut against PrimeIntellect-ai/prime-rl main @ 3fc28dd (vendored verifiers @ b2e4e81).
+Specification and rationale: docs/design/prime-rl-integration.md, section 'llenvs_turn_grpo fork patch specification'.
+Apply from the prime-rl checkout root:  git apply /path/to/prime-rl-llenvs-turn-grpo.patch
+Verify there:                            uv run pytest tests/unit/orchestrator/test_algorithms.py -q
+
+diff --git a/packages/prime-rl-configs/src/prime_rl/configs/algorithm.py b/packages/prime-rl-configs/src/prime_rl/configs/algorithm.py
+index 739cd6e..c7f1d4c 100644
+--- a/packages/prime-rl-configs/src/prime_rl/configs/algorithm.py
++++ b/packages/prime-rl-configs/src/prime_rl/configs/algorithm.py
+@@ -364,6 +364,43 @@ class SFTAlgoConfig(BaseAlgoConfig):
+         return self
+ 
+ 
++class LLEnvsTurnGRPOAlgoConfig(BaseAlgoConfig):
++    type: Literal["llenvs_turn_grpo"] = "llenvs_turn_grpo"
++    """Turn-level GRPO for llenvs-env relay traces: per-decision return-to-go
++    from ``trace.info["llenvs"]["turn_rewards"]``, normalized over the group's
++    pooled decision returns and broadcast over each turn's sampled tokens
++    (``rl`` loss). Traces without turn data get the stock GRPO scalar."""
++
++    action_loss_type: ClassVar[ActionLossType] = "rl"
++
++    gamma: float = Field(1.0, ge=0.0, le=1.0)
++    """Per-DECISION discount of the return-to-go (never per token)."""
++
++    std_normalization: bool = False
++    """Also divide by the std of the pooled decision returns (stock GRPO
++    parity is mean-only)."""
++
++    length_weighting: Literal["uniform", "span_normalized"] = "uniform"
++    """``uniform``: every sampled token of a decision carries its advantage;
++    ``span_normalized``: divide by the decision's token count so each decision
++    weighs the same regardless of its length."""
++
++    def validate_env(self, env_config: vf.EnvConfig) -> None:
++        """Require the llenvs-env relay: it is what records the per-turn rewards."""
++        try:
++            from llenvs_env.env import LLEnvsEnvConfig
++        except ImportError as e:
++            raise ValueError(
++                "algorithm 'llenvs_turn_grpo' needs the llenvs-env plugin "
++                "(`pip install 'llenvs[verifiers]'` in the orchestrator venv)."
++            ) from e
++        if not isinstance(env_config, LLEnvsEnvConfig):
++            raise ValueError(
++                "algorithm 'llenvs_turn_grpo' reads the llenvs-env relay's per-turn rewards, "
++                f"but this env resolved to {type(env_config).__name__}. Use 'grpo' for other envs."
++            )
++
++
+ AlgoConfig: TypeAlias = Annotated[
+     GRPOAlgoConfig
+     | EchoAlgoConfig
+@@ -372,7 +409,8 @@ AlgoConfig: TypeAlias = Annotated[
+     | HierarchicalGRPOAlgoConfig
+     | OPDAlgoConfig
+     | OPSDAlgoConfig
+-    | SFTAlgoConfig,
++    | SFTAlgoConfig
++    | LLEnvsTurnGRPOAlgoConfig,
+     Field(discriminator="type"),
+ ]
+ """The training algorithm: sampling plus the per-token training signal (credit
+@@ -387,6 +425,7 @@ its class defaults are the vetted setting.
+ - ``opsd`` — SDFT: policy samples, demo-conditioned reverse KL against the live policy (the teacher is the policy itself).
+ - ``sft`` — a frozen model samples, the policy trains with CE on its tokens. Needs a frozen ``sampling.source``.
+ - ``echo`` — GRPO on action tokens + weighted CE on tool-response observation tokens.
++- ``llenvs_turn_grpo`` — GRPO with per-decision credit from llenvs-env turn rewards.
+ 
+ A new credit-assignment scheme is a new named algorithm in code (subclass
+ ``Algorithm``, register it), not a config that points at an import path.
+diff --git a/src/prime_rl/orchestrator/algo/__init__.py b/src/prime_rl/orchestrator/algo/__init__.py
+index 104fd68..f46caa6 100644
+--- a/src/prime_rl/orchestrator/algo/__init__.py
++++ b/src/prime_rl/orchestrator/algo/__init__.py
+@@ -26,6 +26,7 @@ from prime_rl.orchestrator.algo.base import Algorithm, connect_frozen_client
+ from prime_rl.orchestrator.algo.echo import EchoAlgorithm
+ from prime_rl.orchestrator.algo.grpo import GRPOAlgorithm
+ from prime_rl.orchestrator.algo.hierarchical_grpo import HierarchicalGRPOAlgorithm
++from prime_rl.orchestrator.algo.llenvs_turn_grpo import LLEnvsTurnGRPOAlgorithm
+ from prime_rl.orchestrator.algo.max_rl import MaxRLAlgorithm
+ from prime_rl.orchestrator.algo.opd import OPDAlgorithm
+ from prime_rl.orchestrator.algo.opsd import OPSDAlgorithm
+@@ -48,6 +49,7 @@ ALGORITHM_CLASSES: dict[str, type[Algorithm]] = {
+     "opd": OPDAlgorithm,
+     "opsd": OPSDAlgorithm,
+     "sft": SFTDistillAlgorithm,
++    "llenvs_turn_grpo": LLEnvsTurnGRPOAlgorithm,
+ }
+ 
+ 
+@@ -67,6 +69,7 @@ __all__ = [
+     "EchoAlgorithm",
+     "GRPOAlgorithm",
+     "HierarchicalGRPOAlgorithm",
++    "LLEnvsTurnGRPOAlgorithm",
+     "MaxRLAlgorithm",
+     "OPDAlgorithm",
+     "OPSDAlgorithm",
+diff --git a/src/prime_rl/orchestrator/algo/llenvs_turn_grpo.py b/src/prime_rl/orchestrator/algo/llenvs_turn_grpo.py
+new file mode 100644
+index 0000000..d4d6152
+--- /dev/null
++++ b/src/prime_rl/orchestrator/algo/llenvs_turn_grpo.py
+@@ -0,0 +1,117 @@
++"""llenvs turn-level GRPO: per-decision credit from ``trace.info["llenvs"]``.
++
++The llenvs-env relay records each environment step's reward total in
++``trace.info["llenvs"]["turn_rewards"]`` (decision i = the i-th policy turn) and
++keeps ``trace.reward == sum(turn_rewards)``. This algorithm turns those per-turn
++rewards into per-decision advantages — return-to-go with a per-DECISION discount,
++normalized group-relative over the pooled decision returns of the cohort — and
++broadcasts each decision's advantage over its turn's sampled tokens. Traces
++without usable turn data (no llenvs payload, a forked trace, or a harness that
++sampled several nodes per turn) fall back to the stock GRPO scalar, so a group
++with no turn data trains exactly like ``grpo``.
++"""
++
++from __future__ import annotations
++
++import math
++from typing import TYPE_CHECKING
++
++import verifiers.v1 as vf
++
++from prime_rl.configs.algorithm import LLEnvsTurnGRPOAlgoConfig
++from prime_rl.orchestrator.algo.base import Algorithm, iter_trainable_traces
++from prime_rl.orchestrator.algo.routing import assign_advantages
++from prime_rl.utils.logger import get_logger
++
++if TYPE_CHECKING:
++    from prime_rl.orchestrator.clients import InferenceClient
++
++
++def turn_rewards(trace: vf.Trace) -> list[float] | None:
++    """The relay's per-turn reward totals, or None when the trace carries none."""
++    payload = trace.info.get("llenvs")
++    if not isinstance(payload, dict):
++        return None
++    rewards = payload.get("turn_rewards")
++    if not isinstance(rewards, list) or not rewards:
++        return None
++    return [float(r) for r in rewards]
++
++
++def decision_spans(trace: vf.Trace) -> list[int]:
++    """Sampled-token count of each masked node in ``trace.nodes`` order — the
++    layout ``assign_advantages`` expects."""
++    return [sum(node.mask) for node in trace.nodes if any(node.mask)]
++
++
++def returns_to_go(rewards: list[float], gamma: float) -> list[float]:
++    """G_i = sum_{j >= i} gamma^(j - i) * r_j, discounted per decision."""
++    returns = [0.0] * len(rewards)
++    acc = 0.0
++    for i in range(len(rewards) - 1, -1, -1):
++        acc = rewards[i] + gamma * acc
++        returns[i] = acc
++    return returns
++
++
++def align_turn_rewards(trace: vf.Trace) -> tuple[list[float], list[int]] | None:
++    """Per-decision rewards aligned to the trace's masked nodes, or None when the
++    trace is not eligible for turn-level credit (it then gets the GRPO scalar)."""
++    rewards = turn_rewards(trace)
++    if rewards is None:
++        return None
++    logger = get_logger()
++    if trace.num_branches != 1:
++        logger.warning(
++            f"llenvs_turn_grpo: trace {trace.id!r} has {trace.num_branches} branches; falling back to GRPO"
++        )
++        return None
++    spans = decision_spans(trace)
++    missing = len(spans) - len(rewards)
++    if missing not in (0, 1):
++        logger.warning(
++            f"llenvs_turn_grpo: trace {trace.id!r} has {len(spans)} sampled nodes for {len(rewards)} "
++            "turn rewards (use a one-call-per-turn harness such as `null`); falling back to GRPO"
++        )
++        return None
++    # A trailing sampled turn the env never stepped (e.g. an empty reply) earns 0.
++    return rewards + [0.0] * missing, spans
++
++
++class LLEnvsTurnGRPOAlgorithm(Algorithm):
++    """GRPO with per-decision credit for llenvs-env relay traces."""
++
++    def __init__(self, config: LLEnvsTurnGRPOAlgoConfig, clients: InferenceClient):
++        super().__init__(config, clients)
++        self.gamma = config.gamma
++        self.std_normalization = config.std_normalization
++        self.length_weighting = config.length_weighting
++
++    async def score_group(self, episodes: list[vf.Episode]) -> None:
++        traces = [trace for _, trace in iter_trainable_traces(episodes)]
++        if not traces:
++            return
++        aligned = {
++            i: alignment
++            for i, trace in enumerate(traces)
++            if (alignment := align_turn_rewards(trace)) is not None
++        }
++        returns = {i: returns_to_go(rewards, self.gamma) for i, (rewards, _) in aligned.items()}
++        pooled = [g for gs in returns.values() for g in gs]
++        mean = sum(pooled) / len(pooled) if pooled else 0.0
++        std = 1.0
++        if self.std_normalization and len(pooled) > 1:
++            std = math.sqrt(sum((g - mean) ** 2 for g in pooled) / len(pooled)) or 1.0
++        scalar_mean = sum(trace.reward for trace in traces) / len(traces)
++        for i, trace in enumerate(traces):
++            if i not in aligned:
++                assign_advantages(trace, trace.reward - scalar_mean)
++                continue
++            _, spans = aligned[i]
++            per_token: list[float] = []
++            for g, span in zip(returns[i], spans, strict=True):
++                advantage = (g - mean) / std
++                if self.length_weighting == "span_normalized" and span:
++                    advantage /= span
++                per_token.extend([advantage] * span)
++            assign_advantages(trace, per_token)
+diff --git a/tests/unit/orchestrator/test_algorithms.py b/tests/unit/orchestrator/test_algorithms.py
+index 3e490e7..c316176 100644
+--- a/tests/unit/orchestrator/test_algorithms.py
++++ b/tests/unit/orchestrator/test_algorithms.py
+@@ -8,7 +8,15 @@ from verifiers.v1.graph import MessageNode
+ from verifiers.v1.types import AssistantMessage, ToolMessage, UserMessage
+ 
+ from prime_rl.configs.algorithm import AlgoConfig, FrozenModelConfig
+-from prime_rl.orchestrator.algo import EchoAlgorithm, assign_advantages, stamp_loss_routing
++from prime_rl.orchestrator.algo import (
++    EchoAlgorithm,
++    GRPOAlgorithm,
++    LLEnvsTurnGRPOAlgorithm,
++    assign_advantages,
++    stamp_loss_routing,
++)
++from prime_rl.orchestrator.algo.llenvs_turn_grpo import returns_to_go
++from verifiers.v1.trace import Reward
+ from prime_rl.orchestrator.trajectories import trace_to_samples
+ from prime_rl.transports.batch.types import TrainingSample
+ 
+@@ -40,6 +48,7 @@ def _ref_kind(ref):
+         ("sft", {"sampling": {"source": FROZEN}}, "frozen", "ce"),
+         ("opsd", {}, "policy", "ref_kl"),
+         ("echo", {}, "policy", "rl"),
++        ("llenvs_turn_grpo", {}, "policy", "rl"),
+     ],
+ )
+ def test_type_defaults_are_the_vetted_algorithms(algorithm_type, build_kwargs, source, action_loss_type):
+@@ -388,3 +397,206 @@ def test_echo_filter_narrows_selection():
+     episode = _two_turn_episode()
+     with pytest.raises(ValueError, match="span the branch's tokens"):
+         asyncio.run(_echo_algorithm(filter_fn=lambda trace: [[True] * 6]).score_episode(episode))
++
++
++# --- llenvs_turn_grpo: per-decision credit from the llenvs-env relay ----------
++
++
++def _relay_episode(turn_rewards, spans, *, with_info=True, fork=False) -> vf.Episode:
++    """A linear relay trace: user/assistant alternation, the k-th assistant node
++    carrying ``spans[k]`` sampled tokens, with the llenvs turn-credit payload."""
++    nodes = []
++    parent = None
++    for k, span in enumerate(spans):
++        nodes.append(
++            MessageNode(
++                parent=parent,
++                message=UserMessage(content=f"U{k}"),
++                sampled=False,
++                token_ids=[100 + k],
++                mask=[False],
++            )
++        )
++        parent = len(nodes) - 1
++        nodes.append(
++            MessageNode(
++                parent=parent,
++                message=AssistantMessage(content=f"A{k}"),
++                sampled=True,
++                token_ids=list(range(span)),
++                mask=[True] * span,
++                logprobs=[-0.1] * span,
++            )
++        )
++        parent = len(nodes) - 1
++    if fork:
++        # A second sampled child of the first user node: two leaves, two branches.
++        nodes.append(
++            MessageNode(
++                parent=0,
++                message=AssistantMessage(content="A0-alt"),
++                sampled=True,
++                token_ids=[9],
++                mask=[True],
++                logprobs=[-0.1],
++            )
++        )
++    trace = vf.Trace(
++        task=vf.TraceTask(type="Task", data=vf.TaskData(idx=0, prompt=None)),
++        agent=vf.AgentInfo(config=vf.AgentConfig()),
++        nodes=nodes,
++        rewards={"llenvs/progress": Reward(score=float(sum(turn_rewards)))},
++        info={"llenvs": {"turn_rewards": list(turn_rewards)}} if with_info else {},
++        ok=True,
++    )
++    return vf.Episode(
++        env=vf.EnvInfo(id="llenvs-env", name="llenvs-env"),
++        task=trace.task,
++        group=vf.GroupInfo(id="group"),
++        traces=[trace],
++    )
++
++
++def _sampled_advantages(episode: vf.Episode) -> list[list[float]]:
++    return [node.advantages for node in episode.traces[0].nodes if any(node.mask)]
++
++
++def _score_turn_grpo(episodes: list[vf.Episode], **kwargs) -> None:
++    algo = LLEnvsTurnGRPOAlgorithm(_build(type="llenvs_turn_grpo", **kwargs), MagicMock())
++    asyncio.run(algo.score_group(episodes))
++
++
++def _score_grpo(episodes: list[vf.Episode]) -> None:
++    asyncio.run(GRPOAlgorithm(_build(type="grpo"), MagicMock()).score_group(episodes))
++
++
++def test_turn_grpo_config_defaults():
++    algo = _build(type="llenvs_turn_grpo")
++    assert algo.gamma == 1.0
++    assert algo.std_normalization is False
++    assert algo.length_weighting == "uniform"
++
++
++def test_turn_grpo_validate_env_requires_the_llenvs_relay():
++    with pytest.raises(ValueError, match="llenvs-env"):
++        _build(type="llenvs_turn_grpo").validate_env(vf.EnvConfig())
++
++
++def test_turn_grpo_validate_env_accepts_the_llenvs_relay():
++    pytest.importorskip("llenvs_env")
++    from llenvs_env.env import LLEnvsEnvConfig
++    from llenvs_env.taskset import LLEnvsTasksetConfig
++
++    _build(type="llenvs_turn_grpo").validate_env(
++        LLEnvsEnvConfig(taskset=LLEnvsTasksetConfig(id="llenvs-env"))
++    )
++
++
++def test_returns_to_go_discounts_per_decision():
++    assert returns_to_go([0.0, 1.0], 0.5) == [0.5, 1.0]
++    assert returns_to_go([1.0, 0.0, 2.0], 1.0) == [3.0, 2.0, 2.0]
++    assert returns_to_go([1.0, 1.0], 0.0) == [1.0, 1.0]
++
++
++def test_turn_grpo_return_to_go_pooled_over_the_group():
++    # Returns: [1, 0] and [0, 0] -> pooled mean 0.25.
++    won = _relay_episode([1.0, 0.0], spans=[2, 1])
++    lost = _relay_episode([0.0, 0.0], spans=[1, 1])
++    _score_turn_grpo([won, lost])
++    assert _sampled_advantages(won) == [[0.75, 0.75], [-0.25]]
++    assert _sampled_advantages(lost) == [[-0.25], [-0.25]]
++
++
++def test_turn_grpo_gamma_discounts_per_decision_not_per_token():
++    episode = _relay_episode([0.0, 1.0], spans=[3, 1])
++    _score_turn_grpo([episode], gamma=0.5)
++    # Returns [0.5, 1.0], pooled mean 0.75; the 3-token first turn shares one advantage.
++    assert _sampled_advantages(episode) == [[-0.25, -0.25, -0.25], [0.25]]
++
++
++def test_turn_grpo_broadcasts_over_each_turn_and_ships_a_full_stream():
++    episode = _relay_episode([1.0, 0.0], spans=[3, 2])
++    other = _relay_episode([0.0, 0.0], spans=[1, 1])
++    _score_turn_grpo([episode, other])
++    trace = episode.traces[0]
++    assert [len(a) for a in _sampled_advantages(episode)] == [3, 2]
++    sample = trace_to_samples(trace)[0]
++    # Returns [1, 0] and [0, 0]: pooled mean 0.25.
++    assert sample.advantages == [0.0, 0.75, 0.75, 0.75, 0.0, -0.25, -0.25]
++    assert len(sample.advantages) == sum(len(n.token_ids) for n in trace.nodes)
++
++
++def test_turn_grpo_pads_a_trailing_unstepped_turn_with_zero():
++    # Two sampled turns, one env step recorded: the trailing turn earns 0.
++    episode = _relay_episode([1.0], spans=[2, 1])
++    _score_turn_grpo([episode])
++    # Aligned rewards [1, 0] -> returns [1, 0] -> pooled mean 0.5.
++    assert _sampled_advantages(episode) == [[0.5, 0.5], [-0.5]]
++
++
++def test_turn_grpo_falls_back_to_grpo_scalar_when_nodes_and_turns_disagree():
++    def group():
++        return [
++            _relay_episode([1.0], spans=[1, 1, 1]),  # three sampled nodes, one reward
++            _relay_episode([0.0], spans=[1]),
++        ]
++
++    turn, grpo = group(), group()
++    _score_turn_grpo(turn)
++    _score_grpo(grpo)
++    # The misaligned trace gets reward - group mean = 1.0 - 0.5, exactly like GRPO.
++    assert _sampled_advantages(turn[0]) == _sampled_advantages(grpo[0]) == [[0.5], [0.5], [0.5]]
++    # The aligned trace is normalized over the pooled decision returns (just [0.0]).
++    assert _sampled_advantages(turn[1]) == [[0.0]]
++
++
++def test_turn_grpo_falls_back_to_grpo_for_forked_traces():
++    def group():
++        return [
++            _relay_episode([1.0], spans=[1], fork=True),
++            _relay_episode([0.0], spans=[1], with_info=False),
++        ]
++
++    turn, grpo = group(), group()
++    assert turn[0].traces[0].num_branches == 2
++    _score_turn_grpo(turn)
++    _score_grpo(grpo)
++    for scored, reference in zip(turn, grpo, strict=True):
++        assert _sampled_advantages(scored) == _sampled_advantages(reference)
++    assert _sampled_advantages(turn[0]) == [[0.5], [0.5]]
++
++
++def test_turn_grpo_without_turn_data_is_exactly_grpo():
++    def group():
++        return [
++            _relay_episode([1.0, 0.0], spans=[2, 1], with_info=False),
++            _relay_episode([0.0, 0.0], spans=[1, 2], with_info=False),
++        ]
++
++    turn, grpo = group(), group()
++    _score_turn_grpo(turn)
++    _score_grpo(grpo)
++    for scored, reference in zip(turn, grpo, strict=True):
++        assert _sampled_advantages(scored) == _sampled_advantages(reference)
++    assert _sampled_advantages(turn[0]) == [[0.5, 0.5], [0.5]]
++
++
++def test_turn_grpo_span_normalized_divides_by_the_turn_length():
++    long = _relay_episode([1.0], spans=[4])
++    short = _relay_episode([0.0], spans=[2])
++    _score_turn_grpo([long, short], length_weighting="span_normalized")
++    # Pooled mean 0.5: +0.5 spread over 4 tokens, -0.5 over 2.
++    assert _sampled_advantages(long) == [[0.125] * 4]
++    assert _sampled_advantages(short) == [[-0.25] * 2]
++
++
++def test_turn_grpo_std_normalization_with_zero_std_guard():
++    won, lost = _relay_episode([1.0], spans=[1]), _relay_episode([0.0], spans=[1])
++    _score_turn_grpo([won, lost], std_normalization=True)
++    # Pooled [1, 0]: mean 0.5, population std 0.5.
++    assert _sampled_advantages(won) == [[1.0]]
++    assert _sampled_advantages(lost) == [[-1.0]]
++
++    same = [_relay_episode([1.0], spans=[1]), _relay_episode([1.0], spans=[1])]
++    _score_turn_grpo(same, std_normalization=True)
++    assert [_sampled_advantages(e) for e in same] == [[[0.0]], [[0.0]]]

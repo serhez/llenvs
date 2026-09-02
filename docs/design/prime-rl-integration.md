@@ -65,8 +65,7 @@ verifiers or prime-rl.
   name = "llenvs-env"
   env.taskset.id = "llenvs-env"
   env.taskset.config = "/path/to/llenvs-eval.yaml"   # our typed TasksetConfig field
-  env.agent.harness.id = "null"
-  env.agent.runtime.type = "subprocess"
+  env.agent.runtime.type = "subprocess"                # the seat's harness defaults to the bundled LLEnvsHarness
   ```
 
   The `env` block is validated against the config class the id's package declares
@@ -236,12 +235,13 @@ plugin imports `verifiers.v1`, so it cannot live under `llenvs/`'s import surfac
 
 ```
 src/llenvs_env/            # plugin id "llenvs-env" → module "llenvs_env"
-├── __init__.py            # lazy (PEP 562) __all__ = ["LLEnvsTaskset", "LLEnvsEnv"]
+├── __init__.py            # lazy (PEP 562) __all__ = ["LLEnvsTaskset", "LLEnvsEnv", "LLEnvsHarness"]
 ├── _vf.py                 # guarded `verifiers.v1` import with an install hint
 ├── _config.py             # EvalConfig load/select, Scorer/DatasetProvider caches (no vf imports)
 ├── _relay.py              # feedback/tool text, Hermes parsing → Action, cleanup (no vf imports)
 ├── taskset.py             # LLEnvsTasksetConfig, LLEnvsData, LLEnvsTask, LLEnvsTaskset
-└── env.py                 # LLEnvsEnvConfig (one `agent` seat, max_steps), LLEnvsEnv relay
+├── env.py                 # LLEnvsEnvConfig (one `agent` seat, max_steps), LLEnvsEnv relay
+└── harness.py             # LLEnvsHarness(NullHarness): the taskset's bundled default harness
 ```
 
 - **`LLEnvsTasksetConfig(vf.TasksetConfig)`**: `config: Path` (llenvs `EvalConfig`
@@ -583,22 +583,34 @@ __all__ += ["LLEnvsTurnGRPOAlgorithm"]                            # in the list 
 name = "llenvs"
 env.taskset.id = "llenvs-env"
 env.taskset.config = "/abs/path/config.yaml"
-env.agent.harness.id = "null"          # one model call per turn — required for the node↔turn mapping
+# the seat's harness defaults to the bundled LLEnvsHarness: one model call per turn,
+# which the node↔turn mapping requires — do not pin a tool-looping harness here
 algo.type = "llenvs_turn_grpo"
 algo.gamma = 1.0
 ```
 
 Verification in the checkout: `uv run pytest tests/unit/orchestrator/test_algorithms.py -q`.
 
+**Apply-ready diff.** `docs/design/patches/prime-rl-llenvs-turn-grpo.patch` is this specification as a
+`git apply` patch, cut against the prime-rl commit named in its header; apply it from the prime-rl
+checkout root. When prime-rl has moved and the diff no longer applies, this section is the source
+of truth and the patch file gets re-cut from it.
+
 **Upstream alternative.** A dotted-path algorithm registry (an `import_path` on
 `BaseAlgoConfig`, mirroring `CustomLossConfig.import_path` and echo's token filter) would
 let this module live in the llenvs distribution and shrink the patch to zero files.
 
-**Apply-time verifications.** Re-verify at the verifiers commit prime-rl vendors
-(`b2e4e81` at analysis time): `assign_advantages`' masked-node order, `Trace.info` on the
-msgpack wire (statically verified: a regular field; `EXCLUDE_FIELDS` trims only tensors),
-`Segment.last_reply` vs full messages for reasoning models (what the llenvs extractors see),
-and how `group_size` interacts with `ratio`-mixed sources when only one source is llenvs.
+**Apply-time verifications.** At prime-rl `main` @ `3fc28dd` with its vendored verifiers
+`b2e4e81` the patch applies as written and `tests/unit/orchestrator/test_algorithms.py`
+passes with the tests above added and the existing tests untouched. At that commit
+`assign_advantages` iterates the masked nodes in `trace.nodes` order and `Trace.info` is a
+regular serialized field (`EXCLUDE_FIELDS` trims only tensors), and the llenvs-env plugin
+imports and passes its own test suite against it. On a macOS dev box the unit tests need
+`uv sync --group dev --no-install-package litellm --no-install-package harbor` (the
+`litellm` sdist does not build there) plus `uv pip install torch`. Still to verify on a
+training run: `Segment.last_reply` vs full messages for reasoning models (what the llenvs
+extractors see), and how `group_size` interacts with `ratio`-mixed sources when only one
+source is llenvs.
 
 **Estimator caveat.** Turn-GRPO with a pooled group baseline is a pragmatic first
 estimator; per-turn-index baselines and turn-PPO (decision-boundary value extraction) are
