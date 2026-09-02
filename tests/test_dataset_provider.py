@@ -10,6 +10,7 @@ import pytest
 from llenvs.core.environment import EnvironmentSpec, StepResult
 from llenvs.core.reward import RewardFunction, SignalBundle
 from llenvs.core.state import Action, Observation, State, StateMetadata
+from llenvs.core.tools import ToolDefinition
 from llenvs.integrations.dataset_provider import DatasetProvider, TaskItem
 
 # ---------------------------------------------------------------------------
@@ -237,3 +238,57 @@ class TestDatasetProvider:
         assert len(ds) == 2
         assert ds[0]["task_index"] == 1
         assert ds[1]["task_index"] == 3
+
+
+# ---------------------------------------------------------------------------
+# available_tools
+# ---------------------------------------------------------------------------
+
+LOOKUP_TOOL = ToolDefinition(name="lookup", description="Look something up.")
+
+
+class MockToolEnv(MockSingleTurnEnv):
+    """Single-turn env whose observations advertise a tool."""
+
+    @property
+    def available_tools(self) -> tuple[ToolDefinition, ...]:
+        return (LOOKUP_TOOL,)
+
+    def reset(self, *, seed=None, options=None):
+        state, info = super().reset(seed=seed, options=options)
+        observation = Observation(
+            prompt=state.observation.prompt,
+            messages=state.observation.messages,
+            available_tools=(LOOKUP_TOOL,),
+        )
+        return State(observation=observation, hidden=state.hidden, metadata=state.metadata), info
+
+
+class TestTaskItemTools:
+    def test_available_tools_defaults_to_empty(self):
+        item = TaskItem(task_index=0, prompt="hello", messages=(), ground_truth=None, metadata={})
+        assert item.available_tools == ()
+
+    def test_available_tools_field(self):
+        item = TaskItem(
+            task_index=0,
+            prompt="hello",
+            messages=(),
+            ground_truth=None,
+            metadata={},
+            available_tools=(LOOKUP_TOOL,),
+        )
+        assert item.available_tools == (LOOKUP_TOOL,)
+
+
+class TestDatasetProviderTools:
+    def test_tools_populated_from_observation(self):
+        item = DatasetProvider(MockToolEnv())[0]
+        assert item.available_tools == (LOOKUP_TOOL,)
+
+    def test_tools_empty_for_text_env(self):
+        assert DatasetProvider(MockSingleTurnEnv())[0].available_tools == ()
+
+    def test_to_hf_dataset_columns_unchanged_with_tools(self):
+        ds = DatasetProvider(MockToolEnv(num_tasks=2)).to_hf_dataset()
+        assert set(ds.column_names) == {"task_index", "prompt", "ground_truth", "messages"}

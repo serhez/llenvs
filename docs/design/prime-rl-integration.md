@@ -1,6 +1,10 @@
 # prime-rl Integration — Deep Analysis
 
-Status: research/analysis only, no implementation. Companion to `miles-integration.md`
+Status: both directions are implemented on branch `verifiers-v1-integration` — the export
+plugin `src/llenvs_env/` (plugin id `llenvs-env`; user guide `docs/guides/prime-rl.md`) and
+the import adapter `src/llenvs/adapters/verifiers_v1.py` (`docs/adapters/verifiers-v1.md`).
+The `llenvs_turn_grpo` prime-rl patch is specified apply-ready at the end of this document
+and applies to a prime-rl checkout, not to this repo. Companion to `miles-integration.md`
 (same three questions, same llenvs baseline), written after the miles connector shipped
 and informed by that experience.
 
@@ -232,24 +236,30 @@ plugin imports `verifiers.v1`, so it cannot live under `llenvs/`'s import surfac
 
 ```
 src/llenvs_env/            # plugin id "llenvs-env" → module "llenvs_env"
-├── __init__.py            # __all__ = ["LLEnvsEnv", "LLEnvsTaskset"]
-└── taskset.py
+├── __init__.py            # lazy (PEP 562) __all__ = ["LLEnvsTaskset", "LLEnvsEnv"]
+├── _vf.py                 # guarded `verifiers.v1` import with an install hint
+├── _config.py             # EvalConfig load/select, Scorer/DatasetProvider caches (no vf imports)
+├── _relay.py              # feedback/tool text, Hermes parsing → Action, cleanup (no vf imports)
+├── taskset.py             # LLEnvsTasksetConfig, LLEnvsData, LLEnvsTask, LLEnvsTaskset
+└── env.py                 # LLEnvsEnvConfig (one `agent` seat, max_steps), LLEnvsEnv relay
 ```
 
 - **`LLEnvsTasksetConfig(vf.TasksetConfig)`**: `config: Path` (llenvs `EvalConfig`
-  YAML), `env_name: str | None`, `num_tasks`, `seed/shuffle`. First-class TOML/CLI
+  YAML), `env_name: str | None`, `num_tasks`, `shuffle_seed`. First-class TOML/CLI
   fields — no env-var discovery layer needed (retire the miles-style
   `LLENVS_MILES_CONFIG` pattern here).
 - **`LLEnvsData(vf.TaskData)`**: `task_index: int`, ground truth for scoring,
-  `prompt=None` (our loop opens; single-turn tasksets may set `prompt` and let
-  `SingleAgentEnv` handle everything).
+  the prompt from `DatasetProvider` (the framework sends it; the relay opens with a
+  bare `turn()`), `multi_turn`, `answer`, `config_path`, `env_name`, `info`;
+  `Task.key = llenvs:<env_name>:<task_index>`.
 - **`LLEnvsTaskset.load()`**: `DatasetProvider.get_items()` → yield tasks (drop
   `episode_id` etc. as in the miles exporter; identity via `Task.key`).
-- **`LLEnvsEnv(vf.Env[LLEnvsEnvConfig])`** (one `player: vf.AgentConfig` seat):
+- **`LLEnvsEnv(vf.Env[LLEnvsEnvConfig])`** (one `agent: vf.AgentConfig` seat plus `max_steps`):
   `run()` = fresh llenvs env via `EnvironmentFactory` in `to_thread`, `reset(task_index)`,
   then the textarena/openenv relay loop — `turn(observation)` → llenvs extraction /
   tool parsing → `to_thread(env.step)` → feedback message; named stops
-  (`env_terminated`, `env_truncated`, `empty_action`, `env_error`); post-loop:
+  (`env_terminated`, `env_truncated`, `max_steps`, `empty_action`; environment exceptions
+  raise so the framework records the episode error and retries); post-loop:
   weighted signals → `record_reward`, weight-0 → `record_metric`, per-turn totals →
   `trace.info["llenvs"]["turn_rewards"]` (the channel a turn-credit algorithm reads;
   `info` not `metrics`, to keep logging clean), plus per-turn signal breakdowns.
@@ -338,3 +348,258 @@ structural costs are operational (env servers, venv co-installation) and ecosyst
   extractor should see).
 - Where `group_size` interacts with `ratio`-mixed multi-source runs when only one source
   is llenvs.
+
+## `llenvs_turn_grpo` fork patch specification
+
+The llenvs side of turn-level credit ships in the plugin: `LLEnvsEnv` records each step's
+`SignalBundle.total` in `trace.info["llenvs"]["turn_rewards"]` (decision *i* = the *i*-th
+policy turn) and keeps `trace.reward == sum(turn_rewards)`. The prime-rl side is a
+three-file patch plus tests, applied to a **prime-rl checkout** (verified against `main` @
+`3fc28dd`), not to this repo. It relies on two verified transport facts: `trace.info` is a
+regular serialized `Trace` field (the env-server msgpack wire trims only tensors), and
+`assign_advantages(trace, list[float])` takes exactly `Σ sum(node.mask)` values over the
+masked nodes in `trace.nodes` order — so decision *i* ↔ the *i*-th masked node on a linear
+relay trace. `Branch.advantages` spreads node advantages onto the flat sample and
+`trace_to_samples` ships them verbatim: **zero transport or trainer changes.** Stock prime-rl
+already trains llenvs-env traces with trajectory-level GRPO; this patch only adds
+per-decision credit.
+
+Discounting is per **decision**, never per token (a per-token γ would decay across a
+1000-token turn), and there is one forward pass per trajectory — credit rides the advantage
+vector.
+
+**1. New `src/prime_rl/orchestrator/algo/llenvs_turn_grpo.py`**
+
+```python
+"""llenvs turn-level GRPO: per-decision credit from ``trace.info["llenvs"]``.
+
+The llenvs-env relay records each environment step's reward total in
+``trace.info["llenvs"]["turn_rewards"]`` (decision i = the i-th policy turn) and
+keeps ``trace.reward == sum(turn_rewards)``. This algorithm turns those per-turn
+rewards into per-decision advantages — return-to-go with a per-DECISION discount,
+normalized group-relative over the pooled decision returns of the cohort — and
+broadcasts each decision's advantage over its turn's sampled tokens. Traces
+without usable turn data (no llenvs payload, a forked trace, or a harness that
+sampled several nodes per turn) fall back to the stock GRPO scalar, so a group
+with no turn data trains exactly like ``grpo``.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import TYPE_CHECKING
+
+import verifiers.v1 as vf
+
+from prime_rl.configs.algorithm import LLEnvsTurnGRPOAlgoConfig
+from prime_rl.orchestrator.algo.base import Algorithm, iter_trainable_traces
+from prime_rl.orchestrator.algo.routing import assign_advantages
+from prime_rl.utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from prime_rl.orchestrator.clients import InferenceClient
+
+
+def turn_rewards(trace: vf.Trace) -> list[float] | None:
+    """The relay's per-turn reward totals, or None when the trace carries none."""
+    payload = trace.info.get("llenvs")
+    if not isinstance(payload, dict):
+        return None
+    rewards = payload.get("turn_rewards")
+    if not isinstance(rewards, list) or not rewards:
+        return None
+    return [float(r) for r in rewards]
+
+
+def decision_spans(trace: vf.Trace) -> list[int]:
+    """Sampled-token count of each masked node in ``trace.nodes`` order — the
+    layout ``assign_advantages`` expects."""
+    return [sum(node.mask) for node in trace.nodes if any(node.mask)]
+
+
+def returns_to_go(rewards: list[float], gamma: float) -> list[float]:
+    """G_i = sum_{j >= i} gamma^(j - i) * r_j, discounted per decision."""
+    returns = [0.0] * len(rewards)
+    acc = 0.0
+    for i in range(len(rewards) - 1, -1, -1):
+        acc = rewards[i] + gamma * acc
+        returns[i] = acc
+    return returns
+
+
+def align_turn_rewards(trace: vf.Trace) -> tuple[list[float], list[int]] | None:
+    """Per-decision rewards aligned to the trace's masked nodes, or None when the
+    trace is not eligible for turn-level credit (it then gets the GRPO scalar)."""
+    rewards = turn_rewards(trace)
+    if rewards is None:
+        return None
+    logger = get_logger()
+    if trace.num_branches != 1:
+        logger.warning(
+            f"llenvs_turn_grpo: trace {trace.id!r} has {trace.num_branches} branches; falling back to GRPO"
+        )
+        return None
+    spans = decision_spans(trace)
+    missing = len(spans) - len(rewards)
+    if missing not in (0, 1):
+        logger.warning(
+            f"llenvs_turn_grpo: trace {trace.id!r} has {len(spans)} sampled nodes for {len(rewards)} "
+            "turn rewards (use a one-call-per-turn harness such as `null`); falling back to GRPO"
+        )
+        return None
+    # A trailing sampled turn the env never stepped (e.g. an empty reply) earns 0.
+    return rewards + [0.0] * missing, spans
+
+
+class LLEnvsTurnGRPOAlgorithm(Algorithm):
+    """GRPO with per-decision credit for llenvs-env relay traces."""
+
+    def __init__(self, config: LLEnvsTurnGRPOAlgoConfig, clients: InferenceClient):
+        super().__init__(config, clients)
+        self.gamma = config.gamma
+        self.std_normalization = config.std_normalization
+        self.length_weighting = config.length_weighting
+
+    async def score_group(self, episodes: list[vf.Episode]) -> None:
+        traces = [trace for _, trace in iter_trainable_traces(episodes)]
+        if not traces:
+            return
+        aligned = {
+            i: alignment
+            for i, trace in enumerate(traces)
+            if (alignment := align_turn_rewards(trace)) is not None
+        }
+        returns = {i: returns_to_go(rewards, self.gamma) for i, (rewards, _) in aligned.items()}
+        pooled = [g for gs in returns.values() for g in gs]
+        mean = sum(pooled) / len(pooled) if pooled else 0.0
+        std = 1.0
+        if self.std_normalization and len(pooled) > 1:
+            std = math.sqrt(sum((g - mean) ** 2 for g in pooled) / len(pooled)) or 1.0
+        scalar_mean = sum(trace.reward for trace in traces) / len(traces)
+        for i, trace in enumerate(traces):
+            if i not in aligned:
+                assign_advantages(trace, trace.reward - scalar_mean)
+                continue
+            _, spans = aligned[i]
+            per_token: list[float] = []
+            for g, span in zip(returns[i], spans, strict=True):
+                advantage = (g - mean) / std
+                if self.length_weighting == "span_normalized" and span:
+                    advantage /= span
+                per_token.extend([advantage] * span)
+            assign_advantages(trace, per_token)
+```
+
+Eligibility per trace: a non-empty `turn_rewards` list, a single branch, and
+`len(masked nodes) − len(turn_rewards) ∈ {0, 1}` (the trailing un-stepped turn — an empty
+reply — is padded with 0.0; any other mismatch means the harness sampled several nodes per
+turn, so the decision↔node mapping is unknown and the trace falls back). Ineligible traces
+get the stock GRPO scalar `trace.reward − group mean`; a group with no eligible trace is
+`GRPOAlgorithm` exactly. The connector invariant `trace.reward == Σ turn_rewards` keeps
+mixed groups on one reward scale (pooled-decision baseline for eligible traces, scalar
+baseline for the rest). `filter_zero_advantages` (default on) then drops zero-credit
+decisions from the RL loss — intended.
+
+**2. `packages/prime-rl-configs/src/prime_rl/configs/algorithm.py` — the config class**
+
+Add before the `AlgoConfig` union:
+
+```python
+class LLEnvsTurnGRPOAlgoConfig(BaseAlgoConfig):
+    type: Literal["llenvs_turn_grpo"] = "llenvs_turn_grpo"
+    """Turn-level GRPO for llenvs-env relay traces: per-decision return-to-go
+    from ``trace.info["llenvs"]["turn_rewards"]``, normalized over the group's
+    pooled decision returns and broadcast over each turn's sampled tokens
+    (``rl`` loss). Traces without turn data get the stock GRPO scalar."""
+
+    action_loss_type: ClassVar[ActionLossType] = "rl"
+
+    gamma: float = Field(1.0, ge=0.0, le=1.0)
+    """Per-DECISION discount of the return-to-go (never per token)."""
+
+    std_normalization: bool = False
+    """Also divide by the std of the pooled decision returns (stock GRPO
+    parity is mean-only)."""
+
+    length_weighting: Literal["uniform", "span_normalized"] = "uniform"
+    """``uniform``: every sampled token of a decision carries its advantage;
+    ``span_normalized``: divide by the decision's token count so each decision
+    weighs the same regardless of its length."""
+
+    def validate_env(self, env_config: vf.EnvConfig) -> None:
+        """Require the llenvs-env relay: it is what records the per-turn rewards."""
+        try:
+            from llenvs_env.env import LLEnvsEnvConfig
+        except ImportError as e:
+            raise ValueError(
+                "algorithm 'llenvs_turn_grpo' needs the llenvs-env plugin "
+                "(`pip install 'llenvs[verifiers]'` in the orchestrator venv)."
+            ) from e
+        if not isinstance(env_config, LLEnvsEnvConfig):
+            raise ValueError(
+                "algorithm 'llenvs_turn_grpo' reads the llenvs-env relay's per-turn rewards, "
+                f"but this env resolved to {type(env_config).__name__}. Use 'grpo' for other envs."
+            )
+```
+
+Then add `| LLEnvsTurnGRPOAlgoConfig` to the `AlgoConfig` union and a bullet to its
+docstring list:
+``- ``llenvs_turn_grpo`` — GRPO with per-decision credit from llenvs-env turn rewards.``
+
+**3. `src/prime_rl/orchestrator/algo/__init__.py` — registry**
+
+```python
+from prime_rl.orchestrator.algo.llenvs_turn_grpo import LLEnvsTurnGRPOAlgorithm
+...
+ALGORITHM_CLASSES["llenvs_turn_grpo"] = LLEnvsTurnGRPOAlgorithm   # in the dict literal
+...
+__all__ += ["LLEnvsTurnGRPOAlgorithm"]                            # in the list literal
+```
+
+**4. `tests/unit/orchestrator/test_algorithms.py`**
+
+- Add `("llenvs_turn_grpo", {}, "policy", "rl")` to the vetted-defaults parametrize row;
+  assert `_build(type="llenvs_turn_grpo").gamma == 1.0` and that `validate_env` rejects a
+  plain `vf.EnvConfig()` (`match="llenvs-env"`).
+- A `_relay_episode(turn_rewards, spans)` helper modeled on the file's `_make_episode`:
+  alternating user/assistant `MessageNode`s, the *k*-th assistant node with `span[k]`
+  masked tokens, `trace.info={"llenvs": {"turn_rewards": turn_rewards}}`,
+  `rewards={"llenvs/progress": vf.Reward(score=sum(turn_rewards))}`; build the algorithm
+  with `LLEnvsTurnGRPOAlgorithm(_build(type="llenvs_turn_grpo", **kw), MagicMock())` and
+  drive `asyncio.run(algo.score_group([...]))`, reading `node.advantages` per masked node.
+- Behaviors: (a) return-to-go with γ=1 over a two-episode group (`[1, 0]` and `[0, 0]` →
+  pooled mean 0.25 → node advantages `0.75, -0.25` / `-0.25, -0.25`); (b) γ=0.5 on
+  `[0, 1]` → returns `[0.5, 1.0]`; (c) broadcast lengths equal `sum(node.mask)` per node
+  and `trace_to_samples` ships a full-length advantage stream; (d) trailing un-stepped
+  turn padded with 0.0; (e) three sampled nodes for one reward → scalar fallback equal to
+  `GRPOAlgorithm`'s; (f) multi-branch trace → fallback; (g) a group with no turn data →
+  per-token advantages identical to `GRPOAlgorithm`; (h) `span_normalized` divides by the
+  span; (i) `std_normalization` divides by the pooled std, with the zero-std guard.
+
+**Launch** (per-source algorithm, verified at `configs/orchestrator.py` `TrainSourceConfig.algo`):
+
+```toml
+[[orchestrator.train.source]]
+name = "llenvs"
+env.taskset.id = "llenvs-env"
+env.taskset.config = "/abs/path/config.yaml"
+env.agent.harness.id = "null"          # one model call per turn — required for the node↔turn mapping
+algo.type = "llenvs_turn_grpo"
+algo.gamma = 1.0
+```
+
+Verification in the checkout: `uv run pytest tests/unit/orchestrator/test_algorithms.py -q`.
+
+**Upstream alternative.** A dotted-path algorithm registry (an `import_path` on
+`BaseAlgoConfig`, mirroring `CustomLossConfig.import_path` and echo's token filter) would
+let this module live in the llenvs distribution and shrink the patch to zero files.
+
+**Apply-time verifications.** Re-verify at the verifiers commit prime-rl vendors
+(`b2e4e81` at analysis time): `assign_advantages`' masked-node order, `Trace.info` on the
+msgpack wire (statically verified: a regular field; `EXCLUDE_FIELDS` trims only tensors),
+`Segment.last_reply` vs full messages for reasoning models (what the llenvs extractors see),
+and how `group_size` interacts with `ratio`-mixed sources when only one source is llenvs.
+
+**Estimator caveat.** Turn-GRPO with a pooled group baseline is a pragmatic first
+estimator; per-turn-index baselines and turn-PPO (decision-boundary value extraction) are
+research knobs on top of the same channel, mirroring the miles Tier-2 caveat.

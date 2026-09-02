@@ -88,8 +88,11 @@ class TaskItem:
     messages: tuple[dict[str, Any], ...]
     ground_truth: str | None    # None for multi-turn environments
     metadata: dict[str, Any]
-    images: tuple[ImageContent, ...] = ()  # Images from the observation
+    images: ObservationImages = ObservationImages()      # Task and state images
+    available_tools: tuple[ToolDefinition, ...] = ()    # Tools advertised at reset
 ```
+
+`available_tools` lets text-only training loops advertise an environment's tools in the prompt (for example through `HermesToolCallParser.format_tools()`); it is not a column of `to_hf_dataset()`.
 
 ## Token Masking for Multi-Turn
 
@@ -210,6 +213,10 @@ For multi-turn OpenRLHF training, use the `TrajectoryMasker` directly as a build
 ### miles
 
 miles gets a full connector rather than a thin wrapper: a custom reward model, a prompt-data exporter, an agent function that drives multi-turn episodes against miles' token-in/token-out session server, a rollout data source, and hooks for turn-level credit assignment. See the dedicated [miles Training](miles.md) guide.
+
+### prime-rl / verifiers v1
+
+llenvs ships a verifiers v1 plugin package (`llenvs_env`, plugin id `llenvs-env`) that exposes any configured environment as a verifiers taskset plus a relay env, consumable by `uv run eval`, GEPA, and prime-rl training sources without a fork. See the dedicated [prime-rl / verifiers v1 Training](prime-rl.md) guide.
 
 ## Configuration-Driven Setup
 

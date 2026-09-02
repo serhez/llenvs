@@ -2,6 +2,8 @@
 
 Wraps [verifiers](https://github.com/PrimeIntellect-ai/verifiers) **v1** tasksets and environments as llenvs MDP environments — including multi-agent envs, whose untrainable seats are driven by `env_llm`. The legacy v0 API is served by the sibling [Verifiers adapter](verifiers.md); both APIs ship in the same installed `verifiers` package.
 
+The opposite direction — exposing llenvs environments *to* verifiers, GEPA, and prime-rl — is the `llenvs_env` plugin package described in the [prime-rl / verifiers v1 Training](../guides/prime-rl.md) guide.
+
 ## Installation
 
 ```bash

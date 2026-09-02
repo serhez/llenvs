@@ -86,6 +86,7 @@ nav:
     - Containers: guides/containers.md
     - RL Training: guides/rl-training.md
     - miles Training: guides/miles.md
+    - prime-rl / verifiers v1 Training: guides/prime-rl.md
     - Multimodal Observations: guides/multimodal.md
     - Library Landscape: guides/landscape.md
   - Adapters:

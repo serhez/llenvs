@@ -11,6 +11,7 @@ from typing import Any
 
 from llenvs.core.environment import Environment
 from llenvs.core.state import ObservationImages
+from llenvs.core.tools import ToolDefinition
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class TaskItem:
         ground_truth: Expected answer (None for multi-turn environments).
         metadata: Additional task metadata.
         images: Images from the observation, separated by source.
+        available_tools: Tools advertised by the initial observation.
     """
 
     task_index: int
@@ -32,6 +34,7 @@ class TaskItem:
     ground_truth: str | None
     metadata: dict[str, Any]
     images: ObservationImages = ObservationImages()
+    available_tools: tuple[ToolDefinition, ...] = ()
 
 
 class DatasetProvider:
@@ -88,6 +91,7 @@ class DatasetProvider:
                 **info,
             },
             images=state.observation.get_images(),
+            available_tools=state.observation.available_tools,
         )
 
     def get_items(self, indices: list[int] | None = None) -> list[TaskItem]:

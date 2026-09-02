@@ -183,7 +183,7 @@ for item in provider:
     print(item.prompt, item.ground_truth)
 ```
 
-Framework-specific adapters for **veRL**, **TRL**, and **OpenRLHF** provide ready-made reward functions and dataset helpers. A `TrajectoryMasker` converts multi-turn trajectories into per-token source masks for training.
+Framework-specific adapters for **veRL**, **TRL**, and **OpenRLHF** provide ready-made reward functions and dataset helpers. A `TrajectoryMasker` converts multi-turn trajectories into per-token source masks for training. Full connectors exist for **miles** (reward model, agent function, data source) and for **prime-rl / verifiers v1** (the `llenvs_env` plugin package, id `llenvs-env`, usable with `uv run eval`, GEPA, and prime-rl training sources).
 
 ## Segmentation
 
