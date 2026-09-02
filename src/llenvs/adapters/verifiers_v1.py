@@ -364,7 +364,7 @@ class _StubInteraction:
     Replicates the exact turn contract: the prompted/bare-turn rule
     matrix, the per-turn refusal check (max_turns, then Trace-boundary
     ``@stop`` hooks — a refused turn commits nothing and returns a
-    terminated Segment), segment-scoped ``root_reply`` hygiene, and close
+    terminated Segment), segment-scoped ``root_reply`` hygiene (where the installed verifiers has the field), and close
     semantics (stop as ``user_closed``, offline scoring unless failed,
     ``is_completed``/``ok`` stamps). The trace is live from the moment
     the interaction exists.
@@ -432,13 +432,19 @@ class _StubInteraction:
                 prompt_messages.insert(0, vf.SystemMessage(content=self._task.data.system_prompt))
 
         nodes_before = len(trace.nodes)
-        trace.root_reply = None
+        # ``Trace.root_reply`` (a reply override the rollout resets per segment)
+        # exists only on newer verifiers; mirror the reset where the field exists.
+        has_root_reply = hasattr(trace, "root_reply")
+        if has_root_reply:
+            trace.root_reply = None
         reply = await self._agent.reply_provider()(trace, prompt_messages)
         _commit_reply(self._v1, trace, prompt_messages, reply)
         # Offline commits never produce tool messages, so the segment is
         # exactly the sampled nodes this turn added.
         segment_messages = [node.message for node in trace.nodes[nodes_before:] if node.sampled]
-        return vf.Segment(messages=segment_messages, root_reply=trace.root_reply)
+        if has_root_reply:
+            return vf.Segment(messages=segment_messages, root_reply=trace.root_reply)
+        return vf.Segment(messages=segment_messages)
 
     async def _refused(self) -> str | None:
         """The pre-turn refusal check (``RolloutSession.refused`` offline).

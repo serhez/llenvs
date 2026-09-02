@@ -818,6 +818,32 @@ class TestStubInteractionTurnRules:
         assert RootReplyObservingProvider.observed == [None]
         assert segment.root_reply is None
 
+    def test_root_reply_left_alone_when_trace_lacks_it(self):
+        """verifiers releases without ``Trace.root_reply``: the field is never set."""
+
+        class LegacyTrace(FakeTrace):
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                del self.root_reply
+
+            @property
+            def last_reply(self) -> str:
+                for node in reversed(self.nodes):
+                    if node.sampled and getattr(node.message, "role", "") == "assistant":
+                        return (node.message.content or "").strip()
+                return ""
+
+        v1 = _make_fake_v1()
+        v1.vf.Trace = LegacyTrace
+        interaction = _make_interaction(_simple_task(), v1=v1, policy=ScriptedProvider())
+        assert not hasattr(interaction.trace, "root_reply")
+
+        segment = asyncio.run(interaction.turn())
+
+        assert segment.messages
+        assert segment.root_reply is None
+        assert not hasattr(interaction.trace, "root_reply")
+
     def test_refused_turn_preserves_root_reply(self):
         interaction = _make_interaction(_simple_task(), max_turns=0)
         interaction.trace.root_reply = "prior"
