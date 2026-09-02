@@ -29,8 +29,10 @@ __all__ = ["LLEnvsTasksetConfig", "LLEnvsData", "LLEnvsTask", "LLEnvsTaskset"]
 class LLEnvsTasksetConfig(vf.TasksetConfig):
     """``--env.taskset.*`` knobs for the ``llenvs-env`` taskset."""
 
-    config: Path
-    """Path to the llenvs ``EvalConfig`` YAML (environments, extractors, prompts)."""
+    config: Path | None = None
+    """Path to the llenvs ``EvalConfig`` YAML (environments, extractors, prompts).
+    Required to load tasks; optional here because the verifiers CLI instantiates
+    the narrowed config from the taskset id alone before reading the flags."""
     env_name: str | None = None
     """Which ``environments[]`` entry to use; required when the YAML lists several."""
     num_tasks: int | None = Field(None, ge=1)
@@ -95,6 +97,11 @@ class LLEnvsTaskset(vf.Taskset[LLEnvsTask, LLEnvsTasksetConfig]):
 
     def load(self) -> Iterable[LLEnvsTask]:
         cfg = self.config
+        if cfg.config is None:
+            raise ValueError(
+                "llenvs-env needs the llenvs config path: set --env.taskset.config <eval.yaml> "
+                "(TOML: env.taskset.config)."
+            )
         eval_cfg = _config.load_eval_config(cfg.config)
         env_cfg = _config.select_environment(eval_cfg, cfg.env_name)
         system_prompt = _config.resolve_config_system_prompt(eval_cfg, env_cfg)

@@ -18,7 +18,7 @@ verifiers resolves plugin ids to installed modules (`llenvs-env` → `llenvs_env
 
 | `--env.taskset.*` field | Type | Meaning |
 | --- | --- | --- |
-| `config` | path (required) | llenvs `EvalConfig` YAML: environments, extractors, system prompt |
+| `config` | path (required to load) | llenvs `EvalConfig` YAML: environments, extractors, system prompt |
 | `env_name` | str | Which `environments[]` entry to use; required when the YAML lists several |
 | `num_tasks` | int | Keep only the first `num_tasks` tasks (applied after shuffling) |
 | `shuffle_seed` | int | Shuffle task indices with this seed first; prime-rl samples sources in order, so shuffling is the taskset's job |
@@ -115,4 +115,10 @@ Stock prime-rl trains on `trace.reward` (GRPO broadcasts one scalar over the tra
 
 ## Testing
 
-`tests/test_llenvs_env_config.py` and `tests/test_llenvs_env_relay.py` cover the verifiers-free halves (config loading and caching, feedback/tool text, action parsing) and run in the base venv. `tests/test_llenvs_env_taskset.py` and `tests/test_llenvs_env_env.py` drive the taskset and the relay loop with stub `Agents`/`Interaction` objects from `tests/llenvs_env_stubs.py` (token-free trace commits, a scripted mock environment) and are skipped unless `verifiers.v1` is importable — run them in a venv with the `verifiers` extra installed. End-to-end validation is `uv run eval llenvs-env ...` in a verifiers checkout against a served model.
+`tests/test_llenvs_env_config.py` and `tests/test_llenvs_env_relay.py` cover the verifiers-free halves (config loading and caching, feedback/tool text, action parsing) and run in the base venv. `tests/test_llenvs_env_taskset.py` and `tests/test_llenvs_env_env.py` drive the taskset and the relay loop with stub `Agents`/`Interaction` objects from `tests/llenvs_env_stubs.py` (token-free trace commits, a scripted mock environment) and are skipped unless `verifiers.v1` is importable — run them in a venv with the `verifiers` extra installed. A model-free smoke that exercises the plugin loader, CLI narrowing, taskset loading and task setup is verifiers' validate CLI:
+
+```bash
+uv run validate llenvs-env --taskset.config path/to/eval.yaml --runtime.type subprocess -o runs/
+```
+
+llenvs tasks carry no model-free gold check, so every task ends as `unchecked`; what the run proves is that the taskset resolves, its tasks load with the expected keys and system prompts, and nothing errors. End-to-end validation is `uv run eval llenvs-env ...` in a verifiers checkout against a served model.

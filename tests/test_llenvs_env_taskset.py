@@ -141,9 +141,15 @@ def relay(tmp_path: Path) -> Path:
 
 
 class TestTasksetConfig:
-    def test_config_path_is_required(self):
-        with pytest.raises(ValidationError):
-            LLEnvsTasksetConfig(id="llenvs-env")
+    def test_constructs_from_id_alone(self):
+        # The verifiers CLI narrows the run config by instantiating the taskset
+        # config from its id before any flag is parsed; a required field breaks it.
+        cfg = LLEnvsTasksetConfig(id="llenvs-env")
+        assert cfg.config is None
+
+    def test_config_path_is_required_to_load(self):
+        with pytest.raises(ValueError, match="env.taskset.config"):
+            list(LLEnvsTaskset(LLEnvsTasksetConfig(id="llenvs-env")))
 
     def test_defaults(self, single):
         cfg = LLEnvsTasksetConfig(id="llenvs-env", config=single)
