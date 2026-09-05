@@ -4,6 +4,7 @@ Extractors parse model responses to extract the final answer,
 handling various formats (XML tags, regex patterns, etc.).
 """
 
+import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -148,6 +149,92 @@ class RegexExtractor:
             "match_start": match.start(),
             "match_end": match.end(),
             "num_matches": len(matches),
+        }
+
+
+@dataclass
+class JSONFieldExtractor:
+    """Extract a top-level scalar field from a JSON object.
+
+    The response must be either a JSON object in its entirety or a JSON object
+    inside a Markdown code fence labelled ``json`` (or with no label). JSON
+    embedded in surrounding prose is deliberately ignored. Object and array
+    field values are rejected because extractors return scalar text.
+
+    Attributes:
+        field: Top-level object field to extract.
+        allow_code_fences: Whether to inspect JSON and unlabelled code fences.
+        strip_whitespace: Whether to strip whitespace from string values.
+    """
+
+    field: str
+    allow_code_fences: bool = True
+    strip_whitespace: bool = True
+
+    _fence_pattern = re.compile(
+        r"```(?P<label>[^\r\n`]*)\r?\n(?P<body>.*?)```",
+        re.DOTALL,
+    )
+
+    def _extract_scalar(self, text: str) -> str | None:
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(parsed, dict) or self.field not in parsed:
+            return None
+
+        value = parsed[self.field]
+        if value is None or isinstance(value, (dict, list)):
+            return None
+        if isinstance(value, str):
+            return value.strip() if self.strip_whitespace else value
+        if isinstance(value, (bool, int, float)):
+            try:
+                return json.dumps(value, ensure_ascii=False, allow_nan=False)
+            except ValueError:
+                return None
+        return None
+
+    def extract(self, response: str) -> tuple[str | None, dict[str, Any]]:
+        """Extract the configured field from a whole or fenced JSON object."""
+        stripped = response.strip()
+        value = self._extract_scalar(stripped)
+        if value is not None:
+            return value, {
+                "found": True,
+                "format": "json_field",
+                "field": self.field,
+                "source": "whole_response",
+                "match_start": 0,
+                "match_end": len(response),
+            }
+
+        if self.allow_code_fences:
+            matches = [
+                match
+                for match in self._fence_pattern.finditer(response)
+                if match.group("label").strip().lower() in {"", "json"}
+            ]
+            for match in reversed(matches):
+                value = self._extract_scalar(match.group("body").strip())
+                if value is not None:
+                    return value, {
+                        "found": True,
+                        "format": "json_field",
+                        "field": self.field,
+                        "source": "code_fence",
+                        "match_start": match.start(),
+                        "match_end": match.end(),
+                        "num_candidate_fences": len(matches),
+                    }
+
+        return None, {
+            "found": False,
+            "format": "json_field",
+            "field": self.field,
+            "allow_code_fences": self.allow_code_fences,
+            "error": "No valid JSON object with a scalar field value was found.",
         }
 
 

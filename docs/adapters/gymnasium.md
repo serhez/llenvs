@@ -261,7 +261,11 @@ On successful steps, both action fields are populated:
 - `extracted_action`: after answer extraction (e.g., `"0"`)
 - `resolved_action`: the gymnasium action formatted via `ActionMapper.format_action()` (e.g., `"left"`)
 
-The raw model generation is available on the `Action` object passed to `step()`. On extraction failure, both fields are `None`. On mapping failure (extraction succeeded but action invalid), `extracted_action` is set but `resolved_action` is `None`.
+The raw model generation is available on the `Action` object passed to `step()`. On
+extraction failure, `extracted_action` is `None`; `resolved_action` contains the
+configured invalid-action history marker by default (`"[invalid action]"`) and is
+`None` when no marker is configured. On mapping failure (extraction succeeded but
+the action is invalid), `extracted_action` is set and `resolved_action` is `None`.
 
 ### Using AnswerExtractor
 
@@ -280,6 +284,11 @@ env = GymnasiumEnvironment(
 # LLM responds: "I should go left. <action>left</action>"
 # Extractor pulls "left", mapper converts to 0
 ```
+
+For JSON-producing models, use `JSONFieldExtractor(field="action")`. It accepts a
+whole JSON object such as `{"action": "left"}` or the same object in a `json` or
+unlabelled Markdown code fence. It deliberately rejects JSON embedded in prose; the
+action mapper still validates the extracted value against the action space.
 
 ## ANSI Render
 
@@ -324,10 +333,15 @@ Built-in presets for popular gymnasium-compatible environments:
 
 | Preset ID | Description | Grid | Max Steps |
 |-----------|-------------|------|-----------|
-| `frozen_lake` | Navigate frozen lake 4x4 (slippery) | 4x4 | 100 |
-| `frozen_lake/8x8` | Navigate frozen lake 8x8 (slippery) | 8x8 | 200 |
+| `frozen_lake` | Navigate frozen lake 4x4 | 4x4 | 100 |
+| `frozen_lake/8x8` | Navigate frozen lake 8x8 | 8x8 | 200 |
 
 Actions: `left`, `down`, `right`, `up`. Observation: ASCII grid rendered by `FrozenLakeObservationMapper` (auto-created from the gym env's `desc`). The 8x8 preset passes `make_kwargs={"map_name": "8x8"}` to `gymnasium.make()`.
+
+The generated task description follows the configured dynamics: the Gymnasium
+default says the surface is slippery, while `is_slippery=False` says that actions
+move deterministically. An explicit `prompts["description"]` always takes
+precedence.
 
 ```python
 adapter = GymnasiumAdapter()

@@ -1533,6 +1533,54 @@ class TestFrozenLakePreset:
         assert preset["make_kwargs"] == {"map_name": "8x8"}
         assert preset["max_steps"] == 200
 
+    @pytest.mark.parametrize("name", ["frozen_lake", "frozen_lake/8x8"])
+    def test_non_slippery_task_description_says_actions_are_deterministic(
+        self, import_adapter, name
+    ):
+        env = import_adapter.GymnasiumAdapter().get_environment(
+            name,
+            gym_env=MockGymEnv(action_space=MockDiscrete(4)),
+            is_slippery=False,
+        )
+
+        state, _ = env.reset()
+        description = state.observation.task.text.lower()
+
+        assert "deterministically" in description
+        assert "slippery" not in description
+
+    @pytest.mark.parametrize("name", ["frozen_lake", "frozen_lake/8x8"])
+    def test_slippery_task_description_discloses_stochastic_movement(
+        self, import_adapter, name
+    ):
+        env = import_adapter.GymnasiumAdapter().get_environment(
+            name,
+            gym_env=MockGymEnv(action_space=MockDiscrete(4)),
+            is_slippery=True,
+        )
+
+        state, _ = env.reset()
+        description = state.observation.task.text.lower()
+
+        assert "slippery" in description
+        assert "may" in description
+
+    def test_explicit_frozen_lake_description_is_not_overwritten(
+        self, import_adapter
+    ):
+        env = import_adapter.GymnasiumAdapter().get_environment(
+            "frozen_lake",
+            gym_env=MockGymEnv(action_space=MockDiscrete(4)),
+            is_slippery=False,
+            prompts={"description": "Use the custom dynamics description."},
+        )
+
+        state, _ = env.reset()
+        description = state.observation.task.text
+
+        assert "Use the custom dynamics description." in description
+        assert "deterministically" not in description.lower()
+
 
 # =============================================================================
 # Prompt Separation (task vs state)
