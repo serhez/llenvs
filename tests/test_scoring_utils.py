@@ -33,6 +33,7 @@ class _CharTokenizer:
 
     def __init__(self) -> None:
         self.template_kwargs_seen: list[dict] = []
+        self.encode_kwargs_seen: list[dict] = []
 
     def apply_chat_template(self, conversation, *, tokenize=False,
                             add_generation_prompt=True, **kwargs) -> str:
@@ -41,7 +42,8 @@ class _CharTokenizer:
         self.template_kwargs_seen.append(kwargs)
         return self.PROMPT
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **kwargs) -> list[int]:
+        self.encode_kwargs_seen.append(kwargs)
         return [ord(c) for c in text]
 
     def decode(self, ids) -> str:
@@ -51,7 +53,8 @@ class _CharTokenizer:
 class _FixedLenTokenizer(_CharTokenizer):
     """encode() ignores the continuation so full_ids <= prompt_ids (degenerate)."""
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **kwargs) -> list[int]:
+        self.encode_kwargs_seen.append(kwargs)
         return [ord(c) for c in self.PROMPT]
 
 
@@ -74,6 +77,19 @@ class TestBuildScoringInputs:
         tok = _CharTokenizer()
         build_scoring_inputs(tok, {"enable_thinking": False}, [_msgs("hi")], ["A"])
         assert tok.template_kwargs_seen == [{"enable_thinking": False}]
+
+    def test_rendered_chat_text_is_encoded_without_adding_special_tokens(self):
+        """The chat template already emits BOS/control tokens.
+
+        Asking ``encode`` to add them again can prepend a second BOS under
+        older Transformers releases and shift every continuation-token span.
+        """
+        tok = _CharTokenizer()
+        build_scoring_inputs(tok, {}, [_msgs("hi")], ["AB"])
+        assert tok.encode_kwargs_seen == [
+            {"add_special_tokens": False},
+            {"add_special_tokens": False},
+        ]
 
     def test_empty_continuation_yields_empty_result_and_is_not_scored(self):
         tok = _CharTokenizer()

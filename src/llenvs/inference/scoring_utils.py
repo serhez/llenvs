@@ -67,7 +67,11 @@ def build_scoring_inputs(
             add_generation_prompt=True,
             **chat_template_kwargs,
         )
-        prompt_ids = tokenizer.encode(prompt_text)
+        # ``apply_chat_template(tokenize=False)`` has already emitted the
+        # model's BOS/control tokens. Letting ``encode`` add special tokens a
+        # second time can prepend a duplicate BOS (notably with Gemma under
+        # older Transformers releases), shifting the continuation span.
+        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
         if not continuation:
             empty_results[index] = ScoringResult(
                 token_scores=(), prompt_tokens=len(prompt_ids), scored_tokens=0
@@ -75,7 +79,7 @@ def build_scoring_inputs(
             continue
 
         full_text = prompt_text + continuation
-        full_ids = tokenizer.encode(full_text)
+        full_ids = tokenizer.encode(full_text, add_special_tokens=False)
         if len(full_ids) <= len(prompt_ids):
             empty_results[index] = ScoringResult(
                 token_scores=(), prompt_tokens=len(prompt_ids), scored_tokens=0

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import signal
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -369,7 +371,7 @@ class _CharTokenizer:
         self.template_kwargs_seen.append(kwargs)
         return self.PROMPT
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **kwargs) -> list[int]:
         return [ord(c) for c in text]
 
     def decode(self, ids) -> str:
@@ -416,6 +418,56 @@ def _wire_scoring(backend, tokenizer=None):
     fake = _FakeCompletions()
     backend._openai._async_client.completions = fake
     return tok, fake
+
+
+def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(
+    tmp_path, monkeypatch
+):
+    """Transformers 4.x expects a mapping where Gemma's v5 metadata has a list.
+
+    The fallback must preserve those entries as ordinary additional special
+    tokens instead of requiring a host Transformers upgrade or mutating the HF
+    cache shared with the container.
+    """
+    from llenvs.inference.backends import vllm_singularity as mod
+
+    tokenizer_config = tmp_path / "tokenizer_config.json"
+    tokenizer_config.write_text(
+        json.dumps({"extra_special_tokens": ["<|video|>"]})
+    )
+    sentinel = object()
+
+    class _FakeAutoTokenizer:
+        calls: list[tuple[str, dict]] = []
+
+        @classmethod
+        def from_pretrained(cls, model_path: str, **kwargs):
+            cls.calls.append((model_path, kwargs))
+            if len(cls.calls) == 1:
+                raise AttributeError("'list' object has no attribute 'keys'")
+            return sentinel
+
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setattr(
+        mod,
+        "_resolve_tokenizer_config_path",
+        lambda _model_path: tokenizer_config,
+        raising=False,
+    )
+
+    assert mod._load_hf_tokenizer("google/gemma-4-31B-it") is sentinel
+    assert _FakeAutoTokenizer.calls == [
+        ("google/gemma-4-31B-it", {}),
+        (
+            "google/gemma-4-31B-it",
+            {
+                "extra_special_tokens": {},
+                "additional_special_tokens": ["<|video|>"],
+            },
+        ),
+    ]
 
 
 class TestSingularityVLLMBackendScoring:

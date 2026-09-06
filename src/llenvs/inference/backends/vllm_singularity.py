@@ -20,6 +20,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import dataclasses
+import json
 import logging
 import os
 import shlex
@@ -46,6 +47,8 @@ from llenvs.inference.scoring_utils import (
 
 _log = logging.getLogger(__name__)
 
+_LEGACY_EXTRA_SPECIAL_TOKENS_ERROR = "'list' object has no attribute 'keys'"
+
 
 def _with_request_thinking_toggle(params: SamplingParams) -> SamplingParams:
     """Map ``params.disable_thinking`` onto vLLM's ``chat_template_kwargs``.
@@ -69,6 +72,47 @@ def _with_request_thinking_toggle(params: SamplingParams) -> SamplingParams:
     return dataclasses.replace(params, extra=extra)
 
 
+def _resolve_tokenizer_config_path(model_path: str) -> Path | None:
+    """Resolve ``tokenizer_config.json`` locally without loading model weights."""
+    local_path = Path(model_path)
+    if local_path.is_dir():
+        config_path = local_path / "tokenizer_config.json"
+        return config_path if config_path.is_file() else None
+
+    try:
+        from transformers.utils.hub import cached_file
+
+        resolved = cached_file(model_path, "tokenizer_config.json")
+    except Exception:
+        # This is a best-effort compatibility path reached only after the
+        # normal tokenizer load has already failed. Preserve that original
+        # error if its cached metadata cannot be resolved.
+        return None
+    return Path(resolved) if resolved is not None else None
+
+
+def _legacy_extra_special_tokens(model_path: str) -> list[Any] | None:
+    """Translate Transformers-5 list metadata for a Transformers-4 host."""
+    config_path = _resolve_tokenizer_config_path(model_path)
+    if config_path is None:
+        return None
+    try:
+        config = json.loads(config_path.read_text())
+    except (OSError, TypeError, ValueError):
+        return None
+
+    extra = config.get("extra_special_tokens")
+    if not isinstance(extra, list):
+        return None
+
+    existing = config.get("additional_special_tokens")
+    combined = list(existing) if isinstance(existing, list) else []
+    for token in extra:
+        if token not in combined:
+            combined.append(token)
+    return combined
+
+
 def _load_hf_tokenizer(model_path: str) -> Any:
     """Load the HF tokenizer for scoring-prompt rendering on the host.
 
@@ -78,7 +122,26 @@ def _load_hf_tokenizer(model_path: str) -> Any:
     """
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(model_path)
+    try:
+        return AutoTokenizer.from_pretrained(model_path)
+    except AttributeError as exc:
+        if _LEGACY_EXTRA_SPECIAL_TOKENS_ERROR not in str(exc):
+            raise
+        additional_special_tokens = _legacy_extra_special_tokens(model_path)
+        if additional_special_tokens is None:
+            raise
+
+        _log.warning(
+            "Tokenizer metadata for %s uses Transformers-5-style list-valued "
+            "extra_special_tokens; loading it through the compatible "
+            "additional_special_tokens field on this host",
+            model_path,
+        )
+        return AutoTokenizer.from_pretrained(
+            model_path,
+            extra_special_tokens={},
+            additional_special_tokens=additional_special_tokens,
+        )
 
 
 def _pick_free_port() -> int:
@@ -204,7 +267,9 @@ class SingularityVLLMBackend(ModelBackend):
         self._max_concurrency = max_concurrency
 
         # --- resolve sif ---
-        sif_resolved = _resolve_default(sif, "LLENVS_SIF") or _resolve_default(None, "LLENVS_VLLM_SIF")
+        sif_resolved = _resolve_default(sif, "LLENVS_SIF") or _resolve_default(
+            None, "LLENVS_VLLM_SIF"
+        )
         if not sif_resolved:
             raise RuntimeError(
                 "SingularityVLLMBackend: no .sif path provided. Pass "
@@ -226,11 +291,7 @@ class SingularityVLLMBackend(ModelBackend):
             binds = [b for b in env_binds if b]
 
         # --- resolve hf_home (and add to binds) ---
-        hf_home_resolved = (
-            hf_home
-            or os.environ.get("HF_HOME")
-            or os.environ.get("LLENVS_HF_HOME")
-        )
+        hf_home_resolved = hf_home or os.environ.get("HF_HOME") or os.environ.get("LLENVS_HF_HOME")
         if hf_home_resolved and hf_home_resolved not in binds:
             binds.append(hf_home_resolved)
         self._hf_home = hf_home_resolved
@@ -301,9 +362,7 @@ class SingularityVLLMBackend(ModelBackend):
             server_log_path = f".llenvs-vllm-serve-{self._port}.log"
         self._log_path = server_log_path
         self._log_fh = open(server_log_path, "ab", buffering=0)
-        self._log_fh.write(
-            f"# singularity exec cmd: {shlex.join(argv)}\n".encode()
-        )
+        self._log_fh.write(f"# singularity exec cmd: {shlex.join(argv)}\n".encode())
 
         _log.info(
             "SingularityVLLMBackend: spawning vllm serve "
@@ -383,9 +442,7 @@ class SingularityVLLMBackend(ModelBackend):
     def model_name(self) -> str:
         return self._model_path
 
-    def generate(
-        self, prompts: list[str], params: SamplingParams
-    ) -> list[GenerationResult]:
+    def generate(self, prompts: list[str], params: SamplingParams) -> list[GenerationResult]:
         if self._openai is None:
             raise RuntimeError("SingularityVLLMBackend is closed")
         return self._openai.generate(prompts, params)
@@ -395,9 +452,7 @@ class SingularityVLLMBackend(ModelBackend):
     ) -> GenerationResult:
         if self._openai is None:
             raise RuntimeError("SingularityVLLMBackend is closed")
-        return self._openai.generate_chat(
-            messages, _with_request_thinking_toggle(params)
-        )
+        return self._openai.generate_chat(messages, _with_request_thinking_toggle(params))
 
     def generate_chat_batch(
         self,
@@ -410,9 +465,7 @@ class SingularityVLLMBackend(ModelBackend):
             messages_batch, _with_request_thinking_toggle(params)
         )
 
-    def score_chat(
-        self, messages: list[ChatMessage], continuation: str
-    ) -> ScoringResult:
+    def score_chat(self, messages: list[ChatMessage], continuation: str) -> ScoringResult:
         return self.score_chat_batch([messages], [continuation])[0]
 
     def score_chat_batch(
@@ -454,9 +507,7 @@ class SingularityVLLMBackend(ModelBackend):
                 results.append(next(scored_iter))
         return results
 
-    async def _score_one_async(
-        self, prompt_len: int, full_ids: list[int]
-    ) -> ScoringResult:
+    async def _score_one_async(self, prompt_len: int, full_ids: list[int]) -> ScoringResult:
         # Ride the inner OpenAI client's async connection; vLLM's completions
         # endpoint returns prompt logprobs via the extra_body passthrough.
         response = await self._openai._async_client.completions.create(
@@ -494,8 +545,7 @@ class SingularityVLLMBackend(ModelBackend):
             if self._proc is None or self._proc.poll() is not None:
                 rc = self._proc.returncode if self._proc else None
                 raise RuntimeError(
-                    f"vllm serve exited during startup (rc={rc}); "
-                    f"see {self._log_path} for details"
+                    f"vllm serve exited during startup (rc={rc}); see {self._log_path} for details"
                 )
             try:
                 with urllib.request.urlopen(url, timeout=5) as resp:

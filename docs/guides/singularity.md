@@ -143,6 +143,17 @@ Optional fields on `BackendConfig`:
 
 All generation proxies to an OpenAI-compatible client talking to the in-container `vllm serve`, so this backend supports token logprobs (used by logprob-decoding methods such as the verifier). `vllm serve` returns up to its `--max-logprobs` top logprobs per position (vLLM's default is 20); pass a larger `--max-logprobs` via `singularity_extra_vllm_args` if you need more.
 
+Full continuation scoring renders the chat prompt and tokenizes it in the host
+process, then sends token IDs to the container's `/v1/completions` endpoint for
+`prompt_logprobs`. The host and container may use different compatible
+Transformers releases. In particular, when a Transformers 4.x host encounters
+the list-valued `extra_special_tokens` metadata written by Transformers 5.x, the
+backend maps those entries to `additional_special_tokens` while loading the host
+tokenizer. Rendered chat templates are encoded with
+`add_special_tokens=False`, because the template already contains BOS and control
+tokens; this keeps token positions aligned with the tokenizer inside the vLLM
+container without requiring an upgrade of the host Transformers package.
+
 Then run value-bench normally — **no container wrapping, no special bin scripts**:
 
 ```bash
