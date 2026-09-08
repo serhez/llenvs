@@ -66,6 +66,25 @@ env = adapter.get_environment("sudoku", size=50)
 
 ## Environment Types
 
+### ALFWorld reference planning
+
+With `expert_plan=True`, `config.env.expert_type` selects `handcoded` or
+`planner`. The handcoded expert is not guaranteed deterministic or optimal.
+`expose_expert_plan_in_obs=True` makes the next reference command visible in a
+`[expert_plan_next: ...]` marker; keep it disabled for ordinary actors.
+
+For reference rollouts starting from saved actor states, call
+`env.refresh_expert_plan(state)`. It restores the saved command history and returns
+an annotated copy without taking another action or changing the input. Terminal
+or out-of-budget states pass through unchanged; an in-budget nonterminal state
+without a plan raises instead of substituting `look`.
+
+For the symbolic planner, `config.env.defer_expert_planning: true` disables
+planning at intermediate reset/replay steps. Planning runs only at the restored
+state or the final result of an executed action. This option requires
+`expert_plan=True` and `config.env.expert_type: planner`. A newly reset state must
+be explicitly refreshed before it is passed to a policy requiring a plan hint.
+
 ### Single-Turn
 
 Agent provides one response, receives final reward:
