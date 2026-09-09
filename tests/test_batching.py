@@ -601,7 +601,9 @@ class TestSyncToolExtraForwarding:
         backend._client = MagicMock()
 
         response = MagicMock()
+        response.error = None
         response.choices = [MagicMock()]
+        response.choices[0].error = None
         response.choices[0].message.content = "ok"
         response.choices[0].message.tool_calls = []
         response.choices[0].finish_reason = "stop"
@@ -739,7 +741,9 @@ class TestOpenRouterBatchChat:
 
         def _make_openai_response(text: str) -> MagicMock:
             resp = MagicMock()
+            resp.error = None
             resp.choices = [MagicMock()]
+            resp.choices[0].error = None
             resp.choices[0].message.content = text
             resp.choices[0].finish_reason = "stop"
             resp.choices[0].logprobs = None

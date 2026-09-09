@@ -283,6 +283,16 @@ presence/count/length fields for `message.reasoning` and
 `message.reasoning_details`. The full reasoning payload is not copied into
 metadata.
 
+OpenRouter responses with a top-level or per-choice `error`, or a raw/native
+`finish_reason` of `error`, raise `MalformedResponseError` even if HTTP succeeded
+and choices contain plausible text or tool calls. No partial answer is returned
+as a successful generation. The exception retains `provider_error`, model/backend
+identifiers and a numeric `status_code` when the error payload provides one.
+Callers should distinguish transient failures from permanent 4xx errors rather
+than retry every malformed response blindly. Chat rate-limit handling recognizes
+429; permanent 4xx codes do not enter its rate-limit wait loop. Concurrent batches
+preserve successful siblings and original failed indices in `PartialBatchError`.
+
 ## LiteLLM
 
 Routes requests through the [litellm](https://docs.litellm.ai) SDK,

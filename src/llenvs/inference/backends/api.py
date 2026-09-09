@@ -177,6 +177,11 @@ def _is_rate_limit_malformed(exc: BaseException) -> bool:
     """
     if not isinstance(exc, MalformedResponseError):
         return False
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    if status is not None and 400 <= status < 500:
+        return False
     parts = [str(exc)]
     provider_error = getattr(exc, "provider_error", None)
     if isinstance(provider_error, dict):
@@ -1640,6 +1645,31 @@ class OpenRouterBackend(ModelBackend):
 
         return kwargs
 
+    def _validated_choice(self, response: Any) -> Any:
+        """Reject explicit provider failures before consuming text or tool calls."""
+        choices = getattr(response, "choices", None)
+        provider_error = getattr(response, "error", None)
+        choice = choices[0] if choices else None
+        if provider_error is None and choice is not None:
+            provider_error = getattr(choice, "error", None)
+        error_stop = choice is not None and any(
+            str(getattr(choice, field, "")).lower() == "error"
+            for field in ("finish_reason", "native_finish_reason")
+        )
+        if not choices or provider_error is not None or error_stop:
+            message = (
+                _format_no_choices_message(provider_error)
+                if not choices
+                else f"OpenRouter returned a provider error completion: {provider_error!r}"
+            )
+            raise MalformedResponseError(
+                message,
+                backend_name="OpenRouterBackend",
+                model_name=self._model,
+                provider_error=provider_error,
+            )
+        return choice
+
     def _chat_result(self, response: Any) -> GenerationResult:
         """Convert an OpenAI-compatible ChatCompletion to GenerationResult.
 
@@ -1649,16 +1679,7 @@ class OpenRouterBackend(ModelBackend):
         ``top_logprobs: [{token, logprob, bytes}]``), so the same
         extraction works.
         """
-        choices = getattr(response, "choices", None)
-        if not choices:
-            provider_error = getattr(response, "error", None)
-            raise MalformedResponseError(
-                _format_no_choices_message(provider_error),
-                backend_name="OpenRouterBackend",
-                model_name=self._model,
-                provider_error=provider_error,
-            )
-        choice = choices[0]
+        choice = self._validated_choice(response)
 
         token_logprobs = None
         if getattr(choice, "logprobs", None) and getattr(choice.logprobs, "content", None):
@@ -1935,7 +1956,7 @@ class OpenRouterBackend(ModelBackend):
             if normalized is exc:
                 raise
             raise normalized from exc
-        choice = response.choices[0]
+        choice = self._validated_choice(response)
 
         # Parse tool calls from response
         tool_calls: tuple[ToolCall, ...] = ()
@@ -2012,7 +2033,7 @@ class OpenRouterBackend(ModelBackend):
             if normalized is exc:
                 raise
             raise normalized from exc
-        choice = response.choices[0]
+        choice = self._validated_choice(response)
 
         tool_calls: tuple[ToolCall, ...] = ()
         if choice.message.tool_calls:

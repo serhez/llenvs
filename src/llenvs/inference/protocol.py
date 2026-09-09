@@ -163,8 +163,8 @@ class MalformedResponseError(Exception):
     request. The SDK doesn't raise — it hands back a response object that
     breaks downstream parsing.
 
-    Treated as transient: the same request may succeed on retry (e.g.,
-    OpenRouter may route to a different provider).
+    Also covers explicit error completions with choices present. These are
+    generally transient unless the provider status identifies a permanent error.
 
     Attributes:
         backend_name: Identifier of the backend that raised.
@@ -173,6 +173,7 @@ class MalformedResponseError(Exception):
             (OpenRouter's top-level ``error`` field), useful for logging
             and for classifiers that want to distinguish transient from
             terminal upstream conditions.
+        status_code: Numeric error code from the provider payload, if supplied.
     """
 
     def __init__(
@@ -187,6 +188,10 @@ class MalformedResponseError(Exception):
         self.backend_name = backend_name
         self.model_name = model_name
         self.provider_error = provider_error
+        code = provider_error.get("code") if isinstance(provider_error, dict) else None
+        self.status_code = (
+            int(code) if isinstance(code, (int, str)) and str(code).isdigit() else None
+        )
 
 
 class LogprobsNotReturnedError(RuntimeError):
