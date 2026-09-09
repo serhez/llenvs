@@ -40,6 +40,10 @@ If your model works with the in-process `VLLMBackend`, keep using that — it's 
 
 `close()` terminates the process group (SIGTERM → 30s wait → SIGKILL) and shuts down the HTTP client. `__enter__`/`__exit__`/`__del__`/`atexit` all route to `close()` so crashes don't leak vllm servers.
 
+Batch chat generation and continuation scoring share the inner OpenAI backend's
+persistent event loop and pooled async HTTP client. Closing the backend also
+closes those connections on their owning loop and stops its thread.
+
 Vision works automatically: llenvs' [`ChatMessage.to_dict()`](../../src/llenvs/inference/protocol.py) already emits OpenAI-compatible multimodal content blocks (`{"type": "text"}` / `{"type": "image_url"}` with base64 data URLs), which vLLM's server understands natively.
 
 ## One-time setup

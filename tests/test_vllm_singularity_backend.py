@@ -82,7 +82,13 @@ def patched(tmp_path, fake_sif, monkeypatch):
             fake_proc_holder["p"].returncode = -sig
 
     monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(mod, "OpenAIBackend", MagicMock())
+    from llenvs.inference.backends.api import _AsyncRunner
+
+    # Mock the SDK, but retain the real connection-loop lifetime used by scoring.
+    runner = _AsyncRunner()
+    mock_openai = MagicMock()
+    mock_openai.return_value._async_runner = runner
+    monkeypatch.setattr(mod, "OpenAIBackend", mock_openai)
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr(mod.os, "killpg", fake_killpg)
     monkeypatch.setattr(mod.os, "getpgid", lambda pid: pid)
@@ -92,6 +98,7 @@ def patched(tmp_path, fake_sif, monkeypatch):
         "proc_holder": fake_proc_holder,
         "killed": killed,
     }
+    runner.close()
 
 
 class TestSingularityVLLMBackendLifecycle:

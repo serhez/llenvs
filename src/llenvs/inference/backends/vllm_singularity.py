@@ -496,6 +496,7 @@ class SingularityVLLMBackend(ModelBackend):
             lambda item: self._score_one_async(item[0], item[1]),
             list(zip(prompt_lengths, full_token_ids)),
             self._max_concurrency,
+            runner=self._openai._async_runner,
         )
 
         results: list[ScoringResult] = []

@@ -17,6 +17,15 @@ Callers own backend lifecycle. Local backends release heavyweight model
 resources best-effort on `close()`, and API backends close reusable client
 sessions. Repeated `close()` calls are safe.
 
+OpenAI, OpenRouter and Anthropic batch calls reuse a dedicated background event
+loop for the lifetime of each backend's async client. Chat and tool batches share
+that loop, so pooled HTTP connections remain usable across successive calls,
+including calls from different threads or from an existing async context. These
+public methods are synchronous: they block their caller until the batch finishes.
+Concurrent callers on one backend are serialized; requests within each batch use
+`max_concurrency` and results retain input order. `close()` closes the async client
+on its owning loop and stops the loop thread. Always close backends when finished.
+
 ## Available Backends
 
 | Backend | Package | Features |

@@ -5,6 +5,7 @@ Each backend wraps the respective API client with the ModelBackend interface.
 
 import asyncio
 import json
+import threading
 from typing import Any
 
 from llenvs.core.tools import ToolCall, ToolDefinition
@@ -265,17 +266,106 @@ def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseE
     return error
 
 
+class _AsyncRunner:
+    """Own one loop for a backend's pooled async connections until close().
+
+    Synchronous callers may come from different threads or an active event loop.
+    Batches are serialized across callers, but items within a batch run concurrently.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._closed = False
+
+    @staticmethod
+    def _serve(loop: asyncio.AbstractEventLoop) -> None:
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.run_until_complete(loop.shutdown_default_executor())
+            loop.close()
+
+    def run(self, coro: Any) -> Any:
+        if threading.current_thread() is self._thread:
+            coro.close()
+            raise RuntimeError("Cannot synchronously call a backend from its own API loop")
+        with self._lock:
+            if self._closed:
+                coro.close()
+                raise RuntimeError("API backend is closed")
+            if self._loop is None:
+                self._loop = asyncio.new_event_loop()
+                self._thread = threading.Thread(
+                    target=self._serve, args=(self._loop,), name="llenvs-api", daemon=True,
+                )
+                self._thread.start()
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            try:
+                return future.result()
+            except BaseException:
+                future.cancel()
+                raise
+
+    def close(self, finalizer: Any = None) -> None:
+        if threading.current_thread() is self._thread:
+            if finalizer is not None:
+                finalizer.close()
+            raise RuntimeError("Cannot synchronously close a backend from its own API loop")
+        with self._lock:
+            if self._closed:
+                if finalizer is not None:
+                    finalizer.close()
+                return
+            try:
+                if finalizer is not None:
+                    self.run(finalizer)
+            finally:
+                self._closed = True
+                if self._loop is not None:
+                    self._loop.call_soon_threadsafe(self._loop.stop)
+                    self._thread.join()
+
+
+def _close_api_clients(backend: Any) -> None:
+    if getattr(backend, "_closed", False):
+        return
+    runner = getattr(backend, "_async_runner", None) or _AsyncRunner()
+    client = getattr(backend, "_client", None)
+    async_client = getattr(backend, "_async_client", None)
+    try:
+        try:
+            if client is not None:
+                client.close()
+        finally:
+            runner.close(async_client.close() if async_client is not None else None)
+    finally:
+        backend._client = None
+        backend._async_client = None
+        backend._closed = True
+
+
 def _run_concurrent(
     coro_fn: Any,
     items: list[Any],
     max_concurrency: int,
     *,
     return_partial: bool = False,
+    runner: _AsyncRunner | None = None,
 ) -> list[Any]:
     """Run an async function concurrently over a list of items.
 
     Uses asyncio.gather with a semaphore to limit concurrency.
-    Handles being called from both sync and async contexts.
+    Handles both sync and async callers. Supply the client owner's runner when
+    reusing async HTTP connections; omission creates a one-call loop.
 
     Args:
         coro_fn: Async callable that takes one item and returns a result.
@@ -321,28 +411,13 @@ def _run_concurrent(
             raise next(iter(failures.values()))
         return list(results)
 
+    if runner is not None:
+        return runner.run(_run())
+    temporary = _AsyncRunner()
     try:
-        asyncio.get_running_loop()
-        # Already in an async context — run in a separate thread
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, _run()).result()
-    except RuntimeError:
-        # No running loop — safe to use asyncio.run()
-        return asyncio.run(_run())
-
-
-def _run_async_close(coro: Any) -> None:
-    """Run an async close coroutine from sync code."""
-    try:
-        asyncio.get_running_loop()
-        import concurrent.futures
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(asyncio.run, coro).result()
-    except RuntimeError:
-        asyncio.run(coro)
+        return temporary.run(_run())
+    finally:
+        temporary.close()
 
 
 class OpenAIBackend(ModelBackend):
@@ -407,6 +482,7 @@ class OpenAIBackend(ModelBackend):
 
         self._client = OpenAI(**client_args)
         self._async_client = AsyncOpenAI(**client_args)
+        self._async_runner = _AsyncRunner()
         self._closed = False
 
     @property
@@ -432,18 +508,7 @@ class OpenAIBackend(ModelBackend):
 
     def close(self) -> None:
         """Close reusable OpenAI clients."""
-        if getattr(self, "_closed", False):
-            return
-
-        client = getattr(self, "_client", None)
-        async_client = getattr(self, "_async_client", None)
-        if client is not None:
-            client.close()
-        if async_client is not None:
-            _run_async_close(async_client.close())
-        self._client = None
-        self._async_client = None
-        self._closed = True
+        _close_api_clients(self)
 
     def generate(
         self,
@@ -494,7 +559,10 @@ class OpenAIBackend(ModelBackend):
         try:
             response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
         choice = response.choices[0]
 
         # Extract logprobs if available
@@ -567,7 +635,10 @@ class OpenAIBackend(ModelBackend):
         try:
             response = await self._async_client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
         choice = response.choices[0]
 
         token_logprobs = None
@@ -618,6 +689,7 @@ class OpenAIBackend(ModelBackend):
             messages_batch,
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
+            runner=self._async_runner,
         )
 
     def generate_with_tools(
@@ -663,7 +735,10 @@ class OpenAIBackend(ModelBackend):
         try:
             response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
         choice = response.choices[0]
 
         # Parse tool calls from response
@@ -739,7 +814,10 @@ class OpenAIBackend(ModelBackend):
         try:
             response = await self._async_client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
         choice = response.choices[0]
 
         tool_calls: tuple[ToolCall, ...] = ()
@@ -785,6 +863,7 @@ class OpenAIBackend(ModelBackend):
             messages_batch,
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
+            runner=self._async_runner,
         )
 
 
@@ -834,6 +913,7 @@ class AnthropicBackend(ModelBackend):
 
         self._client = Anthropic(**client_args)
         self._async_client = AsyncAnthropic(**client_args)
+        self._async_runner = _AsyncRunner()
         self._closed = False
 
     @property
@@ -859,18 +939,7 @@ class AnthropicBackend(ModelBackend):
 
     def close(self) -> None:
         """Close reusable Anthropic clients."""
-        if getattr(self, "_closed", False):
-            return
-
-        client = getattr(self, "_client", None)
-        async_client = getattr(self, "_async_client", None)
-        if client is not None:
-            client.close()
-        if async_client is not None:
-            _run_async_close(async_client.close())
-        self._client = None
-        self._async_client = None
-        self._closed = True
+        _close_api_clients(self)
 
     def generate(
         self,
@@ -930,7 +999,10 @@ class AnthropicBackend(ModelBackend):
         try:
             response = self._client.messages.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
 
         # Extract text from content blocks
         text = ""
@@ -992,7 +1064,10 @@ class AnthropicBackend(ModelBackend):
         try:
             response = await self._async_client.messages.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
 
         text = ""
         for block in response.content:
@@ -1022,6 +1097,7 @@ class AnthropicBackend(ModelBackend):
             messages_batch,
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
+            runner=self._async_runner,
         )
 
     def continue_from_prefix(
@@ -1057,7 +1133,10 @@ class AnthropicBackend(ModelBackend):
             try:
                 response = self._client.messages.create(**kwargs)
             except Exception as exc:
-                raise _normalize_provider_error(exc, model_name=self._model) from exc
+                normalized = _normalize_provider_error(exc, model_name=self._model)
+                if normalized is exc:
+                    raise
+                raise normalized from exc
 
             text = ""
             for block in response.content:
@@ -1166,7 +1245,10 @@ class AnthropicBackend(ModelBackend):
         try:
             response = self._client.messages.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
 
         # Extract text and tool calls from content blocks
         text_parts: list[str] = []
@@ -1281,7 +1363,10 @@ class AnthropicBackend(ModelBackend):
         try:
             response = await self._async_client.messages.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
 
         text_parts: list[str] = []
         parsed_calls: list[ToolCall] = []
@@ -1325,6 +1410,7 @@ class AnthropicBackend(ModelBackend):
             messages_batch,
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
+            runner=self._async_runner,
         )
 
 
@@ -1426,6 +1512,7 @@ class OpenRouterBackend(ModelBackend):
 
         self._client = OpenAI(**client_args)
         self._async_client = AsyncOpenAI(**client_args)
+        self._async_runner = _AsyncRunner()
         self._closed = False
 
     @property
@@ -1458,18 +1545,7 @@ class OpenRouterBackend(ModelBackend):
 
     def close(self) -> None:
         """Close reusable OpenRouter clients."""
-        if getattr(self, "_closed", False):
-            return
-
-        client = getattr(self, "_client", None)
-        async_client = getattr(self, "_async_client", None)
-        if client is not None:
-            client.close()
-        if async_client is not None:
-            _run_async_close(async_client.close())
-        self._client = None
-        self._async_client = None
-        self._closed = True
+        _close_api_clients(self)
 
     def generate(
         self,
@@ -1732,7 +1808,10 @@ class OpenRouterBackend(ModelBackend):
                     translated = self._translate_router_404_for_logprobs(exc, params)
                     if translated is not exc:
                         raise translated from exc
-                    raise _normalize_provider_error(exc, model_name=self._model) from exc
+                    normalized = _normalize_provider_error(exc, model_name=self._model)
+                    if normalized is exc:
+                        raise
+                    raise normalized from exc
             except (RateLimitError, MalformedResponseError) as exc:
                 if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
                     raise
@@ -1775,7 +1854,10 @@ class OpenRouterBackend(ModelBackend):
                     translated = self._translate_router_404_for_logprobs(exc, params)
                     if translated is not exc:
                         raise translated from exc
-                    raise _normalize_provider_error(exc, model_name=self._model) from exc
+                    normalized = _normalize_provider_error(exc, model_name=self._model)
+                    if normalized is exc:
+                        raise
+                    raise normalized from exc
             except (RateLimitError, MalformedResponseError) as exc:
                 if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
                     raise
@@ -1802,6 +1884,7 @@ class OpenRouterBackend(ModelBackend):
             messages_batch,
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
+            runner=self._async_runner,
         )
 
     def generate_with_tools(
@@ -1848,7 +1931,10 @@ class OpenRouterBackend(ModelBackend):
         try:
             response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
         choice = response.choices[0]
 
         # Parse tool calls from response
@@ -1922,7 +2008,10 @@ class OpenRouterBackend(ModelBackend):
         try:
             response = await self._async_client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise _normalize_provider_error(exc, model_name=self._model) from exc
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            if normalized is exc:
+                raise
+            raise normalized from exc
         choice = response.choices[0]
 
         tool_calls: tuple[ToolCall, ...] = ()
@@ -1968,4 +2057,5 @@ class OpenRouterBackend(ModelBackend):
             messages_batch,
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
+            runner=self._async_runner,
         )
