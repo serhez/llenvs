@@ -7,10 +7,19 @@ No external requests, model downloads, or credentials are needed.
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 from llenvs.inference.backends.api import OpenRouterBackend
-from llenvs.inference.protocol import ChatMessage, PartialBatchError, SamplingParams
+from llenvs.inference.protocol import (
+    ChatMessage,
+    MalformedResponseError,
+    PartialBatchError,
+    PromptTooLongError,
+    RecoverableInputError,
+    SamplingParams,
+)
 
 
 def completion(text="<answer>0.5</answer>", finish="stop", *, error=None, location="top"):
@@ -42,6 +51,81 @@ def backend():
 
 MESSAGES = [ChatMessage(role="user", content="Return a value in answer tags.")]
 PARAMS = SamplingParams(max_tokens=8192)
+
+
+@pytest.mark.parametrize("operation", ["chat", "batch", "tools", "tools_batch"])
+@pytest.mark.parametrize("envelope", ["http", "top", "choice", "no_choices"])
+@pytest.mark.parametrize(
+    "message,error_type",
+    [
+        ("maximum context length exceeded", PromptTooLongError),
+        ("invalid image input", RecoverableInputError),
+    ],
+)
+def test_input_error_normalization_matches_http_and_body(
+    backend,
+    monkeypatch,
+    operation,
+    envelope,
+    message,
+    error_type,
+):
+    payload = {"code": 400, "message": message}
+    if envelope == "http":
+        error = BadRequestError(
+            message,
+            response=httpx.Response(400, request=httpx.Request("POST", "https://offline.invalid")),
+            body=payload,
+        )
+        sync, asynchronous = Mock(side_effect=error), AsyncMock(side_effect=error)
+    else:
+        response = completion(error=payload, location="choice" if envelope == "choice" else "top")
+        if envelope == "no_choices":
+            response.choices = []
+        sync, asynchronous = Mock(return_value=response), AsyncMock(return_value=response)
+    monkeypatch.setattr(backend._client.chat.completions, "create", sync)
+    monkeypatch.setattr(backend._async_client.chat.completions, "create", asynchronous)
+    with pytest.raises(PartialBatchError if "batch" in operation else error_type) as caught:
+        if operation == "chat":
+            backend.generate_chat(MESSAGES, PARAMS)
+        elif operation == "batch":
+            backend.generate_chat_batch([MESSAGES], PARAMS)
+        elif operation == "tools":
+            backend.generate_with_tools(MESSAGES, [], PARAMS)
+        else:
+            backend.generate_with_tools_batch([MESSAGES], [], PARAMS)
+    error = caught.value.failures[0] if "batch" in operation else caught.value
+    assert isinstance(error, error_type)
+    assert error.offending_indices == [0]
+    assert message in str(error)
+    assert sync.call_count + asynchronous.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "status,message",
+    [
+        (401, "invalid API key; maximum context length"),
+        (402, "insufficient credits; maximum context length"),
+        (403, "permission denied; invalid image"),
+        (400, "content policy violation: maximum context length"),
+        (400, "unrecognized invalid request"),
+    ],
+)
+@pytest.mark.parametrize("location", ["top", "choice"])
+def test_body_errors_do_not_broaden_safe_input_skipping(
+    backend, monkeypatch, status, message, location
+):
+    payload = {"code": status, "message": message}
+    monkeypatch.setattr(
+        backend._client.chat.completions,
+        "create",
+        Mock(return_value=completion(error=payload, location=location)),
+    )
+    with pytest.raises(MalformedResponseError) as caught:
+        backend.generate_chat(MESSAGES, PARAMS)
+    assert caught.value.status_code == status
+    assert caught.value.provider_error == payload
+    assert not isinstance(caught.value, RecoverableInputError)
 
 
 @pytest.mark.parametrize("operation", ["chat", "batch", "tools", "tools_batch"])

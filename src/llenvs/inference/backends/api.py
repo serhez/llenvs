@@ -70,6 +70,9 @@ def _error_body(error: BaseException) -> Any:
     body = getattr(error, "body", None)
     if body is not None:
         return body
+    provider_error = getattr(error, "provider_error", None)
+    if provider_error is not None:
+        return provider_error
     response = getattr(error, "response", None)
     if response is None:
         return None
@@ -1662,12 +1665,16 @@ class OpenRouterBackend(ModelBackend):
                 if not choices
                 else f"OpenRouter returned a provider error completion: {provider_error!r}"
             )
-            raise MalformedResponseError(
+            error = MalformedResponseError(
                 message,
                 backend_name="OpenRouterBackend",
                 model_name=self._model,
                 provider_error=provider_error,
             )
+            normalized = _normalize_provider_error(error, model_name=self._model)
+            if normalized is error:
+                raise error
+            raise normalized from error
         return choice
 
     def _chat_result(self, response: Any) -> GenerationResult:
