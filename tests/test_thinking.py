@@ -270,7 +270,7 @@ class TestV1ProcessorClass:
     def _make_v1_class(self):
         """Create V1 processor class with a mocked AdapterLogitsProcessor base."""
         import sys
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
 
         # Create a mock AdapterLogitsProcessor base class
         class MockAdapterLogitsProcessor:
@@ -279,14 +279,11 @@ class TestV1ProcessorClass:
         # Mock the vllm module
         mock_module = MagicMock()
         mock_module.AdapterLogitsProcessor = MockAdapterLogitsProcessor
-        sys.modules["vllm.v1.sample.logits_processor"] = mock_module
 
         from llenvs.inference.thinking import _build_v1_thinking_processor_class
 
-        cls = _build_v1_thinking_processor_class()
-
-        # Clean up
-        del sys.modules["vllm.v1.sample.logits_processor"]
+        with patch.dict(sys.modules, {"vllm.v1.sample.logits_processor": mock_module}):
+            cls = _build_v1_thinking_processor_class()
 
         return cls, MockAdapterLogitsProcessor
 
@@ -296,11 +293,15 @@ class TestV1ProcessorClass:
         assert cls is not None
         assert issubclass(cls, base)
 
-    def test_returns_none_without_vllm(self):
+    def test_returns_none_without_vllm(self, monkeypatch):
         """Returns None when vllm V1 API is not importable."""
-        from llenvs.inference.thinking import make_v1_thinking_processor_class
+        import sys
+        from llenvs.inference.thinking import _build_v1_thinking_processor_class
 
-        cls = make_v1_thinking_processor_class()
+        # Exercise the import branch independently of installed packages and
+        # the public factory's module-level cached class.
+        monkeypatch.setitem(sys.modules, "vllm.v1.sample.logits_processor", None)
+        cls = _build_v1_thinking_processor_class()
         assert cls is None
 
     def test_class_has_pickle_compatible_qualname(self):

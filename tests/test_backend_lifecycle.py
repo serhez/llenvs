@@ -137,7 +137,6 @@ class TestVLLMBackendLifecycle:
         backend = VLLMBackend.__new__(VLLMBackend)
         backend._closed = False
         backend._tokenizer = MagicMock()
-        backend._scoring_model = MagicMock()
         llm = MagicMock()
         llm.llm_engine.engine_core.shutdown = MagicMock()
         llm.llm_engine.model_executor.shutdown = MagicMock()
@@ -150,7 +149,7 @@ class TestVLLMBackendLifecycle:
         llm.llm_engine.model_executor.shutdown.assert_not_called()
         assert backend._llm is None
         assert backend._tokenizer is None
-        assert backend._scoring_model is None
+        assert backend._closed is True
 
     def test_close_falls_back_to_model_executor_shutdown(self):
         from llenvs.inference.backends.vllm import VLLMBackend
@@ -158,7 +157,6 @@ class TestVLLMBackendLifecycle:
         backend = VLLMBackend.__new__(VLLMBackend)
         backend._closed = False
         backend._tokenizer = MagicMock()
-        backend._scoring_model = MagicMock()
         llm = MagicMock()
         del llm.llm_engine.engine_core
         llm.llm_engine.model_executor.shutdown = MagicMock()
@@ -170,7 +168,7 @@ class TestVLLMBackendLifecycle:
         llm.llm_engine.model_executor.shutdown.assert_called_once()
         assert backend._llm is None
         assert backend._tokenizer is None
-        assert backend._scoring_model is None
+        assert backend._closed is True
 
     def test_close_without_known_shutdown_path_still_clears_refs(self):
         from llenvs.inference.backends.vllm import VLLMBackend
@@ -178,7 +176,6 @@ class TestVLLMBackendLifecycle:
         backend = VLLMBackend.__new__(VLLMBackend)
         backend._closed = False
         backend._tokenizer = MagicMock()
-        backend._scoring_model = MagicMock()
         llm = MagicMock()
         del llm.llm_engine.engine_core
         del llm.llm_engine.model_executor
@@ -189,7 +186,7 @@ class TestVLLMBackendLifecycle:
 
         assert backend._llm is None
         assert backend._tokenizer is None
-        assert backend._scoring_model is None
+        assert backend._closed is True
 
     def test_close_does_not_call_sleep(self):
         from llenvs.inference.backends.vllm import VLLMBackend
@@ -197,7 +194,6 @@ class TestVLLMBackendLifecycle:
         backend = VLLMBackend.__new__(VLLMBackend)
         backend._closed = False
         backend._tokenizer = MagicMock()
-        backend._scoring_model = None
         llm = MagicMock()
         llm.llm_engine.engine_core.shutdown = MagicMock()
         llm.llm_engine.model_executor.shutdown = MagicMock()

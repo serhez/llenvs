@@ -745,6 +745,9 @@ class TestOpenRouterBatchChat:
             resp.choices = [MagicMock()]
             resp.choices[0].error = None
             resp.choices[0].message.content = text
+            resp.choices[0].message.reasoning = None
+            resp.choices[0].message.reasoning_content = None
+            resp.choices[0].message.reasoning_details = None
             resp.choices[0].finish_reason = "stop"
             resp.choices[0].logprobs = None
             resp.usage = MagicMock()

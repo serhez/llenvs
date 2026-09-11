@@ -19,6 +19,7 @@ from llenvs.inference.backends.api import (
     _is_rate_limit_malformed,
     _normalize_provider_error,
     _openai_stop_reason,
+    _reasoning_metadata,
     _run_concurrent,
     _to_plain_mapping,
 )
@@ -317,15 +318,7 @@ class LiteLLMBackend(ModelBackend):
             if reasoning_tokens is not None:
                 metadata["reasoning_tokens"] = reasoning_tokens
 
-        # ``reasoning_content`` is litellm's normalized field; check
-        # ``reasoning`` first for proxy passthrough responses.
-        reasoning = getattr(message, "reasoning", None)
-        if reasoning is None:
-            reasoning = getattr(message, "reasoning_content", None)
-        if reasoning is not None:
-            reasoning_text = str(reasoning)
-            metadata["reasoning_present"] = bool(reasoning_text)
-            metadata["reasoning_chars"] = len(reasoning_text)
+        metadata.update(_reasoning_metadata(message))
 
         hidden_params = getattr(response, "_hidden_params", None)
         if hidden_params is not None:

@@ -302,6 +302,33 @@ Normalized errors chain the original provider error for diagnostics. Retryable
 408/409 timeouts are not rate-limit waits; caller-level retry handling remains
 responsible for body-level non-429 transient failures.
 
+### Retaining assistant reasoning
+
+OpenRouter and LiteLLM keep separately returned `reasoning` (including the
+`reasoning_content` alias) and `reasoning_details` in `GenerationResult.metadata`.
+They do not add it to `result.text` or to the action produced by
+`result.to_agent_action()`. Structured blocks retain their order, signatures,
+nulls and extra provider fields as detached plain data.
+
+For an API continuation, pass that payload in the assistant message:
+
+```python
+assistant = ChatMessage(
+    role="assistant",
+    content=result.text,
+    reasoning=result.metadata.get("reasoning"),
+    reasoning_details=tuple(result.metadata.get("reasoning_details") or ()),
+)
+```
+
+`ChatMessage.to_dict()` sends `reasoning_details` when nonempty, otherwise
+`reasoning`; it does not send both copies. Messages without either field keep
+their ordinary wire representation, and old pickled messages remain readable.
+These are provider-native API fields, not a portable prompt format for every
+backend. The caller must choose a backend/provider that accepts them and budget
+space for the retained reasoning as well as the continuation. Retaining a payload
+does not itself enable another reasoning phase or guarantee the provider uses it.
+
 ## LiteLLM
 
 Routes requests through the [litellm](https://docs.litellm.ai) SDK,

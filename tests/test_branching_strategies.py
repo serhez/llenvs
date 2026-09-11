@@ -639,7 +639,7 @@ class TestBranchManager:
 
     def test_action_replay_through_branch_manager(self):
         """End-to-end test: mutable env + action replay + branching."""
-        from llenvs.core.branching import BranchManager
+        from llenvs.core.branching import ActionReplayStrategy, BranchManager
 
         env = MutableEnv()
         state, _ = env.reset(seed=42, options={"task_index": 0})
@@ -652,7 +652,10 @@ class TestBranchManager:
             result = env.step(state, action)
             state = result.next_state
 
-        with BranchManager.create(env, env_factory=MutableEnv) as mgr:
+        with BranchManager.create(
+            env, strategy="action_replay", env_factory=MutableEnv
+        ) as mgr:
+            assert isinstance(mgr._strategy, ActionReplayStrategy)
             mgr.checkpoint(
                 "after_2_steps",
                 state,

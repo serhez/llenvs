@@ -6,6 +6,7 @@ Each backend wraps the respective API client with the ModelBackend interface.
 import asyncio
 import json
 import threading
+from copy import deepcopy
 from typing import Any
 
 from llenvs.core.tools import ToolCall, ToolDefinition
@@ -255,6 +256,45 @@ def _reasoning_detail_types(reasoning_details: Any) -> list[str]:
         if detail_type is not None:
             types.append(str(detail_type))
     return types
+
+
+def _reasoning_metadata(message: Any) -> dict[str, Any]:
+    """Retain separately returned reasoning without treating it as answer text.
+
+    Reasoning blocks may include signatures and opaque provider fields. Keep
+    their order and full contents, including nulls, as detached plain data.
+    """
+    metadata: dict[str, Any] = {}
+    reasoning = _get_field(message, "reasoning")
+    if reasoning is None:
+        reasoning = _get_field(message, "reasoning_content")
+    if reasoning is not None:
+        if not isinstance(reasoning, str):
+            raise ValueError("Expected assistant reasoning to be a string")
+        metadata.update(reasoning=reasoning, reasoning_present=bool(reasoning),
+                        reasoning_chars=len(reasoning))
+
+    details = _get_field(message, "reasoning_details")
+    if details is not None:
+        if not isinstance(details, (list, tuple)):
+            raise ValueError("Expected reasoning_details to be a list of blocks")
+        blocks = []
+        for block in details:
+            if not isinstance(block, dict):
+                dump = getattr(block, "model_dump", None)
+                if not callable(dump):
+                    raise ValueError("Expected reasoning_details blocks to be mappings")
+                block = dump(mode="json")
+            if not isinstance(block, dict):
+                raise ValueError("Expected reasoning_details blocks to be mappings")
+            blocks.append(deepcopy(block))
+        metadata.update(reasoning_details=blocks,
+                        reasoning_details_present=bool(blocks),
+                        reasoning_details_count=len(blocks))
+        detail_types = _reasoning_detail_types(blocks)
+        if detail_types:
+            metadata["reasoning_details_types"] = tuple(detail_types)
+    return metadata
 
 
 def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseException:
@@ -1728,25 +1768,7 @@ class OpenRouterBackend(ModelBackend):
             if reasoning_tokens is not None:
                 metadata["reasoning_tokens"] = reasoning_tokens
 
-        reasoning = getattr(message, "reasoning", None)
-        if reasoning is None:
-            reasoning = getattr(message, "reasoning_content", None)
-        if reasoning is not None:
-            reasoning_text = str(reasoning)
-            metadata["reasoning_present"] = bool(reasoning_text)
-            metadata["reasoning_chars"] = len(reasoning_text)
-
-        reasoning_details = getattr(message, "reasoning_details", None)
-        if reasoning_details is not None:
-            metadata["reasoning_details_present"] = bool(reasoning_details)
-            metadata["reasoning_details_count"] = (
-                len(reasoning_details)
-                if isinstance(reasoning_details, (list, tuple))
-                else 1
-            )
-            detail_types = _reasoning_detail_types(reasoning_details)
-            if detail_types:
-                metadata["reasoning_details_types"] = tuple(detail_types)
+        metadata.update(_reasoning_metadata(message))
 
         return GenerationResult(
             text=choice.message.content or "",

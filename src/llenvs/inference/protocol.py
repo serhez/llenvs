@@ -7,6 +7,7 @@ and common data structures for generation.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import MISSING, dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -426,6 +427,9 @@ class ChatMessage:
         content_blocks: Interleaved text/image blocks for VLM prompts.
             When non-empty, overrides ``content`` and ``images`` in
             serialisation.
+        reasoning: Separately returned assistant reasoning for API continuation.
+        reasoning_details: Provider-native reasoning blocks, preserved in order.
+            Takes precedence over ``reasoning`` in OpenAI-format requests.
     """
 
     role: str
@@ -435,6 +439,8 @@ class ChatMessage:
     name: str | None = None
     images: tuple[ImageContent, ...] = ()
     content_blocks: tuple[str | ImageContent, ...] = ()
+    reasoning: str | None = None
+    reasoning_details: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for API calls (OpenAI format).
@@ -490,6 +496,11 @@ class ChatMessage:
 
         if self.name is not None:
             result["name"] = self.name
+
+        if self.reasoning_details:
+            result["reasoning_details"] = deepcopy(list(self.reasoning_details))
+        elif self.reasoning:
+            result["reasoning"] = self.reasoning
 
         return result
 
