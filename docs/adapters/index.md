@@ -56,6 +56,14 @@ llenvs wraps 18+ environment libraries through a unified adapter interface. Each
 
     [:octicons-arrow-right-24: AlfWorld](alfworld.md)
 
+-   :material-web:{ .lg .middle } **OpenApps**
+
+    ---
+
+    Browser-based calendar, todo, messenger, and map tasks.
+
+    [:octicons-arrow-right-24: OpenApps](open-apps.md)
+
 -   :material-book-open-page-variant-outline:{ .lg .middle } **Jericho**
 
     ---
