@@ -29,7 +29,7 @@ import socket
 import subprocess
 import time
 from pathlib import Path
-from typing import IO, Any
+from typing import IO, Any, cast
 
 from llenvs.inference.backends.api import OpenAIBackend, _run_concurrent
 from llenvs.inference.protocol import (
@@ -37,6 +37,7 @@ from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
     ModelBackend,
+    PartialBatchError,
     SamplingParams,
     ScoringResult,
 )
@@ -479,6 +480,8 @@ class SingularityVLLMBackend(ModelBackend):
         appends the continuation as raw text, then requests per-position
         prompt logprobs from ``/v1/completions`` with a token-id prompt —
         the HTTP analog of the in-process ``VLLMBackend`` scoring path.
+        Failed requests raise ``PartialBatchError`` with successful siblings
+        retained and failure indices relative to the original input batch.
         """
         if self._openai is None:
             raise RuntimeError("SingularityVLLMBackend is closed")
@@ -492,21 +495,35 @@ class SingularityVLLMBackend(ModelBackend):
         if not full_token_ids:
             return [empty_results[i] for i in range(len(messages_batch))]
 
-        scored = _run_concurrent(
-            lambda item: self._score_one_async(item[0], item[1]),
-            list(zip(prompt_lengths, full_token_ids)),
-            self._max_concurrency,
-            runner=self._openai._async_runner,
-        )
+        partial = False
+        try:
+            scored = _run_concurrent(
+                lambda item: self._score_one_async(item[0], item[1]),
+                list(zip(prompt_lengths, full_token_ids)),
+                self._max_concurrency,
+                return_partial=True,
+                runner=self._openai._async_runner,
+            )
+        except PartialBatchError as exc:
+            scored = exc.results
+            partial = True
 
-        results: list[ScoringResult] = []
+        results: list[ScoringResult | BaseException] = []
         scored_iter = iter(scored)
         for index in range(len(messages_batch)):
             if index in empty_results:
                 results.append(empty_results[index])
             else:
                 results.append(next(scored_iter))
-        return results
+        if partial:
+            raise PartialBatchError(
+                results,
+                {
+                    i: entry for i, entry in enumerate(results)
+                    if isinstance(entry, BaseException)
+                },
+            )
+        return cast(list[ScoringResult], results)
 
     async def _score_one_async(self, prompt_len: int, full_ids: list[int]) -> ScoringResult:
         # Ride the inner OpenAI client's async connection; vLLM's completions

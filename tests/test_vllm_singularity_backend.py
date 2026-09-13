@@ -478,6 +478,62 @@ def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(
 
 
 class TestSingularityVLLMBackendScoring:
+    @pytest.mark.parametrize("continuations", [
+        ["A", "B", "A"], ["", "A", "", "B", "A", ""],
+        ["B"], ["", "B", "", "B"],
+    ])
+    @pytest.mark.parametrize("failure_kind", ["input", "connection", "fatal"])
+    def test_partial_scoring_preserves_successes_and_original_indices(
+        self, patched, continuations, failure_kind,
+    ):
+        from llenvs.inference.protocol import (
+            PartialBatchError,
+            RecoverableInputError,
+            ScoringResult,
+            TokenScore,
+        )
+
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        error_type = {
+            "input": RecoverableInputError,
+            "connection": ConnectionError,
+            "fatal": RuntimeError,
+        }[failure_kind]
+        failure = error_type("synthetic scoring failure")
+        calls = []
+
+        async def score_one(prompt_len, ids):
+            calls.append(ids[-1])
+            if ids[-1] == ord("B"):
+                raise failure
+            return ScoringResult(
+                token_scores=(TokenScore("A", ord("A"), -2),), scored_tokens=1,
+            )
+
+        try:
+            _wire_scoring(backend)
+            backend._score_one_async = score_one
+            with pytest.raises(PartialBatchError) as caught:
+                backend.score_chat_batch(
+                    [_msgs(str(i)) for i in range(len(continuations))], continuations,
+                )
+            exc = caught.value
+            assert exc.failures == {
+                i: failure for i, c in enumerate(continuations) if c == "B"
+            }
+            assert len(exc.results) == len(continuations)
+            for i, continuation in enumerate(continuations):
+                if continuation == "B":
+                    assert exc.results[i] is failure
+                elif continuation == "":
+                    assert exc.results[i].scored_tokens == 0
+                else:
+                    assert exc.results[i].token_scores[0].logprob == -2
+            assert calls == [ord(c) for c in continuations if c]
+        finally:
+            backend.close()
+
     def test_supports_full_scoring_true_when_open_false_when_closed(self, patched):
         mod = patched["module"]
         from llenvs.inference.protocol import BackendCapabilities

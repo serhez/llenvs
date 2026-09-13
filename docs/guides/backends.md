@@ -99,6 +99,20 @@ for token_lp in results[0].token_logprobs:
 
 > **Tip:** If you already have a remote `vllm serve` instance running, use `OpenAIBackend(model="your-model", base_url="http://host:port/v1")` instead — vLLM's server exposes an OpenAI-compatible API.
 
+### Container-hosted continuation scoring
+
+`SingularityVLLMBackend` (`vllm_singularity`) uses the container server's
+`/v1/completions` endpoint for `score_chat` / `score_chat_batch`, with
+`prompt_logprobs` and thinking disabled when rendering the scoring prompt.
+The host loads only the tokenizer; model inference runs inside the container.
+
+If any concurrent scoring request fails, `score_chat_batch` raises
+`PartialBatchError`. Its `results` retains successful `ScoringResult` entries and
+exceptions in input order; `failures` maps original input indices to exceptions.
+Empty continuations receive empty scoring results without a server request and
+do not shift failure indices. Callers can retry failed entries without discarding
+successful siblings. The single-request `score_chat` path uses the same contract.
+
 ## HuggingFace Transformers (Local Inference)
 
 A lightweight alternative to vLLM for running HuggingFace models directly with the `transformers` library.
