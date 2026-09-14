@@ -158,6 +158,28 @@ tokenizer. Rendered chat templates are encoded with
 tokens; this keeps token positions aligned with the tokenizer inside the vLLM
 container without requiring an upgrade of the host Transformers package.
 
+Long prompts with a large vocabulary can require substantial temporary GPU
+memory for prompt-logprob normalization, even when requesting only the actual
+token's probability. Lowering `gpu_memory_utilization` reserves less KV cache
+and leaves more room for this workspace. Alternatively,
+`extra_vllm_args=("--max-num-batched-tokens", "2048", "--enable-chunked-prefill")`
+processes fewer prompt tokens at once without truncating inputs or reducing
+`max_model_len`, but changing chunk sizes can change numerical scores. Validate
+memory and numerics on the installed vLLM version and representative long inputs;
+reducing the returned top-logprob count alone does not eliminate this workspace.
+
+The backend checks its owned server process before requests and after failures.
+An exited process, or an owned local listener refusing connections after startup,
+raises `BackendProcessExitedError`, which callers should treat
+as fatal for the current run, not as a bad input or transient network failure.
+Partial batches retain successful responses and identify the failed slots.
+The listener can disappear while the container launcher is still alive. Refusal
+is detected from the OS error through the SDK's exception chain, never from
+message text; further calls on that backend then fail without HTTP requests.
+There are no extra HTTP health probes during inference. Timeouts, connection
+resets and ordinary request failures with a live server retain their original
+classification.
+
 Then run value-bench normally — **no container wrapping, no special bin scripts**:
 
 ```bash

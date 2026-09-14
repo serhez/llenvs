@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -232,6 +233,9 @@ def test_local_scoring_and_chat_share_connection_lifetime(http_server):
     inner = OpenAIBackend(model="fake", api_key="dummy", base_url=http_server.url, max_retries=0, timeout=2)
     outer = SingularityVLLMBackend.__new__(SingularityVLLMBackend)
     outer._openai = inner
+    # This HTTP-only shell stands in for a healthy owned inference process.
+    outer._proc = SimpleNamespace(poll=lambda: None)
+    outer._server_failure = None
     outer._served_model_name = "fake"
     outer._model_path = "fake"
     outer._max_concurrency = 2
@@ -254,3 +258,37 @@ def test_local_scoring_and_chat_share_connection_lifetime(http_server):
         inner.close()
         # The outer shell did not start a server, so it must not run its destructor.
         outer._openai = None
+
+
+def test_owned_server_refusal_survives_real_httpx_exception_wrapping(tmp_path):
+    """A closed loopback listener models a dead server; no external requests."""
+    pytest.importorskip("openai")
+    from llenvs.inference.backends.vllm_singularity import SingularityVLLMBackend
+    from llenvs.inference.protocol import BackendProcessExitedError
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        port = listener.getsockname()[1]
+        listener.listen()
+        listener.close()
+        inner = OpenAIBackend(
+            model="fake", api_key="dummy",
+            base_url=f"http://127.0.0.1:{port}/v1",
+            max_retries=0, timeout=2,
+        )
+        outer = SingularityVLLMBackend.__new__(SingularityVLLMBackend)
+        outer._openai = inner
+        outer._proc = SimpleNamespace(poll=lambda: None)
+        outer._log_path = str(tmp_path / "server.log")
+        outer._server_failure = None
+        try:
+            with pytest.raises(PartialBatchError) as caught:
+                outer.generate_chat_batch([messages("test")], PARAMS)
+            assert isinstance(caught.value.failures[0], BackendProcessExitedError)
+            assert caught.value.failures[0].__cause__ is not None
+            # The service stays failed even while the launcher reports alive.
+            with pytest.raises(BackendProcessExitedError):
+                outer.generate_chat_batch([messages("again")], PARAMS)
+        finally:
+            inner.close()
+            outer._openai = None

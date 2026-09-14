@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import io
+import errno
 import json
-import os
 import signal
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -425,6 +424,239 @@ def _wire_scoring(backend, tokenizer=None):
     fake = _FakeCompletions()
     backend._openai._async_client.completions = fake
     return tok, fake
+
+
+@pytest.mark.parametrize("operation", ["generate", "generate_chat", "generate_chat_batch", "score_chat_batch"])
+@pytest.mark.parametrize("returncode", [0, 1, -9])
+def test_exited_server_rejects_calls_without_http(patched, operation, returncode):
+    from llenvs.inference.protocol import BackendProcessExitedError, SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    try:
+        _, fake = _wire_scoring(backend)
+        patched["proc_holder"]["p"].returncode = returncode
+        args = {
+            "generate": (["hello"], SamplingParams()),
+            "generate_chat": (_msgs("hello"), SamplingParams()),
+            "generate_chat_batch": ([_msgs("hello")], SamplingParams()),
+            "score_chat_batch": ([_msgs("hello")], ["A"]),
+        }[operation]
+        with pytest.raises(BackendProcessExitedError, match=f"rc={returncode}") as caught:
+            getattr(backend, operation)(*args)
+        assert backend._log_path in str(caught.value)
+        assert not fake.calls
+        for name in ("generate", "generate_chat", "generate_chat_batch"):
+            getattr(backend._openai, name).assert_not_called()
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("dead", [False, True])
+def test_server_death_during_scoring_preserves_success_and_failure_cause(patched, dead):
+    from llenvs.inference.protocol import BackendProcessExitedError, PartialBatchError
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m", max_concurrency=1)
+    try:
+        _, fake = _wire_scoring(backend)
+        original_create = fake.create
+        failure = ConnectionError("temporarily unavailable")
+
+        async def create(**kwargs):
+            if kwargs["prompt"][-1] == ord("B"):
+                if dead:
+                    patched["proc_holder"]["p"].returncode = 1
+                raise failure
+            return await original_create(**kwargs)
+
+        fake.create = create
+        with pytest.raises(PartialBatchError) as caught:
+            backend.score_chat_batch([_msgs("a")] * 4, ["", "A", "B", "C"])
+        exc = caught.value
+        assert exc.results[0].scored_tokens == 0
+        assert exc.results[1].token_scores[0].token_id == ord("A")
+        if dead:
+            assert set(exc.failures) == {2, 3}
+            assert all(isinstance(e, BackendProcessExitedError) for e in exc.failures.values())
+            assert exc.failures[2].__cause__ is failure
+            assert len(fake.calls) == 1  # C must not reach the dead server.
+        else:
+            assert exc.failures == {2: failure}
+            assert exc.results[3].token_scores[0].token_id == ord("C")
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("dead", [False, True])
+def test_generation_failure_checks_owned_process_without_losing_siblings(patched, partial, dead):
+    from llenvs.inference.protocol import (
+        BackendProcessExitedError,
+        GenerationResult,
+        PartialBatchError,
+        SamplingParams,
+    )
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    good = GenerationResult(text="A")
+    failure = ConnectionError("temporarily unavailable")
+    original = PartialBatchError([good, failure], {1: failure}) if partial else failure
+
+    def fail(*args):
+        if dead:
+            patched["proc_holder"]["p"].returncode = 1
+        raise original
+
+    try:
+        backend._openai.generate_chat_batch.side_effect = fail
+        expected = PartialBatchError if partial else BackendProcessExitedError if dead else ConnectionError
+        with pytest.raises(expected) as caught:
+            backend.generate_chat_batch([_msgs("a"), _msgs("b")], SamplingParams())
+        if not dead:
+            assert caught.value is original
+        elif partial:
+            assert caught.value.results[0] is good
+            assert set(caught.value.failures) == {1}
+            assert isinstance(caught.value.failures[1], BackendProcessExitedError)
+            assert caught.value.failures[1].__cause__ is failure
+    finally:
+        backend.close()
+
+
+def test_successful_batch_is_not_discarded_if_server_exits_after_reply(patched):
+    from llenvs.inference.protocol import GenerationResult, SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    good = [GenerationResult(text="A")]
+
+    def complete(*args):
+        patched["proc_holder"]["p"].returncode = 1
+        return good
+
+    try:
+        backend._openai.generate_chat_batch.side_effect = complete
+        assert backend.generate_chat_batch([_msgs("a")], SamplingParams()) is good
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_refused_owned_server_is_fatal_even_while_launcher_is_alive(patched, partial):
+    import asyncio
+
+    from llenvs.inference.protocol import (
+        BackendProcessExitedError,
+        GenerationResult,
+        PartialBatchError,
+        SamplingParams,
+    )
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    good = GenerationResult(text="A")
+    cancellation = asyncio.CancelledError()
+    refused = OSError(errno.ECONNREFUSED, "connection refused")
+    failure = ConnectionError("All connection attempts failed")
+    failure.__cause__ = ExceptionGroup("connection attempts", [refused])
+    original = PartialBatchError([good, failure, cancellation], {1: failure, 2: cancellation}) if partial else failure
+    try:
+        backend._openai.generate_chat_batch.side_effect = original
+        with pytest.raises(PartialBatchError if partial else BackendProcessExitedError) as caught:
+            backend.generate_chat_batch([_msgs("a")] * 3, SamplingParams())
+        if partial:
+            assert caught.value.results[0] is good
+            assert caught.value.failures[2] is cancellation
+            error = caught.value.failures[1]
+        else:
+            error = caught.value
+        assert isinstance(error, BackendProcessExitedError)
+        assert error.__cause__ is failure
+        assert backend._log_path in str(error)
+        assert patched["proc_holder"]["p"].poll() is None
+        backend._openai.generate_chat_batch.reset_mock()
+        with pytest.raises(BackendProcessExitedError):
+            backend.generate_chat_batch([_msgs("again")], SamplingParams())
+        backend._openai.generate_chat_batch.assert_not_called()
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("failure", [
+    TimeoutError("connection refused is mentioned, but this is a timeout"),
+    OSError(errno.ECONNRESET, "peer reset the connection"),
+    ConnectionError("connection refused"),
+])
+def test_live_server_transient_errors_are_not_misclassified_by_message(patched, failure):
+    from llenvs.inference.protocol import SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    try:
+        # Cyclic exception context must not hang failure inspection.
+        failure.__context__ = failure
+        backend._openai.generate_chat.side_effect = failure
+        with pytest.raises(type(failure)) as caught:
+            backend.generate_chat(_msgs("a"), SamplingParams())
+        assert caught.value is failure
+        backend._openai.generate_chat.side_effect = None
+        backend.generate_chat(_msgs("b"), SamplingParams())
+        assert backend._openai.generate_chat.call_count == 2
+    finally:
+        backend.close()
+
+
+def test_refused_server_during_scoring_retains_siblings_and_skips_later_http(patched):
+    from llenvs.inference.protocol import BackendProcessExitedError, PartialBatchError
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m", max_concurrency=1)
+    try:
+        _, fake = _wire_scoring(backend)
+        original_create = fake.create
+        failure = ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+        attempted = []
+
+        async def create(**kwargs):
+            attempted.append(kwargs["prompt"][-1])
+            if kwargs["prompt"][-1] == ord("B"):
+                raise failure
+            return await original_create(**kwargs)
+
+        fake.create = create
+        with pytest.raises(PartialBatchError) as caught:
+            backend.score_chat_batch([_msgs("a")] * 4, ["", "A", "B", "C"])
+        assert caught.value.results[0].scored_tokens == 0
+        assert caught.value.results[1].token_scores[0].token_id == ord("A")
+        assert set(caught.value.failures) == {2, 3}
+        assert all(isinstance(e, BackendProcessExitedError) for e in caught.value.failures.values())
+        assert caught.value.failures[2].__cause__ is failure
+        assert attempted == [ord("A"), ord("B")]
+        assert patched["proc_holder"]["p"].poll() is None
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_server_exit_does_not_reclassify_cancellation(patched, partial):
+    import asyncio
+
+    from llenvs.inference.protocol import PartialBatchError, SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    cancellation = asyncio.CancelledError()
+
+    def cancel(*args):
+        patched["proc_holder"]["p"].returncode = 1
+        if partial:
+            raise PartialBatchError([cancellation], {0: cancellation})
+        raise cancellation
+
+    try:
+        backend._openai.generate_chat_batch.side_effect = cancel
+        with pytest.raises(PartialBatchError if partial else asyncio.CancelledError) as caught:
+            backend.generate_chat_batch([_msgs("a")], SamplingParams())
+        if partial:
+            assert caught.value.failures == {0: cancellation}
+        else:
+            assert caught.value is cancellation
+    finally:
+        backend.close()
 
 
 def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(

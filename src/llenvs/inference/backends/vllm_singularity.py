@@ -20,6 +20,7 @@ from __future__ import annotations
 import atexit
 import contextlib
 import dataclasses
+import errno
 import json
 import logging
 import os
@@ -28,12 +29,14 @@ import signal
 import socket
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any, cast
 
 from llenvs.inference.backends.api import OpenAIBackend, _run_concurrent
 from llenvs.inference.protocol import (
     BackendCapabilities,
+    BackendProcessExitedError,
     ChatMessage,
     GenerationResult,
     ModelBackend,
@@ -49,6 +52,27 @@ from llenvs.inference.scoring_utils import (
 _log = logging.getLogger(__name__)
 
 _LEGACY_EXTRA_SPECIAL_TOKENS_ERROR = "'list' object has no attribute 'keys'"
+
+
+def _connection_refused(error: BaseException | None) -> bool:
+    """Find the OS error through SDK/httpx/anyio wrappers, without message guessing."""
+    pending = [error] if error is not None else []
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen or not isinstance(current, Exception):
+            continue
+        seen.add(id(current))
+        if isinstance(current, OSError) and current.errno == errno.ECONNREFUSED:
+            return True
+        if isinstance(current, PartialBatchError):
+            pending.extend(current.failures.values())
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions)
+        cause = current.__cause__ or current.__context__
+        if cause is not None:
+            pending.append(cause)
+    return False
 
 
 def _with_request_thinking_toggle(params: SamplingParams) -> SamplingParams:
@@ -261,6 +285,7 @@ class SingularityVLLMBackend(ModelBackend):
         self._closed = False
         self._model_path = model_path
         self._proc: subprocess.Popen[bytes] | None = None
+        self._server_failure: str | None = None
         self._log_fh: IO[bytes] | None = None
         self._openai: OpenAIBackend | None = None
         self._tokenizer: Any = None
@@ -444,27 +469,24 @@ class SingularityVLLMBackend(ModelBackend):
         return self._model_path
 
     def generate(self, prompts: list[str], params: SamplingParams) -> list[GenerationResult]:
-        if self._openai is None:
-            raise RuntimeError("SingularityVLLMBackend is closed")
-        return self._openai.generate(prompts, params)
+        with self._server_request():
+            return self._openai.generate(prompts, params)
 
     def generate_chat(
         self, messages: list[ChatMessage], params: SamplingParams
     ) -> GenerationResult:
-        if self._openai is None:
-            raise RuntimeError("SingularityVLLMBackend is closed")
-        return self._openai.generate_chat(messages, _with_request_thinking_toggle(params))
+        with self._server_request():
+            return self._openai.generate_chat(messages, _with_request_thinking_toggle(params))
 
     def generate_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         params: SamplingParams,
     ) -> list[GenerationResult]:
-        if self._openai is None:
-            raise RuntimeError("SingularityVLLMBackend is closed")
-        return self._openai.generate_chat_batch(
-            messages_batch, _with_request_thinking_toggle(params)
-        )
+        with self._server_request():
+            return self._openai.generate_chat_batch(
+                messages_batch, _with_request_thinking_toggle(params)
+            )
 
     def score_chat(self, messages: list[ChatMessage], continuation: str) -> ScoringResult:
         return self.score_chat_batch([messages], [continuation])[0]
@@ -483,8 +505,7 @@ class SingularityVLLMBackend(ModelBackend):
         Failed requests raise ``PartialBatchError`` with successful siblings
         retained and failure indices relative to the original input batch.
         """
-        if self._openai is None:
-            raise RuntimeError("SingularityVLLMBackend is closed")
+        self._ensure_server_running()
 
         # Scored continuations are answer text, never reasoning: a forced pass
         # has nowhere to put a thinking block, so render with thinking off.
@@ -528,13 +549,14 @@ class SingularityVLLMBackend(ModelBackend):
     async def _score_one_async(self, prompt_len: int, full_ids: list[int]) -> ScoringResult:
         # Ride the inner OpenAI client's async connection; vLLM's completions
         # endpoint returns prompt logprobs via the extra_body passthrough.
-        response = await self._openai._async_client.completions.create(
-            model=self._served_model_name,
-            prompt=full_ids,
-            max_tokens=1,
-            temperature=0,
-            extra_body={"prompt_logprobs": 0},
-        )
+        with self._server_request():
+            response = await self._openai._async_client.completions.create(
+                model=self._served_model_name,
+                prompt=full_ids,
+                max_tokens=1,
+                temperature=0,
+                extra_body={"prompt_logprobs": 0},
+            )
         choice = response.choices[0]
         return parse_prompt_logprobs_http(
             prompt_len=prompt_len,
@@ -549,6 +571,55 @@ class SingularityVLLMBackend(ModelBackend):
         return self._tokenizer
 
     # ---------- lifecycle ----------
+
+    def _server_error(self, failure: BaseException | None = None) -> BackendProcessExitedError | None:
+        if self._server_failure is not None:
+            return BackendProcessExitedError(self._server_failure)
+        rc = self._proc.poll() if self._proc is not None else None
+        if self._proc is None or rc is not None:
+            return BackendProcessExitedError(
+                f"vllm serve exited (rc={rc}); see {self._log_path} for details"
+            )
+        # The container launcher may outlive its API server. After readiness,
+        # refusal from our loopback listener means this owned service is gone.
+        if _connection_refused(failure):
+            self._server_failure = (
+                f"vllm serve refused a local connection after startup; "
+                f"see {self._log_path} for details"
+            )
+            return BackendProcessExitedError(self._server_failure)
+        return None
+
+    def _ensure_server_running(self) -> None:
+        if self._openai is None:
+            raise RuntimeError("SingularityVLLMBackend is closed")
+        error = self._server_error()
+        if error is not None:
+            raise error
+
+    @contextlib.contextmanager
+    def _server_request(self) -> Iterator[None]:
+        """Detect owned service loss; preserve successful responses and cancellation."""
+        self._ensure_server_running()
+        try:
+            yield
+        except PartialBatchError as exc:
+            server_error = self._server_error(exc)
+            if server_error is None:
+                raise
+            results = list(exc.results)
+            failures = dict(exc.failures)
+            for index, failure in failures.items():
+                if isinstance(failure, Exception):
+                    error = BackendProcessExitedError(str(server_error))
+                    error.__cause__ = failure
+                    results[index] = failures[index] = error
+            raise PartialBatchError(results, failures) from exc
+        except Exception as exc:
+            error = self._server_error(exc)
+            if error is not None:
+                raise error from exc
+            raise
 
     def _wait_for_health(self, timeout: float, interval: float) -> None:
         """Poll GET /health until 200, or the subprocess dies, or timeout."""

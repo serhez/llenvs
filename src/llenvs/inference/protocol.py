@@ -17,6 +17,14 @@ if TYPE_CHECKING:
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
 
 
+class BackendProcessExitedError(RuntimeError):
+    """The owned inference service exited or stopped listening; abort this run.
+
+    Retrying requests cannot revive the service. Completed sibling responses
+    remain valid and may be retained in a ``PartialBatchError``.
+    """
+
+
 class RecoverableInputError(ValueError):
     """Raised when a specific request item is invalid but the backend is healthy.
 

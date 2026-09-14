@@ -29,6 +29,7 @@ from llenvs.inference.prompts import (
 )
 from llenvs.inference.protocol import (
     BackendCapabilities,
+    BackendProcessExitedError,
     ChatMessage,
     GenerationResult,
     ModelBackend,
@@ -55,6 +56,7 @@ __all__ = [
     "ChatMessage",
     "ScoringResult",
     "StopReason",
+    "BackendProcessExitedError",
     "PartialBatchError",
     "PromptTooLongError",
     "QuotaExhaustedError",
