@@ -10,13 +10,19 @@ Reference: https://github.com/facebookresearch/OpenApps
 
 from __future__ import annotations
 
+import copy
+import math
 import queue
 import subprocess
+import sys
 import threading
 import time
 import uuid
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from datetime import datetime
+from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult, _StateContinuityTracker
 from llenvs.core.reward import RewardFunction, RewardType, Signal, SignalBundle
@@ -28,7 +34,6 @@ from llenvs.core.state import (
     State,
     StateMetadata,
 )
-
 
 # ---------------------------------------------------------------------------
 # Task names shipped with OpenApps
@@ -58,6 +63,56 @@ OPEN_APPS_MODULES: list[str] = [
     "codeeditor",
     "onlineshop",
 ]
+
+_TASK_RELEVANT_STATE_KEYS: dict[str, tuple[str, ...]] = {
+    "add_meeting_with_dennis": ("calendar",),
+    "add_christmas_shopping_event": ("calendar",),
+    "add_paper_reading_meeting_with_einstein": ("calendar",),
+    "remove_wacv_abstract_deadline": ("calendar",),
+    "add_call_mom_to_my_todo": ("todo",),
+    "mark_water_plants_as_done": ("todo",),
+    "message_bob_to_meet": ("messenger",),
+    "save_paris_to_my_favorite_places": ("map",),
+}
+
+
+def _validate_reward_scope(scope: str, task_names: tuple[str, ...]) -> None:
+    if scope not in ("native", "task_local"):
+        raise ValueError("reward_scope must be 'native' or 'task_local'")
+    if scope == "task_local":
+        unknown = set(task_names) - _TASK_RELEVANT_STATE_KEYS.keys()
+        if unknown:
+            raise ValueError(f"Task-local reward scope is undefined for tasks: {sorted(unknown)}")
+
+
+def _check_task_complete_task_local(
+    task: Any,
+    task_name: str,
+    initial_state: dict[str, Any],
+    current_state: dict[str, Any],
+) -> tuple[bool, tuple[str, ...]]:
+    """Compare relevant apps using the task's native target and normalizer.
+
+    Unrelated apps are masked to target values for comparison only. Missing
+    inputs and unsupported tasks fail rather than changing the reward rule.
+    Copies protect saved states from mutation by upstream normalizers.
+    """
+    _validate_reward_scope("task_local", (task_name,))
+    keys = _TASK_RELEVANT_STATE_KEYS[task_name]
+    if not callable(getattr(task, "get_target_state", None)):
+        raise ValueError(f"Task {task_name!r} does not provide a target state")
+    for key in keys:
+        if key not in initial_state or key not in current_state:
+            raise ValueError(f"Missing relevant app data: {key}")
+    from open_apps.tasks.tasks import AppStateComparison
+
+    target = task.get_target_state(copy.deepcopy(initial_state))
+    masked = copy.deepcopy(target)
+    for key in keys:
+        if key not in target:
+            raise ValueError(f"Missing relevant app in target state: {key}")
+        masked[key] = copy.deepcopy(current_state[key])
+    return bool(AppStateComparison(target, masked).compare()), keys
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +230,52 @@ def _get_app_state(base_url: str) -> dict[str, Any]:
 
 _pw_patch_lock = threading.Lock()
 _pw_patched = False
+_browser_owner_options = threading.local()
+
+
+def _parse_reference_time(value: str | None) -> datetime | None:
+    """Validate an ISO timestamp whose offset defines the app's local time."""
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, str):
+            raise ValueError
+        parsed = datetime.fromisoformat(value)
+        if parsed.utcoffset() is None:
+            raise ValueError
+    except ValueError:
+        raise ValueError(
+            "reference_time must be an ISO timestamp with an explicit timezone"
+        ) from None
+    return parsed
+
+
+def _positive_number(value: float, name: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ValueError(f"{name} must be a finite positive number")
+    return float(value)
+
+
+def _configure_browser_scale(pw: Any, scale: float) -> None:
+    """Merge a launch flag on this owner's Chromium object, not on its class."""
+    launch = pw.chromium.launch
+    flag = f"--force-device-scale-factor={scale:g}"
+
+    def launch_with_scale(*, args: list[str] | None = None, **kwargs: Any) -> Any:
+        launch_args = list(args or ())
+        existing = [arg for arg in launch_args if arg.startswith("--force-device-scale-factor")]
+        if existing and existing != [flag]:
+            raise ValueError("browser_scale_factor conflicts with Chromium launch arguments")
+        if not existing:
+            launch_args.append(flag)
+        return launch(args=launch_args, **kwargs)
+
+    pw.chromium.launch = launch_with_scale
 
 
 def _patch_browsergym_thread_local_pw() -> None:
@@ -193,28 +294,64 @@ def _patch_browsergym_thread_local_pw() -> None:
     with _pw_patch_lock:
         if _pw_patched:
             return
+
+        import browsergym.core
+        import browsergym.core.chat
+        import browsergym.core.env
+
+        _tls = threading.local()
+
+        def _thread_local_get_pw() -> Any:
+            pw = getattr(_tls, "pw", None)
+            if pw is None:
+                import playwright.sync_api
+
+                pw = playwright.sync_api.sync_playwright().start()
+                scale = getattr(_browser_owner_options, "scale", None)
+                if scale is not None:
+                    _configure_browser_scale(pw, scale)
+                _tls.pw = pw
+            return pw
+
+        # Publish all bindings before another owner can see the patch as ready.
+        browsergym.core._get_global_playwright = _thread_local_get_pw
+        browsergym.core.env._get_global_playwright = _thread_local_get_pw
+        browsergym.core.chat._get_global_playwright = _thread_local_get_pw
         _pw_patched = True
 
-    import browsergym.core
-    import browsergym.core.chat
-    import browsergym.core.env
 
-    _tls = threading.local()
+def _has_visible_browsergym_node(raw_obs: Any) -> bool:
+    """Detect incomplete captures, not general page/rendering correctness.
 
-    def _thread_local_get_pw() -> Any:
-        pw = getattr(_tls, "pw", None)
-        if pw is None:
-            import playwright.sync_api
-
-            pw = playwright.sync_api.sync_playwright().start()
-            _tls.pw = pw
-        return pw
-
-    # Patch every module that imports the accessor so their local
-    # reference also points to the thread-local version.
-    browsergym.core._get_global_playwright = _thread_local_get_pw
-    browsergym.core.env._get_global_playwright = _thread_local_get_pw
-    browsergym.core.chat._get_global_playwright = _thread_local_get_pw
+    Match the adapter's visible, BID-bearing accessibility-tree filtering.
+    A screenshot alone can be newer than the DOM/AX snapshots and is not proof
+    that extraction succeeded. Headings-only and text-only pages remain valid.
+    """
+    if not isinstance(raw_obs, dict):
+        return False
+    tree = raw_obs.get("axtree_object")
+    properties = raw_obs.get("extra_element_properties")
+    if not isinstance(tree, dict) or not isinstance(properties, dict):
+        return False
+    nodes = tree.get("nodes")
+    if not isinstance(nodes, (list, tuple)):
+        return False
+    for node in nodes:
+        if not isinstance(node, dict) or node.get("ignored", False):
+            continue
+        bid = node.get("browsergym_id")
+        prop = properties.get(bid) if isinstance(bid, str) else None
+        if not isinstance(prop, dict):
+            continue
+        visibility = prop.get("visibility")
+        if (
+            isinstance(visibility, (int, float))
+            and not isinstance(visibility, bool)
+            and math.isfinite(visibility)
+            and visibility >= 0.5
+        ):
+            return True
+    return False
 
 
 class _BrowserGymProxy:
@@ -232,25 +369,38 @@ class _BrowserGymProxy:
     own Playwright — giving true concurrent browser execution.
     """
 
-    _CALL_TIMEOUT = 60  # seconds per operation; trajectories that hang
-    # longer (e.g. because an epsilon-random click landed on a broken
-    # page) abort quickly instead of burning 5 min of wall clock each.
-
-    def __init__(self, env_factory: Any) -> None:
+    def __init__(
+        self,
+        env_factory: Any,
+        *,
+        call_timeout: float = 60,
+        browser_scale_factor: float | None = None,
+        recover_observation: bool = False,
+    ) -> None:
+        if not isinstance(recover_observation, bool):
+            raise ValueError("recover_observation must be a bool")
+        self._recover_observation = recover_observation
+        self._call_timeout = _positive_number(call_timeout, "call_timeout")
+        self._browser_scale_factor = (
+            None
+            if browser_scale_factor is None
+            else _positive_number(browser_scale_factor, "browser_scale_factor")
+        )
+        self._call_lock = threading.Lock()
+        self._unusable_reason: str | None = None
+        self._closed = False
         self._cmd_q: queue.Queue = queue.Queue()
         self._res_q: queue.Queue = queue.Queue()
         self._ready = threading.Event()
         self._error: BaseException | None = None
-        self._thread = threading.Thread(
-            target=self._run, args=(env_factory,), daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, args=(env_factory,), daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=180):
+            self._unusable_reason = "startup timed out"
+            self._cmd_q.put(("__stop__", (), {}))
             raise RuntimeError("BrowserGym proxy thread failed to start in 180s")
         if self._error is not None:
-            raise RuntimeError(
-                f"BrowserGym proxy thread died during startup: {self._error}"
-            )
+            raise RuntimeError(f"BrowserGym proxy thread died during startup: {self._error}")
 
     # -- internal event loop (runs on the owner thread) --------------------
 
@@ -266,10 +416,10 @@ class _BrowserGymProxy:
         except RuntimeError:
             asyncio.set_event_loop(asyncio.new_event_loop())
 
-        # Ensure BrowserGym uses thread-local Playwright instances.
-        _patch_browsergym_thread_local_pw()
-
         try:
+            _browser_owner_options.scale = self._browser_scale_factor
+            # Keep initialization errors inside the startup error boundary.
+            _patch_browsergym_thread_local_pw()
             env = env_factory()
         except Exception as exc:
             logger.error("Proxy thread: env_factory failed: %s", exc)
@@ -283,10 +433,11 @@ class _BrowserGymProxy:
             while True:
                 cmd, args, kwargs = self._cmd_q.get()
                 if cmd == "__stop__":
-                    self._res_q.put(None)
                     break
                 try:
                     result = getattr(env, cmd)(*args, **kwargs)
+                    if self._recover_observation and cmd in ("reset", "step"):
+                        result = self._recover_result_observation(env, result)
                     self._res_q.put(("ok", result))
                 except Exception as exc:
                     self._res_q.put(("err", exc))
@@ -298,19 +449,57 @@ class _BrowserGymProxy:
             except Exception:
                 pass
 
+    def _recover_result_observation(self, env: Any, result: tuple) -> tuple:
+        """Re-read on the browser owner thread; never repeat the operation.
+
+        Keep the original reward/termination/info tuple. An unsuccessful read
+        leaves the browser past the last accepted state, so it must be closed,
+        not reused as if the original action had never happened.
+        """
+        import logging
+
+        logger = logging.getLogger("llenvs.adapters.open_apps.proxy")
+        try:
+            if _has_visible_browsergym_node(result[0]):
+                return result
+            browser = env.unwrapped
+            for attempt in range(1, 4):
+                if self._unusable_reason is not None:
+                    raise RuntimeError(f"BrowserGym proxy is unusable: {self._unusable_reason}")
+                logger.warning(
+                    "Incomplete OpenApps observation; re-reading without repeating the action (%d/3)",
+                    attempt,
+                )
+                # Unlike BrowserGym's load check, a timeout here must propagate.
+                browser.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                raw_obs = browser._get_obs()
+                if _has_visible_browsergym_node(raw_obs):
+                    return (raw_obs, *result[1:])
+            raise RuntimeError("OpenApps observation remains incomplete after three fresh reads")
+        except Exception:
+            self._unusable_reason = (
+                self._unusable_reason
+                or "observation recovery failed; close and recreate the environment"
+            )
+            raise
+
     # -- public forwarding methods (called from any thread) ----------------
 
     def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        if not self._thread.is_alive():
-            raise RuntimeError("BrowserGym proxy thread is dead")
-        self._cmd_q.put((method, args, kwargs))
-        try:
-            tag, result = self._res_q.get(timeout=self._CALL_TIMEOUT)
-        except queue.Empty:
-            raise TimeoutError(
-                f"BrowserGym proxy: '{method}' timed out after "
-                f"{self._CALL_TIMEOUT}s"
-            ) from None
+        # Queue pairs must remain owned by one caller until its result arrives.
+        with self._call_lock:
+            if self._unusable_reason is not None:
+                raise RuntimeError(f"BrowserGym proxy is unusable: {self._unusable_reason}")
+            if not self._thread.is_alive():
+                raise RuntimeError("BrowserGym proxy thread is dead")
+            self._cmd_q.put((method, args, kwargs))
+            try:
+                tag, result = self._res_q.get(timeout=self._call_timeout)
+            except queue.Empty:
+                self._unusable_reason = f"'{method}' timed out; close and recreate the environment"
+                raise TimeoutError(
+                    f"BrowserGym proxy: '{method}' timed out after {self._call_timeout:g}s"
+                ) from None
         if tag == "err":
             raise result
         return result
@@ -322,12 +511,16 @@ class _BrowserGymProxy:
         return self._call("step", action)
 
     def close(self) -> None:
-        if self._thread.is_alive():
-            self._cmd_q.put(("__stop__", (), {}))
-            try:
-                self._res_q.get(timeout=30)
-            except queue.Empty:
-                pass
+        with self._call_lock:
+            if self._closed:
+                return
+            self._closed = True
+            self._unusable_reason = self._unusable_reason or "closed"
+            if self._thread.is_alive():
+                self._cmd_q.put(("__stop__", (), {}))
+        # A result left by a timed-out action is NOT a close acknowledgement.
+        # Threads cannot be forcibly killed; cleanup runs when that action exits.
+        self._thread.join(timeout=30)
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +557,8 @@ class OpenAppsEnvironment:
         omit_axtree_text: bool = False,
         extra_rewards: tuple[RewardFunction, ...] = (),
         initial_task_index: int = 0,
-        server: "_OpenAppsServer | None" = None,
+        server: _OpenAppsServer | None = None,
+        reward_scope: str = "native",
     ) -> None:
         """Initialize an OpenApps environment over a collection of tasks.
 
@@ -404,11 +598,15 @@ class OpenAppsEnvironment:
                 native task-completion reward.
             initial_task_index: Index of the task to activate eagerly.
                 Defaults to 0.
+            reward_scope: Native whole-state comparison by default. Explicit
+                ``task_local`` checks only the task-relevant apps.
         """
         if not task_names:
             raise ValueError("OpenAppsEnvironment requires at least one task name")
+        _validate_reward_scope(reward_scope, task_names)
 
         self._task_names = tuple(task_names)
+        self._reward_scope = reward_scope
         self._task_factory = task_factory
         self._base_url = base_url
         self._max_steps = max_steps
@@ -605,6 +803,7 @@ class OpenAppsEnvironment:
         # Strip query/fragment, then compare path to the home routes.
         # OpenApps serves the welcome page from "/" (and sometimes "").
         from urllib.parse import urlparse
+
         path = urlparse(url).path or "/"
         return path in ("", "/", "/home", "/index.html")
 
@@ -621,9 +820,7 @@ class OpenAppsEnvironment:
         """
         if not self._is_home_screen(raw_obs):
             return raw_obs
-        new_obs, _r, _term, _trunc, _info = self._env.step(
-            f"noop({_HOME_FADE_IN_WAIT_MS})"
-        )
+        new_obs, _r, _term, _trunc, _info = self._env.step(f"noop({_HOME_FADE_IN_WAIT_MS})")
         return new_obs
 
     # -- MDP interface ------------------------------------------------------
@@ -713,9 +910,19 @@ class OpenAppsEnvironment:
 
         # Compute task-level reward via state comparison
         current_app_state = _get_app_state(self._base_url)
-        task_complete = self._task.check_if_task_is_complete(
-            state.hidden.initial_app_state, current_app_state
-        )
+        scope_info: dict[str, Any] = {}
+        if self._reward_scope == "task_local":
+            task_complete, relevant_apps = _check_task_complete_task_local(
+                self._task,
+                state.hidden.task_name,
+                state.hidden.initial_app_state,
+                current_app_state,
+            )
+            scope_info = {"reward_scope": "task_local", "reward_relevant_apps": relevant_apps}
+        else:
+            task_complete = self._task.check_if_task_is_complete(
+                state.hidden.initial_app_state, current_app_state
+            )
         task_reward = 1.0 if task_complete else 0.0
 
         # Check truncation
@@ -751,6 +958,7 @@ class OpenAppsEnvironment:
                 "open_apps_reward": task_reward,
                 "browsergym_reward": reward,
                 "task_complete": task_complete,
+                **scope_info,
                 "last_action": action.text,
             },
         )
@@ -773,6 +981,7 @@ class OpenAppsEnvironment:
                 "open_apps_reward": task_reward,
                 "browsergym_reward": reward,
                 "task_complete": task_complete,
+                **scope_info,
                 "action": action.text,
             },
         )
@@ -853,11 +1062,17 @@ class _OpenAppsServer:
         config_overrides: dict[str, Any] | None = None,
         start_port: int = 5001,
         startup_timeout: float = 120.0,
+        reference_time: str | None = None,
     ) -> None:
+        parsed_time = _parse_reference_time(reference_time)
+        self.reference_time = parsed_time.isoformat() if parsed_time is not None else None
         self._open_apps_path = open_apps_path
-        self._config_overrides = config_overrides or {}
+        self._config_overrides = dict(config_overrides or {})
         self._startup_timeout = startup_timeout
         self._process: subprocess.Popen | None = None
+        self._stdout_stop = threading.Event()
+        self._stdout_thread: threading.Thread | None = None
+        self._stdout_tail: deque[bytes] = deque(maxlen=8)
 
         self.port = self._pick_port(start_port)
         self.host = "localhost"
@@ -885,15 +1100,24 @@ class _OpenAppsServer:
 
     def start(self) -> None:
         """Launch the OpenApps web server."""
-        import shutil
+        if self.reference_time is not None:
+            cmd = [
+                sys.executable,
+                "-m",
+                "llenvs.adapters._open_apps_server",
+                "--open-apps-path",
+                self._open_apps_path,
+                "--reference-time",
+                self.reference_time,
+                "--",
+            ]
+        else:
+            import shutil
 
-        uv = shutil.which("uv")
-        if uv is None:
-            raise RuntimeError(
-                "'uv' is required to launch OpenApps but was not found on PATH"
-            )
-
-        cmd = [uv, "run", "launch.py"]
+            uv = shutil.which("uv")
+            if uv is None:
+                raise RuntimeError("'uv' is required to launch OpenApps but was not found on PATH")
+            cmd = [uv, "run", "launch.py"]
         for key, value in self._config_overrides.items():
             cmd.append(f"{key}={value}")
 
@@ -905,7 +1129,44 @@ class _OpenAppsServer:
             start_new_session=True,
         )
 
-        self._wait_until_ready()
+        try:
+            self._wait_until_ready()
+            if self._process.poll() is None and self._process.stdout is not None:
+                self._stdout_stop.clear()
+                self._stdout_tail.clear()
+                self._stdout_thread = threading.Thread(
+                    target=self._drain_stdout,
+                    args=(self._process.stdout, self._stdout_stop, self._stdout_tail),
+                    name="openapps-server-output",
+                    daemon=True,
+                )
+                self._stdout_thread.start()
+        except BaseException:
+            self.stop()
+            raise
+
+    @staticmethod
+    def _drain_stdout(stream, stop, tail) -> None:
+        """Drain bounded chunks without retaining the server or waiting for EOF.
+
+        A descendant may inherit stdout, so shutdown uses a stop event rather
+        than relying on every descendant to close its end of the pipe.
+        """
+        import os
+        import selectors
+
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(stream, selectors.EVENT_READ)
+                while not stop.is_set():
+                    if not selector.select(timeout=0.1):
+                        continue
+                    chunk = os.read(stream.fileno(), 8192)
+                    if not chunk:
+                        break
+                    tail.append(chunk)
+        finally:
+            stream.close()
 
     def _wait_until_ready(self) -> None:
         """Block until the server responds to HTTP requests.
@@ -971,15 +1232,27 @@ class _OpenAppsServer:
         )
 
     def stop(self) -> None:
-        """Terminate the server subprocess."""
+        """Terminate the server subprocess and close its output reader."""
         if self._process is not None:
-            self._process.terminate()
+            process = self._process
             try:
-                self._process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait()
-            self._process = None
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            finally:
+                self._stdout_stop.set()
+                if self._stdout_thread is not None:
+                    self._stdout_thread.join(timeout=2)
+                    if self._stdout_thread.is_alive():
+                        raise RuntimeError("OpenApps server output reader did not stop")
+                    self._stdout_thread = None
+                if process.stdout is not None:
+                    process.stdout.close()
+                self._process = None
 
     def __del__(self) -> None:
         """Stop the subprocess when the last reference is dropped.
@@ -1073,8 +1346,7 @@ class OpenAppsAdapter:
             return browsergym
         except ImportError as e:
             raise ImportError(
-                "BrowserGym is required for OpenAppsAdapter. "
-                "Install with: pip install browsergym"
+                "BrowserGym is required for OpenAppsAdapter. Install with: pip install browsergym"
             ) from e
 
     def _resolve_open_apps_path(self) -> str:
@@ -1093,17 +1365,29 @@ class OpenAppsAdapter:
     def _ensure_server(
         self,
         config_overrides: dict[str, Any] | None = None,
+        *,
+        reference_time: str | None = None,
     ) -> _OpenAppsServer:
         """Start the OpenApps server if it isn't already running.
 
         Thread-safe: multiple proxy threads may call get_environment
         concurrently on a shared adapter instance.
         """
+        parsed_time = _parse_reference_time(reference_time)
+        normalized_time = parsed_time.isoformat() if parsed_time is not None else None
         with self._server_lock:
             if self._server is not None and self._server.is_running:
+                if self._server.reference_time != normalized_time:
+                    raise ValueError(
+                        "Cannot change reference_time on a running shared OpenApps server"
+                    )
                 return self._server
             path = self._resolve_open_apps_path()
-            self._server = _OpenAppsServer(path, config_overrides=config_overrides)
+            self._server = _OpenAppsServer(
+                path,
+                config_overrides=config_overrides,
+                reference_time=normalized_time,
+            )
             self._server.start()
             return self._server
 
@@ -1131,6 +1415,11 @@ class OpenAppsAdapter:
         extra_rewards: tuple[RewardFunction, ...] = (),
         config_overrides: dict[str, Any] | None = None,
         task_names: tuple[str, ...] | None = None,
+        browsergym_call_timeout: float = 60,
+        browser_scale_factor: float | None = None,
+        reference_time: str | None = None,
+        reward_scope: str = "native",
+        recover_observation: bool = False,
         **kwargs: Any,
     ) -> OpenAppsEnvironment:
         """Create an OpenApps environment.
@@ -1158,35 +1447,55 @@ class OpenAppsAdapter:
             config_overrides: Hydra config overrides for the server.
             task_names: Subset of tasks the env should serve.  Defaults
                 to all of :data:`OPEN_APPS_TASKS`.
+            browsergym_call_timeout: Seconds to wait for a browser operation.
+                A timed-out environment must be closed and recreated.
+            browser_scale_factor: Opt-in Chromium device scale; *None* keeps
+                native behavior. Use 1 for CSS-sized screenshots on HiDPI hosts.
+            reference_time: Opt-in ISO timestamp with timezone for the managed
+                app server's clock. External servers cannot use this override.
+            reward_scope: ``native`` keeps whole-state comparison. Explicit
+                ``task_local`` ignores unrelated apps for the supported tasks.
+            recover_observation: Opt-in, bounded re-reading of incomplete raw
+                observations on the browser thread without repeating actions.
+                Persistent failure invalidates the environment's browser proxy.
             **kwargs: Extra keyword arguments forwarded to BrowserGym.
 
         Returns:
             Configured :class:`OpenAppsEnvironment`.
         """
+        _validate_reward_scope(
+            reward_scope, tuple(task_names) if task_names is not None else tuple(OPEN_APPS_TASKS)
+        )
+        if not isinstance(recover_observation, bool):
+            raise ValueError("recover_observation must be a bool")
+        browsergym_call_timeout = _positive_number(
+            browsergym_call_timeout, "browsergym_call_timeout"
+        )
+        if browser_scale_factor is not None:
+            browser_scale_factor = _positive_number(browser_scale_factor, "browser_scale_factor")
+        _parse_reference_time(reference_time)
+        if base_url is not None and reference_time is not None:
+            raise ValueError(
+                "reference_time cannot control an external server supplied via base_url"
+            )
         self._get_open_apps()
         self._get_browsergym()
 
-        from open_apps.tasks.tasks import (
-            AddEventTask,
-            AddToDoTask,
-            MarkToDoDoneTask,
-            RemoveEventTask,
-            SavePlaceTask,
-            SendMessageTask,
-            Task,
-        )
-        from open_apps.tasks.add_tasks_to_browsergym import register_tasks_with_browsergym
-
         import hydra
         from omegaconf import OmegaConf
+        from open_apps.tasks.add_tasks_to_browsergym import register_tasks_with_browsergym
+        from open_apps.tasks.tasks import (
+            AddEventTask,
+            Task,
+        )
 
         # Start server if needed. The returned env holds a reference to
         # this server object, so the FastHTML subprocess stays alive for
         # the env's lifetime and is cleaned up (via
         # ``_OpenAppsServer.__del__``) when the env is discarded.
-        server: "_OpenAppsServer | None" = None
+        server: _OpenAppsServer | None = None
         if base_url is None:
-            server = self._ensure_server(config_overrides)
+            server = self._ensure_server(config_overrides, reference_time=reference_time)
             base_url = server.url
 
         # Load task config via Hydra
@@ -1195,9 +1504,7 @@ class OpenAppsAdapter:
             all_tasks_cfg = OmegaConf.load(f)
 
         if name not in all_tasks_cfg:
-            raise ValueError(
-                f"Unknown task '{name}'. Available: {list(all_tasks_cfg.keys())}"
-            )
+            raise ValueError(f"Unknown task '{name}'. Available: {list(all_tasks_cfg.keys())}")
 
         # Closure that builds (task, BrowserGym proxy) for any task_name in
         # all_tasks_cfg.  Used both for the initial environment and for
@@ -1211,16 +1518,13 @@ class OpenAppsAdapter:
         def _build_task_env(task_name: str) -> tuple[Any, Any]:
             if task_name not in all_tasks_cfg:
                 raise ValueError(
-                    f"Unknown task '{task_name}'. Available: "
-                    f"{list(all_tasks_cfg.keys())}"
+                    f"Unknown task '{task_name}'. Available: {list(all_tasks_cfg.keys())}"
                 )
             # _convert_="all" strips omegaconf wrappers so task dataclass
             # fields are plain list/dict — needed because tasks like
             # add_paper_reading_meeting_with_einstein have non-empty
             # `invitees` lists that later flow into JSON comparisons.
-            task_obj: Task = hydra.utils.instantiate(
-                all_tasks_cfg[task_name], _convert_="all"
-            )
+            task_obj: Task = hydra.utils.instantiate(all_tasks_cfg[task_name], _convert_="all")
             # Patch: for AddEventTask, normalise the `invitees` field to
             # the comma-separated string format the Calendar backend
             # actually stores.  Without this, the task's target state
@@ -1230,9 +1534,7 @@ class OpenAppsAdapter:
             # ``AppStateComparison.compare`` reports a mismatch and
             # ``check_if_task_is_complete`` always returns False —
             # making the task unsolvable through the UI.
-            if isinstance(task_obj, AddEventTask) and isinstance(
-                task_obj.invitees, list
-            ):
+            if isinstance(task_obj, AddEventTask) and isinstance(task_obj.invitees, list):
                 task_obj.invitees = ", ".join(task_obj.invitees)
             register_tasks_with_browsergym(tasks=[task_obj])
             task_id = task_obj.task_id
@@ -1245,16 +1547,19 @@ class OpenAppsAdapter:
                     **_extra_kw,
                 )
 
-            return task_obj, _BrowserGymProxy(_make_browsergym_env)
+            return task_obj, _BrowserGymProxy(
+                _make_browsergym_env,
+                call_timeout=browsergym_call_timeout,
+                browser_scale_factor=browser_scale_factor,
+                recover_observation=recover_observation,
+            )
 
         # Resolve the task list this env will serve and validate `name`.
         env_task_names: tuple[str, ...] = (
             tuple(task_names) if task_names is not None else tuple(OPEN_APPS_TASKS)
         )
         if name not in env_task_names:
-            raise ValueError(
-                f"Initial task {name!r} is not in task_names {list(env_task_names)}"
-            )
+            raise ValueError(f"Initial task {name!r} is not in task_names {list(env_task_names)}")
         initial_task_index = env_task_names.index(name)
 
         return OpenAppsEnvironment(
@@ -1268,6 +1573,7 @@ class OpenAppsAdapter:
             extra_rewards=extra_rewards,
             initial_task_index=initial_task_index,
             server=server,
+            reward_scope=reward_scope,
         )
 
     def get_default_system_prompt(self, name: str) -> str | None:

@@ -479,8 +479,13 @@ class TestOpenRouterReasoningMetadata:
             "id": "gen-stub",
             "finish_reason": "length",
             "native_finish_reason": "MAX_TOKENS",
+            "reasoning": "private chain of thought",
             "reasoning_present": True,
             "reasoning_chars": 24,
+            "reasoning_details": [
+                {"type": "reasoning.text", "text": "step one"},
+                {"type": "reasoning.encrypted", "data": "opaque"},
+            ],
             "reasoning_details_present": True,
             "reasoning_details_count": 2,
             "reasoning_details_types": ("reasoning.text", "reasoning.encrypted"),

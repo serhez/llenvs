@@ -1,5 +1,7 @@
 """Tests for answer extraction."""
 
+import pytest
+
 from llenvs.core.cleaning import strip_special_tokens, take_first_nonempty_line
 from llenvs.core.extraction import (
     BoxedExtractor,
@@ -7,6 +9,7 @@ from llenvs.core.extraction import (
     CodeBlockExtractor,
     CompositeExtractor,
     GSM8KExtractor,
+    JSONFieldExtractor,
     LastLineExtractor,
     MultipleChoiceExtractor,
     NativeExtractor,
@@ -17,6 +20,91 @@ from llenvs.core.extraction import (
     SingleLineExtractor,
     TagBasedExtractor,
 )
+
+
+class TestJSONFieldExtractor:
+    """Tests for extracting a top-level scalar from JSON responses."""
+
+    def test_extracts_string_from_whole_response(self):
+        extractor = JSONFieldExtractor(field="action")
+
+        answer, meta = extractor.extract('  {"action": " right "}  ')
+
+        assert answer == "right"
+        assert meta["found"] is True
+        assert meta["field"] == "action"
+        assert meta["source"] == "whole_response"
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            '```json\n{"action": "down"}\n```',
+            '```\n{"action": "down"}\n```',
+        ],
+    )
+    def test_extracts_from_json_or_unlabelled_code_fence(self, response):
+        answer, meta = JSONFieldExtractor(field="action").extract(response)
+
+        assert answer == "down"
+        assert meta["source"] == "code_fence"
+
+    def test_uses_last_valid_fenced_object_with_field(self):
+        response = (
+            '```json\n{"action": "left"}\n```\n'
+            '```json\n{"other": "ignored"}\n```\n'
+            '```json\n{"action": "up"}\n```'
+        )
+
+        answer, _ = JSONFieldExtractor(field="action").extract(response)
+
+        assert answer == "up"
+
+    @pytest.mark.parametrize(
+        ("response", "expected"),
+        [
+            ('{"value": 3.5}', "3.5"),
+            ('{"value": true}', "true"),
+            ('{"value": false}', "false"),
+        ],
+    )
+    def test_serializes_non_string_scalars_as_json(self, response, expected):
+        answer, _ = JSONFieldExtractor(field="value").extract(response)
+        assert answer == expected
+
+    @pytest.mark.parametrize(
+        "response",
+        [
+            'prefix {"action": "right"}',
+            '{"other": "right"}',
+            '{"action": null}',
+            '{"action": ["right"]}',
+            '{"action": {"name": "right"}}',
+            '{"action": NaN}',
+            '{not valid json}',
+        ],
+    )
+    def test_rejects_embedded_missing_null_structured_or_malformed_values(
+        self, response
+    ):
+        answer, meta = JSONFieldExtractor(field="action").extract(response)
+
+        assert answer is None
+        assert meta["found"] is False
+
+    def test_code_fences_can_be_disabled(self):
+        answer, meta = JSONFieldExtractor(
+            field="action", allow_code_fences=False
+        ).extract('```json\n{"action": "right"}\n```')
+
+        assert answer is None
+        assert meta["found"] is False
+
+    def test_can_preserve_string_whitespace(self):
+        answer, _ = JSONFieldExtractor(
+            field="action", strip_whitespace=False
+        ).extract('{"action": " right "}')
+
+        assert answer == " right "
 
 
 class TestTagBasedExtractor:

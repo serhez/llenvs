@@ -17,6 +17,15 @@ Callers own backend lifecycle. Local backends release heavyweight model
 resources best-effort on `close()`, and API backends close reusable client
 sessions. Repeated `close()` calls are safe.
 
+OpenAI, OpenRouter and Anthropic batch calls reuse a dedicated background event
+loop for the lifetime of each backend's async client. Chat and tool batches share
+that loop, so pooled HTTP connections remain usable across successive calls,
+including calls from different threads or from an existing async context. These
+public methods are synchronous: they block their caller until the batch finishes.
+Concurrent callers on one backend are serialized; requests within each batch use
+`max_concurrency` and results retain input order. `close()` closes the async client
+on its owning loop and stops the loop thread. Always close backends when finished.
+
 ## Available Backends
 
 | Backend | Package | Features |
@@ -89,6 +98,20 @@ for token_lp in results[0].token_logprobs:
 | vision | Auto | VLMs detected automatically |
 
 > **Tip:** If you already have a remote `vllm serve` instance running, use `OpenAIBackend(model="your-model", base_url="http://host:port/v1")` instead — vLLM's server exposes an OpenAI-compatible API.
+
+### Container-hosted continuation scoring
+
+`SingularityVLLMBackend` (`vllm_singularity`) uses the container server's
+`/v1/completions` endpoint for `score_chat` / `score_chat_batch`, with
+`prompt_logprobs` and thinking disabled when rendering the scoring prompt.
+The host loads only the tokenizer; model inference runs inside the container.
+
+If any concurrent scoring request fails, `score_chat_batch` raises
+`PartialBatchError`. Its `results` retains successful `ScoringResult` entries and
+exceptions in input order; `failures` maps original input indices to exceptions.
+Empty continuations receive empty scoring results without a server request and
+do not shift failure indices. Callers can retry failed entries without discarding
+successful siblings. The single-request `score_chat` path uses the same contract.
 
 ## HuggingFace Transformers (Local Inference)
 
@@ -273,6 +296,52 @@ diagnostics are preserved in `GenerationResult.metadata`: normalized
 presence/count/length fields for `message.reasoning` and
 `message.reasoning_details`. The full reasoning payload is not copied into
 metadata.
+
+OpenRouter responses with a top-level or per-choice `error`, or a raw/native
+`finish_reason` of `error`, raise an exception even if HTTP succeeded
+and choices contain plausible text or tool calls. No partial answer is returned
+as a successful generation. Unnormalized failures raise `MalformedResponseError`,
+which retains `provider_error`, model/backend
+identifiers and a numeric `status_code` when the error payload provides one.
+Callers should distinguish transient failures from permanent 4xx errors rather
+than retry every malformed response blindly. Chat rate-limit handling recognizes
+429; permanent 4xx codes do not enter its rate-limit wait loop. Concurrent batches
+preserve successful siblings and original failed indices in `PartialBatchError`.
+
+HTTP and body-level 400 errors share input normalization across chat/tool and
+single/batch paths: recognized context-limit errors become `PromptTooLongError`,
+and invalid media becomes `RecoverableInputError`. Authentication, billing,
+permission and policy failures are not converted into skippable input failures.
+Normalized errors chain the original provider error for diagnostics. Retryable
+408/409 timeouts are not rate-limit waits; caller-level retry handling remains
+responsible for body-level non-429 transient failures.
+
+### Retaining assistant reasoning
+
+OpenRouter and LiteLLM keep separately returned `reasoning` (including the
+`reasoning_content` alias) and `reasoning_details` in `GenerationResult.metadata`.
+They do not add it to `result.text` or to the action produced by
+`result.to_agent_action()`. Structured blocks retain their order, signatures,
+nulls and extra provider fields as detached plain data.
+
+For an API continuation, pass that payload in the assistant message:
+
+```python
+assistant = ChatMessage(
+    role="assistant",
+    content=result.text,
+    reasoning=result.metadata.get("reasoning"),
+    reasoning_details=tuple(result.metadata.get("reasoning_details") or ()),
+)
+```
+
+`ChatMessage.to_dict()` sends `reasoning_details` when nonempty, otherwise
+`reasoning`; it does not send both copies. Messages without either field keep
+their ordinary wire representation, and old pickled messages remain readable.
+These are provider-native API fields, not a portable prompt format for every
+backend. The caller must choose a backend/provider that accepts them and budget
+space for the retained reasoning as well as the continuation. Retaining a payload
+does not itself enable another reasoning phase or guarantee the provider uses it.
 
 ## LiteLLM
 

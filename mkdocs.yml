@@ -97,6 +97,7 @@ nav:
     - Gymnasium: adapters/gymnasium.md
     - WebShop: adapters/webshop.md
     - AlfWorld: adapters/alfworld.md
+    - OpenApps: adapters/open-apps.md
     - Jericho: adapters/jericho.md
     - AgentGym: adapters/agentgym.md
     - LMRL-Gym: adapters/lmrl.md

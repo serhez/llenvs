@@ -12,7 +12,7 @@ import re
 import threading
 import uuid
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from llenvs.core.environment import EnvironmentSpec, StepResult
@@ -56,6 +56,21 @@ _SPLIT_DATA_KEYS: dict[str, str] = {
     "eval_in_distribution": "eval_id_data_path",
     "eval_out_of_distribution": "eval_ood_data_path",
 }
+
+
+def _deferred_planner_expert() -> Any:
+    """Keep native expert wrapping but search only at an explicitly restored leaf."""
+    from alfworld.agents.environment.alfred_tw_env import AlfredExpert
+
+    class DeferredPlannerExpert(AlfredExpert):
+        def load(self, filename: str) -> None:
+            super().load(filename)
+            self.request_infos.policy_commands = False
+
+        def _gather_infos(self) -> None:
+            self.state["extra.expert_plan"] = []
+
+    return DeferredPlannerExpert(expert_type="planner")
 
 
 def _extract_objective(observation: str) -> str:
@@ -319,6 +334,11 @@ class AlfWorldEnvironment:
         """
         self._game_files = game_files
         self._config = config
+        self._defer_expert_planning = bool(config.get("env", {}).get("defer_expert_planning", False))
+        if self._defer_expert_planning and (
+            not expert_plan or config.get("env", {}).get("expert_type") != "planner"
+        ):
+            raise ValueError("defer_expert_planning requires expert_plan=True and expert_type=planner")
         self._max_steps = max_steps
         self._include_admissible_commands = include_admissible_commands
         self._include_objective_in_obs = include_objective_in_obs
@@ -465,7 +485,10 @@ class AlfWorldEnvironment:
                 if self._expert_plan:
                     from alfworld.agents.environment.alfred_tw_env import AlfredExpert
                     expert_type = self._config.get("env", {}).get("expert_type", "handcoded")
-                    wrappers.append(AlfredExpert(expert_type))
+                    wrappers.append(
+                        _deferred_planner_expert() if self._defer_expert_planning
+                        else AlfredExpert(expert_type=expert_type)
+                    )
                     extras.append("expert_plan")
                 wrappers.append(AlfredInfos)
 
@@ -704,6 +727,48 @@ class AlfWorldEnvironment:
             return notice
         return f"{notice}\n\n{env_feedback}"
 
+    def _reference_plan(self, gym_env: Any, infos: Any) -> tuple[str, ...] | None:
+        if not self._defer_expert_planning:
+            return _extract_expert_plan(infos)
+        # TextWorld's single-game gym wrapper uses a synchronous batch of one.
+        # Calling PDDL replan directly avoids searches at each reset/replay step.
+        environments = gym_env.batch_env.envs
+        if len(environments) != 1:
+            raise ValueError("Deferred ALFWorld planning requires one TextWorld environment")
+        pddl = environments[0].unwrapped
+        return tuple(pddl._pddl_state.replan(pddl._entity_infos))
+
+    def refresh_expert_plan(self, state: State[AlfWorldHidden]) -> State[AlfWorldHidden]:
+        """Refresh reference-only hints by restoring a state, without taking an action.
+
+        Returns a copy with expert annotations; observations, history, counters,
+        and task metadata otherwise remain as supplied. This opt-in helper is
+        for reference rollouts from saved actor states, not actor observations.
+        """
+        if state.metadata.is_terminal or state.hidden.episode_step >= self._max_steps:
+            return state
+        if not self._expert_plan:
+            raise ValueError("refresh_expert_plan requires expert_plan=True")
+        with self._gym_env_lock:
+            gym_env = None
+            try:
+                gym_env, _, infos, _ = self._init_game(state.hidden.game_file)
+                for command in state.hidden.trajectory:
+                    _, _, _, infos = gym_env.step(command)
+                plan = self._reference_plan(gym_env, infos)
+                if not plan:
+                    raise ValueError("Missing expert plan for a nonterminal ALFWorld reference state")
+            except Exception:
+                if gym_env is not None:
+                    self._discard_cached_gym_env_locked(state.hidden.game_file, gym_env)
+                raise
+        observation = state.observation
+        if self._expose_expert_plan_in_obs:
+            content = observation.state or ObservationContent(text=observation.prompt or "")
+            text = re.sub(r"^\[expert_plan_next:[^\n]*\]\n?", "", content.text or "", flags=re.MULTILINE)
+            observation = replace(observation, state=replace(content, text=f"[expert_plan_next: {plan[0]}]\n{text}"))
+        return replace(state, hidden=replace(state.hidden, expert_plan=plan), observation=observation)
+
     def step(
         self,
         state: State[AlfWorldHidden],
@@ -760,7 +825,8 @@ class AlfWorldEnvironment:
                         won = won_val[0] if isinstance(won_val, (list, tuple)) else won_val
                         ac_val = infos.get("admissible_commands", ())
                         admissible_commands = _unbatch_admissible_commands(ac_val)
-                        expert_plan = _extract_expert_plan(infos)
+                        if not won and state.hidden.episode_step + 1 < self._max_steps:
+                            expert_plan = self._reference_plan(gym_env, infos)
                 else:
                     raw_obs = state.observation.state.text if state.observation.state is not None else ""
                     won = False

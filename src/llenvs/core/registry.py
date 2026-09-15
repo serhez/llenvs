@@ -280,6 +280,7 @@ def register_defaults() -> None:
         BoxedExtractor,
         CodeBlockExtractor,
         GSM8KExtractor,
+        JSONFieldExtractor,
         LastLineExtractor,
         MultipleChoiceExtractor,
         NumericExtractor,
@@ -296,6 +297,7 @@ def register_defaults() -> None:
 
     answer_extractor_registry.register("tag_based", TagBasedExtractor)
     answer_extractor_registry.register("regex", RegexExtractor)
+    answer_extractor_registry.register("json_field", JSONFieldExtractor)
     answer_extractor_registry.register("gsm8k", GSM8KExtractor)
     answer_extractor_registry.register("multiple_choice", MultipleChoiceExtractor)
     answer_extractor_registry.register("raw", RawGenerationExtractor)

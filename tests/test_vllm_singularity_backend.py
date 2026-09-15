@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import io
-import os
+import errno
+import json
 import signal
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+import sys
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -80,7 +81,13 @@ def patched(tmp_path, fake_sif, monkeypatch):
             fake_proc_holder["p"].returncode = -sig
 
     monkeypatch.setattr(mod.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(mod, "OpenAIBackend", MagicMock())
+    from llenvs.inference.backends.api import _AsyncRunner
+
+    # Mock the SDK, but retain the real connection-loop lifetime used by scoring.
+    runner = _AsyncRunner()
+    mock_openai = MagicMock()
+    mock_openai.return_value._async_runner = runner
+    monkeypatch.setattr(mod, "OpenAIBackend", mock_openai)
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr(mod.os, "killpg", fake_killpg)
     monkeypatch.setattr(mod.os, "getpgid", lambda pid: pid)
@@ -90,6 +97,7 @@ def patched(tmp_path, fake_sif, monkeypatch):
         "proc_holder": fake_proc_holder,
         "killed": killed,
     }
+    runner.close()
 
 
 class TestSingularityVLLMBackendLifecycle:
@@ -369,7 +377,7 @@ class _CharTokenizer:
         self.template_kwargs_seen.append(kwargs)
         return self.PROMPT
 
-    def encode(self, text: str) -> list[int]:
+    def encode(self, text: str, **kwargs) -> list[int]:
         return [ord(c) for c in text]
 
     def decode(self, ids) -> str:
@@ -418,7 +426,346 @@ def _wire_scoring(backend, tokenizer=None):
     return tok, fake
 
 
+@pytest.mark.parametrize("operation", ["generate", "generate_chat", "generate_chat_batch", "score_chat_batch"])
+@pytest.mark.parametrize("returncode", [0, 1, -9])
+def test_exited_server_rejects_calls_without_http(patched, operation, returncode):
+    from llenvs.inference.protocol import BackendProcessExitedError, SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    try:
+        _, fake = _wire_scoring(backend)
+        patched["proc_holder"]["p"].returncode = returncode
+        args = {
+            "generate": (["hello"], SamplingParams()),
+            "generate_chat": (_msgs("hello"), SamplingParams()),
+            "generate_chat_batch": ([_msgs("hello")], SamplingParams()),
+            "score_chat_batch": ([_msgs("hello")], ["A"]),
+        }[operation]
+        with pytest.raises(BackendProcessExitedError, match=f"rc={returncode}") as caught:
+            getattr(backend, operation)(*args)
+        assert backend._log_path in str(caught.value)
+        assert not fake.calls
+        for name in ("generate", "generate_chat", "generate_chat_batch"):
+            getattr(backend._openai, name).assert_not_called()
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("dead", [False, True])
+def test_server_death_during_scoring_preserves_success_and_failure_cause(patched, dead):
+    from llenvs.inference.protocol import BackendProcessExitedError, PartialBatchError
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m", max_concurrency=1)
+    try:
+        _, fake = _wire_scoring(backend)
+        original_create = fake.create
+        failure = ConnectionError("temporarily unavailable")
+
+        async def create(**kwargs):
+            if kwargs["prompt"][-1] == ord("B"):
+                if dead:
+                    patched["proc_holder"]["p"].returncode = 1
+                raise failure
+            return await original_create(**kwargs)
+
+        fake.create = create
+        with pytest.raises(PartialBatchError) as caught:
+            backend.score_chat_batch([_msgs("a")] * 4, ["", "A", "B", "C"])
+        exc = caught.value
+        assert exc.results[0].scored_tokens == 0
+        assert exc.results[1].token_scores[0].token_id == ord("A")
+        if dead:
+            assert set(exc.failures) == {2, 3}
+            assert all(isinstance(e, BackendProcessExitedError) for e in exc.failures.values())
+            assert exc.failures[2].__cause__ is failure
+            assert len(fake.calls) == 1  # C must not reach the dead server.
+        else:
+            assert exc.failures == {2: failure}
+            assert exc.results[3].token_scores[0].token_id == ord("C")
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("dead", [False, True])
+def test_generation_failure_checks_owned_process_without_losing_siblings(patched, partial, dead):
+    from llenvs.inference.protocol import (
+        BackendProcessExitedError,
+        GenerationResult,
+        PartialBatchError,
+        SamplingParams,
+    )
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    good = GenerationResult(text="A")
+    failure = ConnectionError("temporarily unavailable")
+    original = PartialBatchError([good, failure], {1: failure}) if partial else failure
+
+    def fail(*args):
+        if dead:
+            patched["proc_holder"]["p"].returncode = 1
+        raise original
+
+    try:
+        backend._openai.generate_chat_batch.side_effect = fail
+        expected = PartialBatchError if partial else BackendProcessExitedError if dead else ConnectionError
+        with pytest.raises(expected) as caught:
+            backend.generate_chat_batch([_msgs("a"), _msgs("b")], SamplingParams())
+        if not dead:
+            assert caught.value is original
+        elif partial:
+            assert caught.value.results[0] is good
+            assert set(caught.value.failures) == {1}
+            assert isinstance(caught.value.failures[1], BackendProcessExitedError)
+            assert caught.value.failures[1].__cause__ is failure
+    finally:
+        backend.close()
+
+
+def test_successful_batch_is_not_discarded_if_server_exits_after_reply(patched):
+    from llenvs.inference.protocol import GenerationResult, SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    good = [GenerationResult(text="A")]
+
+    def complete(*args):
+        patched["proc_holder"]["p"].returncode = 1
+        return good
+
+    try:
+        backend._openai.generate_chat_batch.side_effect = complete
+        assert backend.generate_chat_batch([_msgs("a")], SamplingParams()) is good
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_refused_owned_server_is_fatal_even_while_launcher_is_alive(patched, partial):
+    import asyncio
+
+    from llenvs.inference.protocol import (
+        BackendProcessExitedError,
+        GenerationResult,
+        PartialBatchError,
+        SamplingParams,
+    )
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    good = GenerationResult(text="A")
+    cancellation = asyncio.CancelledError()
+    refused = OSError(errno.ECONNREFUSED, "connection refused")
+    failure = ConnectionError("All connection attempts failed")
+    failure.__cause__ = ExceptionGroup("connection attempts", [refused])
+    original = PartialBatchError([good, failure, cancellation], {1: failure, 2: cancellation}) if partial else failure
+    try:
+        backend._openai.generate_chat_batch.side_effect = original
+        with pytest.raises(PartialBatchError if partial else BackendProcessExitedError) as caught:
+            backend.generate_chat_batch([_msgs("a")] * 3, SamplingParams())
+        if partial:
+            assert caught.value.results[0] is good
+            assert caught.value.failures[2] is cancellation
+            error = caught.value.failures[1]
+        else:
+            error = caught.value
+        assert isinstance(error, BackendProcessExitedError)
+        assert error.__cause__ is failure
+        assert backend._log_path in str(error)
+        assert patched["proc_holder"]["p"].poll() is None
+        backend._openai.generate_chat_batch.reset_mock()
+        with pytest.raises(BackendProcessExitedError):
+            backend.generate_chat_batch([_msgs("again")], SamplingParams())
+        backend._openai.generate_chat_batch.assert_not_called()
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("failure", [
+    TimeoutError("connection refused is mentioned, but this is a timeout"),
+    OSError(errno.ECONNRESET, "peer reset the connection"),
+    ConnectionError("connection refused"),
+])
+def test_live_server_transient_errors_are_not_misclassified_by_message(patched, failure):
+    from llenvs.inference.protocol import SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    try:
+        # Cyclic exception context must not hang failure inspection.
+        failure.__context__ = failure
+        backend._openai.generate_chat.side_effect = failure
+        with pytest.raises(type(failure)) as caught:
+            backend.generate_chat(_msgs("a"), SamplingParams())
+        assert caught.value is failure
+        backend._openai.generate_chat.side_effect = None
+        backend.generate_chat(_msgs("b"), SamplingParams())
+        assert backend._openai.generate_chat.call_count == 2
+    finally:
+        backend.close()
+
+
+def test_refused_server_during_scoring_retains_siblings_and_skips_later_http(patched):
+    from llenvs.inference.protocol import BackendProcessExitedError, PartialBatchError
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m", max_concurrency=1)
+    try:
+        _, fake = _wire_scoring(backend)
+        original_create = fake.create
+        failure = ConnectionRefusedError(errno.ECONNREFUSED, "refused")
+        attempted = []
+
+        async def create(**kwargs):
+            attempted.append(kwargs["prompt"][-1])
+            if kwargs["prompt"][-1] == ord("B"):
+                raise failure
+            return await original_create(**kwargs)
+
+        fake.create = create
+        with pytest.raises(PartialBatchError) as caught:
+            backend.score_chat_batch([_msgs("a")] * 4, ["", "A", "B", "C"])
+        assert caught.value.results[0].scored_tokens == 0
+        assert caught.value.results[1].token_scores[0].token_id == ord("A")
+        assert set(caught.value.failures) == {2, 3}
+        assert all(isinstance(e, BackendProcessExitedError) for e in caught.value.failures.values())
+        assert caught.value.failures[2].__cause__ is failure
+        assert attempted == [ord("A"), ord("B")]
+        assert patched["proc_holder"]["p"].poll() is None
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_server_exit_does_not_reclassify_cancellation(patched, partial):
+    import asyncio
+
+    from llenvs.inference.protocol import PartialBatchError, SamplingParams
+
+    backend = patched["module"].SingularityVLLMBackend(model_path="m")
+    cancellation = asyncio.CancelledError()
+
+    def cancel(*args):
+        patched["proc_holder"]["p"].returncode = 1
+        if partial:
+            raise PartialBatchError([cancellation], {0: cancellation})
+        raise cancellation
+
+    try:
+        backend._openai.generate_chat_batch.side_effect = cancel
+        with pytest.raises(PartialBatchError if partial else asyncio.CancelledError) as caught:
+            backend.generate_chat_batch([_msgs("a")], SamplingParams())
+        if partial:
+            assert caught.value.failures == {0: cancellation}
+        else:
+            assert caught.value is cancellation
+    finally:
+        backend.close()
+
+
+def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(
+    tmp_path, monkeypatch
+):
+    """Transformers 4.x expects a mapping where Gemma's v5 metadata has a list.
+
+    The fallback must preserve those entries as ordinary additional special
+    tokens instead of requiring a host Transformers upgrade or mutating the HF
+    cache shared with the container.
+    """
+    from llenvs.inference.backends import vllm_singularity as mod
+
+    tokenizer_config = tmp_path / "tokenizer_config.json"
+    tokenizer_config.write_text(
+        json.dumps({"extra_special_tokens": ["<|video|>"]})
+    )
+    sentinel = object()
+
+    class _FakeAutoTokenizer:
+        calls: list[tuple[str, dict]] = []
+
+        @classmethod
+        def from_pretrained(cls, model_path: str, **kwargs):
+            cls.calls.append((model_path, kwargs))
+            if len(cls.calls) == 1:
+                raise AttributeError("'list' object has no attribute 'keys'")
+            return sentinel
+
+    fake_transformers = ModuleType("transformers")
+    fake_transformers.AutoTokenizer = _FakeAutoTokenizer
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+    monkeypatch.setattr(
+        mod,
+        "_resolve_tokenizer_config_path",
+        lambda _model_path: tokenizer_config,
+        raising=False,
+    )
+
+    assert mod._load_hf_tokenizer("google/gemma-4-31B-it") is sentinel
+    assert _FakeAutoTokenizer.calls == [
+        ("google/gemma-4-31B-it", {}),
+        (
+            "google/gemma-4-31B-it",
+            {
+                "extra_special_tokens": {},
+                "additional_special_tokens": ["<|video|>"],
+            },
+        ),
+    ]
+
+
 class TestSingularityVLLMBackendScoring:
+    @pytest.mark.parametrize("continuations", [
+        ["A", "B", "A"], ["", "A", "", "B", "A", ""],
+        ["B"], ["", "B", "", "B"],
+    ])
+    @pytest.mark.parametrize("failure_kind", ["input", "connection", "fatal"])
+    def test_partial_scoring_preserves_successes_and_original_indices(
+        self, patched, continuations, failure_kind,
+    ):
+        from llenvs.inference.protocol import (
+            PartialBatchError,
+            RecoverableInputError,
+            ScoringResult,
+            TokenScore,
+        )
+
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        error_type = {
+            "input": RecoverableInputError,
+            "connection": ConnectionError,
+            "fatal": RuntimeError,
+        }[failure_kind]
+        failure = error_type("synthetic scoring failure")
+        calls = []
+
+        async def score_one(prompt_len, ids):
+            calls.append(ids[-1])
+            if ids[-1] == ord("B"):
+                raise failure
+            return ScoringResult(
+                token_scores=(TokenScore("A", ord("A"), -2),), scored_tokens=1,
+            )
+
+        try:
+            _wire_scoring(backend)
+            backend._score_one_async = score_one
+            with pytest.raises(PartialBatchError) as caught:
+                backend.score_chat_batch(
+                    [_msgs(str(i)) for i in range(len(continuations))], continuations,
+                )
+            exc = caught.value
+            assert exc.failures == {
+                i: failure for i, c in enumerate(continuations) if c == "B"
+            }
+            assert len(exc.results) == len(continuations)
+            for i, continuation in enumerate(continuations):
+                if continuation == "B":
+                    assert exc.results[i] is failure
+                elif continuation == "":
+                    assert exc.results[i].scored_tokens == 0
+                else:
+                    assert exc.results[i].token_scores[0].logprob == -2
+            assert calls == [ord(c) for c in continuations if c]
+        finally:
+            backend.close()
+
     def test_supports_full_scoring_true_when_open_false_when_closed(self, patched):
         mod = patched["module"]
         from llenvs.inference.protocol import BackendCapabilities

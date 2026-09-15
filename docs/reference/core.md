@@ -177,8 +177,30 @@ The raw model generation is always available on `transition.action.text` (or the
 - **Extraction-only adapters** (reasoning_gym, huggingface, gem, verifiers, iterative): `extracted_action == resolved_action`.
 - **Extraction + mapping adapters** (gymnasium, craftax): `resolved_action` uses `ActionMapper.format_action()` and differs from `extracted_action` when the env maps to named actions.
 - **Non-extracting adapters** (dialogue, agentgym, lmrl, openenv, tau): both `extracted_action` and `resolved_action` are `None`.
-- On extraction failure, `extracted_action` and `resolved_action` are both `None`.
+- On extraction failure, `extracted_action` is `None`. `resolved_action` is
+  normally `None`; adapters that replace malformed history entries may store
+  their configured invalid-action marker there instead.
 - On mapping failure (extraction succeeded but action invalid), `extracted_action` is set but `resolved_action` is `None`.
+
+## Answer extraction
+
+Answer extractors convert a raw model response into the scalar text an adapter
+consumes. `JSONFieldExtractor` reads a top-level scalar from either a whole JSON
+object or a `json`/unlabelled Markdown code fence:
+
+```python
+from llenvs.core import JSONFieldExtractor
+
+extractor = JSONFieldExtractor(field="action")
+answer, metadata = extractor.extract('{"action": "right"}')
+assert answer == "right"
+```
+
+JSON embedded in surrounding prose is not accepted. Missing fields, `null`, arrays,
+and objects fail extraction. Set `allow_code_fences=False` to accept only a whole
+JSON response, or `strip_whitespace=False` to preserve whitespace inside string
+values. The extractor is available from `answer_extractor_registry` as
+`json_field`.
 
 ### EnvironmentSpec
 

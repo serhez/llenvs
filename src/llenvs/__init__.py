@@ -14,6 +14,7 @@ from llenvs.core.environment import Environment, EnvironmentSpec, StepResult
 from llenvs.core.extraction import (
     AnswerExtractor,
     GSM8KExtractor,
+    JSONFieldExtractor,
     MultipleChoiceExtractor,
     RegexExtractor,
     TagBasedExtractor,
@@ -63,6 +64,7 @@ __all__ = [
     "TagBasedExtractor",
     "RegexExtractor",
     "GSM8KExtractor",
+    "JSONFieldExtractor",
     "MultipleChoiceExtractor",
     # Config
     "EvalConfig",

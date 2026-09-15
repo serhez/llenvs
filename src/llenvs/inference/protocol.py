@@ -7,6 +7,7 @@ and common data structures for generation.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import MISSING, dataclass, field, fields
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
@@ -14,6 +15,14 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from llenvs.core.state import Action, ImageContent
     from llenvs.core.tools import ToolCall, ToolDefinition, ToolResult
+
+
+class BackendProcessExitedError(RuntimeError):
+    """The owned inference service exited or stopped listening; abort this run.
+
+    Retrying requests cannot revive the service. Completed sibling responses
+    remain valid and may be retained in a ``PartialBatchError``.
+    """
 
 
 class RecoverableInputError(ValueError):
@@ -163,8 +172,8 @@ class MalformedResponseError(Exception):
     request. The SDK doesn't raise — it hands back a response object that
     breaks downstream parsing.
 
-    Treated as transient: the same request may succeed on retry (e.g.,
-    OpenRouter may route to a different provider).
+    Also covers explicit error completions with choices present. These are
+    generally transient unless the provider status identifies a permanent error.
 
     Attributes:
         backend_name: Identifier of the backend that raised.
@@ -173,6 +182,7 @@ class MalformedResponseError(Exception):
             (OpenRouter's top-level ``error`` field), useful for logging
             and for classifiers that want to distinguish transient from
             terminal upstream conditions.
+        status_code: Numeric error code from the provider payload, if supplied.
     """
 
     def __init__(
@@ -187,6 +197,10 @@ class MalformedResponseError(Exception):
         self.backend_name = backend_name
         self.model_name = model_name
         self.provider_error = provider_error
+        code = provider_error.get("code") if isinstance(provider_error, dict) else None
+        self.status_code = (
+            int(code) if isinstance(code, (int, str)) and str(code).isdigit() else None
+        )
 
 
 class LogprobsNotReturnedError(RuntimeError):
@@ -421,6 +435,9 @@ class ChatMessage:
         content_blocks: Interleaved text/image blocks for VLM prompts.
             When non-empty, overrides ``content`` and ``images`` in
             serialisation.
+        reasoning: Separately returned assistant reasoning for API continuation.
+        reasoning_details: Provider-native reasoning blocks, preserved in order.
+            Takes precedence over ``reasoning`` in OpenAI-format requests.
     """
 
     role: str
@@ -430,6 +447,8 @@ class ChatMessage:
     name: str | None = None
     images: tuple[ImageContent, ...] = ()
     content_blocks: tuple[str | ImageContent, ...] = ()
+    reasoning: str | None = None
+    reasoning_details: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for API calls (OpenAI format).
@@ -485,6 +504,11 @@ class ChatMessage:
 
         if self.name is not None:
             result["name"] = self.name
+
+        if self.reasoning_details:
+            result["reasoning_details"] = deepcopy(list(self.reasoning_details))
+        elif self.reasoning:
+            result["reasoning"] = self.reasoning
 
         return result
 

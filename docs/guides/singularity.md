@@ -40,6 +40,10 @@ If your model works with the in-process `VLLMBackend`, keep using that — it's 
 
 `close()` terminates the process group (SIGTERM → 30s wait → SIGKILL) and shuts down the HTTP client. `__enter__`/`__exit__`/`__del__`/`atexit` all route to `close()` so crashes don't leak vllm servers.
 
+Batch chat generation and continuation scoring share the inner OpenAI backend's
+persistent event loop and pooled async HTTP client. Closing the backend also
+closes those connections on their owning loop and stops its thread.
+
 Vision works automatically: llenvs' [`ChatMessage.to_dict()`](../../src/llenvs/inference/protocol.py) already emits OpenAI-compatible multimodal content blocks (`{"type": "text"}` / `{"type": "image_url"}` with base64 data URLs), which vLLM's server understands natively.
 
 ## One-time setup
@@ -142,6 +146,39 @@ Optional fields on `BackendConfig`:
 - `singularity_cuda_visible_devices` — pin `vllm serve` to a GPU subset (e.g. `"0,1"`). Lets other workloads on the same node use the remaining GPUs.
 
 All generation proxies to an OpenAI-compatible client talking to the in-container `vllm serve`, so this backend supports token logprobs (used by logprob-decoding methods such as the verifier). `vllm serve` returns up to its `--max-logprobs` top logprobs per position (vLLM's default is 20); pass a larger `--max-logprobs` via `singularity_extra_vllm_args` if you need more.
+
+Full continuation scoring renders the chat prompt and tokenizes it in the host
+process, then sends token IDs to the container's `/v1/completions` endpoint for
+`prompt_logprobs`. The host and container may use different compatible
+Transformers releases. In particular, when a Transformers 4.x host encounters
+the list-valued `extra_special_tokens` metadata written by Transformers 5.x, the
+backend maps those entries to `additional_special_tokens` while loading the host
+tokenizer. Rendered chat templates are encoded with
+`add_special_tokens=False`, because the template already contains BOS and control
+tokens; this keeps token positions aligned with the tokenizer inside the vLLM
+container without requiring an upgrade of the host Transformers package.
+
+Long prompts with a large vocabulary can require substantial temporary GPU
+memory for prompt-logprob normalization, even when requesting only the actual
+token's probability. Lowering `gpu_memory_utilization` reserves less KV cache
+and leaves more room for this workspace. Alternatively,
+`extra_vllm_args=("--max-num-batched-tokens", "2048", "--enable-chunked-prefill")`
+processes fewer prompt tokens at once without truncating inputs or reducing
+`max_model_len`, but changing chunk sizes can change numerical scores. Validate
+memory and numerics on the installed vLLM version and representative long inputs;
+reducing the returned top-logprob count alone does not eliminate this workspace.
+
+The backend checks its owned server process before requests and after failures.
+An exited process, or an owned local listener refusing connections after startup,
+raises `BackendProcessExitedError`, which callers should treat
+as fatal for the current run, not as a bad input or transient network failure.
+Partial batches retain successful responses and identify the failed slots.
+The listener can disappear while the container launcher is still alive. Refusal
+is detected from the OS error through the SDK's exception chain, never from
+message text; further calls on that backend then fail without HTTP requests.
+There are no extra HTTP health probes during inference. Timeouts, connection
+resets and ordinary request failures with a live server retain their original
+classification.
 
 Then run value-bench normally — **no container wrapping, no special bin scripts**:
 

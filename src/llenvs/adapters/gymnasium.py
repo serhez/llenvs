@@ -1603,6 +1603,20 @@ class GymnasiumEnvironment:
 # =============================================================================
 
 
+def _frozen_lake_description(*, size: str | None, is_slippery: bool) -> str:
+    size_text = f" ({size})" if size else ""
+    base = (
+        f"Navigate a frozen lake{size_text} from start (S) to goal (G) "
+        "without falling into holes (H)."
+    )
+    if is_slippery:
+        return (
+            f"{base} The surface is slippery, so an action may move the agent "
+            "in a neighboring direction instead of the chosen one."
+        )
+    return f"{base} Actions move deterministically in the chosen direction."
+
+
 GYMNASIUM_PRESETS: dict[str, dict[str, Any]] = {
     # FrozenLake environments
     "frozen_lake": {
@@ -1847,6 +1861,28 @@ class GymnasiumAdapter:
         num_maps = merged_make_kwargs.pop("num_maps", None)
         map_seed = merged_make_kwargs.pop("map_seed", None)
         map_size = merged_make_kwargs.pop("map_size", None)
+
+        # FrozenLake's stock presets historically claimed that every lake was
+        # slippery, even when callers explicitly configured deterministic
+        # movement. Derive the built-in description from the effective dynamics;
+        # an explicit caller-provided description still takes precedence.
+        has_explicit_description = prompts is not None and "description" in prompts
+        if env_id == "FrozenLake-v1" and not has_explicit_description:
+            if "is_slippery" in merged_make_kwargs:
+                is_slippery = bool(merged_make_kwargs["is_slippery"])
+            elif num_maps and int(num_maps) > 1:
+                # FrozenLakeMapCycler currently defaults to deterministic maps.
+                is_slippery = False
+            else:
+                # Gymnasium's FrozenLake default is slippery.
+                is_slippery = True
+            configured_size = merged_make_kwargs.get("map_name")
+            if configured_size is None and map_size is not None:
+                configured_size = f"{map_size}x{map_size}"
+            merged_prompts["description"] = _frozen_lake_description(
+                size=str(configured_size) if configured_size else None,
+                is_slippery=is_slippery,
+            )
 
         # Create gym env if not provided
         if gym_env is None:

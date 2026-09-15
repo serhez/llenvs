@@ -49,6 +49,16 @@ from llenvs.inference.protocol import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def api_runner():
+    """Loop ownership for tests that intentionally bypass SDK construction."""
+    from llenvs.inference.backends.api import _AsyncRunner
+
+    runner = _AsyncRunner()
+    yield runner
+    runner.close()
+
+
 def _make_result(text: str) -> GenerationResult:
     """Create a simple GenerationResult."""
     return GenerationResult(
@@ -297,11 +307,12 @@ class TestHuggingFaceBatchChat:
 class TestOpenAIBatchChat:
     """Test OpenAI generate_chat_batch uses async concurrency."""
 
-    def test_batch_returns_correct_results(self):
+    def test_batch_returns_correct_results(self, api_runner):
         """Batch should return one result per conversation."""
         from llenvs.inference.backends.api import OpenAIBackend
 
         backend = object.__new__(OpenAIBackend)
+        backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
 
@@ -337,22 +348,24 @@ class TestOpenAIBatchChat:
         assert len(results) == 5
         assert call_count == 5
 
-    def test_empty_batch(self):
+    def test_empty_batch(self, api_runner):
         """Empty batch returns empty list."""
         from llenvs.inference.backends.api import OpenAIBackend
 
         backend = object.__new__(OpenAIBackend)
+        backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
 
         results = backend.generate_chat_batch([], SamplingParams())
         assert results == []
 
-    def test_concurrency_with_async_client(self):
+    def test_concurrency_with_async_client(self, api_runner):
         """Verify that async client is used for concurrent generation."""
         from llenvs.inference.backends.api import OpenAIBackend
 
         backend = object.__new__(OpenAIBackend)
+        backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 2
 
@@ -381,11 +394,12 @@ class TestOpenAIBatchChat:
         # Async client should have been called 3 times
         assert mock_async_client.chat.completions.create.await_count == 3
 
-    def test_partial_failures_raise_partial_batch_error(self):
+    def test_partial_failures_raise_partial_batch_error(self, api_runner):
         """When partial-batch mode is enabled, successes are preserved in the error."""
         from llenvs.inference.backends.api import OpenAIBackend
 
         backend = object.__new__(OpenAIBackend)
+        backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
         backend._return_partial_batch = True
@@ -475,11 +489,12 @@ class TestOpenAIBatchChat:
 class TestOpenAIBatchTools:
     """Test OpenAI generate_with_tools_batch uses async concurrency."""
 
-    def test_partial_failures_raise_partial_batch_error(self):
+    def test_partial_failures_raise_partial_batch_error(self, api_runner):
         """Tool batches should preserve per-item successes on partial failure."""
         from llenvs.inference.backends.api import OpenAIBackend
 
         backend = object.__new__(OpenAIBackend)
+        backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
         backend._return_partial_batch = True
@@ -586,7 +601,9 @@ class TestSyncToolExtraForwarding:
         backend._client = MagicMock()
 
         response = MagicMock()
+        response.error = None
         response.choices = [MagicMock()]
+        response.choices[0].error = None
         response.choices[0].message.content = "ok"
         response.choices[0].message.tool_calls = []
         response.choices[0].finish_reason = "stop"
@@ -609,11 +626,12 @@ class TestSyncToolExtraForwarding:
 class TestAnthropicBatchChat:
     """Test Anthropic generate_chat_batch uses async concurrency."""
 
-    def test_batch_returns_correct_results(self):
+    def test_batch_returns_correct_results(self, api_runner):
         """Batch should return one result per conversation."""
         from llenvs.inference.backends.api import AnthropicBackend
 
         backend = object.__new__(AnthropicBackend)
+        backend._async_runner = api_runner
         backend._model = "claude-sonnet-4-20250514"
         backend._max_concurrency = 10
 
@@ -649,11 +667,12 @@ class TestAnthropicBatchChat:
         assert len(results) == 4
         assert call_count == 4
 
-    def test_concurrency_with_async_client(self):
+    def test_concurrency_with_async_client(self, api_runner):
         """Verify that async client is used for concurrent generation."""
         from llenvs.inference.backends.api import AnthropicBackend
 
         backend = object.__new__(AnthropicBackend)
+        backend._async_runner = api_runner
         backend._model = "claude-sonnet-4-20250514"
         backend._max_concurrency = 2
 
@@ -707,11 +726,12 @@ class TestAnthropicBatchChat:
 class TestOpenRouterBatchChat:
     """Test OpenRouter generate_chat_batch uses async concurrency."""
 
-    def test_batch_returns_correct_results(self):
+    def test_batch_returns_correct_results(self, api_runner):
         """Batch should return one result per conversation."""
         from llenvs.inference.backends.api import OpenRouterBackend
 
         backend = object.__new__(OpenRouterBackend)
+        backend._async_runner = api_runner
         backend._model = "anthropic/claude-sonnet-4-20250514"
         backend._max_concurrency = 10
         backend._rate_limit_wait = 0.0
@@ -721,8 +741,13 @@ class TestOpenRouterBatchChat:
 
         def _make_openai_response(text: str) -> MagicMock:
             resp = MagicMock()
+            resp.error = None
             resp.choices = [MagicMock()]
+            resp.choices[0].error = None
             resp.choices[0].message.content = text
+            resp.choices[0].message.reasoning = None
+            resp.choices[0].message.reasoning_content = None
+            resp.choices[0].message.reasoning_details = None
             resp.choices[0].finish_reason = "stop"
             resp.choices[0].logprobs = None
             resp.usage = MagicMock()
@@ -768,11 +793,12 @@ class TestOpenRouterBatchChat:
 class TestSemaphoreConcurrency:
     """Test that max_concurrency is respected via semaphore."""
 
-    def test_max_concurrency_limits_parallel_calls(self):
+    def test_max_concurrency_limits_parallel_calls(self, api_runner):
         """At most max_concurrency calls should be in-flight simultaneously."""
         from llenvs.inference.backends.api import OpenAIBackend
 
         backend = object.__new__(OpenAIBackend)
+        backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 2
 
