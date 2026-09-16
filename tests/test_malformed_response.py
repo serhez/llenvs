@@ -27,6 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from openai import APIStatusError
 
 from llenvs.inference.backends.api import (
     OpenRouterBackend,
@@ -39,8 +40,6 @@ from llenvs.inference.protocol import (
     PromptTooLongError,
     SamplingParams,
 )
-from openai import APIStatusError
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,6 +82,24 @@ def _valid_response() -> SimpleNamespace:
         model="openrouter/stub-model",
         id="chatcmpl-stub",
         usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+
+
+def _missing_termination_response(
+    text: str = "partial visible answer",
+) -> SimpleNamespace:
+    message = SimpleNamespace(content=text, tool_calls=[])
+    choice = SimpleNamespace(
+        message=message,
+        finish_reason=None,
+        native_finish_reason=None,
+        logprobs=None,
+    )
+    return SimpleNamespace(
+        choices=[choice],
+        model="openrouter/stub-model",
+        id="chatcmpl-missing-stop",
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=17),
     )
 
 
@@ -190,6 +207,53 @@ class TestMalformedResponseSync:
         assert exc_info.value.backend_name == "OpenRouterBackend"
         assert exc_info.value.model_name == "openrouter/stub-model"
 
+    @pytest.mark.parametrize("text", ["", "partial visible answer"])
+    def test_raises_when_completion_has_no_termination_metadata(
+        self, monkeypatch: pytest.MonkeyPatch, text: str
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._client.chat.completions.create = MagicMock(
+            return_value=_missing_termination_response(text)
+        )
+
+        with pytest.raises(MalformedResponseError, match="termination metadata"):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")], SamplingParams()
+            )
+
+    @pytest.mark.parametrize(
+        "finish_reason,native_finish_reason",
+        [("stop", None), (None, "stop"), ("tool_calls", "tool_calls")],
+    )
+    def test_accepts_completion_with_at_least_one_termination_field(
+        self, monkeypatch, finish_reason, native_finish_reason
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        response = _valid_response()
+        response.choices[0].finish_reason = finish_reason
+        response.choices[0].native_finish_reason = native_finish_reason
+        backend._client.chat.completions.create = MagicMock(return_value=response)
+
+        result = backend.generate_chat(
+            [ChatMessage(role="user", content="hi")], SamplingParams()
+        )
+
+        assert result.text == "ok"
+
+    def test_rejects_empty_termination_fields(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        response = _missing_termination_response()
+        response.choices[0].finish_reason = ""
+        response.choices[0].native_finish_reason = ""
+        backend._client.chat.completions.create = MagicMock(return_value=response)
+
+        with pytest.raises(MalformedResponseError, match="termination metadata"):
+            backend.generate_chat(
+                [ChatMessage(role="user", content="hi")], SamplingParams()
+            )
+
 
 # ---------------------------------------------------------------------------
 # Fix 1: choices=None must also surface through the concurrent batch path
@@ -214,6 +278,23 @@ class TestMalformedResponseAsync:
         assert isinstance(failure, MalformedResponseError)
         assert failure.backend_name == "OpenRouterBackend"
         assert failure.model_name == "openrouter/stub-model"
+
+    def test_batch_surfaces_missing_termination_as_partial_failure(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = _openrouter_backend(monkeypatch)
+        backend._async_client.chat.completions.create = AsyncMock(
+            return_value=_missing_termination_response()
+        )
+
+        with pytest.raises(PartialBatchError) as exc_info:
+            backend.generate_chat_batch(
+                [[ChatMessage(role="user", content="hi")]], SamplingParams()
+            )
+
+        failure = exc_info.value.failures[0]
+        assert isinstance(failure, MalformedResponseError)
+        assert "termination metadata" in str(failure)
 
 
 # ---------------------------------------------------------------------------

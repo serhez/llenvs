@@ -25,6 +25,10 @@ from llenvs.inference.protocol import (
     TokenLogprob,
 )
 
+# Callers that persist normalized OpenRouter responses should include this in
+# checkpoint identity. Bump it when response acceptance semantics change.
+OPENROUTER_RESPONSE_PROTOCOL_VERSION = "require-termination-v1"
+
 
 def _openai_stop_reason(reason: str | None) -> StopReason:
     """Convert OpenAI finish reason to StopReason."""
@@ -1689,7 +1693,7 @@ class OpenRouterBackend(ModelBackend):
         return kwargs
 
     def _validated_choice(self, response: Any) -> Any:
-        """Reject explicit provider failures before consuming text or tool calls."""
+        """Reject provider failures or incomplete completions before parsing."""
         choices = getattr(response, "choices", None)
         provider_error = getattr(response, "error", None)
         choice = choices[0] if choices else None
@@ -1715,6 +1719,16 @@ class OpenRouterBackend(ModelBackend):
             if normalized is error:
                 raise error
             raise normalized from error
+        finish_reason = getattr(choice, "finish_reason", None)
+        native_finish_reason = getattr(choice, "native_finish_reason", None)
+        if not finish_reason and not native_finish_reason:
+            completion_id = getattr(response, "id", "unknown")
+            raise MalformedResponseError(
+                "OpenRouter returned a completion without termination metadata; "
+                f"the visible response may be incomplete (id={completion_id})",
+                backend_name="OpenRouterBackend",
+                model_name=self._model,
+            )
         return choice
 
     def _chat_result(self, response: Any) -> GenerationResult:
