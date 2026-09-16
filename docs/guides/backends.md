@@ -307,6 +307,10 @@ Callers should distinguish transient failures from permanent 4xx errors rather
 than retry every malformed response blindly. Chat rate-limit handling recognizes
 429; permanent 4xx codes do not enter its rate-limit wait loop. Concurrent batches
 preserve successful siblings and original failed indices in `PartialBatchError`.
+Responses for which both normalized and native finish reasons are absent also
+raise `MalformedResponseError`, even when visible text is present: without a
+termination marker that text may be an incomplete answer. Callers may retry this
+transient malformed response while retaining successful batch siblings.
 
 HTTP and body-level 400 errors share input normalization across chat/tool and
 single/batch paths: recognized context-limit errors become `PromptTooLongError`,
