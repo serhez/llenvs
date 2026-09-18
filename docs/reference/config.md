@@ -2,6 +2,17 @@
 
 This document covers configuration options for llenvs.
 
+## OpenApps runtime options
+
+`OpenAppsAdapter.get_environment` accepts `browsergym_call_timeout` (default 60
+seconds), `browser_scale_factor` (default `None`, native scaling), and
+`reference_time` (default `None`, live app time), and `reward_scope` (default
+`"native"`, with explicit `"task_local"` as an alternative), and
+`recover_observation` (default `False`, opt-in bounded re-reading of incomplete
+accessibility data without repeating actions). These are adapter controls and
+are not forwarded as BrowserGym constructor arguments. See
+[OpenApps](../adapters/open-apps.md) for replay scope and timeout recovery rules.
+
 ## CLI Configuration
 
 ```yaml

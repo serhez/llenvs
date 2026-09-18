@@ -20,3 +20,6 @@ site/
 .vscode/
 *.log
 *.out
+
+# Private research and implementation guidance
+/.local/docs/
