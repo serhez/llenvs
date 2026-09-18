@@ -5,6 +5,7 @@ backends, and other pluggable components.
 """
 
 from collections.abc import Callable
+from threading import RLock
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -163,20 +164,26 @@ class EnvironmentRegistry:
         from llenvs.core.adapter import Adapter
 
         self._adapters: dict[str, Adapter] = {}
+        self._probes: dict[str, Callable[[], Any]] = {}
+        self._lock = RLock()
 
-    def register_adapter(self, adapter: Any) -> None:
+    def register_adapter(self, adapter: Any, *, probe: Callable[[], Any] | None = None) -> None:
         """Register an adapter.
 
         Args:
             adapter: Adapter instance implementing the Adapter protocol.
+            probe: Optional dependency check, deferred until selection/listing.
 
         Raises:
             ValueError: If an adapter with this name is already registered.
         """
         name = adapter.name
-        if name in self._adapters:
-            raise ValueError(f"Adapter '{name}' is already registered")
-        self._adapters[name] = adapter
+        with self._lock:
+            if name in self._adapters:
+                raise ValueError(f"Adapter '{name}' is already registered")
+            self._adapters[name] = adapter
+            if probe is not None:
+                self._probes[name] = probe
 
     def unregister_adapter(self, name: str) -> None:
         """Unregister an adapter by name.
@@ -184,7 +191,9 @@ class EnvironmentRegistry:
         Args:
             name: Adapter name to unregister.
         """
-        self._adapters.pop(name, None)
+        with self._lock:
+            self._adapters.pop(name, None)
+            self._probes.pop(name, None)
 
     def get_adapter(self, name: str) -> Any:
         """Get a registered adapter by name.
@@ -198,11 +207,21 @@ class EnvironmentRegistry:
         Raises:
             KeyError: If adapter is not registered.
         """
-        if name not in self._adapters:
-            raise KeyError(
-                f"Adapter '{name}' not registered. Available: {list(self._adapters.keys())}"
-            )
-        return self._adapters[name]
+        with self._lock:
+            probe = self._probes.pop(name, None)
+            if probe is not None:
+                try:
+                    probe()
+                except Exception as exc:
+                    self._adapters.pop(name, None)
+                    raise KeyError(
+                        f"Adapter '{name}' is unavailable: dependency probe failed"
+                    ) from exc
+            if name not in self._adapters:
+                raise KeyError(
+                    f"Adapter '{name}' not registered. Candidates: {list(self._adapters)}"
+                )
+            return self._adapters[name]
 
     def get(
         self,
@@ -228,8 +247,14 @@ class EnvironmentRegistry:
         return adapter_instance.get_environment(name, **kwargs)
 
     def list_adapters(self) -> list[str]:
-        """List all registered adapter names."""
-        return list(self._adapters.keys())
+        """Probe optional dependencies and list available registered adapters."""
+        with self._lock:
+            for name in list(self._probes):
+                try:
+                    self.get_adapter(name)
+                except KeyError:
+                    pass
+            return list(self._adapters)
 
     def list_environments(self, adapter: str | None = None) -> list[tuple[str, str]]:
         """List available environments.
@@ -243,7 +268,8 @@ class EnvironmentRegistry:
         """
         result: list[tuple[str, str]] = []
 
-        adapters_to_check = [self._adapters[adapter]] if adapter else self._adapters.values()
+        names = [adapter] if adapter is not None else self.list_adapters()
+        adapters_to_check = [self.get_adapter(name) for name in names]
 
         for adp in adapters_to_check:
             for env_name in adp.list_environments():
@@ -258,9 +284,11 @@ class EnvironmentRegistry:
             key: Tuple of (adapter_name, environment_name).
         """
         adapter_name, env_name = key
-        if adapter_name not in self._adapters:
+        try:
+            adapter = self.get_adapter(adapter_name)
+        except KeyError:
             return False
-        return env_name in self._adapters[adapter_name].list_environments()
+        return env_name in adapter.list_environments()
 
 
 # Global registries for common component types

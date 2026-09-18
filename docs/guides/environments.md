@@ -18,6 +18,8 @@ llenvs provides a unified interface to multiple environment sources through adap
 
 The environment registry provides adapter-based lookup:
 
+Optional adapter dependencies are probed lazily when selecting an adapter or explicitly listing availability. `list_adapters()` checks all registered candidates and excludes unavailable adapters; selecting one adapter does not probe unrelated ones. Each candidate is checked once per registration. Plain package imports do not perform these dependency probes.
+
 ```python
 from llenvs.core.registry import environment_registry
 

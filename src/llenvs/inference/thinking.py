@@ -11,7 +11,8 @@ instances are per-request in vLLM. The ``hf_processor`` path remains stateless
 (scans full history) for batch safety in HuggingFace.
 """
 
-from typing import Any
+from threading import RLock
+from typing import Any, cast
 
 DEFAULT_EARLY_STOPPING_SUFFIX = "\n\nConsidering the limited time by the user, I have to give the solution based on the thinking directly now.\n</think>\n\n"
 
@@ -437,17 +438,23 @@ def _build_v1_thinking_processor_class() -> type | None:
     return V1ThinkingBudgetProcessor
 
 
-# Build once at module load. Both parent and spawn-subprocess must see the
-# same module-level ``V1ThinkingBudgetProcessor`` attribute for pickle's
-# identity check to pass when vLLM ships logits processors across processes.
-V1ThinkingBudgetProcessor = _build_v1_thinking_processor_class()
+_v1_processor_class: type | None | object = _UNSET
+_v1_processor_lock = RLock()
+
+
+def __getattr__(name: str) -> Any:
+    # Pickle resolves this attribute in a fresh spawn process. Build lazily in
+    # that process too, so ordinary llenvs imports do not load/probe vLLM.
+    if name == "V1ThinkingBudgetProcessor":
+        return make_v1_thinking_processor_class()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def make_v1_thinking_processor_class() -> type | None:
     """Return the V1-compatible thinking budget processor class.
 
-    Returns the cached module-level :data:`V1ThinkingBudgetProcessor` (or
-    ``None`` if the vLLM V1 API wasn't importable at module load). Returning
+    Returns the lazily cached module-level :data:`V1ThinkingBudgetProcessor` (or
+    ``None`` if the vLLM V1 API is unavailable at first use). Returning
     the cached object — rather than building a fresh class per call — is
     required so that the class pickle sees in ``logits_processors`` is the
     same object as ``llenvs.inference.thinking.V1ThinkingBudgetProcessor``,
@@ -456,4 +463,8 @@ def make_v1_thinking_processor_class() -> type | None:
     Returns:
         The processor class, or ``None`` if vLLM V1 is not available.
     """
-    return V1ThinkingBudgetProcessor
+    global _v1_processor_class
+    with _v1_processor_lock:
+        if _v1_processor_class is _UNSET:
+            _v1_processor_class = _build_v1_thinking_processor_class()
+        return cast(type | None, _v1_processor_class)

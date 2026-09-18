@@ -334,6 +334,20 @@ class TestV1ProcessorClass:
         assert cls1 is cls2
         assert cls1 is thinking.V1ThinkingBudgetProcessor
 
+    def test_lazy_class_is_pickleable_and_built_once(self, monkeypatch):
+        import pickle
+        from unittest.mock import Mock
+
+        from llenvs.inference import thinking
+
+        cls = type("V1ThinkingBudgetProcessor", (), {"__module__": thinking.__name__})
+        build = Mock(return_value=cls)
+        monkeypatch.setattr(thinking, "_v1_processor_class", thinking._UNSET)
+        monkeypatch.setattr(thinking, "_build_v1_thinking_processor_class", build)
+        assert thinking.make_v1_thinking_processor_class() is cls
+        assert pickle.loads(pickle.dumps(cls)) is cls
+        build.assert_called_once_with()
+
     def test_validate_params_accepts_valid(self):
         """validate_params accepts valid thinking_budget int."""
         cls, _ = self._make_v1_class()

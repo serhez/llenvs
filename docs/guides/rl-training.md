@@ -14,6 +14,8 @@ llenvs provides three layers:
 
 Framework-specific adapters (veRL, TRL, OpenRLHF) are thin wrappers around these primitives.
 
+For task preparation, the bounded native text-launch entrypoint, and token-credit contracts, see [SkyRL](skyrl.md). Installed-runtime/GPU acceptance remains pending; VLM rendering is not implemented.
+
 ## Single-Turn Scoring
 
 The `Scorer` wraps any single-turn environment to provide a `score()` interface that reuses the environment's reward computation.

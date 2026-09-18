@@ -5,6 +5,7 @@ Available adapters are automatically registered with the environment_registry.
 """
 
 import logging
+from functools import partial
 
 from llenvs.adapters.agentgym import (
     AgentGymAdapter,
@@ -332,11 +333,20 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 
+def _probe_adapter(adapter, probe_name: str, display_name: str) -> None:
+    try:
+        getattr(adapter, probe_name)()
+    except Exception as exc:
+        logger.debug("Skipping %s adapter registration: %s", display_name, exc)
+        raise
+
+
 def _register_adapters() -> None:
     """Register available adapters with the environment registry.
 
-    Called automatically on import. Each optional adapter is probed by
-    importing its third-party stack; a probe that fails for any reason —
+    Called automatically on import, without loading third-party stacks. Optional
+    probes run when selecting an adapter or listing available adapters. A probe
+    that fails for any reason —
     missing package, broken install, or an unavailable system dependency
     (e.g. pyjnius raising ``RuntimeError`` when no JVM is present) — skips
     that adapter instead of breaking ``import llenvs``.
@@ -371,8 +381,9 @@ def _register_adapters() -> None:
     for display_name, adapter_cls, probe_name in optional_adapters:
         try:
             adapter = adapter_cls()
-            getattr(adapter, probe_name)()
-            environment_registry.register_adapter(adapter)
+            environment_registry.register_adapter(
+                adapter, probe=partial(_probe_adapter, adapter, probe_name, display_name)
+            )
         except ValueError:
             pass  # Already registered (e.g., during testing)
         except Exception as exc:

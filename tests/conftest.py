@@ -9,6 +9,10 @@ from llenvs.core.state import Action, Observation, State, StateMetadata
 from llenvs.core.trajectory import Trajectory, Transition
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "skyrl_gpu: explicitly enabled staged SkyRL/CUDA acceptance")
+
+
 @pytest.fixture
 def sample_metadata() -> StateMetadata:
     """Create sample state metadata."""
