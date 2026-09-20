@@ -1,9 +1,11 @@
-"""Singularity-hosted vLLM backend.
+"""Container- or host-hosted vLLM server backend.
 
-Spawns ``vllm serve`` inside a Singularity container as a sibling subprocess
-and talks to it over HTTP via the vLLM OpenAI-compatible server. The calling
-Python process stays on bare metal — this is the only place in llenvs that
-knows about Singularity.
+Spawns ``vllm serve`` as a sibling subprocess and talks to it over HTTP via the
+vLLM OpenAI-compatible server. The calling Python process stays on bare metal —
+this is the only place in llenvs that knows about Singularity. With
+``launcher="native"`` the server runs straight from ``PATH`` with no container,
+for hosts that already ship vLLM (e.g. a Docker image on a cloud GPU); the
+port, health check, teardown and scoring path are the same either way.
 
 Use this backend when the cluster's native ``vllm`` is too old for a given
 model (e.g. gemma-4 needs vllm>=0.19 + transformers 5.x). For anything the
@@ -189,6 +191,19 @@ def _resolve_default(explicit: str | None, env_var: str) -> str | None:
     return val or None
 
 
+_LAUNCHERS = ("singularity", "native")
+
+
+def _resolve_launcher(explicit: str | None) -> str:
+    launcher = explicit or os.environ.get("LLENVS_VLLM_LAUNCHER", "") or "singularity"
+    if launcher not in _LAUNCHERS:
+        raise ValueError(
+            f"SingularityVLLMBackend: unknown launcher {launcher!r}; "
+            f"expected one of {_LAUNCHERS}"
+        )
+    return launcher
+
+
 class SingularityVLLMBackend(ModelBackend):
     """Run ``vllm serve`` inside a Singularity container, talk to it over HTTP.
 
@@ -226,6 +241,7 @@ class SingularityVLLMBackend(ModelBackend):
         hf_offline: bool | None = None,
         cuda_visible_devices: str | None = None,
         server_log_path: str | None = None,
+        launcher: str | None = None,
     ) -> None:
         """Spawn ``vllm serve`` in the container and wait until it's healthy.
 
@@ -277,6 +293,13 @@ class SingularityVLLMBackend(ModelBackend):
             chat_template_kwargs: Extra kwargs for chat-template rendering
                 during continuation scoring (e.g. reasoning toggles). Scoring
                 always forces ``enable_thinking=False`` on top of these.
+            launcher: ``"singularity"`` (default) runs ``vllm serve`` inside
+                the ``.sif`` image; ``"native"`` runs the ``vllm`` binary from
+                ``PATH`` with no container, for hosts that already ship vLLM
+                (e.g. a Docker image on a cloud GPU). Defaults from
+                ``$LLENVS_VLLM_LAUNCHER``. In native mode ``sif`` and binds
+                are ignored (with a warning if set) and env vars are passed
+                directly instead of via ``SINGULARITYENV_*``.
 
         Raises:
             RuntimeError: if the ``.sif`` can't be located, the subprocess
@@ -292,25 +315,37 @@ class SingularityVLLMBackend(ModelBackend):
         self._chat_template_kwargs = chat_template_kwargs or {}
         self._max_concurrency = max_concurrency
 
-        # --- resolve sif ---
-        sif_resolved = _resolve_default(sif, "LLENVS_SIF") or _resolve_default(
-            None, "LLENVS_VLLM_SIF"
-        )
-        if not sif_resolved:
-            raise RuntimeError(
-                "SingularityVLLMBackend: no .sif path provided. Pass "
-                "sif=... or set $LLENVS_SIF (e.g. by sourcing "
-                "llenvs/bin/_cluster.sh). See docs/guides/singularity.md."
-            )
-        if not Path(sif_resolved).is_file():
-            raise RuntimeError(
-                f"SingularityVLLMBackend: .sif not found at {sif_resolved}. "
-                "Build it with bin/build_container.sh."
-            )
-        self._sif = sif_resolved
+        self._launcher = _resolve_launcher(launcher)
+        native = self._launcher == "native"
 
-        # --- resolve binds ---
-        if singularity_binds:
+        # --- resolve sif (container launcher only) ---
+        self._sif: str | None = None
+        if native:
+            if sif or os.environ.get("LLENVS_SIF") or os.environ.get("LLENVS_VLLM_SIF"):
+                _log.warning("SingularityVLLMBackend: launcher=native; .sif setting ignored")
+        else:
+            sif_resolved = _resolve_default(sif, "LLENVS_SIF") or _resolve_default(
+                None, "LLENVS_VLLM_SIF"
+            )
+            if not sif_resolved:
+                raise RuntimeError(
+                    "SingularityVLLMBackend: no .sif path provided. Pass "
+                    "sif=... or set $LLENVS_SIF (e.g. by sourcing "
+                    "llenvs/bin/_cluster.sh). See docs/guides/singularity.md."
+                )
+            if not Path(sif_resolved).is_file():
+                raise RuntimeError(
+                    f"SingularityVLLMBackend: .sif not found at {sif_resolved}. "
+                    "Build it with bin/build_container.sh."
+                )
+            self._sif = sif_resolved
+
+        # --- resolve binds (container launcher only) ---
+        if native:
+            if singularity_binds or os.environ.get("LLENVS_BINDS", "").split():
+                _log.warning("SingularityVLLMBackend: launcher=native; singularity binds ignored")
+            binds = []
+        elif singularity_binds:
             binds = list(singularity_binds)
         else:
             env_binds = os.environ.get("LLENVS_BINDS", "").split()
@@ -318,7 +353,7 @@ class SingularityVLLMBackend(ModelBackend):
 
         # --- resolve hf_home (and add to binds) ---
         hf_home_resolved = hf_home or os.environ.get("HF_HOME") or os.environ.get("LLENVS_HF_HOME")
-        if hf_home_resolved and hf_home_resolved not in binds:
+        if not native and hf_home_resolved and hf_home_resolved not in binds:
             binds.append(hf_home_resolved)
         self._hf_home = hf_home_resolved
 
@@ -358,44 +393,49 @@ class SingularityVLLMBackend(ModelBackend):
             vllm_serve_args.extend(["--max-model-len", str(max_model_len)])
         vllm_serve_args.extend(extra_vllm_args)
 
-        argv = [
-            "singularity",
-            "exec",
-            "--nv",
-            *bind_flags,
-            self._sif,
-            *vllm_serve_args,
-        ]
+        if native:
+            argv = list(vllm_serve_args)
+        else:
+            argv = [
+                "singularity",
+                "exec",
+                "--nv",
+                *bind_flags,
+                cast(str, self._sif),
+                *vllm_serve_args,
+            ]
 
-        # --- build env (SINGULARITYENV_* forwarding) ---
+        # --- build env (plain for native, SINGULARITYENV_* for the container) ---
+        prefix = "" if native else "SINGULARITYENV_"
         env = os.environ.copy()
         if hf_home_resolved:
-            env["SINGULARITYENV_HF_HOME"] = hf_home_resolved
+            env[f"{prefix}HF_HOME"] = hf_home_resolved
         if self._hf_offline:
-            env["SINGULARITYENV_HF_HUB_OFFLINE"] = "1"
-            env["SINGULARITYENV_TRANSFORMERS_OFFLINE"] = "1"
+            env[f"{prefix}HF_HUB_OFFLINE"] = "1"
+            env[f"{prefix}TRANSFORMERS_OFFLINE"] = "1"
         if cuda_visible_devices is not None:
             # Pin vllm-serve to a subset of the job's GPUs. The parent
             # process keeps its own CUDA_VISIBLE_DEVICES untouched, so other
             # code on the same node can use the remaining devices.
-            env["SINGULARITYENV_CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+            env[f"{prefix}CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         self._cuda_visible_devices = cuda_visible_devices
         for k, v in (extra_singularity_env or {}).items():
-            env[f"SINGULARITYENV_{k}"] = v
+            env[f"{prefix}{k}"] = v
 
         # --- log file ---
         if server_log_path is None:
             server_log_path = f".llenvs-vllm-serve-{self._port}.log"
         self._log_path = server_log_path
         self._log_fh = open(server_log_path, "ab", buffering=0)
-        self._log_fh.write(f"# singularity exec cmd: {shlex.join(argv)}\n".encode())
+        self._log_fh.write(f"# {self._launcher} cmd: {shlex.join(argv)}\n".encode())
 
         _log.info(
             "SingularityVLLMBackend: spawning vllm serve "
-            "(model=%s, port=%d, tp=%d, sif=%s, log=%s)",
+            "(model=%s, port=%d, tp=%d, launcher=%s, sif=%s, log=%s)",
             model_path,
             self._port,
             tensor_parallel_size,
+            self._launcher,
             self._sif,
             server_log_path,
         )
@@ -411,9 +451,10 @@ class SingularityVLLMBackend(ModelBackend):
             )
         except FileNotFoundError as e:
             self._close_log_fh()
+            binary = "vllm" if native else "singularity"
             raise RuntimeError(
-                f"SingularityVLLMBackend: singularity binary not found. "
-                f"Is singularity installed on PATH? ({e})"
+                f"SingularityVLLMBackend: {binary} binary not found. "
+                f"Is {binary} installed on PATH? ({e})"
             ) from e
 
         atexit.register(self._atexit_close)

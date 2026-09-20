@@ -1,6 +1,6 @@
 # Running vLLM via Singularity (`vllm_singularity` backend)
 
-llenvs' default [`VLLMBackend`](../../src/llenvs/inference/backends/vllm.py) runs `vllm` **in-process** against whatever the cluster's native venv provides. Sometimes that native vLLM is too old or its torch/CUDA stack conflicts with the model you want to run. For those cases, llenvs ships a second backend, [`SingularityVLLMBackend`](../../src/llenvs/inference/backends/vllm_singularity.py), which spawns `vllm serve` inside a Singularity image as a sibling subprocess and talks to it over HTTP.
+llenvs' default [`VLLMBackend`](../../src/llenvs/inference/backends/vllm.py) runs `vllm` **in-process** against whatever the cluster's native venv provides. Sometimes that native vLLM is too old or its torch/CUDA stack conflicts with the model you want to run. For those cases, llenvs ships a second backend, [`SingularityVLLMBackend`](../../src/llenvs/inference/backends/vllm_singularity.py), which spawns `vllm serve` inside a Singularity image as a sibling subprocess and talks to it over HTTP. The same class also drives a plain `vllm serve` process when the host already provides vLLM — see [Native launcher](#native-launcher-no-container).
 
 The caller (value-bench, a notebook, any other llenvs user) stays on bare metal — its own venv, its own `uv run`, no wrapping. Projects that don't need `vllm_singularity` get zero new code paths, no extra dependencies, no surprise setup steps.
 
@@ -201,6 +201,26 @@ sbatch --partition=<gpu-partition> --gres=gpu:2 --time=02:00:00 --mem=120G \
 ```
 
 The `source llenvs/bin/_cluster.sh` line inside the wrap is what injects `LLENVS_SIF` / `LLENVS_BINDS` into the job environment.
+
+## Native launcher (no container)
+
+On hosts that already ship vLLM — a Docker image on a cloud GPU, for instance —
+the container is redundant. Set `LLENVS_VLLM_LAUNCHER=native` (or pass
+`launcher="native"`) and the backend runs the `vllm` binary from `PATH`
+directly instead of `singularity exec`:
+
+```bash
+export LLENVS_VLLM_LAUNCHER=native
+uv run python scripts/pipeline/predict.py --config ...
+```
+
+`vllm` must be on `PATH`; if it is not, construction fails with `vllm binary
+not found`. Any `.sif` path and `--bind` specs are ignored (with a warning if
+set), and environment variables such as `HF_HOME` or `CUDA_VISIBLE_DEVICES` are
+passed to the process directly rather than through `SINGULARITYENV_*`. The
+port, health poll, process group, teardown and HTTP scoring path are identical,
+so backend names, `type: vllm_singularity` config entries and results are
+unchanged.
 
 ## GPU pinning (running other work alongside)
 

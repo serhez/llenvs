@@ -880,3 +880,82 @@ class TestSingularityVLLMBackendScoring:
             assert loaded == ["some/model"]  # loaded once, then memoized
         finally:
             backend.close()
+
+
+class TestNativeLauncher:
+    def test_native_argv_runs_vllm_directly(self, patched, monkeypatch):
+        mod = patched["module"]
+        monkeypatch.delenv("LLENVS_SIF", raising=False)
+        backend = mod.SingularityVLLMBackend(
+            model_path="Qwen/Qwen3.5-9B", tensor_parallel_size=2, launcher="native"
+        )
+        try:
+            argv = patched["proc_holder"]["p"].argv
+            assert argv[:3] == ["vllm", "serve", "Qwen/Qwen3.5-9B"]
+            assert "singularity" not in argv and "--nv" not in argv and "--bind" not in argv
+            tp_idx = argv.index("--tensor-parallel-size")
+            assert argv[tp_idx + 1] == "2"
+        finally:
+            backend.close()
+
+    def test_native_env_is_plain_not_singularityenv(self, patched, monkeypatch):
+        mod = patched["module"]
+        monkeypatch.setenv("LLENVS_HF_OFFLINE", "1")
+        backend = mod.SingularityVLLMBackend(
+            model_path="m",
+            launcher="native",
+            hf_home="/hf",
+            cuda_visible_devices="0,1",
+            extra_singularity_env={"FOO": "bar"},
+        )
+        try:
+            env = patched["proc_holder"]["p"].env
+            assert env["HF_HOME"] == "/hf"
+            assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
+            assert env["CUDA_VISIBLE_DEVICES"] == "0,1"
+            assert env["FOO"] == "bar"
+            assert not any(k.startswith("SINGULARITYENV_") for k in env)
+        finally:
+            backend.close()
+
+    def test_launcher_resolves_from_env_var(self, patched, monkeypatch):
+        mod = patched["module"]
+        monkeypatch.delenv("LLENVS_SIF", raising=False)
+        monkeypatch.setenv("LLENVS_VLLM_LAUNCHER", "native")
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            assert patched["proc_holder"]["p"].argv[0] == "vllm"
+        finally:
+            backend.close()
+
+    def test_default_launcher_is_singularity(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            assert patched["proc_holder"]["p"].argv[0] == "singularity"
+        finally:
+            backend.close()
+
+    def test_unknown_launcher_raises(self, patched):
+        mod = patched["module"]
+        with pytest.raises(ValueError, match="launcher"):
+            mod.SingularityVLLMBackend(model_path="m", launcher="docker")
+
+    def test_native_warns_when_sif_or_binds_given(self, patched, caplog):
+        mod = patched["module"]
+        with caplog.at_level("WARNING"):
+            backend = mod.SingularityVLLMBackend(
+                model_path="m", launcher="native", singularity_binds=("/x",)
+            )
+        backend.close()
+        assert any("ignored" in r.message for r in caplog.records)
+
+    def test_native_missing_vllm_binary_message(self, patched, monkeypatch):
+        mod = patched["module"]
+
+        def missing(*a, **k):
+            raise FileNotFoundError("vllm")
+
+        monkeypatch.setattr(mod.subprocess, "Popen", missing)
+        with pytest.raises(RuntimeError, match="vllm binary not found"):
+            mod.SingularityVLLMBackend(model_path="m", launcher="native")

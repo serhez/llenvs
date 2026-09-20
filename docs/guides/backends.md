@@ -105,6 +105,9 @@ for token_lp in results[0].token_logprobs:
 `/v1/completions` endpoint for `score_chat` / `score_chat_batch`, with
 `prompt_logprobs` and thinking disabled when rendering the scoring prompt.
 The host loads only the tokenizer; model inference runs inside the container.
+The same class serves a native `vllm serve` process when `launcher="native"`
+(or `LLENVS_VLLM_LAUNCHER=native`), for hosts that already provide vLLM; the
+scoring path is identical.
 
 If any concurrent scoring request fails, `score_chat_batch` raises
 `PartialBatchError`. Its `results` retains successful `ScoringResult` entries and
