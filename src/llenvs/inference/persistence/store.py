@@ -22,7 +22,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, MutableMapping
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from llenvs.inference.protocol import (
     ChatMessage,
@@ -179,6 +179,7 @@ class UnknownOutcomeError(CheckpointError):
 
     def __init__(self, key: str):
         self.key = key
+        self.metadata: dict[str, Any] = {}
         super().__init__(f"Outcome unknown for {key}; explicit recovery decision required")
 
 
@@ -257,9 +258,17 @@ class CallStore:
     """One exclusively owned run with short journal locks and bounded writes."""
 
     @classmethod
-    def open(cls, root: str | Path, *, run_descriptor: Mapping[str, Any]) -> CallStore:
+    def open(
+        cls,
+        root: str | Path,
+        *,
+        run_descriptor: Mapping[str, Any],
+        validation: Literal["full", "lazy"] = "full",
+    ) -> CallStore:
         from llenvs.inference.records import credential_free
 
+        if validation not in {"full", "lazy"}:
+            raise ValueError("validation must be 'full' or 'lazy'")
         descriptor = _normalize(credential_free(run_descriptor))
         fingerprint = _fingerprint({"schema": 1, "run": descriptor})
         root = Path(root)
@@ -271,12 +280,12 @@ class CallStore:
             handle.close()
             raise CheckpointInUseError(f"Run {fingerprint} is already open") from exc
         try:
-            return cls(root, fingerprint, descriptor, handle)
+            return cls(root, fingerprint, descriptor, handle, validation=validation)
         except BaseException:
             handle.close()
             raise
 
-    def __init__(self, root, fingerprint, descriptor, handle):
+    def __init__(self, root, fingerprint, descriptor, handle, *, validation):
         self.root, self.fingerprint = root, fingerprint
         self.run_dir = root / fingerprint
         self._handle = handle
@@ -295,8 +304,9 @@ class CallStore:
             if self.run_dir.exists():
                 if json.loads(path.read_text()) != manifest:
                     raise ValueError("manifest mismatch")
-                for record_path in (self.run_dir / "calls").rglob("*.pkl"):
-                    self._load(record_path)
+                if validation == "full":
+                    for record_path in (self.run_dir / "calls").rglob("*.pkl"):
+                        self._load(record_path)
                 for lifecycle_path in (self.run_dir / "lifecycle").glob("*.pkl"):
                     event = _read_checked_pickle(lifecycle_path)
                     if not isinstance(event, dict) or not isinstance(event.get("event"), str):
@@ -306,13 +316,15 @@ class CallStore:
                     if journal["run"] != fingerprint or journal["id"] != journal_path.stem:
                         raise ValueError("submission journal identity mismatch")
                     self._journals[journal["id"]] = journal
-                    for blob in [journal["input_blob"], *journal.get("raw_files", {}).values()]:
-                        self.blob_path(blob)
-                    for key in journal["keys"]:
-                        record = self._records[key]
-                        if record["request"].get("scope") != "batch":
-                            raise ValueError("Submission references a non-Batch call")
-                        if journal["state"] == "intent":
+                    if validation == "full":
+                        for blob in [journal["input_blob"], *journal.get("raw_files", {}).values()]:
+                            self.blob_path(blob)
+                        for key in journal["keys"]:
+                            record = self._records[key]
+                            if record["request"].get("scope") != "batch":
+                                raise ValueError("Submission references a non-Batch call")
+                    if journal["state"] == "intent":
+                        for key in journal["keys"]:
                             self._intent_submissions[key] = journal["id"]
             else:
                 _atomic_write_json(path, manifest)
@@ -437,14 +449,40 @@ class CallStore:
             return "receipt" if self._records[key]["state"] == "received" else "backend"
         return "store" if future.done() else "shared"
 
-    def _result(self, key, outcome, source):
+    def _result(self, outcome, provenance):
         """Detach invocation provenance without changing the retained outcome."""
         result = copy.deepcopy(outcome)
         target = getattr(result, "result", result)
-        target.metadata["persistence"] = {
+        target.metadata["persistence"] = dict(provenance)
+        return result
+
+    def _provenance(self, key, source):
+        with self._mutex:
+            previous_attempts = len(self._records[key]["attempts"])
+        return {
             "run_fingerprint": self.fingerprint,
             "call_key": key,
             "source": source,
+            "previous_attempts": previous_attempts,
+        }
+
+    def _error(self, error, provenance):
+        """Keep native exception semantics and detach per-invocation metadata."""
+        try:
+            result = copy.copy(error)
+        except TypeError:
+            # SDK exceptions often require keyword-only response/request objects.
+            # Bypass __init__; keep those objects without copying live clients.
+            result = BaseException.__new__(type(error), *error.args)
+            result.__dict__.update(vars(error))
+        result.args = error.args
+        result.__traceback__ = error.__traceback__
+        result.__cause__ = error.__cause__
+        result.__context__ = error.__context__
+        result.__suppress_context__ = error.__suppress_context__
+        result.metadata = {
+            **getattr(error, "metadata", {}),
+            "persistence": dict(provenance),
         }
         return result
 
@@ -591,6 +629,7 @@ class CallStore:
 class _Observer:
     def __init__(self, store, keys):
         self.store, self.keys = store, keys
+        self.provenance = [store._provenance(key, "backend") for key in keys]
 
     def started(self, index, attempt):
         key = self.keys[index]
@@ -619,7 +658,7 @@ class _Observer:
             key, future, owner = self.store.reserve(
                 {"parent": self.keys[index], "phase": name, "arguments": arguments}, 0
             )
-            source = self.store._result_source(key, future, owner)
+            provenance = self.store._provenance(key, self.store._result_source(key, future, owner))
         if owner:
             child = _Observer(self.store, [key])
             try:
@@ -638,7 +677,9 @@ class _Observer:
                         else exc
                     )
         try:
-            return self.store._result(key, future.result(), source)
+            return self.store._result(future.result(), provenance)
+        except UnknownOutcomeError as exc:
+            raise self.store._error(exc, provenance) from exc
         finally:
             with self.store._mutex:
                 if future.done() and self.store._inflight.get(key) is future:
@@ -676,7 +717,11 @@ class _Observer:
                 self.store.update(key, "failed", error=_failure(error))
             elif record["state"] == "started":
                 self.store.update(key, "started", error=_failure(error), outcome_unknown=True)
-                raise UnknownOutcomeError(key) from error
+                failure = self.store._error(UnknownOutcomeError(key), self.provenance[index])
+                future = self.store._inflight.get(key)
+                if future is not None and not future.done():
+                    future.set_exception(failure)
+                raise failure from error
 
     async def notify(self, method, index, value):
         # The bounded writer keeps fsync off the HTTP event loop.
@@ -906,8 +951,10 @@ class PersistentBackend:
                     },
                     repeat,
                 )
-                source = self._store._result_source(key, future, owner)
-            entries.append((key, future, source))
+                provenance = self._store._provenance(
+                    key, self._store._result_source(key, future, owner)
+                )
+            entries.append((key, future, provenance))
             if owner:
                 record = self._store._records[key]
                 if record["state"] == "received":
@@ -944,6 +991,18 @@ class PersistentBackend:
                         observer.completed(index, result)
             except BaseException as exc:
                 if isinstance(exc, CheckpointError):
+                    if isinstance(exc, UnknownOutcomeError):
+                        with self._store._mutex:
+                            parent = (
+                                self._store._records.get(exc.key, {})
+                                .get("request", {})
+                                .get("parent")
+                            )
+                            future = self._store._inflight.get(parent)
+                            if parent in keys and future is not None:
+                                if not future.done():
+                                    future.set_exception(exc)
+                                self._store._inflight.pop(parent)
                     raise
                 failures = (
                     exc.failures
@@ -959,14 +1018,20 @@ class PersistentBackend:
                             observer.failed(index, failures[index])
                             future.set_exception(failures[index])
         outcomes, failures = [], {}
-        for index, (key, future, source) in enumerate(entries):
+        for index, (key, future, provenance) in enumerate(entries):
             try:
-                outcomes.append(self._store._result(key, future.result(), source))
+                outcomes.append(self._store._result(future.result(), provenance))
+            except UnknownOutcomeError as exc:
+                if exc.key != key and "persistence" in exc.metadata:
+                    # A joined parent reports the child reservation's history.
+                    provenance = {**exc.metadata["persistence"], "source": provenance["source"]}
+                raise self._store._error(exc, provenance) from exc
             except CheckpointError:
                 raise
             except BaseException as exc:
-                outcomes.append(exc)
-                failures[index] = exc
+                error = self._store._error(exc, provenance)
+                outcomes.append(error)
+                failures[index] = error
             finally:
                 with self._store._mutex:
                     if future.done() and self._store._inflight.get(key) is future:

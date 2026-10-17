@@ -211,38 +211,64 @@ requires the original invocation order. Use explicit IDs when regrouping work.
 `scope=...` separates phases/selections; `persist=lambda scope: ...` can exclude
 selected scopes from storage.
 
-### Result identity and reuse
+### Call identity and reuse
 
-Persisted generation, decision and scoring results carry
-`result.metadata["persistence"]`:
+Persisted generation, decision and scoring results, and individual call errors,
+carry `metadata["persistence"]`:
 
 ```python
 {
     "run_fingerprint": "...",  # Store run identity.
     "call_key": "...",         # Logical draw, also used in the journal.
     "source": "store",
+    "previous_attempts": 0,    # Attempt-history length at invocation entry.
 }
 ```
 
 | `source` | How this invocation obtained the result |
 |---|---|
 | `backend` | This invocation delegated the call to the backend |
-| `store` | A completed outcome was already retained locally |
+| `store` | A completed result or failed/unknown outcome was already retained locally |
 | `receipt` | A retained receipt was parsed locally |
 | `shared` | This position joined an already reserved call, including a duplicate batch position |
 | `batch` | This collection obtained an outcome from the retained Batch submission |
 
 The identity stays the same across replay, regrouping and process restarts.
 Provenance describes each returned position, so a mixed batch can contain new,
-replayed and shared results. Controlled reasoning/answer phases carry their own
+replayed and shared outcomes. Controlled reasoning/answer phases carry their own
 keys and sources in each phase's `metadata`; a backend invocation can reuse a
 previous phase. A completed parent replay preserves the original phase records
 and marks the parent result as `store`. Batch sources describe collection, not
 submission: collecting an earlier submission does not buy another model draw.
 With `wait=True`, sources cover the entire collection call across all polls.
 
+`previous_attempts` snapshots the call's attempt-history length when this
+invocation reserves the key. Retries during the invocation do not change its
+returned count; their diagnostics remain in the attempt records. A subsequent
+invocation can therefore report a larger count. Reading a stored outcome or
+reparsing a receipt does not add attempts. Batch collection snapshots history at
+collection entry and retains it across polls. Controlled phases snapshot at
+their own reservation boundary; a joined parent reporting an unknown child
+retains that child's snapshot. Counts are local observations, not proof of
+provider execution or charges. An aggregate controlled call has separate child
+histories rather than a sum of phase attempts.
+
+For a `PartialBatchError`, read each exception in `error.failures[index]` (also
+present in the corresponding `error.results[index]` slot). Those exceptions
+retain their native type, status and diagnostics on the initial invocation;
+replayed errors retain the saved classification as described below. Each
+position has detached provenance even when requests were coalesced. For
+`OpenAIBatchBackend.collect()`, use `collection.failures[index]`.
+
+An `UnknownOutcomeError` for an individual call also carries this record and
+retains its recovery key in `error.key`. An unknown controlled phase identifies
+the child call requiring recovery. A Batch submission error can affect several
+calls: it carries their records in `error.metadata["persistence_calls"]`, while
+`error.key` remains the submission ID used for Batch recovery. Local validation
+and storage errors without an identified call have no call provenance.
+
 Usage, raw receipts, sampled tokens and stored outcomes retain their original
-values. The wrapper adds provenance to detached return values. An excluded
+values. The wrapper adds provenance to detached results and exceptions. An excluded
 `persist` scope has no store provenance. `ScoringResult.metadata` is empty by
 default and carries the same provenance when scoring is persisted.
 
@@ -253,11 +279,30 @@ the phase records rather than counting both their usage and the parent's total.
 The source is not a billing assertion; provider prompt caching still represents
 a new request and differs from a local replay.
 
-The store takes an exclusive process lock and validates the manifest, retained
-records, journals and file checksums before dispatch. Pickles are trusted local
-artifacts: checksums detect corruption, not malicious changes. The private store
-contains full model inputs and raw responses. Keep it in an appropriate private
-location.
+The store takes an exclusive process lock. By default, opening it validates the
+manifest, retained records, journals and file checksums before dispatch. For a
+large store, opt into validation on access:
+
+```python
+with CallStore.open(
+    "./model-calls", run_descriptor={"experiment": "pilot"}, validation="lazy",
+) as store:
+    ...
+```
+
+`validation="lazy"` checks the manifest, lifecycle events and submission journals
+at open, then checks call payloads and Batch files when needed. It skips the
+startup scan of call files. Requested records still undergo checksum, identity
+and outcome validation before reuse or recovery. Detected corruption poisons
+the store and prevents further dispatch. Corruption in unrelated, unread
+payloads can remain undetected until access; close and reopen with
+`validation="full"` (the default) for a complete integrity check. Lazy validation
+does not reduce the number of call files or the size of Batch journals held in
+memory. It does not change call keys or authorize resubmission of unknown work.
+
+Pickles are trusted local artifacts: checksums detect corruption, not malicious
+changes. The private store contains full model inputs and raw responses. Keep
+it in an appropriate private location.
 
 Nonsemantic callbacks and transport clients are excluded from private request
 identity. Custom policy callables, such as supplied logits processors, cannot

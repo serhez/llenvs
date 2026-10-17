@@ -75,6 +75,13 @@ class OpenAIBatchBackend:
     def _write(self, manifest):
         self.store.write_journal(manifest)
 
+    def _unknown_submission(self, manifest):
+        error = UnknownOutcomeError(manifest["id"])
+        error.metadata = {
+            "persistence_calls": [self.store._provenance(key, "batch") for key in manifest["keys"]]
+        }
+        return error
+
     @staticmethod
     def _line(key, body):
         return (
@@ -245,7 +252,7 @@ class OpenAIBatchBackend:
             )
         except Exception as exc:
             # Even an unsuccessful listing does not prove the create was rejected.
-            raise UnknownOutcomeError(manifest["id"]) from exc
+            raise self._unknown_submission(manifest) from exc
         manifest.update(batch_id=response.id, state="pending")
         self._write(manifest)
 
@@ -302,7 +309,7 @@ class OpenAIBatchBackend:
         if len(matches) > 1:
             manifest.update(state="duplicate_submissions", matches=matches)
             self._write(manifest)
-            raise UnknownOutcomeError(manifest["id"])
+            raise self._unknown_submission(manifest)
         if matches:
             manifest.update(batch_id=matches[0]["id"], state="pending")
         else:
@@ -333,11 +340,14 @@ class OpenAIBatchBackend:
                 raise ValueError("Batch handle does not cover the request's current submission")
             sources.setdefault(
                 key,
-                "store"
-                if record["state"] == "completed"
-                else "receipt"
-                if record["state"] == "received"
-                else "batch",
+                self.store._provenance(
+                    key,
+                    "store"
+                    if record["state"] in {"completed", "failed"}
+                    else "receipt"
+                    if record["state"] == "received"
+                    else "batch",
+                ),
             )
         statuses = {}
         failures = {}
@@ -472,7 +482,7 @@ class OpenAIBatchBackend:
         for index, key in enumerate(handle.keys):
             record = self.store._records[key]
             if record["state"] == "completed":
-                results.append(self.store._result(key, record["result"], sources[key]))
+                results.append(self.store._result(record["result"], sources[key]))
             else:
                 results.append(None)
                 if (
@@ -480,8 +490,9 @@ class OpenAIBatchBackend:
                     or record["state"] == "received"
                     and record.get("error")
                 ):
-                    indexed_failures[index] = failures.get(
-                        key, restore_backend_error(record["error"])
+                    indexed_failures[index] = self.store._error(
+                        failures.get(key, restore_backend_error(record["error"])),
+                        sources[key],
                     )
                 else:
                     pending.append(key)
@@ -510,7 +521,8 @@ class OpenAIBatchBackend:
             self.submit_chat_batch(messages_batch, params, repeat_ids=repeat_ids), wait=True
         )
         if collection.pending:
-            raise UnknownOutcomeError(collection.pending[0])
+            key = collection.pending[0]
+            raise self.store._error(UnknownOutcomeError(key), self.store._provenance(key, "batch"))
         if collection.failures:
             raise PartialBatchError(
                 [

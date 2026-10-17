@@ -80,6 +80,7 @@ def test_result_identifies_draw_and_replay_without_changing_usage_or_stored_resu
             "run_fingerprint": fingerprint,
             "call_key": key,
             "source": "backend",
+            "previous_attempts": 0,
         }
         assert store._records[key]["result"] == native
         assert "persistence" not in native.metadata
@@ -91,6 +92,7 @@ def test_result_identifies_draw_and_replay_without_changing_usage_or_stored_resu
             "run_fingerprint": fingerprint,
             "call_key": key,
             "source": "store",
+            "previous_attempts": 0,
         }
         assert native_result(replay) == native
         assert store._records[key]["result"] == native
@@ -233,6 +235,169 @@ def test_successful_partial_batch_slots_keep_provenance_and_usage(tmp_path):
         assert native_result(replay) == outcome
 
 
+@pytest.mark.parametrize("kind", ["sdk", "malformed", "oserror"])
+def test_failed_positions_have_detached_identity_source_and_replay_metadata(tmp_path, kind):
+    from llenvs.inference.protocol import MalformedResponseError, PartialBatchError
+
+    if kind == "sdk":
+        import httpx
+        from openai import BadRequestError
+
+        error = BadRequestError(
+            "rejected",
+            response=httpx.Response(400, request=httpx.Request("POST", "https://offline.invalid")),
+            body={"error": "rejected"},
+        )
+    elif kind == "malformed":
+        error = MalformedResponseError("rejected", provider_error={"code": 400})
+    else:
+        error = OSError(5, "rejected", "offline")
+        error.status_code = 400
+    error.metadata = {"provider": "offline"}
+    backend = Backend()
+
+    def execute(batch, params, *, observer):
+        backend.calls += len(batch)
+        for index in range(len(batch)):
+            observer.started(index, 0)
+        raise PartialBatchError([error] * len(batch), dict.fromkeys(range(len(batch)), error))
+
+    backend.generate_chat_batch = execute
+    batch = [messages("a"), messages("b"), messages("b")]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        wrapped = PersistentBackend(backend, store)
+        with pytest.raises(PartialBatchError) as caught:
+            wrapped.generate_chat_batch(batch, SamplingParams(), repeat_ids=["a", "b", "b"])
+        failures = caught.value.failures
+        records = [failure.metadata["persistence"] for failure in failures.values()]
+        assert [record["source"] for record in records] == ["backend", "backend", "shared"]
+        assert records[0]["call_key"] != records[1]["call_key"] == records[2]["call_key"]
+        assert all(record["run_fingerprint"] == store.fingerprint for record in records)
+        assert all(record["previous_attempts"] == 0 for record in records)
+        assert all(
+            type(failure) is type(error) and failure.status_code == 400
+            for failure in failures.values()
+        )
+        assert all(caught.value.results[i] is failure for i, failure in failures.items())
+        assert len({id(failure) for failure in failures.values()}) == 3
+        assert error.metadata == {"provider": "offline"}
+        if kind == "sdk":
+            assert failures[0].response is error.response and failures[0].body == error.body
+        if kind == "oserror":
+            assert failures[0].filename == "offline" and failures[0].errno == 5
+        failures[1].metadata["persistence"]["source"] = "tampered"
+        assert failures[2].metadata["persistence"]["source"] == "shared"
+        keys = [record["call_key"] for record in records]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        with pytest.raises(PartialBatchError) as caught:
+            PersistentBackend(backend, store).generate_chat_batch(
+                batch, SamplingParams(), repeat_ids=["a", "b", "b"]
+            )
+        for index, failure in caught.value.failures.items():
+            assert failure.metadata["persistence"] == {
+                "run_fingerprint": store.fingerprint,
+                "call_key": keys[index],
+                "source": "store",
+                "previous_attempts": 0,
+            }
+            assert failure.status_code == 400
+        assert backend.calls == 2
+
+
+def test_attempt_count_is_history_at_entry_not_retries_during_the_invocation(tmp_path):
+    from llenvs.inference.protocol import PartialBatchError
+
+    backend = Backend()
+    original = backend.generate_chat_batch
+    error = ValueError("retry budget exhausted")
+    error.status_code = 503
+    error.attempts = [{"status_code": 503}] * 3
+
+    def execute(batch, params, *, observer):
+        for attempt in range(3):
+            observer.started(0, attempt)
+            backend.calls += 1
+            observer.failed(0, error)
+        raise error
+
+    backend.generate_chat_batch = execute
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        wrapped = PersistentBackend(backend, store)
+        with pytest.raises(PartialBatchError) as caught:
+            wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id="a")
+        failure = caught.value.failures[0]
+        provenance = failure.metadata["persistence"]
+        assert provenance["previous_attempts"] == 0
+        assert failure.attempts == error.attempts
+        key = provenance["call_key"]
+        with pytest.raises(PartialBatchError) as replayed:
+            wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id="a")
+        assert replayed.value.failures[0].metadata["persistence"] == {
+            **provenance,
+            "source": "store",
+            "previous_attempts": 2,
+        }
+        assert backend.calls == 3
+        store.acknowledge_resubmission(
+            key, reason="Retry definite failure", accept_duplicate_expenditure=True
+        )
+        backend.generate_chat_batch = original
+        result = wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id="a")
+        assert result.metadata["persistence"] == {**provenance, "previous_attempts": 3}
+        assert wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id="a").metadata[
+            "persistence"
+        ] == {
+            **result.metadata["persistence"],
+            "source": "store",
+        }
+        assert backend.calls == 4
+
+
+def test_successful_retry_and_shared_position_keep_their_entry_history_count(tmp_path):
+    backend = Backend()
+    original = backend.generate_chat_batch
+    error = ValueError("retryable")
+    error.status_code = 503
+
+    def execute(batch, params, *, observer):
+        for attempt in range(2):
+            observer.started(0, attempt)
+            observer.failed(0, error)
+        return original(batch, params, observer=observer)
+
+    backend.generate_chat_batch = execute
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        wrapped = PersistentBackend(backend, store)
+        results = wrapped.generate_chat_batch(
+            [messages("a"), messages("a")], SamplingParams(), repeat_ids=["a", "a"]
+        )
+        records = [result.metadata["persistence"] for result in results]
+        assert [record["source"] for record in records] == ["backend", "shared"]
+        assert [record["previous_attempts"] for record in records] == [0, 0]
+        replay = wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id="a")
+        assert replay.metadata["persistence"] == {
+            **records[0],
+            "source": "store",
+            "previous_attempts": 2,
+        }
+
+
+def test_repeated_parser_errors_identify_receipt_reuse_without_another_attempt(tmp_path):
+    from llenvs.inference.protocol import PartialBatchError
+
+    backend = Backend()
+    backend.reparse_receipt = lambda *args: (_ for _ in ()).throw(ValueError("parser failed"))
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        wrapped = PersistentBackend(backend, store)
+        for source in ("backend", "receipt", "receipt"):
+            with pytest.raises(PartialBatchError) as caught:
+                wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id="a")
+            record = caught.value.failures[0].metadata["persistence"]
+            assert record["source"] == source and record["previous_attempts"] == 0
+            assert store._records[record["call_key"]]["state"] == "received"
+        assert backend.calls == 1
+
+
 def test_explicit_draws_survive_regrouping_subsets_and_duplicate_positions(tmp_path):
     backend = Backend()
     with CallStore.open(tmp_path, run_descriptor={"run": "test"}) as store:
@@ -279,25 +444,91 @@ def test_receipt_is_reparsed_locally_after_parser_failure(tmp_path):
         assert provenance["run_fingerprint"] == store.fingerprint
 
 
-def test_started_without_receipt_stops_resubmission(tmp_path):
+@pytest.mark.parametrize("retries", [0, 2])
+def test_started_without_receipt_stops_resubmission(tmp_path, retries):
     backend = Backend()
 
     def interrupted(batch, params, *, observer):
-        observer.started(0, 0)
+        for attempt in range(retries + 1):
+            observer.started(0, attempt)
         raise TimeoutError("remote execution may have occurred")
 
     backend.generate_chat_batch = interrupted
     with CallStore.open(tmp_path, run_descriptor={}) as store:
-        with pytest.raises(Exception):
+        with pytest.raises(UnknownOutcomeError) as caught:
             PersistentBackend(backend, store).generate_chat(
                 messages("a"), SamplingParams(), repeat_id=1
             )
+        provenance = caught.value.metadata["persistence"]
+        assert provenance == {
+            "run_fingerprint": store.fingerprint,
+            "call_key": caught.value.key,
+            "source": "backend",
+            "previous_attempts": 0,
+        }
+        assert store._inflight[caught.value.key].done()
+        with pytest.raises(UnknownOutcomeError) as replayed:
+            PersistentBackend(backend, store).generate_chat(
+                messages("a"), SamplingParams(), repeat_id=1
+            )
+        assert replayed.value.metadata["persistence"] == {
+            **provenance,
+            "source": "store",
+            "previous_attempts": retries,
+        }
     backend.generate_chat_batch = lambda *a, **kw: pytest.fail("resubmitted unknown outcome")
     with CallStore.open(tmp_path, run_descriptor={}) as store:
-        with pytest.raises(UnknownOutcomeError):
+        with pytest.raises(UnknownOutcomeError) as caught:
             PersistentBackend(backend, store).generate_chat(
                 messages("a"), SamplingParams(), repeat_id=1
             )
+        assert caught.value.metadata["persistence"] == {
+            **provenance,
+            "source": "store",
+            "previous_attempts": retries,
+        }
+
+
+def test_unknown_phase_error_identifies_the_child_that_requires_recovery(tmp_path):
+    class Phased(Backend):
+        def generate_chat_batch(self, batch, params, *, observer):
+            observer.begin_phases(0)
+
+            def execute(child):
+                child.started(0, 0)
+                self.calls += 1
+                raise TimeoutError("unknown phase outcome")
+
+            observer.run_phase(0, "reasoning", {"ids": [1]}, execute, lambda receipt: receipt)
+
+    backend = Phased()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        wrapped = PersistentBackend(backend, store)
+        with pytest.raises(UnknownOutcomeError) as caught:
+            wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id=1)
+        failure = caught.value
+        provenance = failure.metadata["persistence"]
+        child = store._records[failure.key]
+        assert child["request"]["phase"] == "reasoning"
+        assert provenance == {
+            "run_fingerprint": store.fingerprint,
+            "call_key": failure.key,
+            "source": "backend",
+            "previous_attempts": 0,
+        }
+        parent = child["request"]["parent"]
+        assert parent not in store._inflight or store._inflight[parent].done()
+        with pytest.raises(UnknownOutcomeError) as replayed:
+            wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id=1)
+        assert replayed.value.metadata["persistence"] == {**provenance, "source": "store"}
+        assert backend.calls == 1
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        with pytest.raises(UnknownOutcomeError) as replayed:
+            PersistentBackend(backend, store).generate_chat(
+                messages("a"), SamplingParams(), repeat_id=1
+            )
+        assert replayed.value.metadata["persistence"] == {**provenance, "source": "store"}
+        assert backend.calls == 1
 
 
 def test_distinct_calls_run_concurrently_and_inflight_duplicate_coalesces(tmp_path):
@@ -345,6 +576,90 @@ def test_corruption_fails_on_open_before_any_delegate(tmp_path):
     record.write_bytes(b"broken")
     with pytest.raises(CheckpointCorruptionError):
         CallStore.open(tmp_path, run_descriptor={})
+
+
+def test_lazy_open_skips_call_payloads_but_validates_a_replayed_record(tmp_path, monkeypatch):
+    import llenvs.inference.persistence.store as mod
+
+    backend = Backend()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        PersistentBackend(backend, store).generate_chat(
+            messages("a"), SamplingParams(), repeat_id=1
+        )
+    load = mod.CallStore._load
+    reads = []
+
+    def tracked(store, path):
+        reads.append(path)
+        return load(store, path)
+
+    monkeypatch.setattr(mod.CallStore, "_load", tracked)
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        assert reads == []
+        replay = PersistentBackend(backend, store).generate_chat(
+            messages("a"), SamplingParams(), repeat_id=1
+        )
+        assert replay.text == "a" and len(reads) == 1
+        assert replay.metadata["persistence"]["source"] == "store"
+        assert backend.calls == 1
+
+
+def test_lazy_corruption_fails_on_access_and_prevents_further_dispatch(tmp_path):
+    from llenvs.inference.persistence import CheckpointError
+
+    backend = Backend()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        PersistentBackend(backend, store).generate_chat(
+            messages("a"), SamplingParams(), repeat_id=1
+        )
+        path = next((store.run_dir / "calls").rglob("*.pkl"))
+    path.write_bytes(b"corrupt")
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        wrapped = PersistentBackend(backend, store)
+        with pytest.raises(CheckpointCorruptionError):
+            wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id=1)
+        with pytest.raises(CheckpointError, match="poisoned"):
+            wrapped.generate_chat(messages("b"), SamplingParams(), repeat_id=2)
+        assert backend.calls == 1
+    with pytest.raises(CheckpointCorruptionError):
+        CallStore.open(tmp_path, run_descriptor={})
+
+
+@pytest.mark.parametrize("state", ["completed", "received", "started", "failed"])
+def test_lazy_reopen_preserves_recovery_without_reissuing_the_call(tmp_path, state):
+    from llenvs.inference.protocol import PartialBatchError
+
+    backend = Backend()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        result = PersistentBackend(backend, store).generate_chat(
+            messages("a"), SamplingParams(), repeat_id=1
+        )
+        key = result.metadata["persistence"]["call_key"]
+        store.update(
+            key, state, error={"type": "ValueError", "message": "rejected", "status_code": 503}
+        )
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        wrapped = PersistentBackend(backend, store)
+        if state == "started":
+            with pytest.raises(UnknownOutcomeError):
+                wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id=1)
+        elif state == "failed":
+            with pytest.raises(PartialBatchError) as caught:
+                wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id=1)
+            assert caught.value.failures[0].metadata["persistence"]["source"] == "store"
+        else:
+            replay = wrapped.generate_chat(messages("a"), SamplingParams(), repeat_id=1)
+            assert replay.text == "a"
+            assert replay.metadata["persistence"]["source"] == (
+                "store" if state == "completed" else "receipt"
+            )
+        assert backend.calls == 1
+
+
+def test_invalid_validation_mode_fails_before_creating_a_store(tmp_path):
+    with pytest.raises(ValueError, match="validation"):
+        CallStore.open(tmp_path, run_descriptor={}, validation="skip")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_default_request_granularity_rejects_native_batch_only_backend(tmp_path):

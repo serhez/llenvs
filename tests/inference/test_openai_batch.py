@@ -122,6 +122,7 @@ def test_collection_identifies_each_call_and_replays_without_mutating_saved_resu
                 "run_fingerprint": store.fingerprint,
                 "call_key": key,
                 "source": "batch",
+                "previous_attempts": 0,
             }
             assert result.prompt_tokens == 3 and result.completion_tokens == 1
             assert "persistence" not in store._records[key]["result"].metadata
@@ -137,6 +138,7 @@ def test_collection_identifies_each_call_and_replays_without_mutating_saved_resu
                 "run_fingerprint": store.fingerprint,
                 "call_key": key,
                 "source": "store",
+                "previous_attempts": 0,
             }
             assert result.metadata["request"]["model"] == "gpt-4o"
         fingerprint = store.fingerprint
@@ -179,6 +181,45 @@ def test_waiting_collection_preserves_newly_collected_provenance_across_polls(tm
         )
 
 
+def test_failed_collection_slots_identify_new_and_replayed_errors(tmp_path):
+    client = Client()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", "a")], [ChatMessage("user", "b")]],
+            SamplingParams(),
+            repeat_ids=["a", "b"],
+        )
+        client.outputs["output"] = b"\n".join(
+            [
+                json.dumps(completion(handle.keys[0], "a")).encode(),
+                json.dumps(
+                    {
+                        "custom_id": handle.keys[1],
+                        "error": {"code": "bad_request", "message": "rejected"},
+                    }
+                ).encode(),
+            ]
+        )
+        first = api.collect(handle)
+        assert first.results[0].text == "a" and first.results[1] is None
+        provenance = first.failures[1].metadata["persistence"]
+        assert provenance == {
+            "run_fingerprint": store.fingerprint,
+            "call_key": handle.keys[1],
+            "source": "batch",
+            "previous_attempts": 0,
+        }
+        client.batches.retrieve = lambda *args: pytest.fail("Replayed failure contacted provider")
+        replay = api.collect(handle)
+        assert replay.failures[1].metadata["persistence"] == {**provenance, "source": "store"}
+        assert "metadata" not in store._records[handle.keys[1]]["error"]
+        assert len(client.creates) == 1
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        replay = OpenAIBatchBackend(backend(client), store).collect(handle)
+        assert replay.failures[1].metadata["persistence"] == {**provenance, "source": "store"}
+
+
 def test_unknown_create_does_not_authorize_a_second_submission(tmp_path):
     client = Client()
 
@@ -190,8 +231,18 @@ def test_unknown_create_does_not_authorize_a_second_submission(tmp_path):
     messages = [[ChatMessage("user", "a")]]
     with CallStore.open(tmp_path, run_descriptor={}) as store:
         api = OpenAIBatchBackend(backend(client), store)
-        with pytest.raises(UnknownOutcomeError):
+        with pytest.raises(UnknownOutcomeError) as caught:
             api.submit_chat_batch(messages, SamplingParams(), repeat_ids=["a"])
+        manifest = store._journals[caught.value.key]
+        assert caught.value.metadata["persistence_calls"] == [
+            {
+                "run_fingerprint": store.fingerprint,
+                "call_key": key,
+                "source": "batch",
+                "previous_attempts": 0,
+            }
+            for key in manifest["keys"]
+        ]
     with CallStore.open(tmp_path, run_descriptor={}) as store:
         api = OpenAIBatchBackend(backend(client), store)
         handle = api.submit_chat_batch(messages, SamplingParams(), repeat_ids=["a"])
@@ -355,6 +406,12 @@ def test_partial_expiry_collects_success_before_an_explicit_failed_slot_resubmis
         )
         first = api.collect(handle)
         assert first.results[0].text == "a" and set(first.failures) == {1}
+        assert first.failures[1].metadata["persistence"] == {
+            "run_fingerprint": store.fingerprint,
+            "call_key": handle.keys[1],
+            "source": "batch",
+            "previous_attempts": 0,
+        }
         assert len(client.creates) == 1
         retry = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=[1, 2])
         assert len(client.creates) == 2
@@ -373,6 +430,9 @@ def test_partial_expiry_collects_success_before_an_explicit_failed_slot_resubmis
         assert [result.metadata["persistence"]["call_key"] for result in final.results] == list(
             handle.keys
         )
+        assert [
+            result.metadata["persistence"]["previous_attempts"] for result in final.results
+        ] == [0, 1]
 
 
 def test_cached_batch_results_do_not_require_provider_files_or_api_access(tmp_path):
@@ -389,6 +449,37 @@ def test_cached_batch_results_do_not_require_provider_files_or_api_access(tmp_pa
         assert OpenAIBatchBackend(backend(client), store).collect(handle).results[0].text == "a"
 
 
+def test_lazy_open_defers_batch_payload_validation_until_collection(tmp_path, monkeypatch):
+    client = Client()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", "a")]], SamplingParams(), repeat_ids=[1]
+        )
+        client.outputs["output"] = json.dumps(completion(handle.keys[0], "a")).encode()
+        assert api.collect(handle).results[0].text == "a"
+    load, blob = CallStore._load, CallStore.blob_path
+    reads, blobs = [], []
+
+    def tracked(store, path):
+        reads.append(path)
+        return load(store, path)
+
+    def tracked_blob(store, entry):
+        blobs.append(entry)
+        return blob(store, entry)
+
+    monkeypatch.setattr(CallStore, "_load", tracked)
+    monkeypatch.setattr(CallStore, "blob_path", tracked_blob)
+    client.batches.retrieve = lambda *args: pytest.fail("Replay contacted provider")
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        assert reads == [] and blobs == []
+        result = OpenAIBatchBackend(backend(client), store).collect(handle).results[0]
+        assert result.text == "a" and len(reads) == 1
+        assert result.metadata["persistence"]["source"] == "store"
+        assert len(client.creates) == 1
+
+
 def test_durable_batch_receipt_reparses_without_contacting_provider(tmp_path):
     client = Client()
     with CallStore.open(tmp_path, run_descriptor={}) as store:
@@ -402,7 +493,12 @@ def test_durable_batch_receipt_reparses_without_contacting_provider(tmp_path):
         source.reparse_receipt = lambda *args: (_ for _ in ()).throw(
             ValueError("interrupted parser")
         )
-        assert set(api.collect(handle).failures) == {0}
+        failed = api.collect(handle)
+        assert set(failed.failures) == {0}
+        assert failed.failures[0].metadata["persistence"]["source"] == "batch"
+        failed = api.collect(handle)
+        assert failed.failures[0].metadata["persistence"]["source"] == "receipt"
+        assert failed.failures[0].metadata["persistence"]["previous_attempts"] == 0
         source.reparse_receipt = parse
         client.batches.retrieve = lambda id: pytest.fail(
             "Durable receipt recovery contacted the provider"
@@ -413,6 +509,7 @@ def test_durable_batch_receipt_reparses_without_contacting_provider(tmp_path):
             "run_fingerprint": store.fingerprint,
             "call_key": handle.keys[0],
             "source": "receipt",
+            "previous_attempts": 0,
         }
         assert len(client.creates) == 1
 
