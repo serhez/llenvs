@@ -8,7 +8,14 @@ import pytest
 from llenvs.inference.backends.api import OpenAIBackend
 from llenvs.inference.backends.openai_batch import BatchHandle, OpenAIBatchBackend
 from llenvs.inference.persistence import CallStore, UnknownOutcomeError
-from llenvs.inference.protocol import ChatMessage, SamplingParams
+from llenvs.inference.protocol import (
+    ChatMessage,
+    LogprobsNotReturnedError,
+    MalformedResponseError,
+    PartialBatchError,
+    RefusedByPolicyError,
+    SamplingParams,
+)
 
 
 class Client:
@@ -51,8 +58,8 @@ def backend(client):
     return result
 
 
-def completion(key, text):
-    return {
+def completion(key, text, *, logprobs=False):
+    entry = {
         "custom_id": key,
         "response": {
             "status_code": 200,
@@ -72,6 +79,23 @@ def completion(key, text):
             },
         },
     }
+    if logprobs:
+        entry["response"]["body"]["choices"][0]["logprobs"] = {
+            "content": [{"token": text, "logprob": -0.1, "top_logprobs": []}]
+        }
+    return entry
+
+
+def generated_failure(key, kind):
+    entry = completion(key, "unusable answer")
+    body = entry["response"]["body"]
+    if kind == "refusal":
+        body["choices"][0]["message"].update(content=None, refusal="Cannot answer")
+    elif kind == "malformed":
+        body["choices"] = []
+    else:
+        assert kind == "missing_logprobs"
+    return entry
 
 
 def test_out_of_order_collection_replays_across_process_ownership(tmp_path):
@@ -391,18 +415,25 @@ def test_paginated_reconciliation_adopts_only_exact_submission_identity(tmp_path
         assert len(client.creates) == 1
 
 
-@pytest.mark.parametrize("terminal_status", ["expired", "cancelled", "failed"])
-def test_partial_expiry_collects_success_before_an_explicit_failed_slot_resubmission(
-    tmp_path, terminal_status
-):
+def test_partial_expiry_resubmits_only_a_request_explicitly_reported_unexecuted(tmp_path):
     client = Client()
     batch = [[ChatMessage("user", "a")], [ChatMessage("user", "b")]]
     with CallStore.open(tmp_path, run_descriptor={}) as store:
         api = OpenAIBatchBackend(backend(client), store)
         handle = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=[1, 2])
         client.outputs["output"] = json.dumps(completion(handle.keys[0], "a")).encode()
+        client.outputs["errors"] = json.dumps(
+            {
+                "custom_id": handle.keys[1],
+                "response": None,
+                "error": {
+                    "code": "batch_expired",
+                    "message": "This request could not be executed before the completion window expired.",
+                },
+            }
+        ).encode()
         client.batches.retrieve = lambda id: SimpleNamespace(
-            id=id, status=terminal_status, output_file_id="output", error_file_id=None
+            id=id, status="expired", output_file_id="output", error_file_id="errors"
         )
         first = api.collect(handle)
         assert first.results[0].text == "a" and set(first.failures) == {1}
@@ -413,6 +444,9 @@ def test_partial_expiry_collects_success_before_an_explicit_failed_slot_resubmis
             "previous_attempts": 0,
         }
         assert len(client.creates) == 1
+
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        api = OpenAIBatchBackend(backend(client), store)
         retry = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=[1, 2])
         assert len(client.creates) == 2
         assert len(client.uploads[1].splitlines()) == 1
@@ -433,6 +467,283 @@ def test_partial_expiry_collects_success_before_an_explicit_failed_slot_resubmis
         assert [
             result.metadata["persistence"]["previous_attempts"] for result in final.results
         ] == [0, 1]
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize(
+    "kind,error_type",
+    [
+        ("refusal", RefusedByPolicyError),
+        ("malformed", MalformedResponseError),
+        ("missing_logprobs", LogprobsNotReturnedError),
+    ],
+)
+def test_generated_failures_replay_after_restart_and_regrouping(
+    tmp_path, monkeypatch, validation, kind, error_type
+):
+    client = Client()
+    batch = [[ChatMessage("user", text)] for text in ["good", "bad", "new"]]
+    params = SamplingParams(logprobs=kind == "missing_logprobs")
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(batch[:2], params, repeat_ids=["good", "bad"])
+        client.outputs["output"] = b"\n".join(
+            json.dumps(entry).encode()
+            for entry in [
+                completion(original.keys[0], "good", logprobs=params.logprobs),
+                generated_failure(original.keys[1], kind),
+            ]
+        )
+        first = api.collect(original)
+        assert first.results[0].text == "good" and not first.pending
+        assert isinstance(first.failures[1], error_type)
+        assert first.failures[1].metadata["persistence"]["source"] == "batch"
+        saved_receipt = store._records[original.keys[1]]["receipt"]
+        assert saved_receipt["response"]["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+        }
+        error_message = str(first.failures[1])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A stored generated outcome contacted the provider")
+
+    with CallStore.open(tmp_path, run_descriptor={}, validation=validation) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        with monkeypatch.context() as blocked:
+            blocked.setattr(client.files, "create", forbidden)
+            blocked.setattr(client.files, "content", forbidden)
+            blocked.setattr(client.batches, "create", forbidden)
+            blocked.setattr(client.batches, "retrieve", forbidden)
+            blocked.setattr(client.batches, "list", forbidden)
+            rebuilt = api.submit_chat_batch(
+                [batch[1], batch[0]], params, repeat_ids=["bad", "good"]
+            )
+            replay = api.collect(rebuilt)
+            assert rebuilt.keys == (original.keys[1], original.keys[0])
+            assert replay.results[1].text == "good" and not replay.pending
+            assert isinstance(replay.failures[0], error_type)
+            assert str(replay.failures[0]) == error_message
+            assert replay.failures[0].metadata["persistence"] == {
+                "run_fingerprint": store.fingerprint,
+                "call_key": original.keys[1],
+                "source": "store",
+                "previous_attempts": 0,
+            }
+            with pytest.raises(PartialBatchError) as caught:
+                api.generate_chat_batch([batch[1]], params, repeat_ids=["bad"])
+            assert isinstance(caught.value.failures[0], error_type)
+            assert caught.value.results[0] is caught.value.failures[0]
+            assert caught.value.failures[0].metadata["persistence"]["source"] == "store"
+
+        regrouped = api.submit_chat_batch(
+            [batch[1], batch[2], batch[0]], params, repeat_ids=["bad", "new", "good"]
+        )
+        assert len(client.creates) == len(client.uploads) == 2
+        rows = [json.loads(line) for line in client.uploads[-1].splitlines()]
+        assert [row["custom_id"] for row in rows] == [regrouped.keys[1]]
+        client.outputs["new-output"] = json.dumps(
+            completion(regrouped.keys[1], "new", logprobs=params.logprobs)
+        ).encode()
+        client.batches.retrieve = lambda id: SimpleNamespace(
+            id=id, status="completed", output_file_id="new-output", error_file_id=None
+        )
+        collected = api.collect(regrouped)
+        assert [result.text if result else None for result in collected.results] == [
+            None,
+            "new",
+            "good",
+        ]
+        assert set(collected.failures) == {0} and not collected.pending
+        assert collected.failures[0].metadata["persistence"]["source"] == "store"
+        assert collected.results[1].metadata["persistence"]["source"] == "batch"
+        record = store._records[original.keys[1]]
+        assert record["receipt"] == saved_receipt and record["attempts"] == []
+
+
+def test_per_key_acknowledgement_survives_restart_and_resubmits_only_that_failure(tmp_path):
+    client = Client()
+    batch = [[ChatMessage("user", text)] for text in ["good", "retry", "keep"]]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=[0, 1, 2])
+        client.outputs["output"] = b"\n".join(
+            json.dumps(entry).encode()
+            for entry in [
+                completion(original.keys[0], "good"),
+                generated_failure(original.keys[1], "refusal"),
+                generated_failure(original.keys[2], "refusal"),
+            ]
+        )
+        assert set(api.collect(original).failures) == {1, 2}
+        receipt = store._records[original.keys[1]]["receipt"]
+
+    reason = "Another draw is intended for this one refusal"
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        store.acknowledge_resubmission(
+            original.keys[1], reason=reason, accept_duplicate_expenditure=True
+        )
+        assert len(client.creates) == len(client.uploads) == 1
+
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        retried = api.submit_chat_batch(
+            [batch[2], batch[0], batch[1]], SamplingParams(), repeat_ids=[2, 0, 1]
+        )
+        assert retried.keys == (original.keys[2], original.keys[0], original.keys[1])
+        assert len(client.creates) == len(client.uploads) == 2
+        assert [json.loads(row)["custom_id"] for row in client.uploads[-1].splitlines()] == [
+            original.keys[1]
+        ]
+        client.outputs["retry-output"] = json.dumps(completion(original.keys[1], "retry")).encode()
+        client.batches.retrieve = lambda id: SimpleNamespace(
+            id=id, status="completed", output_file_id="retry-output", error_file_id=None
+        )
+        final = api.collect(retried)
+        assert [result.text if result else None for result in final.results] == [
+            None,
+            "good",
+            "retry",
+        ]
+        assert set(final.failures) == {0} and not final.pending
+        assert final.failures[0].metadata["persistence"]["source"] == "store"
+        assert final.failures[0].metadata["persistence"]["previous_attempts"] == 0
+        assert final.results[1].metadata["persistence"]["previous_attempts"] == 0
+        assert final.results[2].metadata["persistence"] == {
+            "run_fingerprint": store.fingerprint,
+            "call_key": original.keys[1],
+            "source": "batch",
+            "previous_attempts": 1,
+        }
+        record = store._records[original.keys[1]]
+        assert len(record["attempts"]) == 1
+        assert record["attempts"][0]["receipt"] == receipt
+        assert record["attempts"][0]["submission"] == original.submissions[0]
+        assert record["recovery_decisions"] == [
+            {"reason": reason, "duplicate_expenditure_accepted": True}
+        ]
+        assert store._records[original.keys[2]]["attempts"] == []
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "expired", "cancelled", "failed"])
+def test_missing_terminal_output_replays_failure_without_authorizing_another_draw(
+    tmp_path, terminal_status
+):
+    client = Client()
+    batch = [[ChatMessage("user", text)] for text in ["good", "missing"]]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=[0, 1])
+        client.outputs["output"] = json.dumps(completion(original.keys[0], "good")).encode()
+        client.batches.retrieve = lambda id: SimpleNamespace(
+            id=id, status=terminal_status, output_file_id="output", error_file_id=None
+        )
+        first = api.collect(original)
+        assert first.results[0].text == "good" and set(first.failures) == {1}
+        message = str(first.failures[1])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An absent output was treated as permission to execute again")
+
+    client.files.create = client.files.content = forbidden
+    client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        rebuilt = api.submit_chat_batch([batch[1], batch[0]], SamplingParams(), repeat_ids=[1, 0])
+        replay = api.collect(rebuilt)
+        assert replay.results[1].text == "good" and set(replay.failures) == {0}
+        assert str(replay.failures[0]) == message
+        assert replay.failures[0].metadata["persistence"]["source"] == "store"
+        assert store._records[original.keys[1]]["attempts"] == []
+        assert len(client.creates) == len(client.uploads) == 1
+
+
+@pytest.mark.parametrize(
+    "status_code,error_code",
+    [
+        (400, None),
+        (401, None),
+        (429, None),
+        (500, None),
+        (None, "invalid_request"),
+        (None, "rate_limit_exceeded"),
+        (None, "batch_cancelled"),
+        (None, "internal_error"),
+        (200, "batch_expired"),
+        (500, "batch_expired"),
+    ],
+)
+def test_request_errors_are_not_automatically_assumed_unexecuted_and_retryable(
+    tmp_path, status_code, error_code
+):
+    client = Client()
+    messages = [[ChatMessage("user", "question")]]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(messages, SamplingParams(), repeat_ids=[0])
+        entry = completion(original.keys[0], "answer")
+        entry["response"] = (
+            {**entry["response"], "status_code": status_code} if status_code is not None else None
+        )
+        entry["error"] = {"code": error_code, "message": "Request failed"} if error_code else None
+        client.outputs["output"] = json.dumps(entry).encode()
+        first = api.collect(original)
+        assert set(first.failures) == {0}
+        message = str(first.failures[0])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An arbitrary request error was automatically resubmitted")
+
+    client.files.create = client.files.content = forbidden
+    client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        rebuilt = api.submit_chat_batch(messages, SamplingParams(), repeat_ids=[0])
+        replay = api.collect(rebuilt)
+        assert set(replay.failures) == {0} and str(replay.failures[0]) == message
+        assert replay.failures[0].metadata["persistence"] == {
+            "run_fingerprint": store.fingerprint,
+            "call_key": original.keys[0],
+            "source": "store",
+            "previous_attempts": 0,
+        }
+        assert store._records[original.keys[0]]["attempts"] == []
+
+
+def test_pending_requests_rejoin_their_submission_after_restart_with_different_windows(tmp_path):
+    client = Client()
+    batch = [[ChatMessage("user", text)] for text in ["a", "b", "c"]]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        original = OpenAIBatchBackend(backend(client), store).submit_chat_batch(
+            batch[:2], SamplingParams(), repeat_ids=["a", "b"]
+        )
+
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        rebuilt = api.submit_chat_batch(batch[1:], SamplingParams(), repeat_ids=["b", "c"])
+        assert rebuilt.keys[0] == original.keys[1]
+        assert len(client.creates) == len(client.uploads) == 2
+        assert [json.loads(row)["custom_id"] for row in client.uploads[-1].splitlines()] == [
+            rebuilt.keys[1]
+        ]
+        client.outputs["first"] = b"\n".join(
+            json.dumps(completion(key, text)).encode()
+            for key, text in zip(original.keys, ["a", "b"], strict=True)
+        )
+        client.outputs["second"] = json.dumps(completion(rebuilt.keys[1], "c")).encode()
+        client.batches.retrieve = lambda id: SimpleNamespace(
+            id=id,
+            status="completed",
+            output_file_id="first" if id == "batch-1" else "second",
+            error_file_id=None,
+        )
+        results = api.collect(rebuilt)
+        assert [result.text for result in results.results] == ["b", "c"]
+        assert not results.pending and not results.failures
+        client.batches.retrieve = lambda id: pytest.fail("A completed sibling was fetched again")
+        sibling = api.submit_chat_batch(batch[:1], SamplingParams(), repeat_ids=["a"])
+        assert api.collect(sibling).results[0].text == "a"
+        assert len(client.creates) == 2
 
 
 def test_cached_batch_results_do_not_require_provider_files_or_api_access(tmp_path):
@@ -489,7 +800,6 @@ def test_durable_batch_receipt_reparses_without_contacting_provider(tmp_path):
             [[ChatMessage("user", "a")]], SamplingParams(), repeat_ids=[1]
         )
         client.outputs["output"] = json.dumps(completion(handle.keys[0], "a")).encode()
-        parse = source.reparse_receipt
         source.reparse_receipt = lambda *args: (_ for _ in ()).throw(
             ValueError("interrupted parser")
         )
@@ -499,11 +809,19 @@ def test_durable_batch_receipt_reparses_without_contacting_provider(tmp_path):
         failed = api.collect(handle)
         assert failed.failures[0].metadata["persistence"]["source"] == "receipt"
         assert failed.failures[0].metadata["persistence"]["previous_attempts"] == 0
-        source.reparse_receipt = parse
-        client.batches.retrieve = lambda id: pytest.fail(
-            "Durable receipt recovery contacted the provider"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Durable receipt recovery contacted the provider")
+
+    client.files.create = client.files.content = forbidden
+    client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        rebuilt = api.submit_chat_batch(
+            [[ChatMessage("user", "a")]], SamplingParams(), repeat_ids=[1]
         )
-        result = api.collect(handle).results[0]
+        assert rebuilt.keys == handle.keys
+        result = api.collect(rebuilt).results[0]
         assert result.text == "a"
         assert result.metadata["persistence"] == {
             "run_fingerprint": store.fingerprint,

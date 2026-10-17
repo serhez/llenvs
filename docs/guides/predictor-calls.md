@@ -452,6 +452,13 @@ submission UUID. It saves the upload ID before creation, includes the run/UUID/
 digest in provider metadata, and saves the returned Batch ID immediately. Pending
 or unknown submissions are not enqueued again.
 
+Saving a handle is optional when the requests can be reconstructed. Reopen the
+same durable store and call `submit_chat_batch()` with the same requests,
+parameters and explicit repeat IDs to rebuild a handle. Request order and file
+windows may change: existing keys reuse their submissions or stored outcomes,
+and only eligible new attempts are uploaded. Preserve the run descriptor and
+store across restarts.
+
 When a creation acknowledgment is lost, collection paginates provider listings
 and matches metadata, endpoint and input-file ID. One match is adopted; zero
 matches remain unknown, and multiple matches require reconciliation. An absent
@@ -473,11 +480,35 @@ IDs. Durable receipts and files can be recovered locally after parser/process
 failure. Completed draws replay without provider access.
 
 Terminal expiry/cancellation/failure collects every available success before
-marking unfinished slots failed. A later explicit `submit_chat_batch()` with the
-same keys submits only definitely failed/unfinished slots under a new submission
-UUID. A local parse failure keeps the original paid receipt. Missing/expired
-provider output files do not trigger regeneration. The convenience
-`generate_chat_batch(..., repeat_ids=...)` submits, waits and uses
+marking unfinished slots failed. A later `submit_chat_batch()` replays stored
+failures with `source="store"`, including refusals, malformed responses, missing
+logprobs and HTTP/per-request errors. A generated response may already be billed
+even when parsing fails. Replaying a failure preserves its receipt and attempt
+history without buying another draw.
+
+The only automatically eligible failed slot is a per-request `batch_expired`
+error with no response in a terminal submission: the provider explicitly reports
+that this request was not executed. A later explicit `submit_chat_batch()` sends
+that key under a new submission UUID, preserving the previous attempt. A batch's
+expired/cancelled/failed status, a missing output row or an arbitrary non-200
+status does not establish that an individual request is safe to send again.
+These failures continue to replay until the caller explicitly authorizes another
+attempt:
+
+```python
+store.acknowledge_resubmission(
+    call_key,
+    reason="Another draw is intended for this failed request.",
+    accept_duplicate_expenditure=True,
+)
+# Only a subsequent submit containing this key dispatches the authorized attempt.
+```
+
+This per-call decision is separate from the Batch-level authorization for an
+unknown creation outcome. `collect()` never creates replacement attempts. A local
+parser interruption keeps the original receipt for reparsing without provider
+access. Missing/expired provider output files do not trigger regeneration. The
+convenience `generate_chat_batch(..., repeat_ids=...)` submits, waits and uses
 `PartialBatchError` for failed slots.
 
 Result/attempt metadata records Batch ID, endpoint and pricing tier. Raw provider

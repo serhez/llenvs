@@ -174,6 +174,7 @@ class OpenAIBatchBackend:
             authorized = (
                 existing and self.store._journals[existing]["state"] == "resubmission_authorized"
             )
+            entry = (record.get("receipt") or {}).get("batch_entry") or {}
             if (
                 existing
                 and record["state"] != "completed"
@@ -181,6 +182,8 @@ class OpenAIBatchBackend:
                     authorized
                     or record["state"] == "failed"
                     and self.store._journals[existing]["state"] == "terminal"
+                    and entry.get("response") is None
+                    and (entry.get("error") or {}).get("code") == "batch_expired"
                 )
             ):
                 history = record["attempts"] + [
