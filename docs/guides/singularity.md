@@ -36,9 +36,40 @@ If your model works with the in-process `VLLMBackend`, keep using that — it's 
 3. `subprocess.Popen(argv, env=<with SINGULARITYENV_* forwarding>, start_new_session=True)` — the container process tree is isolated in its own process group so we can SIGTERM-pgroup it cleanly.
 4. Polls `http://127.0.0.1:<port>/health` until 200 (or the subprocess dies, or we hit `startup_timeout`).
 5. Instantiates an inner [`OpenAIBackend`](../../src/llenvs/inference/backends/api.py) pointing at `http://127.0.0.1:<port>/v1` with `api_key="EMPTY"`.
-6. Delegates every `generate` / `generate_chat` / `generate_chat_batch` call to that inner client. Chat calls with `SamplingParams.disable_thinking=True` get `chat_template_kwargs={"enable_thinking": false}` injected into the request body — the server renders the chat template, so this is the only per-request way to switch a hybrid-reasoning model (e.g. Qwen3) out of thinking mode. Caller-supplied `extra["extra_body"]["chat_template_kwargs"]` values win on key collisions.
+6. Delegates ordinary generation to that inner client using explicit
+   `api_flavor="vllm"` and SDK retries disabled. Typed `reasoning_effort` maps
+   through the configured local family into per-request `chat_template_kwargs`.
+   Explicit effort overrides backend defaults; conflicting per-request reasoning
+   extras raise. `after_reasoning_text` uses exact token-ID prompts at
+   `/v1/completions` for separate reasoning and answer phases.
 
-`close()` terminates the process group (SIGTERM → 30s wait → SIGKILL) and shuts down the HTTP client. `__enter__`/`__exit__`/`__del__`/`atexit` all route to `close()` so crashes don't leak vllm servers.
+`close()` terminates the owned process group (SIGTERM → bounded wait → SIGKILL)
+and shuts down the HTTP client. Context-manager, destructor and normal-exit
+handlers route to `close()`. A hard kill can bypass Python cleanup; callers must
+also own the surrounding job/allocation lifecycle.
+
+## Revisions, reasoning and replay identity
+
+Pass `revision=` to pin a Hub snapshot. A mutable revision is resolved once
+before launch; server weights/tokenizer and host tokenizer loads use that same
+immutable commit, including offline cached loads. Local model directories use a
+content manifest. `extra_vllm_args` cannot override owned host/port, revision,
+tokenizer or typed launch controls.
+
+Configure `reasoning_family="qwen3.8"` for the Qwen3.8 template mapping.
+The launcher selects the qwen3 reasoning parser, prompt-token details, explicit
+xgrammar structured outputs and answer-only grammar gating. Request efforts are
+`none`, `low`, `medium` and `xhigh`. Historical reasoning is preserved by default.
+
+`descriptor()` separates stable model/runtime/template/precision/engine identity
+from actual paths, port, process ID and startup provenance. Effective prefix
+caching and other engine settings come from the server's initialization record;
+missing configuration or mismatched host/server revisions raises. Native runtime
+content/dependencies and the actual SIF digest, when applicable, are recorded.
+No container digest is invented for native launches.
+
+See [persistent predictor calls](predictor-calls.md) for controlled formatting,
+raw phase provenance, durable receipts and native GPU qualification requirements.
 
 Batch chat generation and continuation scoring share the inner OpenAI backend's
 persistent event loop and pooled async HTTP client. Closing the backend also

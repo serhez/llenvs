@@ -141,7 +141,7 @@ def test_sdk_reasoning_blocks_are_plain_data_with_nulls_and_extras_preserved():
 def test_assistant_reasoning_reaches_request_without_changing_output_policy():
     reasoning = "The candidate labelled 4 is unsafe."
     message = ChatMessage(role="assistant", content="", reasoning=reasoning)
-    params = SamplingParams(max_tokens=512, disable_thinking=True)
+    params = SamplingParams(max_tokens=512, reasoning_effort="none")
     request = _backend()._chat_kwargs([message], params)
 
     assert request["messages"][0]["reasoning"] == reasoning
@@ -153,7 +153,7 @@ def test_assistant_reasoning_reaches_request_without_changing_output_policy():
 def test_structured_reasoning_reaches_request_as_intact_blocks():
     details = ({"type": "reasoning.text", "text": "partial", "signature": "sig"},)
     message = ChatMessage(role="assistant", content="", reasoning_details=details)
-    request = _backend()._chat_kwargs([message], SamplingParams(disable_thinking=True))
+    request = _backend()._chat_kwargs([message], SamplingParams(reasoning_effort="none"))
 
     assert request["messages"][0]["reasoning_details"] == list(details)
     assert "reasoning" not in request["messages"][0]

@@ -11,6 +11,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,13 +26,12 @@ from llenvs.inference.protocol import (
     SamplingParams,
     StopReason,
 )
+from llenvs.inference.records import credential_free, file_digest, normalize_usage
+from llenvs.inference.sampling import sampling_metadata
 
 logger = logging.getLogger(__name__)
 
-_UNSUPPORTED_PARAM_TEMPLATE = (
-    "CodexCLIBackend does not support SamplingParams.{name}; "
-    "{hint}"
-)
+_UNSUPPORTED_PARAM_TEMPLATE = "CodexCLIBackend does not support SamplingParams.{name}; {hint}"
 _CONTEXT_LIMIT_NEEDLES = (
     "maximum context length",
     "context length",
@@ -150,14 +150,6 @@ def _iter_usage_dicts(payload: Any) -> Any:
             yield from _iter_usage_dicts(value)
 
 
-def _coerce_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    return 0
-
-
 def _extract_usage(events: list[dict[str, Any]]) -> dict[str, Any] | None:
     for event in reversed(events):
         for usage in _iter_usage_dicts(event):
@@ -167,16 +159,6 @@ def _extract_usage(events: list[dict[str, Any]]) -> dict[str, Any] | None:
             ):
                 return usage
     return None
-
-
-def _usage_counts(usage: dict[str, Any] | None) -> tuple[int, int]:
-    if usage is None:
-        return 0, 0
-    prompt_tokens = _coerce_int(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
-    completion_tokens = _coerce_int(
-        usage.get("completion_tokens", usage.get("output_tokens", 0))
-    )
-    return max(prompt_tokens, 0), max(completion_tokens, 0)
 
 
 def _is_context_limit_text(text: str) -> bool:
@@ -202,9 +184,7 @@ class CodexCLIBackend(ModelBackend):
         max_concurrency: int = 64,
         timeout: float = 600.0,
         profile: str | None = None,
-        config_overrides: dict[
-            str, str | int | float | bool | list[str | int | float | bool]
-        ]
+        config_overrides: dict[str, str | int | float | bool | list[str | int | float | bool]]
         | None = None,
     ) -> None:
         if not model:
@@ -262,7 +242,7 @@ class CodexCLIBackend(ModelBackend):
         params: SamplingParams,
     ) -> GenerationResult:
         self._validate_params(params)
-        return self._generate_chat_impl(messages)
+        return self._record_request(self._generate_chat_impl(messages), params)
 
     def generate_chat_batch(
         self,
@@ -278,9 +258,7 @@ class CodexCLIBackend(ModelBackend):
         ]
         failures: dict[int, BaseException] = {}
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=self._max_concurrency
-        ) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_concurrency) as executor:
             future_to_index = {
                 executor.submit(self._generate_chat_impl, messages): idx
                 for idx, messages in enumerate(messages_batch)
@@ -296,33 +274,86 @@ class CodexCLIBackend(ModelBackend):
         if failures:
             raise PartialBatchError(list(results), failures)
 
-        return [result for result in results if isinstance(result, GenerationResult)]
+        return [
+            self._record_request(result, params)
+            for result in results
+            if isinstance(result, GenerationResult)
+        ]
+
+    def descriptor(self):
+        settings = credential_free(
+            {
+                "profile": self._profile,
+                "config_overrides": self._config_overrides,
+                "sandbox": "read-only",
+                "timeout": self._timeout,
+            }
+        )
+        return {
+            "identity": {
+                "backend": "codex_cli",
+                "protocol_version": 1,
+                "model": self._model,
+                "version_pinned": False,
+                "controls_hidden": True,
+                "settings": settings,
+                "executable_sha256": file_digest(self._command)
+                if Path(self._command).is_file()
+                else None,
+            },
+            "provenance": {"executable": self._command},
+        }
+
+    def _record_request(self, result, params):
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                **sampling_metadata(
+                    params,
+                    {"model": self._model, **self.descriptor()["identity"]["settings"]},
+                    capture="cli_input",
+                ),
+            },
+        )
 
     def _validate_params(self, params: SamplingParams) -> None:
+        for name in (
+            "max_tokens",
+            "min_p",
+            "repetition_penalty",
+            "reasoning_effort",
+            "response_schema",
+            "after_reasoning_text",
+        ):
+            if getattr(params, name) is not None:
+                raise ValueError(
+                    f"SamplingParams.{name} is hidden or unsupported by this CLI; omit it with None"
+                )
         unsupported: list[tuple[str, bool, str]] = [
             (
                 "temperature",
-                params.temperature != 0.0,
+                params.temperature is not None,
                 "Codex CLI does not expose a direct equivalent.",
             ),
             (
                 "top_p",
-                params.top_p != 1.0,
+                params.top_p is not None,
                 "Codex CLI does not expose a direct equivalent.",
             ),
             (
                 "top_k",
-                params.top_k != 0,
+                params.top_k is not None,
                 "Codex CLI does not expose a direct equivalent.",
             ),
             (
                 "presence_penalty",
-                params.presence_penalty != 0.0,
+                params.presence_penalty is not None,
                 "Codex CLI does not expose a direct equivalent.",
             ),
             (
                 "frequency_penalty",
-                params.frequency_penalty != 0.0,
+                params.frequency_penalty is not None,
                 "Codex CLI does not expose a direct equivalent.",
             ),
             (
@@ -405,13 +436,11 @@ class CodexCLIBackend(ModelBackend):
                 )
             except subprocess.TimeoutExpired as exc:
                 raise QuotaExhaustedError(
-                    f"codex exec timed out after {self._timeout:.1f}s "
-                    "(treated as quota-exhausted)"
+                    f"codex exec timed out after {self._timeout:.1f}s (treated as quota-exhausted)"
                 ) from exc
 
             events, parse_errors = _parse_jsonl(completed.stdout)
             usage = _extract_usage(events)
-            prompt_tokens, completion_tokens = _usage_counts(usage)
 
             if completed.returncode != 0:
                 diagnostic = _diagnostic_summary(completed.stderr, completed.stdout)
@@ -436,8 +465,7 @@ class CodexCLIBackend(ModelBackend):
             return GenerationResult(
                 text=text,
                 finish_reason=StopReason.UNKNOWN,
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
+                **normalize_usage(usage, provider="codex_cli"),
                 metadata={
                     "model": self._model,
                     "command": self._command,

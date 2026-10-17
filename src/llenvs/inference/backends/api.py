@@ -4,9 +4,16 @@ Each backend wraps the respective API client with the ModelBackend interface.
 """
 
 import asyncio
+import inspect
 import json
+import math
+import random
 import threading
+import time
 from copy import deepcopy
+from dataclasses import asdict, replace
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 from llenvs.core.tools import ToolCall, ToolDefinition
@@ -19,15 +26,31 @@ from llenvs.inference.protocol import (
     ModelBackend,
     PartialBatchError,
     PromptTooLongError,
+    QuotaExhaustedError,
     RecoverableInputError,
+    RefusedByPolicyError,
     SamplingParams,
     StopReason,
     TokenLogprob,
 )
+from llenvs.inference.reasoning import local_chat_messages
+from llenvs.inference.records import dependency_versions, normalize_usage, plain
+from llenvs.inference.sampling import sampling_metadata, validate_sampling
 
 # Callers that persist normalized OpenRouter responses should include this in
 # checkpoint identity. Bump it when response acceptance semantics change.
 OPENROUTER_RESPONSE_PROTOCOL_VERSION = "require-termination-v1"
+
+
+async def _notify(observer, method, index, value):
+    if observer is None:
+        return
+    if hasattr(observer, "notify"):
+        result = observer.notify(method, index, value)
+    else:
+        result = getattr(observer, method)(index, value)
+    if inspect.isawaitable(result):
+        await result
 
 
 def _openai_stop_reason(reason: str | None) -> StopReason:
@@ -236,9 +259,7 @@ def _to_plain_mapping(value: Any) -> dict[str, Any]:
             return dumped
     if hasattr(value, "__dict__"):
         return {
-            str(k): v
-            for k, v in vars(value).items()
-            if not k.startswith("_") and v is not None
+            str(k): v for k, v in vars(value).items() if not k.startswith("_") and v is not None
         }
     return {}
 
@@ -275,8 +296,9 @@ def _reasoning_metadata(message: Any) -> dict[str, Any]:
     if reasoning is not None:
         if not isinstance(reasoning, str):
             raise ValueError("Expected assistant reasoning to be a string")
-        metadata.update(reasoning=reasoning, reasoning_present=bool(reasoning),
-                        reasoning_chars=len(reasoning))
+        metadata.update(
+            reasoning=reasoning, reasoning_present=bool(reasoning), reasoning_chars=len(reasoning)
+        )
 
     details = _get_field(message, "reasoning_details")
     if details is not None:
@@ -292,9 +314,11 @@ def _reasoning_metadata(message: Any) -> dict[str, Any]:
             if not isinstance(block, dict):
                 raise ValueError("Expected reasoning_details blocks to be mappings")
             blocks.append(deepcopy(block))
-        metadata.update(reasoning_details=blocks,
-                        reasoning_details_present=bool(blocks),
-                        reasoning_details_count=len(blocks))
+        metadata.update(
+            reasoning_details=blocks,
+            reasoning_details_present=bool(blocks),
+            reasoning_details_count=len(blocks),
+        )
         detail_types = _reasoning_detail_types(blocks)
         if detail_types:
             metadata["reasoning_details_types"] = tuple(detail_types)
@@ -303,6 +327,14 @@ def _reasoning_metadata(message: Any) -> dict[str, Any]:
 
 def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseException:
     status = _error_status_code(error)
+    if status == 429:
+        body = _error_body(error)
+        detail = body.get("error", body) if isinstance(body, dict) else {}
+        if isinstance(detail, dict) and detail.get("code") in {
+            "insufficient_quota",
+            "billing_hard_limit_reached",
+        }:
+            return QuotaExhaustedError(f"Provider quota exhausted for model {model_name!r}")
     if status != 400 or _is_policy_error(error):
         return error
 
@@ -322,7 +354,7 @@ class _AsyncRunner:
     """Own one loop for a backend's pooled async connections until close().
 
     Synchronous callers may come from different threads or an active event loop.
-    Batches are serialized across callers, but items within a batch run concurrently.
+    Calls share the loop and connection pool while progressing independently.
     """
 
     def __init__(self) -> None:
@@ -357,15 +389,18 @@ class _AsyncRunner:
             if self._loop is None:
                 self._loop = asyncio.new_event_loop()
                 self._thread = threading.Thread(
-                    target=self._serve, args=(self._loop,), name="llenvs-api", daemon=True,
+                    target=self._serve,
+                    args=(self._loop,),
+                    name="llenvs-api",
+                    daemon=True,
                 )
                 self._thread.start()
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-            try:
-                return future.result()
-            except BaseException:
-                future.cancel()
-                raise
+        try:
+            return future.result()
+        except BaseException:
+            future.cancel()
+            raise
 
     def close(self, finalizer: Any = None) -> None:
         if threading.current_thread() is self._thread:
@@ -432,13 +467,25 @@ def _run_concurrent(
 
     async def _run() -> list[Any]:
         sem = asyncio.Semaphore(max_concurrency)
+        fatal = None
 
         async def _limited(item: Any) -> Any:
+            nonlocal fatal
             async with sem:
-                return await coro_fn(item)
+                if fatal is not None:
+                    raise fatal
+                try:
+                    return await coro_fn(item)
+                except Exception as exc:
+                    from llenvs.inference.persistence import CheckpointError
+
+                    if isinstance(exc, CheckpointError):
+                        fatal = exc
+                    raise
 
         results = await asyncio.gather(
-            *[_limited(item) for item in items], return_exceptions=True,
+            *[_limited(item) for item in items],
+            return_exceptions=True,
         )
         failures = {
             idx: failure
@@ -446,17 +493,16 @@ def _run_concurrent(
             if isinstance(failure, BaseException)
         }
         if failures:
+            if fatal is not None:
+                raise fatal
             import logging
 
             logging.getLogger(__name__).warning(
-                "Concurrent batch: %d/%d tasks failed (%s); "
-                "%s",
+                "Concurrent batch: %d/%d tasks failed (%s); %s",
                 len(failures),
                 len(results),
                 type(next(iter(failures.values()))).__name__,
-                "raising PartialBatchError"
-                if return_partial
-                else "re-raising first exception",
+                "raising PartialBatchError" if return_partial else "re-raising first exception",
             )
             if return_partial:
                 raise PartialBatchError(list(results), failures)
@@ -472,7 +518,260 @@ def _run_concurrent(
         temporary.close()
 
 
-class OpenAIBackend(ModelBackend):
+class _APIRequests:
+    """Shared request receipts, normalization boundary, and bounded retry ownership."""
+
+    _model: str
+    _api_flavor: str
+    _client: Any
+    _async_client: Any
+    _rate_limit_wait: float
+    _rate_limit_max_retries: int
+
+    def _parse_response(
+        self, response: Any, params: SamplingParams, metadata: dict[str, Any]
+    ) -> GenerationResult:
+        raise NotImplementedError
+
+    def descriptor(self):
+        from llenvs.inference.sampling import _record_value
+
+        return {
+            "identity": {
+                "backend": f"{type(self).__module__}.{type(self).__qualname__}",
+                "protocol_version": 1,
+                "api_flavor": self._api_flavor,
+                "model": self._model,
+                "version_pinned": False,
+                "endpoint": _record_value({"url": str(self._client.base_url)})["url"],
+                "sdk_max_retries": self._client.max_retries,
+                "dependencies": dependency_versions(
+                    "openai" if self._api_flavor != "anthropic" else "anthropic"
+                ),
+            },
+            "provenance": {},
+        }
+
+    def _dispatch(self, kwargs):
+        resource = (
+            self._client.messages
+            if self._api_flavor == "anthropic"
+            else self._client.chat.completions
+        )
+        return resource.create(**kwargs)
+
+    async def _dispatch_async(self, kwargs):
+        resource = (
+            self._async_client.messages
+            if self._api_flavor == "anthropic"
+            else self._async_client.chat.completions
+        )
+        return await resource.create(**kwargs)
+
+    @staticmethod
+    def _serialized_body(kwargs: dict[str, Any]) -> dict[str, Any]:
+        body = {
+            key: value
+            for key, value in kwargs.items()
+            if key not in {"extra_body", "extra_headers", "extra_query", "timeout"}
+            and type(value).__name__ not in {"NotGiven", "Omit"}
+        }
+
+        def merge(target, extra):
+            for key, value in extra.items():
+                if isinstance(value, dict) and isinstance(target.get(key), dict):
+                    merge(target[key], value)
+                else:
+                    target[key] = deepcopy(value)
+
+        body = deepcopy(body)
+        merge(body, kwargs.get("extra_body", {}))
+        try:
+            body = json.loads(json.dumps(body, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Request body must contain finite JSON values") from exc
+        return body
+
+    def _request_metadata(self, kwargs: dict[str, Any], params: SamplingParams) -> dict[str, Any]:
+        body = self._serialized_body(kwargs)
+        omitted = {
+            "openai": ("top_k", "min_p", "repetition_penalty"),
+            "anthropic": ("min_p", "repetition_penalty", "presence_penalty", "frequency_penalty"),
+        }.get(self._api_flavor, ())
+        return sampling_metadata(params, body, omitted=omitted, capture="serialized_body")
+
+    def _failed_attempt(
+        self,
+        exc: Exception,
+        started: float,
+        attempts: list[dict[str, Any]],
+        call_started: float,
+    ) -> float:
+        normalized = _normalize_provider_error(exc, model_name=self._model)
+        if normalized is not exc:
+            setattr(normalized, "status_code", _error_status_code(exc))
+        attempt = {
+            "status_code": _error_status_code(exc),
+            "elapsed_seconds": time.monotonic() - started,
+            "request_id": getattr(exc, "request_id", None),
+            "error_type": type(normalized).__name__,
+            "usage": _to_plain_mapping(_get_field(_error_body(exc), "usage")),
+        }
+        if getattr(exc, "reported_attempt", None) is not None:
+            attempt.update(getattr(exc, "reported_attempt"))
+            attempt["error_type"] = type(normalized).__name__
+        attempts.append(attempt)
+        delay = None
+        if (
+            normalized is exc
+            and (_error_status_code(exc) == 429 or _is_rate_limit_malformed(exc))
+            and self._rate_limit_wait > 0
+            and len(attempts) <= self._rate_limit_max_retries
+        ):
+            delay = min(
+                60.0,
+                self._rate_limit_wait * 2 ** min(len(attempts) - 1, 16) * random.uniform(1.0, 1.25),
+            )
+            headers = getattr(getattr(exc, "response", None), "headers", {})
+            retry_after = headers.get("retry-after")
+            if retry_after is not None:
+                try:
+                    provider_wait = float(retry_after)
+                except (ValueError, TypeError):
+                    try:
+                        provider_wait = (
+                            parsedate_to_datetime(retry_after) - datetime.now(UTC)
+                        ).total_seconds()
+                    except (ValueError, TypeError, OverflowError):
+                        provider_wait = 0.0
+                if math.isfinite(provider_wait):
+                    delay = max(delay, provider_wait)
+                else:
+                    delay = None
+            if delay is not None and delay > 300:
+                delay = None
+        if delay is None:
+            setattr(normalized, "attempts", deepcopy(attempts))
+            setattr(normalized, "elapsed_seconds", time.monotonic() - call_started)
+            if normalized is exc:
+                raise exc
+            raise normalized from exc
+        attempt["backoff_seconds"] = delay
+        return delay
+
+    async def _failed_attempt_async(self, exc, started, attempts, call_started, observer, index):
+        try:
+            delay = self._failed_attempt(exc, started, attempts, call_started)
+        except Exception as normalized:
+            await _notify(observer, "failed", index, normalized)
+            raise
+        setattr(exc, "attempts", deepcopy(attempts))
+        setattr(exc, "elapsed_seconds", time.monotonic() - call_started)
+        await _notify(observer, "failed", index, exc)
+        return delay
+
+    def _completed_request(
+        self,
+        response: Any,
+        params: SamplingParams,
+        metadata: dict[str, Any],
+        attempts: list[dict[str, Any]],
+        started: float,
+        call_started: float,
+    ) -> GenerationResult:
+        attempts.append(
+            {
+                "status_code": 200,
+                "elapsed_seconds": time.monotonic() - started,
+                "request_id": getattr(response, "_request_id", None),
+                "response_id": response.id,
+                "usage": _to_plain_mapping(getattr(response, "usage", None)),
+            }
+        )
+        metadata.update(attempts=attempts, elapsed_seconds=time.monotonic() - call_started)
+        try:
+            return self._parse_response(response, params, metadata)
+        except Exception as exc:
+            normalized = _normalize_provider_error(exc, model_name=self._model)
+            setattr(normalized, "attempts", deepcopy(attempts))
+            setattr(normalized, "elapsed_seconds", metadata["elapsed_seconds"])
+            if normalized is exc:
+                raise
+            raise normalized from exc
+
+    def _request(self, kwargs: dict[str, Any], params: SamplingParams) -> GenerationResult:
+        metadata = self._request_metadata(kwargs, params)
+        attempts: list[dict[str, Any]] = []
+        call_started = time.monotonic()
+        while True:
+            started = time.monotonic()
+            try:
+                response = self._dispatch(kwargs)
+            except Exception as exc:
+                time.sleep(self._failed_attempt(exc, started, attempts, call_started))
+            else:
+                try:
+                    return self._completed_request(
+                        response, params, metadata, attempts, started, call_started
+                    )
+                except MalformedResponseError as exc:
+                    if not _is_rate_limit_malformed(exc):
+                        raise
+                    setattr(exc, "reported_attempt", attempts.pop())
+                    time.sleep(self._failed_attempt(exc, started, attempts, call_started))
+
+    async def _request_async(
+        self, kwargs: dict[str, Any], params: SamplingParams, *, observer=None, index=0
+    ) -> GenerationResult:
+        metadata = self._request_metadata(kwargs, params)
+        attempts: list[dict[str, Any]] = []
+        call_started = time.monotonic()
+        while True:
+            await _notify(observer, "started", index, len(attempts))
+            started = time.monotonic()
+            try:
+                response = await self._dispatch_async(kwargs)
+            except Exception as exc:
+                await asyncio.sleep(
+                    await self._failed_attempt_async(
+                        exc, started, attempts, call_started, observer, index
+                    )
+                )
+            else:
+                receipt = {
+                    "response": plain(response),
+                    "metadata": {
+                        **metadata,
+                        "attempts": [
+                            *attempts,
+                            {
+                                "status_code": 200,
+                                "request_id": getattr(response, "_request_id", None),
+                                "response_id": response.id,
+                                "usage": plain(response.usage),
+                                "elapsed_seconds": time.monotonic() - started,
+                            },
+                        ],
+                        "elapsed_seconds": time.monotonic() - call_started,
+                    },
+                }
+                await _notify(observer, "received", index, receipt)
+                try:
+                    result = self._completed_request(
+                        response, params, metadata, attempts, started, call_started
+                    )
+                except Exception as exc:
+                    await _notify(observer, "failed", index, exc)
+                    if not _is_rate_limit_malformed(exc):
+                        raise
+                    setattr(exc, "reported_attempt", attempts.pop())
+                    await asyncio.sleep(self._failed_attempt(exc, started, attempts, call_started))
+                    continue
+                await _notify(observer, "completed", index, result)
+                return result
+
+
+class OpenAIBackend(_APIRequests, ModelBackend):
     """OpenAI API backend.
 
     Supports GPT-4, GPT-3.5-turbo, and other OpenAI models.
@@ -488,6 +787,11 @@ class OpenAIBackend(ModelBackend):
         max_concurrency: int = 64,
         timeout: float | None = None,
         max_retries: int | None = None,
+        api_flavor: str = "openai",
+        reasoning_family: str | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        rate_limit_wait: float = 0.0,
+        rate_limit_max_retries: int = 2,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenAI backend.
@@ -502,7 +806,12 @@ class OpenAIBackend(ModelBackend):
                 stays at the SDK default (600s).  ``None`` uses SDK defaults.
             max_retries: Maximum SDK-level retries for transient errors
                 (timeouts, connection errors, 5xx).  ``None`` uses SDK
-                default (2).
+                defaults unless backend rate-limit retries are enabled.
+                Use 0 to prevent hidden retries and ambiguous resubmissions.
+            api_flavor: Explicit endpoint dialect, "openai" or "vllm".
+            rate_limit_wait: Initial rate-limit retry delay in seconds;
+                0 disables backend retries. Enabling it disables SDK retries.
+            rate_limit_max_retries: Maximum number of backend rate-limit retries.
             **client_kwargs: Additional kwargs for OpenAI client.
 
         Raises:
@@ -516,6 +825,30 @@ class OpenAIBackend(ModelBackend):
             ) from e
 
         self._model = model
+        if api_flavor not in {"openai", "vllm"}:
+            raise ValueError("api_flavor must be 'openai' or 'vllm'")
+        if not math.isfinite(rate_limit_wait) or rate_limit_wait < 0:
+            raise ValueError("rate_limit_wait must be finite and nonnegative")
+        if (
+            isinstance(rate_limit_max_retries, bool)
+            or not isinstance(rate_limit_max_retries, int)
+            or rate_limit_max_retries < 0
+        ):
+            raise ValueError("rate_limit_max_retries must be a nonnegative integer")
+        if rate_limit_wait > 0:
+            if max_retries not in (None, 0):
+                raise ValueError("backend rate-limit retries require SDK max_retries=0")
+            max_retries = 0
+        self._api_flavor = api_flavor
+        if reasoning_family is not None and api_flavor != "vllm":
+            raise ValueError("reasoning_family is a local vLLM template mapping")
+        self._reasoning_family = reasoning_family
+        self._reasoning_tokenizer = None
+        self._chat_template_kwargs = deepcopy(chat_template_kwargs or {})
+        if reasoning_family == "qwen3.8":
+            self._chat_template_kwargs.setdefault("preserve_thinking", True)
+        self._rate_limit_wait = rate_limit_wait
+        self._rate_limit_max_retries = rate_limit_max_retries
         self._max_concurrency = max_concurrency
         self._return_partial_batch = True
 
@@ -528,6 +861,7 @@ class OpenAIBackend(ModelBackend):
             client_args["organization"] = organization
         if timeout is not None:
             import httpx
+
             client_args["timeout"] = httpx.Timeout(timeout=600.0, connect=timeout)
         if max_retries is not None:
             client_args["max_retries"] = max_retries
@@ -541,6 +875,7 @@ class OpenAIBackend(ModelBackend):
     def capabilities(self) -> BackendCapabilities:
         """OpenAI capabilities."""
         return BackendCapabilities(
+            supports_explicit_sampling=True,
             supports_logprobs=True,
             supports_prefix_continuation=False,
             supports_batching=True,
@@ -548,6 +883,11 @@ class OpenAIBackend(ModelBackend):
             supports_chat=True,
             supports_function_calling=True,
             supports_vision=True,
+            supports_response_schema=self._api_flavor == "vllm"
+            or self._model.startswith(("gpt-4o", "gpt-4.1", "gpt-5", "gpt-6-luna")),
+            supports_schema_after_reasoning=self._model == "gpt-6-luna"
+            or (self._api_flavor == "vllm" and self._reasoning_family == "qwen3.8"),
+            supports_request_progress=True,
             max_batch_size=None,
             max_context_length=128000,  # Varies by model
             max_concurrency=self._max_concurrency,
@@ -562,183 +902,270 @@ class OpenAIBackend(ModelBackend):
         """Close reusable OpenAI clients."""
         _close_api_clients(self)
 
-    def generate(
-        self,
-        prompts: list[str],
-        params: SamplingParams,
-    ) -> list[GenerationResult]:
-        """Generate completions for text prompts.
+    def generate(self, prompts, params, *, observer=None):
+        if observer is None:
+            return [self.generate_chat([ChatMessage("user", prompt)], params) for prompt in prompts]
+        return self.generate_chat_batch(
+            [[ChatMessage("user", prompt)] for prompt in prompts], params, observer=observer
+        )
 
-        Uses the chat API with a single user message.
-        """
-        results = []
-        for prompt in prompts:
-            messages = [ChatMessage(role="user", content=prompt)]
-            result = self.generate_chat(messages, params)
-            results.append(result)
-        return results
-
-    def generate_chat(
+    def _request_kwargs(
         self,
         messages: list[ChatMessage],
         params: SamplingParams,
-    ) -> GenerationResult:
-        """Generate a response for a chat conversation."""
-        message_dicts = [m.to_dict() for m in messages]
-
+        tools: list[ToolDefinition] | None = None,
+        tool_choice: str = "auto",
+    ) -> dict[str, Any]:
+        unsupported = (
+            {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0}
+            if self._api_flavor == "openai"
+            else {}
+        )
+        validate_sampling(params, unsupported=unsupported)
+        if params.after_reasoning_text is not None:
+            raise ValueError("after_reasoning_text requires a configured local token boundary")
+        if params.thinking_budget is not None:
+            raise ValueError(
+                "thinking_budget requires local token generation or controlled insertion"
+            )
+        luna = self._api_flavor == "openai" and self._model == "gpt-6-luna"
+        if self._api_flavor == "openai":
+            if params.reasoning_effort is not None and not luna:
+                raise ValueError("reasoning_effort needs a known model capability mapping")
+            if luna:
+                if params.reasoning_effort not in {
+                    None,
+                    "none",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                }:
+                    raise ValueError("Unsupported Luna reasoning_effort")
+                if params.reasoning_effort != "none" and (
+                    params.temperature is not None or params.top_p is not None or params.logprobs
+                ):
+                    raise ValueError(
+                        "Luna reasoning requires temperature=None, top_p=None and logprobs=False"
+                    )
         kwargs: dict[str, Any] = {
             "model": self._model,
-            "messages": message_dicts,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-            "n": params.n,
+            "messages": local_chat_messages(messages, getattr(self, "_reasoning_family", None))
+            if self._api_flavor == "vllm"
+            else [m.to_dict() for m in messages],
+            "n": 1,
         }
-
+        for name in ("max_tokens", "temperature", "top_p", "presence_penalty", "frequency_penalty"):
+            value = getattr(params, name)
+            if value is not None:
+                kwargs[name] = value
+        if luna and "max_tokens" in kwargs:
+            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+        if params.reasoning_effort is not None and self._api_flavor == "openai":
+            kwargs["reasoning_effort"] = params.reasoning_effort
+        if params.response_schema is not None:
+            spec = params.response_schema
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": spec.name,
+                    "schema": deepcopy(spec.schema),
+                    "strict": spec.strict,
+                },
+            }
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
-
         if params.logprobs:
-            kwargs["logprobs"] = True
-            kwargs["top_logprobs"] = params.num_logprobs
+            kwargs.update(logprobs=True, top_logprobs=params.num_logprobs)
+        if tools is not None:
+            kwargs["tools"] = [tool.to_openai_schema() for tool in tools]
+            kwargs["tool_choice"] = (
+                tool_choice
+                if tool_choice in {"auto", "none", "required"}
+                else {"type": "function", "function": {"name": tool_choice}}
+            )
+        kwargs.update(deepcopy(params.extra))
+        if self._api_flavor == "vllm":
+            body = kwargs.setdefault("extra_body", {})
+            for name in ("top_k", "min_p", "repetition_penalty"):
+                value = getattr(params, name)
+                if value is not None:
+                    body[name] = value
+            if (
+                params.reasoning_effort is not None
+                or getattr(self, "_reasoning_family", None) is not None
+                or getattr(self, "_chat_template_kwargs", {})
+            ):
+                from llenvs.inference.reasoning import local_template_kwargs
 
-        # Merge backend-specific extra params
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = self._client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-        choice = response.choices[0]
-
-        # Extract logprobs if available
-        token_logprobs = None
-        if choice.logprobs and choice.logprobs.content:
-            logprobs = []
-            for token_info in choice.logprobs.content:
-                top_lps = None
-                if token_info.top_logprobs:
-                    top_lps = {lp.token: lp.logprob for lp in token_info.top_logprobs}
-                logprobs.append(
-                    TokenLogprob(
-                        token=token_info.token,
-                        token_id=0,  # OpenAI doesn't provide token IDs
-                        logprob=token_info.logprob,
-                        top_logprobs=top_lps,
-                    )
+                body["chat_template_kwargs"] = local_template_kwargs(
+                    getattr(self, "_reasoning_family", None),
+                    params.reasoning_effort,
+                    getattr(self, "_chat_template_kwargs", {}),
+                    body.get("chat_template_kwargs"),
                 )
-            token_logprobs = tuple(logprobs)
+            if getattr(self, "_reasoning_family", None) == "qwen3.8":
+                body["return_token_ids"] = True
+                body["skip_special_tokens"] = False
+        return kwargs
 
-        if params.logprobs and not token_logprobs:
-            raise LogprobsNotReturnedError(
-                "OpenAI returned no token logprobs despite logprobs=True for "
-                f"model {self._model!r}.",
+    def reparse_receipt(self, receipt: dict[str, Any], params: SamplingParams) -> GenerationResult:
+        """Normalize a durable response locally without another provider call."""
+        from openai.types.chat import ChatCompletion
+
+        return self._parse_response(
+            ChatCompletion.construct(**receipt["response"]), params, deepcopy(receipt["metadata"])
+        )
+
+    def _parse_response(
+        self,
+        response: Any,
+        params: SamplingParams,
+        metadata: dict[str, Any],
+    ) -> GenerationResult:
+        if not response.choices:
+            raise MalformedResponseError(
+                _format_no_choices_message(getattr(response, "error", None)),
                 backend_name="OpenAIBackend",
                 model_name=self._model,
             )
-
-        return GenerationResult(
-            text=choice.message.content or "",
+        choice = response.choices[0]
+        if (
+            isinstance(getattr(choice.message, "refusal", None), str)
+            and choice.message.refusal
+            or choice.finish_reason == "content_filter"
+        ):
+            raise RefusedByPolicyError(
+                getattr(choice.message, "refusal", None) or "Content filtered"
+            )
+        token_logprobs = None
+        choice_logprobs = getattr(choice, "logprobs", None)
+        raw_ids = getattr(choice, "token_ids", None) if self._api_flavor == "vllm" else None
+        if raw_ids is not None and any(
+            type(token_id) is not int or token_id < 0 for token_id in raw_ids
+        ):
+            raise ValueError("Provider returned invalid native token IDs")
+        if choice_logprobs and choice_logprobs.content:
+            token_logprobs = tuple(
+                TokenLogprob(
+                    token=item.token,
+                    token_id=None,
+                    logprob=item.logprob,
+                    top_logprobs={lp.token: lp.logprob for lp in item.top_logprobs}
+                    if item.top_logprobs
+                    else None,
+                )
+                for item in choice_logprobs.content
+            )
+            if raw_ids is not None:
+                if len(raw_ids) != len(token_logprobs):
+                    raise ValueError("Native token IDs and logprobs have different lengths")
+                token_logprobs = tuple(
+                    replace(lp, token_id=token_id)
+                    for token_id, lp in zip(raw_ids, token_logprobs, strict=True)
+                )
+        if params.logprobs and not token_logprobs:
+            raise LogprobsNotReturnedError(
+                f"OpenAI returned no token logprobs despite logprobs=True for model {self._model!r}.",
+                backend_name="OpenAIBackend",
+                model_name=self._model,
+            )
+        parsed_calls = []
+        for call in getattr(choice.message, "tool_calls", None) or ():
+            try:
+                arguments = json.loads(call.function.arguments)
+            except json.JSONDecodeError:
+                arguments = {"raw": call.function.arguments}
+            parsed_calls.append(ToolCall(id=call.id, name=call.function.name, arguments=arguments))
+        result = GenerationResult(
+            text=choice.message.content if parsed_calls else choice.message.content or "",
             finish_reason=_openai_stop_reason(choice.finish_reason),
+            tool_calls=tuple(parsed_calls),
             token_logprobs=token_logprobs,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
+            **normalize_usage(response.usage),
             metadata={
                 "model": response.model,
                 "id": response.id,
+                "raw_usage": plain(response.usage),
+                "raw_text": choice.message.content,
+                "reasoning": getattr(choice.message, "reasoning_content", None)
+                or getattr(choice.message, "reasoning", None),
+                "service_tier": getattr(response, "service_tier", None),
+                "request_id": getattr(response, "_request_id", None),
+                **metadata,
             },
         )
+        tokenizer = getattr(self, "_reasoning_tokenizer", None)
+        if raw_ids is not None and tokenizer is not None:
+            from llenvs.inference.reasoning import extract_local_reasoning
+
+            template = metadata.get("request", {}).get("chat_template_kwargs", {})
+            return extract_local_reasoning(
+                result,
+                raw_ids,
+                tokenizer,
+                reasoning_enabled=params.reasoning_effort != "none"
+                and template.get("enable_thinking", True),
+            )
+        reasoning = result.metadata.get("reasoning")
+        raw = {
+            "raw_token_ids": list(raw_ids) if raw_ids is not None else None,
+            "raw_token_logprobs": [asdict(lp) for lp in token_logprobs or ()],
+        }
+        if reasoning:
+            return replace(
+                result,
+                token_logprobs=None,
+                metadata={
+                    **result.metadata,
+                    **raw,
+                    "answer_span": None,
+                    "reasoning_truncated": result.finish_reason == StopReason.MAX_TOKENS
+                    and not result.text,
+                },
+            )
+        return replace(result, metadata={**result.metadata, **raw})
+
+    def descriptor(self) -> dict[str, Any]:
+        from llenvs.inference.sampling import _record_value
+
+        return {
+            "identity": {
+                **super().descriptor()["identity"],
+                "api_flavor": self._api_flavor,
+                "endpoint": _record_value({"base_url": str(self._client.base_url)})["base_url"],
+                "dependencies": dependency_versions("openai"),
+                "rate_limit_wait": self._rate_limit_wait,
+                "rate_limit_max_retries": self._rate_limit_max_retries,
+                "sdk_max_retries": self._client.max_retries,
+            },
+            "provenance": {},
+        }
+
+    def generate_chat(
+        self, messages: list[ChatMessage], params: SamplingParams
+    ) -> GenerationResult:
+        """Generate one response, recording the request and every backend attempt."""
+        return self._request(self._request_kwargs(messages, params), params)
 
     async def _generate_chat_async(
         self,
         messages: list[ChatMessage],
         params: SamplingParams,
     ) -> GenerationResult:
-        """Async version of generate_chat for concurrent batch execution."""
-        message_dicts = [m.to_dict() for m in messages]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": message_dicts,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-            "n": params.n,
-        }
-
-        if params.stop_sequences:
-            kwargs["stop"] = list(params.stop_sequences)
-
-        if params.logprobs:
-            kwargs["logprobs"] = True
-            kwargs["top_logprobs"] = params.num_logprobs
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = await self._async_client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-        choice = response.choices[0]
-
-        token_logprobs = None
-        if choice.logprobs and choice.logprobs.content:
-            logprobs = []
-            for token_info in choice.logprobs.content:
-                top_lps = None
-                if token_info.top_logprobs:
-                    top_lps = {lp.token: lp.logprob for lp in token_info.top_logprobs}
-                logprobs.append(
-                    TokenLogprob(
-                        token=token_info.token,
-                        token_id=0,
-                        logprob=token_info.logprob,
-                        top_logprobs=top_lps,
-                    )
-                )
-            token_logprobs = tuple(logprobs)
-
-        if params.logprobs and not token_logprobs:
-            raise LogprobsNotReturnedError(
-                "OpenAI returned no token logprobs despite logprobs=True for "
-                f"model {self._model!r}.",
-                backend_name="OpenAIBackend",
-                model_name=self._model,
-            )
-
-        return GenerationResult(
-            text=choice.message.content or "",
-            finish_reason=_openai_stop_reason(choice.finish_reason),
-            token_logprobs=token_logprobs,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
-        )
+        return await self._request_async(self._request_kwargs(messages, params), params)
 
     def generate_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         params: SamplingParams,
+        *,
+        observer=None,
     ) -> list[GenerationResult]:
-        """Generate responses for multiple conversations concurrently."""
+        requests = [self._request_kwargs(messages, params) for messages in messages_batch]
         return _run_concurrent(
-            lambda msgs: self._generate_chat_async(msgs, params),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
             runner=self._async_runner,
@@ -751,79 +1178,7 @@ class OpenAIBackend(ModelBackend):
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:
-        """Generate a response with tool calling capability."""
-        message_dicts = [m.to_dict() for m in messages]
-        tool_schemas = [t.to_openai_schema() for t in tools]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": message_dicts,
-            "tools": tool_schemas,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-            "n": params.n,
-        }
-
-        # Handle tool_choice
-        if tool_choice == "auto":
-            kwargs["tool_choice"] = "auto"
-        elif tool_choice == "none":
-            kwargs["tool_choice"] = "none"
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = "required"
-        else:
-            # Specific tool name
-            kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
-
-        if params.stop_sequences:
-            kwargs["stop"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = self._client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-        choice = response.choices[0]
-
-        # Parse tool calls from response
-        tool_calls: tuple[ToolCall, ...] = ()
-        if choice.message.tool_calls:
-            parsed_calls = []
-            for tc in choice.message.tool_calls:
-                # Parse arguments from JSON string
-                try:
-                    arguments = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {"raw": tc.function.arguments}
-
-                parsed_calls.append(
-                    ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=arguments,
-                    )
-                )
-            tool_calls = tuple(parsed_calls)
-
-        return GenerationResult(
-            text=choice.message.content,
-            finish_reason=_openai_stop_reason(choice.finish_reason),
-            tool_calls=tool_calls,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
-        )
+        return self._request(self._request_kwargs(messages, params, tools, tool_choice), params)
 
     async def _generate_with_tools_async(
         self,
@@ -832,98 +1187,33 @@ class OpenAIBackend(ModelBackend):
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:
-        """Async version of generate_with_tools for concurrent batch execution."""
-        message_dicts = [m.to_dict() for m in messages]
-        tool_schemas = [t.to_openai_schema() for t in tools]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": message_dicts,
-            "tools": tool_schemas,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-            "n": params.n,
-        }
-
-        if tool_choice == "auto":
-            kwargs["tool_choice"] = "auto"
-        elif tool_choice == "none":
-            kwargs["tool_choice"] = "none"
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = "required"
-        else:
-            kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
-
-        if params.stop_sequences:
-            kwargs["stop"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = await self._async_client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-        choice = response.choices[0]
-
-        tool_calls: tuple[ToolCall, ...] = ()
-        if choice.message.tool_calls:
-            parsed_calls = []
-            for tc in choice.message.tool_calls:
-                try:
-                    arguments = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {"raw": tc.function.arguments}
-
-                parsed_calls.append(
-                    ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=arguments,
-                    )
-                )
-            tool_calls = tuple(parsed_calls)
-
-        return GenerationResult(
-            text=choice.message.content,
-            finish_reason=_openai_stop_reason(choice.finish_reason),
-            tool_calls=tool_calls,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
+        return await self._request_async(
+            self._request_kwargs(messages, params, tools, tool_choice), params
         )
 
     def generate_with_tools_batch(
-        self,
-        messages_batch: list[list[ChatMessage]],
-        tools: list[ToolDefinition],
-        params: SamplingParams,
-        tool_choice: str = "auto",
-    ) -> list[GenerationResult]:
-        """Generate tool-calling responses for multiple conversations concurrently."""
+        self, messages_batch, tools, params, tool_choice="auto", *, observer=None
+    ):
+        requests = [
+            self._request_kwargs(messages, params, tools, tool_choice)
+            for messages in messages_batch
+        ]
         return _run_concurrent(
-            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
-            return_partial=getattr(self, "_return_partial_batch", True),
+            return_partial=True,
             runner=self._async_runner,
         )
 
 
-class AnthropicBackend(ModelBackend):
+class AnthropicBackend(_APIRequests, ModelBackend):
     """Anthropic API backend.
 
     Supports Claude models. Includes prefix continuation via assistant prefill.
     """
+
+    _api_flavor = "anthropic"
 
     def __init__(
         self,
@@ -953,6 +1243,9 @@ class AnthropicBackend(ModelBackend):
             ) from e
 
         self._model = model
+        self._api_flavor = "anthropic"
+        self._rate_limit_wait = 0.0
+        self._rate_limit_max_retries = 0
         self._max_concurrency = max_concurrency
         self._return_partial_batch = True
 
@@ -972,6 +1265,7 @@ class AnthropicBackend(ModelBackend):
     def capabilities(self) -> BackendCapabilities:
         """Anthropic capabilities."""
         return BackendCapabilities(
+            supports_explicit_sampling=True,
             supports_logprobs=False,
             supports_prefix_continuation=True,  # Via assistant prefill
             supports_batching=True,
@@ -979,6 +1273,7 @@ class AnthropicBackend(ModelBackend):
             supports_chat=True,
             supports_function_calling=True,
             supports_vision=True,
+            supports_request_progress=True,
             max_batch_size=None,
             max_context_length=200000,  # Claude 3 context
             max_concurrency=self._max_concurrency,
@@ -993,220 +1288,144 @@ class AnthropicBackend(ModelBackend):
         """Close reusable Anthropic clients."""
         _close_api_clients(self)
 
-    def generate(
-        self,
-        prompts: list[str],
-        params: SamplingParams,
-    ) -> list[GenerationResult]:
-        """Generate completions for text prompts."""
-        results = []
-        for prompt in prompts:
-            messages = [ChatMessage(role="user", content=prompt)]
-            result = self.generate_chat(messages, params)
-            results.append(result)
-        return results
-
-    def generate_chat(
-        self,
-        messages: list[ChatMessage],
-        params: SamplingParams,
-    ) -> GenerationResult:
-        """Generate a response for a chat conversation."""
-        # Separate system message if present
-        system_content = None
-        chat_messages = []
-
-        for msg in messages:
-            if msg.role == "system":
-                system_content = msg.content
-            else:
-                chat_messages.append(msg.to_anthropic_dict())
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": chat_messages,
-            "max_tokens": params.max_tokens,
-        }
-
-        if system_content:
-            kwargs["system"] = system_content
-
-        # Anthropic uses temperature differently
-        if params.temperature > 0:
-            kwargs["temperature"] = params.temperature
-
-        if params.top_p < 1.0:
-            kwargs["top_p"] = params.top_p
-
-        if params.top_k > 0:
-            kwargs["top_k"] = params.top_k
-
-        if params.stop_sequences:
-            kwargs["stop_sequences"] = list(params.stop_sequences)
-
-        # Merge backend-specific extra params
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = self._client.messages.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-
-        # Extract text from content blocks
-        text = ""
-        for block in response.content:
-            if block.type == "text":
-                text += block.text
-
-        return GenerationResult(
-            text=text,
-            finish_reason=_anthropic_stop_reason(response.stop_reason),
-            token_logprobs=None,  # Anthropic doesn't provide logprobs
-            prompt_tokens=response.usage.input_tokens,
-            completion_tokens=response.usage.output_tokens,
-            metadata={
-                "model": response.model,
-                "id": response.id,
+    def _request_kwargs(self, messages, params, tools=None, tool_choice="auto"):
+        validate_sampling(
+            params,
+            unsupported={
+                "min_p": 0,
+                "repetition_penalty": 1,
+                "presence_penalty": 0,
+                "frequency_penalty": 0,
             },
         )
+        if params.max_tokens is None:
+            raise ValueError("Anthropic requires max_tokens")
+        if (
+            params.logprobs
+            or params.response_schema is not None
+            or params.after_reasoning_text is not None
+        ):
+            raise ValueError(
+                "Anthropic does not support the requested logprobs/schema/insertion control"
+            )
+        if params.reasoning_effort not in {None, "none"}:
+            raise ValueError("No Anthropic model mapping for this reasoning_effort")
+        system = [
+            message.content for message in messages if message.role == "system" and message.content
+        ]
+        kwargs = {
+            "model": self._model,
+            "messages": [
+                message.to_anthropic_dict() for message in messages if message.role != "system"
+            ],
+            "max_tokens": params.max_tokens,
+        }
+        if system:
+            kwargs["system"] = "\n\n".join(system)
+        for name in ("temperature", "top_p", "top_k"):
+            if (value := getattr(params, name)) is not None:
+                kwargs[name] = value
+        if params.stop_sequences:
+            kwargs["stop_sequences"] = list(params.stop_sequences)
+        if tools is not None and tool_choice != "none":
+            kwargs["tools"] = [tool.to_anthropic_schema() for tool in tools]
+            kwargs["tool_choice"] = (
+                {"type": "any" if tool_choice == "required" else "auto"}
+                if tool_choice in {"auto", "required"}
+                else {"type": "tool", "name": tool_choice}
+            )
+        if params.reasoning_effort == "none":
+            kwargs["thinking"] = {"type": "disabled"}
+        elif params.thinking_budget is not None:
+            kwargs["thinking"] = {"type": "enabled", "budget_tokens": params.thinking_budget}
+        kwargs.update(deepcopy(params.extra))
+        return kwargs
+
+    def _parse_response(self, response, params, metadata):
+        text = []
+        calls = []
+        reasoning = []
+        for block in response.content:
+            if block.type == "text":
+                text.append(block.text)
+            elif block.type == "tool_use":
+                calls.append(ToolCall(id=block.id, name=block.name, arguments=block.input))
+            elif block.type in {"thinking", "redacted_thinking"}:
+                reasoning.append(plain(block))
+        return GenerationResult(
+            text="".join(text) if text or not calls else None,
+            tool_calls=tuple(calls),
+            finish_reason=_anthropic_stop_reason(response.stop_reason),
+            **normalize_usage(response.usage, provider="anthropic"),
+            metadata={
+                **metadata,
+                "model": response.model,
+                "id": response.id,
+                "raw_usage": plain(response.usage),
+                "reasoning_details": reasoning,
+                "raw_content": plain(response.content),
+            },
+        )
+
+    def reparse_receipt(self, receipt, params):
+        from anthropic.types import Message
+
+        return self._parse_response(
+            Message.construct(**receipt["response"]), params, receipt["metadata"]
+        )
+
+    def generate(self, prompts, params, *, observer=None):
+        if observer is None:
+            return [self.generate_chat([ChatMessage("user", prompt)], params) for prompt in prompts]
+        return self.generate_chat_batch(
+            [[ChatMessage("user", prompt)] for prompt in prompts], params, observer=observer
+        )
+
+    def generate_chat(
+        self, messages: list[ChatMessage], params: SamplingParams
+    ) -> GenerationResult:
+        """Generate one response, recording the request and every backend attempt."""
+        return self._request(self._request_kwargs(messages, params), params)
 
     async def _generate_chat_async(
         self,
         messages: list[ChatMessage],
         params: SamplingParams,
     ) -> GenerationResult:
-        """Async version of generate_chat for concurrent batch execution."""
-        system_content = None
-        chat_messages = []
-
-        for msg in messages:
-            if msg.role == "system":
-                system_content = msg.content
-            else:
-                chat_messages.append(msg.to_anthropic_dict())
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": chat_messages,
-            "max_tokens": params.max_tokens,
-        }
-
-        if system_content:
-            kwargs["system"] = system_content
-
-        if params.temperature > 0:
-            kwargs["temperature"] = params.temperature
-
-        if params.top_p < 1.0:
-            kwargs["top_p"] = params.top_p
-
-        if params.top_k > 0:
-            kwargs["top_k"] = params.top_k
-
-        if params.stop_sequences:
-            kwargs["stop_sequences"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = await self._async_client.messages.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-
-        text = ""
-        for block in response.content:
-            if block.type == "text":
-                text += block.text
-
-        return GenerationResult(
-            text=text,
-            finish_reason=_anthropic_stop_reason(response.stop_reason),
-            token_logprobs=None,
-            prompt_tokens=response.usage.input_tokens,
-            completion_tokens=response.usage.output_tokens,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
-        )
+        return await self._request_async(self._request_kwargs(messages, params), params)
 
     def generate_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         params: SamplingParams,
+        *,
+        observer=None,
     ) -> list[GenerationResult]:
-        """Generate responses for multiple conversations concurrently."""
+        requests = [self._request_kwargs(messages, params) for messages in messages_batch]
         return _run_concurrent(
-            lambda msgs: self._generate_chat_async(msgs, params),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
             runner=self._async_runner,
         )
 
-    def continue_from_prefix(
-        self,
-        prefix: str,
-        params: SamplingParams,
-        num_continuations: int = 1,
-    ) -> list[GenerationResult]:
-        """Continue from a prefix using assistant prefill.
+    def continue_from_prefix(self, prefix, params, num_continuations=1):
+        """Return every requested draw using native assistant prefill."""
+        from dataclasses import replace
 
-        Anthropic supports prefilling the assistant's response.
-        """
-        results = []
-        for _ in range(num_continuations):
-            # Use assistant prefill
-            messages = [
-                {"role": "user", "content": "Continue the following:"},
-                {"role": "assistant", "content": prefix},
-            ]
-
-            kwargs: dict[str, Any] = {
-                "model": self._model,
-                "messages": messages,
-                "max_tokens": params.max_tokens,
-            }
-
-            if params.temperature > 0:
-                kwargs["temperature"] = params.temperature
-
-            if params.stop_sequences:
-                kwargs["stop_sequences"] = list(params.stop_sequences)
-
-            try:
-                response = self._client.messages.create(**kwargs)
-            except Exception as exc:
-                normalized = _normalize_provider_error(exc, model_name=self._model)
-                if normalized is exc:
-                    raise
-                raise normalized from exc
-
-            text = ""
-            for block in response.content:
-                if block.type == "text":
-                    text += block.text
-
-            results.append(
-                GenerationResult(
-                    text=text,
-                    finish_reason=_anthropic_stop_reason(response.stop_reason),
-                    token_logprobs=None,
-                    prompt_tokens=response.usage.input_tokens,
-                    completion_tokens=response.usage.output_tokens,
-                    metadata={"is_continuation": True, "prefix": prefix},
-                )
-            )
-
-        return results
+        if num_continuations < 1:
+            raise ValueError("num_continuations must be positive")
+        validate_sampling(params)
+        messages = [
+            ChatMessage("user", "Continue the following:"),
+            ChatMessage("assistant", prefix),
+        ]
+        results = [self.generate_chat(messages, params) for _ in range(num_continuations)]
+        return [
+            replace(result, metadata={**result.metadata, "is_continuation": True})
+            for result in results
+        ]
 
     def generate_with_tools(
         self,
@@ -1215,122 +1434,7 @@ class AnthropicBackend(ModelBackend):
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:
-        """Generate a response with tool calling capability."""
-        # Separate system message if present
-        system_content = None
-        chat_messages = []
-
-        for msg in messages:
-            if msg.role == "system":
-                system_content = msg.content
-            elif msg.role == "tool":
-                # Anthropic uses tool_result blocks
-                chat_messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id,
-                                "content": msg.content,
-                            }
-                        ],
-                    }
-                )
-            elif msg.role == "assistant" and msg.tool_calls:
-                # Assistant message with tool calls
-                content: list[dict[str, Any]] = []
-                if msg.content:
-                    content.append({"type": "text", "text": msg.content})
-                for tc in msg.tool_calls:
-                    content.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.arguments,
-                        }
-                    )
-                chat_messages.append({"role": "assistant", "content": content})
-            else:
-                chat_messages.append(msg.to_dict())
-
-        tool_schemas = [t.to_anthropic_schema() for t in tools]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": chat_messages,
-            "tools": tool_schemas,
-            "max_tokens": params.max_tokens,
-        }
-
-        if system_content:
-            kwargs["system"] = system_content
-
-        # Handle tool_choice
-        if tool_choice == "auto":
-            kwargs["tool_choice"] = {"type": "auto"}
-        elif tool_choice == "none":
-            # Don't include tools at all
-            del kwargs["tools"]
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = {"type": "any"}
-        else:
-            # Specific tool name
-            kwargs["tool_choice"] = {"type": "tool", "name": tool_choice}
-
-        if params.temperature > 0:
-            kwargs["temperature"] = params.temperature
-
-        if params.top_p < 1.0:
-            kwargs["top_p"] = params.top_p
-
-        if params.top_k > 0:
-            kwargs["top_k"] = params.top_k
-
-        if params.stop_sequences:
-            kwargs["stop_sequences"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = self._client.messages.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-
-        # Extract text and tool calls from content blocks
-        text_parts: list[str] = []
-        parsed_calls: list[ToolCall] = []
-
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                parsed_calls.append(
-                    ToolCall(
-                        id=block.id,
-                        name=block.name,
-                        arguments=block.input if isinstance(block.input, dict) else {},
-                    )
-                )
-
-        text = "".join(text_parts) if text_parts else None
-
-        return GenerationResult(
-            text=text,
-            finish_reason=_anthropic_stop_reason(response.stop_reason),
-            tool_calls=tuple(parsed_calls),
-            prompt_tokens=response.usage.input_tokens,
-            completion_tokens=response.usage.output_tokens,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
-        )
+        return self._request(self._request_kwargs(messages, params, tools, tool_choice), params)
 
     async def _generate_with_tools_async(
         self,
@@ -1339,139 +1443,66 @@ class AnthropicBackend(ModelBackend):
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:
-        """Async version of generate_with_tools for concurrent batch execution."""
-        system_content = None
-        chat_messages = []
-
-        for msg in messages:
-            if msg.role == "system":
-                system_content = msg.content
-            elif msg.role == "tool":
-                chat_messages.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "tool_result",
-                                "tool_use_id": msg.tool_call_id,
-                                "content": msg.content,
-                            }
-                        ],
-                    }
-                )
-            elif msg.role == "assistant" and msg.tool_calls:
-                content: list[dict[str, Any]] = []
-                if msg.content:
-                    content.append({"type": "text", "text": msg.content})
-                for tc in msg.tool_calls:
-                    content.append(
-                        {
-                            "type": "tool_use",
-                            "id": tc.id,
-                            "name": tc.name,
-                            "input": tc.arguments,
-                        }
-                    )
-                chat_messages.append({"role": "assistant", "content": content})
-            else:
-                chat_messages.append(msg.to_dict())
-
-        tool_schemas = [t.to_anthropic_schema() for t in tools]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": chat_messages,
-            "tools": tool_schemas,
-            "max_tokens": params.max_tokens,
-        }
-
-        if system_content:
-            kwargs["system"] = system_content
-
-        if tool_choice == "auto":
-            kwargs["tool_choice"] = {"type": "auto"}
-        elif tool_choice == "none":
-            del kwargs["tools"]
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = {"type": "any"}
-        else:
-            kwargs["tool_choice"] = {"type": "tool", "name": tool_choice}
-
-        if params.temperature > 0:
-            kwargs["temperature"] = params.temperature
-
-        if params.top_p < 1.0:
-            kwargs["top_p"] = params.top_p
-
-        if params.top_k > 0:
-            kwargs["top_k"] = params.top_k
-
-        if params.stop_sequences:
-            kwargs["stop_sequences"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = await self._async_client.messages.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-
-        text_parts: list[str] = []
-        parsed_calls: list[ToolCall] = []
-
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-            elif block.type == "tool_use":
-                parsed_calls.append(
-                    ToolCall(
-                        id=block.id,
-                        name=block.name,
-                        arguments=block.input if isinstance(block.input, dict) else {},
-                    )
-                )
-
-        text = "".join(text_parts) if text_parts else None
-
-        return GenerationResult(
-            text=text,
-            finish_reason=_anthropic_stop_reason(response.stop_reason),
-            tool_calls=tuple(parsed_calls),
-            prompt_tokens=response.usage.input_tokens,
-            completion_tokens=response.usage.output_tokens,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
+        return await self._request_async(
+            self._request_kwargs(messages, params, tools, tool_choice), params
         )
 
     def generate_with_tools_batch(
-        self,
-        messages_batch: list[list[ChatMessage]],
-        tools: list[ToolDefinition],
-        params: SamplingParams,
-        tool_choice: str = "auto",
-    ) -> list[GenerationResult]:
-        """Generate tool-calling responses for multiple conversations concurrently."""
+        self, messages_batch, tools, params, tool_choice="auto", *, observer=None
+    ):
+        requests = [
+            self._request_kwargs(messages, params, tools, tool_choice)
+            for messages in messages_batch
+        ]
         return _run_concurrent(
-            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
-            return_partial=getattr(self, "_return_partial_batch", True),
+            return_partial=True,
             runner=self._async_runner,
         )
 
 
-class OpenRouterBackend(ModelBackend):
+class OpenRouterBackend(_APIRequests, ModelBackend):
     """OpenRouter API backend.
 
     Provides access to multiple model providers through a unified API.
     Capabilities vary by underlying model.
     """
+
+    _api_flavor = "openrouter"
+
+    def _request_kwargs(self, messages, params, tools=None, tool_choice="auto"):
+        kwargs = self._chat_kwargs(messages, params)
+        if tools is not None:
+            kwargs["tools"] = [tool.to_openai_schema() for tool in tools]
+            kwargs["tool_choice"] = (
+                tool_choice
+                if tool_choice in {"auto", "none", "required"}
+                else {"type": "function", "function": {"name": tool_choice}}
+            )
+        return kwargs
+
+    def _parse_response(self, response, params, metadata):
+        from dataclasses import replace
+
+        result = self._ensure_logprobs_if_requested(self._chat_result(response), params)
+        return replace(result, metadata={**result.metadata, **metadata})
+
+    def _failed_attempt(self, exc, started, attempts, call_started):
+        # Preserve capability diagnostics for provider routing failures.
+        if _error_status_code(exc) == 404 and "logprob" in str(exc).lower():
+            raise LogprobsNotReturnedError(
+                str(exc), backend_name="OpenRouterBackend", model_name=self._model
+            ) from exc
+        return super()._failed_attempt(exc, started, attempts, call_started)
+
+    def reparse_receipt(self, receipt, params):
+        from openai.types.chat import ChatCompletion
+
+        return self._parse_response(
+            ChatCompletion.construct(**receipt["response"]), params, receipt["metadata"]
+        )
 
     def __init__(
         self,
@@ -1533,6 +1564,10 @@ class OpenRouterBackend(ModelBackend):
 
         import os
 
+        if rate_limit_wait > 0:
+            if max_retries not in (None, 0):
+                raise ValueError("Backend retries require SDK max_retries=0")
+            max_retries = 0
         self._model = model
         self._max_concurrency = max_concurrency
         self._rate_limit_wait = rate_limit_wait
@@ -1558,6 +1593,7 @@ class OpenRouterBackend(ModelBackend):
             client_args["default_headers"] = headers
         if timeout is not None:
             import httpx
+
             client_args["timeout"] = httpx.Timeout(timeout=600.0, connect=timeout)
         if max_retries is not None:
             client_args["max_retries"] = max_retries
@@ -1578,6 +1614,7 @@ class OpenRouterBackend(ModelBackend):
         ``LogprobsNotReturnedError`` at call time.
         """
         return BackendCapabilities(
+            supports_explicit_sampling=True,
             supports_logprobs=True,
             supports_prefix_continuation=False,
             supports_batching=True,
@@ -1585,6 +1622,7 @@ class OpenRouterBackend(ModelBackend):
             supports_chat=True,
             supports_function_calling=True,
             supports_vision=True,
+            supports_request_progress=True,
             max_batch_size=None,
             max_context_length=None,  # Varies by model
             max_concurrency=self._max_concurrency,
@@ -1599,18 +1637,12 @@ class OpenRouterBackend(ModelBackend):
         """Close reusable OpenRouter clients."""
         _close_api_clients(self)
 
-    def generate(
-        self,
-        prompts: list[str],
-        params: SamplingParams,
-    ) -> list[GenerationResult]:
-        """Generate completions for text prompts."""
-        results = []
-        for prompt in prompts:
-            messages = [ChatMessage(role="user", content=prompt)]
-            result = self.generate_chat(messages, params)
-            results.append(result)
-        return results
+    def generate(self, prompts, params, *, observer=None):
+        if observer is None:
+            return [self.generate_chat([ChatMessage("user", prompt)], params) for prompt in prompts]
+        return self.generate_chat_batch(
+            [[ChatMessage("user", prompt)] for prompt in prompts], params, observer=observer
+        )
 
     # OpenRouter documents an explicit cap of 20 on ``top_logprobs`` (OpenAPI
     # schema ``ChatRequest.top_logprobs`` at openrouter.ai/openapi.json).
@@ -1622,6 +1654,23 @@ class OpenRouterBackend(ModelBackend):
         params: SamplingParams,
     ) -> dict[str, Any]:
         """Build kwargs dict for chat completions."""
+        validate_sampling(params)
+        if params.after_reasoning_text is not None:
+            raise ValueError("after_reasoning_text requires a configured local backend")
+        if params.reasoning_effort is not None and params.reasoning_effort not in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ValueError("Unknown OpenRouter reasoning_effort")
+        if params.reasoning_effort is not None and any(
+            "reasoning" in mapping for mapping in (params.extra, params.extra.get("extra_body", {}))
+        ):
+            raise ValueError("reasoning_effort conflicts with per-request reasoning extras")
         message_dicts = [m.to_dict() for m in messages]
 
         kwargs: dict[str, Any] = {
@@ -1634,6 +1683,20 @@ class OpenRouterBackend(ModelBackend):
             "frequency_penalty": params.frequency_penalty,
         }
         extra_body: dict[str, Any] = {}
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        for name in ("top_k", "min_p", "repetition_penalty"):
+            if (value := getattr(params, name)) is not None:
+                extra_body[name] = value
+        if params.response_schema is not None:
+            schema = params.response_schema
+            kwargs["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema.name,
+                    "schema": deepcopy(schema.schema),
+                    "strict": schema.strict,
+                },
+            }
 
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
@@ -1676,15 +1739,15 @@ class OpenRouterBackend(ModelBackend):
         # ``extra.extra_body`` shallow-merges on top so the explicit escape
         # hatch wins on key collisions.
         # https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
-        if params.thinking_budget is not None and not params.disable_thinking:
+        if params.thinking_budget is not None and params.reasoning_effort != "none":
             extra_body["reasoning"] = {"max_tokens": params.thinking_budget}
 
         user_extras = dict(params.extra) if params.extra else {}
         user_extra_body = user_extras.pop("extra_body", None)
         if user_extra_body:
             extra_body = {**extra_body, **user_extra_body}
-        if params.disable_thinking:
-            extra_body["reasoning"] = {"effort": "none"}
+        if params.reasoning_effort is not None:
+            extra_body["reasoning"] = {"effort": params.reasoning_effort}
         if extra_body:
             kwargs["extra_body"] = extra_body
         if user_extras:
@@ -1752,7 +1815,7 @@ class OpenRouterBackend(ModelBackend):
                 logprobs.append(
                     TokenLogprob(
                         token=token_info.token,
-                        token_id=0,  # OpenRouter/OpenAI do not return token IDs
+                        token_id=None,  # OpenRouter/OpenAI do not return token IDs
                         logprob=token_info.logprob,
                         top_logprobs=top_lps,
                     )
@@ -1783,15 +1846,13 @@ class OpenRouterBackend(ModelBackend):
                 metadata["reasoning_tokens"] = reasoning_tokens
 
         metadata.update(_reasoning_metadata(message))
+        metadata["raw_usage"] = plain(usage)
 
         return GenerationResult(
             text=choice.message.content or "",
             finish_reason=_openai_stop_reason(choice.finish_reason),
             token_logprobs=token_logprobs,
-            prompt_tokens=_get_field(usage, "prompt_tokens", 0) if usage else 0,
-            completion_tokens=(
-                _get_field(usage, "completion_tokens", 0) if usage else 0
-            ),
+            **normalize_usage(usage),
             metadata=metadata,
         )
 
@@ -1846,106 +1907,29 @@ class OpenRouterBackend(ModelBackend):
         return exc
 
     def generate_chat(
-        self,
-        messages: list[ChatMessage],
-        params: SamplingParams,
+        self, messages: list[ChatMessage], params: SamplingParams
     ) -> GenerationResult:
-        """Generate a response for a chat conversation."""
-        import logging
-        import time
-
-        from openai import RateLimitError
-
-        kwargs = self._chat_kwargs(messages, params)
-        last_exc: BaseException | None = None
-
-        for attempt in range(self._rate_limit_max_retries + 1):
-            try:
-                try:
-                    response = self._client.chat.completions.create(**kwargs)
-                    return self._ensure_logprobs_if_requested(
-                        self._chat_result(response), params
-                    )
-                except (RateLimitError, MalformedResponseError):
-                    raise
-                except Exception as exc:
-                    translated = self._translate_router_404_for_logprobs(exc, params)
-                    if translated is not exc:
-                        raise translated from exc
-                    normalized = _normalize_provider_error(exc, model_name=self._model)
-                    if normalized is exc:
-                        raise
-                    raise normalized from exc
-            except (RateLimitError, MalformedResponseError) as exc:
-                if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
-                    raise
-                if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
-                    raise
-                last_exc = exc
-                logging.getLogger(__name__).warning(
-                    "Rate limited (%s), waiting %.0fs (attempt %d/%d)",
-                    type(exc).__name__,
-                    self._rate_limit_wait, attempt + 1, self._rate_limit_max_retries,
-                )
-                time.sleep(self._rate_limit_wait)
-
-        raise last_exc  # unreachable, but satisfies type checker
+        """Generate one response, recording the request and every backend attempt."""
+        return self._request(self._request_kwargs(messages, params), params)
 
     async def _generate_chat_async(
         self,
         messages: list[ChatMessage],
         params: SamplingParams,
     ) -> GenerationResult:
-        """Async version of generate_chat for concurrent batch execution."""
-        import asyncio
-        import logging
-
-        from openai import RateLimitError
-
-        kwargs = self._chat_kwargs(messages, params)
-        last_exc: BaseException | None = None
-
-        for attempt in range(self._rate_limit_max_retries + 1):
-            try:
-                try:
-                    response = await self._async_client.chat.completions.create(**kwargs)
-                    return self._ensure_logprobs_if_requested(
-                        self._chat_result(response), params
-                    )
-                except (RateLimitError, MalformedResponseError):
-                    raise
-                except Exception as exc:
-                    translated = self._translate_router_404_for_logprobs(exc, params)
-                    if translated is not exc:
-                        raise translated from exc
-                    normalized = _normalize_provider_error(exc, model_name=self._model)
-                    if normalized is exc:
-                        raise
-                    raise normalized from exc
-            except (RateLimitError, MalformedResponseError) as exc:
-                if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
-                    raise
-                if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
-                    raise
-                last_exc = exc
-                logging.getLogger(__name__).warning(
-                    "Rate limited (%s), waiting %.0fs (attempt %d/%d)",
-                    type(exc).__name__,
-                    self._rate_limit_wait, attempt + 1, self._rate_limit_max_retries,
-                )
-                await asyncio.sleep(self._rate_limit_wait)
-
-        raise last_exc  # unreachable, but satisfies type checker
+        return await self._request_async(self._request_kwargs(messages, params), params)
 
     def generate_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         params: SamplingParams,
+        *,
+        observer=None,
     ) -> list[GenerationResult]:
-        """Generate responses for multiple conversations concurrently."""
+        requests = [self._request_kwargs(messages, params) for messages in messages_batch]
         return _run_concurrent(
-            lambda msgs: self._generate_chat_async(msgs, params),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
             return_partial=getattr(self, "_return_partial_batch", True),
             runner=self._async_runner,
@@ -1958,79 +1942,7 @@ class OpenRouterBackend(ModelBackend):
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:
-        """Generate a response with tool calling capability.
-
-        Uses OpenAI-compatible format since OpenRouter is OpenAI-compatible.
-        """
-        message_dicts = [m.to_dict() for m in messages]
-        tool_schemas = [t.to_openai_schema() for t in tools]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": message_dicts,
-            "tools": tool_schemas,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-        }
-
-        # Handle tool_choice
-        if tool_choice == "auto":
-            kwargs["tool_choice"] = "auto"
-        elif tool_choice == "none":
-            kwargs["tool_choice"] = "none"
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = "required"
-        else:
-            kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
-
-        if params.stop_sequences:
-            kwargs["stop"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = self._client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-        choice = self._validated_choice(response)
-
-        # Parse tool calls from response
-        tool_calls: tuple[ToolCall, ...] = ()
-        if choice.message.tool_calls:
-            parsed_calls = []
-            for tc in choice.message.tool_calls:
-                try:
-                    arguments = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {"raw": tc.function.arguments}
-
-                parsed_calls.append(
-                    ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=arguments,
-                    )
-                )
-            tool_calls = tuple(parsed_calls)
-
-        return GenerationResult(
-            text=choice.message.content,
-            finish_reason=_openai_stop_reason(choice.finish_reason),
-            tool_calls=tool_calls,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
-        )
+        return self._request(self._request_kwargs(messages, params, tools, tool_choice), params)
 
     async def _generate_with_tools_async(
         self,
@@ -2039,87 +1951,21 @@ class OpenRouterBackend(ModelBackend):
         params: SamplingParams,
         tool_choice: str = "auto",
     ) -> GenerationResult:
-        """Async version of generate_with_tools for concurrent batch execution."""
-        message_dicts = [m.to_dict() for m in messages]
-        tool_schemas = [t.to_openai_schema() for t in tools]
-
-        kwargs: dict[str, Any] = {
-            "model": self._model,
-            "messages": message_dicts,
-            "tools": tool_schemas,
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-        }
-
-        if tool_choice == "auto":
-            kwargs["tool_choice"] = "auto"
-        elif tool_choice == "none":
-            kwargs["tool_choice"] = "none"
-        elif tool_choice == "required":
-            kwargs["tool_choice"] = "required"
-        else:
-            kwargs["tool_choice"] = {"type": "function", "function": {"name": tool_choice}}
-
-        if params.stop_sequences:
-            kwargs["stop"] = list(params.stop_sequences)
-
-        if params.extra:
-            kwargs.update(params.extra)
-
-        try:
-            response = await self._async_client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            normalized = _normalize_provider_error(exc, model_name=self._model)
-            if normalized is exc:
-                raise
-            raise normalized from exc
-        choice = self._validated_choice(response)
-
-        tool_calls: tuple[ToolCall, ...] = ()
-        if choice.message.tool_calls:
-            parsed_calls = []
-            for tc in choice.message.tool_calls:
-                try:
-                    arguments = json.loads(tc.function.arguments)
-                except json.JSONDecodeError:
-                    arguments = {"raw": tc.function.arguments}
-
-                parsed_calls.append(
-                    ToolCall(
-                        id=tc.id,
-                        name=tc.function.name,
-                        arguments=arguments,
-                    )
-                )
-            tool_calls = tuple(parsed_calls)
-
-        return GenerationResult(
-            text=choice.message.content,
-            finish_reason=_openai_stop_reason(choice.finish_reason),
-            tool_calls=tool_calls,
-            prompt_tokens=response.usage.prompt_tokens if response.usage else 0,
-            completion_tokens=response.usage.completion_tokens if response.usage else 0,
-            metadata={
-                "model": response.model,
-                "id": response.id,
-            },
+        return await self._request_async(
+            self._request_kwargs(messages, params, tools, tool_choice), params
         )
 
     def generate_with_tools_batch(
-        self,
-        messages_batch: list[list[ChatMessage]],
-        tools: list[ToolDefinition],
-        params: SamplingParams,
-        tool_choice: str = "auto",
-    ) -> list[GenerationResult]:
-        """Generate tool-calling responses for multiple conversations concurrently."""
+        self, messages_batch, tools, params, tool_choice="auto", *, observer=None
+    ):
+        requests = [
+            self._request_kwargs(messages, params, tools, tool_choice)
+            for messages in messages_batch
+        ]
         return _run_concurrent(
-            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
-            return_partial=getattr(self, "_return_partial_batch", True),
+            return_partial=True,
             runner=self._async_runner,
         )

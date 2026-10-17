@@ -22,7 +22,7 @@ loop for the lifetime of each backend's async client. Chat and tool batches shar
 that loop, so pooled HTTP connections remain usable across successive calls,
 including calls from different threads or from an existing async context. These
 public methods are synchronous: they block their caller until the batch finishes.
-Concurrent callers on one backend are serialized; requests within each batch use
+Concurrent callers share the loop and progress independently; each batch uses
 `max_concurrency` and results retain input order. `close()` closes the async client
 on its owning loop and stops the loop thread. Always close backends when finished.
 
@@ -97,7 +97,10 @@ for token_lp in results[0].token_logprobs:
 | function_calling | ✗ | Not supported |
 | vision | Auto | VLMs detected automatically |
 
-> **Tip:** If you already have a remote `vllm serve` instance running, use `OpenAIBackend(model="your-model", base_url="http://host:port/v1")` instead — vLLM's server exposes an OpenAI-compatible API.
+> **Tip:** For a remote `vllm serve` instance, use `OpenAIBackend(model="your-model", base_url="http://host:port/v1", api_flavor="vllm")` so native vLLM sampling controls reach the server.
+
+For reasoning, schema-constrained answers, persistent draws, decisions and the
+OpenAI Batch service, see [persistent predictor calls](predictor-calls.md).
 
 ### Container-hosted continuation scoring
 
@@ -239,6 +242,27 @@ result = backend.generate_chat(
 )
 ```
 
+### Rate Limits and Attempt Records
+
+`OpenAIBackend(rate_limit_wait=1.0, rate_limit_max_retries=2)` retries transient
+HTTP 429 responses at most twice. It uses capped exponential backoff with jitter
+and honors numeric or HTTP-date `Retry-After` values. A server delay above 300
+seconds stops the attempt loop rather than retrying early. A zero wait disables
+backend retries. Quota exhaustion raises `QuotaExhaustedError`; invalid requests,
+authentication failures and ambiguous network errors are not retried by this loop.
+
+Enabling backend retries disables SDK retries. With backend retries disabled,
+`max_retries=None` preserves SDK defaults; set `max_retries=0` for explicit attempt
+accounting and to prevent SDK resubmission after an ambiguous failure. Combining
+positive SDK retries with backend retries raises.
+
+`metadata["attempts"]` records each backend attempt's status, elapsed time,
+reported request/response IDs, known usage and retry backoff. The result's
+`elapsed_seconds` includes retries and waits. Final request errors also carry
+`attempts` and `elapsed_seconds` attributes. SDK-internal attempts are not visible
+in these records when SDK retries are explicitly retained. Sync, async, chat and
+tool requests share the builder and response parser.
+
 ## Anthropic
 
 ```python
@@ -284,21 +308,18 @@ models silently ignore the field. The other thinking-budget knobs
 and are inert on this backend — they only take effect for `vllm` and
 `huggingface`.
 
-To override the derived `reasoning` block (e.g. send `effort` instead
-of `max_tokens`, or add `exclude: true`), pass
-`extra={"extra_body": {"reasoning": {...}}}` on `SamplingParams`. The
-caller-supplied dict shallow-merges over the derived one and wins on
-key collisions, so it is also the escape hatch for
-`reasoning.effort`/`reasoning.exclude`/`reasoning.enabled`.
+Use typed `reasoning_effort` for effort control, including `"none"` to disable
+reasoning. An explicit effort takes precedence over a thinking budget. Typed
+controls own their provider keys: `extra.reasoning` and nested
+`extra_body.reasoning` are rejected rather than overriding them.
 
 OpenRouter returns hidden reasoning separately from visible assistant
 content. `GenerationResult.text` contains only `message.content`, while
 diagnostics are preserved in `GenerationResult.metadata`: normalized
 `finish_reason`, raw `native_finish_reason` when present,
-`completion_tokens_details`, top-level `reasoning_tokens`, and lightweight
+`completion_tokens_details`, typed `reasoning_tokens`, and
 presence/count/length fields for `message.reasoning` and
-`message.reasoning_details`. The full reasoning payload is not copied into
-metadata.
+`message.reasoning_details`. The full detached reasoning payload is retained.
 
 OpenRouter responses with a top-level or per-choice `error`, or a raw/native
 `finish_reason` of `error`, raise an exception even if HTTP succeeded
@@ -389,12 +410,14 @@ model:
 
 ### Parameter Dropping
 
-`drop_params=True` (the default) makes litellm silently drop request
-parameters the target provider does not support (e.g. `presence_penalty`
-on Anthropic) instead of erroring. Set `drop_params=False` on the
-constructor to fail loudly instead. Logprobs keep a hard guarantee
-either way: if `logprobs=True` was requested and the provider returns
-none, the backend raises `LogprobsNotReturnedError`.
+`drop_params=False` is the default and keeps LiteLLM's native strict behavior.
+Set `drop_params=True` explicitly to allow provider-unsupported parameters to
+be dropped. This opt-in does not guarantee that requested controls reach the
+provider. Logprobs keep a hard guarantee either way: a request with
+`logprobs=True` raises `LogprobsNotReturnedError` when no logprobs are returned.
+Non-neutral `min_p` and `repetition_penalty` require a declared LiteLLM mapping
+for the selected model. Request records use `request_capture="litellm_input"`
+because they describe the input to LiteLLM, which can transform the wire request.
 
 ### Reasoning / Thinking Budget
 
@@ -402,11 +425,10 @@ none, the backend raises `LogprobsNotReturnedError`.
 `thinking={"type": "enabled", "budget_tokens": N}` parameter (Anthropic
 `thinking.budget_tokens`, Gemini thinking budget, Bedrock/Vertex
 equivalents); providers without a budget concept drop it via
-`drop_params`. `disable_thinking=True` sends `reasoning_effort="none"`
-and wins over any other reasoning knob. For effort-style control, pass
-`extra={"reasoning_effort": "high"}` on `SamplingParams` — `params.extra`
-keys flow as top-level kwargs into `litellm.completion()` and override
-derived values. The logits-level thinking knobs
+`drop_params=True`; strict mode raises when the provider cannot accept it.
+Use typed `reasoning_effort`, including `"none"` to disable reasoning.
+Provider aliases of typed controls cannot be supplied through `extra`.
+The logits-level thinking knobs
 (`thinking_budget_per_block`, `thinking_budget_suffix`,
 `thinking_budget_soft_ratio`) are inert on this backend — they only take
 effect for `vllm` and `huggingface`.
@@ -444,7 +466,8 @@ backend = CodexCLIBackend(
 - Runs `codex exec` in a fresh temporary directory for every request.
 - Locks Codex to `--sandbox read-only` and disables session persistence with `--ephemeral`.
 - Supports chat generation only. Native tool calling, vision, logprobs, prefix continuation, and full scoring are not available.
-- `SamplingParams.max_tokens` is accepted but ignored because `codex exec` does not expose a direct equivalent.
+- Set all eight numeric decoding controls to `None`: `codex exec` hides them,
+  so explicit values raise rather than being silently ignored.
 - Use the backend constructor's `config_overrides` argument to pass Codex-specific `-c key=value` overrides when your local Codex CLI/config supports them.
 
 ### Capabilities
@@ -479,7 +502,9 @@ backend = ClaudeCodeBackend(
 - Always passes `--no-session-persistence` and `--strict-mcp-config`. By default `--tools ""` is sent so the spawned CLI cannot run Bash/Edit/Read tools — the backend behaves as a pure text-completion wrapper.
 - `--bare` is **off by default** so the CLI can use the same OAuth/keychain login as the interactive TUI (e.g. a Claude Pro/Max subscription). Pass `bare=True` to force `ANTHROPIC_API_KEY` / `apiKeyHelper` auth and skip auto-discovery — recommended for reproducible CI.
 - Supports chat generation only. Native tool calling, vision, logprobs, prefix continuation, and full scoring are not available.
-- `SamplingParams.max_tokens` is accepted but ignored because the Claude Code CLI does not expose a direct equivalent. Use `effort` to control reasoning level and `max_budget_usd` as a per-call USD cap.
+- Set all eight numeric decoding controls to `None`; explicit values raise
+  because the CLI hides them. Use the constructor's `effort` for CLI reasoning
+  control and `max_budget_usd` as a per-call USD cap.
 - Errors from the underlying Anthropic API are classified into `PromptTooLongError` (context-limit messages), `RuntimeError` (auth failures — not retryable), or `QuotaExhaustedError` (everything else, including `is_error: true` payloads, rate limits, server overload, timeouts, and unparseable output). The CLI itself retries 10× internally before surfacing errors (configurable via `CLAUDE_CODE_MAX_RETRIES`).
 - Use the backend constructor's `extra_args` argument (a list of strings) to pass any Claude Code flag this backend does not model directly.
 
@@ -505,6 +530,8 @@ params = SamplingParams(
     temperature=0.0,
     top_p=1.0,
     top_k=0,
+    min_p=0.0,
+    repetition_penalty=1.0,
     stop_sequences=("</answer>",),
     presence_penalty=0.0,
     frequency_penalty=0.0,
@@ -512,6 +539,44 @@ params = SamplingParams(
     logprobs=False,
 )
 ```
+
+### Explicit Controls and Inheritance
+
+OpenAI, vLLM and HuggingFace apply supplied supported numeric controls,
+including neutral values, so model defaults cannot silently enable those
+filters or penalties. Unsupported non-neutral values raise before dispatch.
+Supported controls set to `None` inherit the native default; they are omitted
+from API bodies. HuggingFace copies the model's generation configuration for
+each call. In-process vLLM resolves inherited fields through its native default
+sampling parameters. Neither path changes the model's stored configuration.
+
+| Backend | Mapping |
+|---------|---------|
+| OpenAI, `api_flavor="openai"` | Omits neutral `top_k=0`, `min_p=0`, and `repetition_penalty=1`; rejects their non-neutral values. |
+| OpenAI, `api_flavor="vllm"` | Sends all supplied controls, with `top_k`, `min_p` and `repetition_penalty` in `extra_body`. |
+| Owned vLLM server | Selects the `vllm` dialect for both native and Singularity launches. |
+| In-process vLLM | Builds native sampling parameters, with explicit neutral filters and penalties. |
+| HuggingFace | Uses native repetition penalty; rejects nonzero presence/frequency penalties because they have no equivalent. |
+| LiteLLM | Omits `None` controls; uses its provider mapping with strict parameter handling by default. |
+
+The endpoint dialect is explicit; a URL or model name does not select it.
+Single-result operations on these backends reject `n != 1` before dispatch.
+Prefix continuation uses its `num_continuations` argument and returns every draw.
+
+### Request Records
+
+These backends put detached request options in `GenerationResult.metadata`:
+
+- `request`: the OpenAI-compatible JSON body after `extra_body` merging,
+  resolved native parameters for local models, or LiteLLM SDK input.
+- `requested_sampling`: caller settings, including explicit `None` values.
+- `inherited_controls`: numeric controls whose native default was requested.
+- `omitted_controls`: unsupported neutral controls omitted by the backend.
+- `request_capture`: `serialized_body` for OpenAI-compatible calls and
+  `litellm_input` for LiteLLM.
+
+Records exclude message/input contents, credential-bearing headers, API keys,
+callbacks and live transport objects. Local records include template arguments.
 
 ### Backend-Specific Parameters
 
@@ -521,10 +586,9 @@ Use the `extra` parameter to pass backend-specific options that aren't part of t
 # HuggingFace-specific (transformers)
 params = SamplingParams(
     temperature=0.7,
+    repetition_penalty=1.2,
     extra={
-        "repetition_penalty": 1.2,
         "num_beams": 4,
-        "do_sample": True,
         "length_penalty": 1.0,
     },
 )
@@ -533,9 +597,7 @@ params = SamplingParams(
 params = SamplingParams(
     temperature=0.7,
     extra={
-        "best_of": 3,
-        "use_beam_search": True,
-        "length_penalty": 1.0,
+        "seed": 42,
     },
 )
 
@@ -544,7 +606,6 @@ params = SamplingParams(
     temperature=0.7,
     extra={
         "seed": 42,
-        "response_format": {"type": "json_object"},
         "logit_bias": {123: -100},
     },
 )
@@ -557,6 +618,13 @@ params = SamplingParams(
     },
 )
 ```
+
+On OpenAI, vLLM, HuggingFace and LiteLLM, `extra` cannot replace typed controls
+or their native aliases (`do_sample`, `max_new_tokens`, `num_return_sequences`,
+etc.), input/model fields, tools or choice counts. The same check applies inside
+`extra_body`. Unrelated options remain available. OpenAI-compatible body options
+must contain finite JSON values; transport options such as `extra_headers` stay
+outside the recorded body.
 
 > **Note:** Parameters in `extra` take precedence over the common parameters if there's a conflict. Unknown parameters may cause errors from the underlying API.
 
@@ -591,9 +659,11 @@ used by `vllm` and `huggingface` — those backends own token generation
 and can intervene per-step. For OpenRouter the same `thinking_budget`
 field is accepted but flows through the provider's reasoning API
 (`reasoning.max_tokens`); see the OpenRouter section above for the
-behavior and limitations there. Pure HTTP backends without a reasoning
-API (OpenAI, Anthropic direct, Codex CLI, Claude Code CLI, vllm_singularity) ignore
-these fields entirely.
+behavior and limitations there. HTTP backends do not implement the local logits
+processor. OpenAI rejects a thinking
+budget; Anthropic maps it to native `thinking.budget_tokens`. CLI backends reject
+unsupported controls. The owned vLLM server supports a thinking budget through
+the explicit two-phase [insertion path](predictor-calls.md#text-before-the-reasoning-closure).
 
 For models that produce `<think>...</think>` reasoning blocks (e.g., Qwen3 with `enable_thinking=True`), you can cap the number of tokens generated inside each thinking block using `thinking_budget` on `InferenceConfig`:
 
@@ -765,7 +835,7 @@ model:
 
 ### Interaction with Thinking Budget
 
-Second elicitation and thinking budget are complementary for the first generation, but the follow-up call is forced into no-thinking mode. The runner clears local thinking-budget fields, sets `SamplingParams.disable_thinking=True`, and backends that support per-call thinking control honor that request:
+Second elicitation and thinking budget are complementary for the first generation. The runner clears local thinking-budget fields and sets `reasoning_effort="none"` for the follow-up. The backend applies this setting or raises if no mapping exists:
 
 - vLLM and HuggingFace call the chat template with `enable_thinking=False` and skip thinking-budget logits processors.
 - The Singularity-hosted vLLM server backend injects `chat_template_kwargs={"enable_thinking": false}` into the request body (the server renders the chat template, so the toggle must travel with the request).

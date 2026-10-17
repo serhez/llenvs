@@ -61,14 +61,71 @@ params = SamplingParams(
     temperature=0.0,        # Sampling temperature (0 = greedy)
     top_p=1.0,              # Nucleus sampling parameter
     top_k=0,                # Top-k sampling (0 = disabled)
+    min_p=0.0,              # Relative probability filter (0 = disabled)
+    repetition_penalty=1.0,  # Multiplicative penalty (1 = disabled)
     stop_sequences=(),      # Stop generation at these strings
     presence_penalty=0.0,   # Penalize token presence
     frequency_penalty=0.0,  # Penalize token frequency
-    n=1,                    # Number of completions
+    n=1,                    # One result per input
     logprobs=False,         # Return token logprobs
     num_logprobs=5,         # How many logprobs per token
 )
 ```
+
+The eight numeric decoding controls (`max_tokens`, `temperature`, `top_p`,
+`top_k`, `min_p`, `repetition_penalty`, `presence_penalty`, and
+`frequency_penalty`) accept `None`. On OpenAI, vLLM, HuggingFace and LiteLLM,
+this requests the provider/model default; it does not send JSON `null`.
+Use YAML `null` for the same setting. The fields survive config loading,
+serialization and forwarding to evaluation, judge and environment models.
+Unknown inference config keys raise rather than being ignored.
+
+Values must be finite. Token/choice counts are integers; `max_tokens` and
+`n` are positive, `top_k` is nonnegative, temperature is nonnegative,
+`top_p` and `min_p` are in `[0, 1]`, and repetition penalty is positive.
+Backends may impose narrower limits. In OpenAI, vLLM, HuggingFace and LiteLLM,
+single-result operations reject `n != 1` before dispatch. Use
+`continue_from_prefix(..., num_continuations=N)` on a backend that supports
+multiple prefix continuations.
+
+For backend mappings, omitted controls, request records and rules for `extra`,
+see [sampling parameters](../guides/backends.md#sampling-parameters).
+
+### Reasoning and structured answers
+
+`InferenceConfig` and `SamplingParams` also accept `reasoning_effort`,
+`response_schema` and `after_reasoning_text`. `None` inherits reasoning defaults;
+`"none"` explicitly disables reasoning. A schema mapping is detached when creating
+`ResponseSchema`; `name` defaults to `"response"` and `strict` to `True`.
+
+```yaml
+model:
+  backend: openai
+  model: gpt-6-luna
+  params:
+    max_retries: 0
+inference:
+  max_tokens: 4096
+  reasoning_effort: medium
+  temperature: null
+  top_p: null
+  response_schema:
+    name: prediction
+    strict: true
+    schema:
+      type: object
+      properties:
+        percentage: {type: integer, minimum: 0, maximum: 100}
+      required: [percentage]
+      additionalProperties: false
+```
+
+For Luna, inherited/default or enabled reasoning requires `temperature: null`,
+`top_p: null` and `logprobs: false`. Local family mappings are configured through
+`model.params.reasoning_family`. `after_reasoning_text` requires a configured local
+token boundary and uses two explicit generation phases; closed APIs reject it.
+See [persistent predictor calls](../guides/predictor-calls.md) for supported
+efforts, phase provenance, nullable usage, descriptors and recovery APIs.
 
 ## Backend Configuration
 
@@ -83,6 +140,10 @@ backend = OpenAIBackend(
     organization="org-...",   # Optional
     base_url=None,            # Custom endpoint
     max_concurrency=64,       # Max concurrent batch requests
+    api_flavor="openai",     # Explicitly use "vllm" for a vLLM endpoint
+    max_retries=0,            # Disable SDK retries for explicit attempt accounting
+    rate_limit_wait=1.0,      # Initial backend retry delay; 0 disables retries
+    rate_limit_max_retries=2,
 )
 ```
 
@@ -140,7 +201,7 @@ backend = LiteLLMBackend(
     rate_limit_max_retries=2,
     timeout=None,             # Per-request timeout in seconds
     num_retries=None,         # litellm in-SDK transient retries (default off)
-    drop_params=True,         # Drop provider-unsupported params instead of erroring
+    drop_params=False,        # Reject provider-unsupported params (native strict mode)
 )
 ```
 
@@ -184,7 +245,8 @@ model:
 Notes:
 
 - Each request runs in a fresh temporary directory with `codex exec --sandbox read-only --ephemeral --skip-git-repo-check`.
-- `SamplingParams.max_tokens` is accepted but ignored because the Codex CLI does not expose a direct equivalent.
+- CLI sampling requires all eight numeric decoding fields to be `None`;
+  explicit values raise because those controls are hidden by the CLI.
 - Use `model.params.config_overrides` to pass Codex-specific `-c key=value` overrides when your local Codex CLI/config supports them.
 
 ## Backend Capabilities

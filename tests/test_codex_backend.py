@@ -24,6 +24,20 @@ from llenvs.inference import (
 from llenvs.inference.backends import CodexCLIBackend
 
 
+def _cli_params(**values):
+    defaults = dict(
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        min_p=None,
+        repetition_penalty=None,
+        presence_penalty=None,
+        frequency_penalty=None,
+    )
+    return SamplingParams(**(defaults | values))
+
+
 def _make_backend(**kwargs: object) -> CodexCLIBackend:
     with patch("llenvs.inference.backends.codex_cli.shutil.which", return_value="/usr/bin/codex"):
         return CodexCLIBackend(**kwargs)
@@ -106,7 +120,7 @@ class TestCodexCLIBackendGeneration:
             return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(messages, SamplingParams(max_tokens=17))
+            result = backend.generate_chat(messages, _cli_params())
 
         cmd = captured["cmd"]
         assert isinstance(cmd, list)
@@ -160,7 +174,7 @@ class TestCodexCLIBackendGeneration:
             )
 
         with patch.object(backend, "_generate_chat_impl", side_effect=fake_impl):
-            results = backend.generate(["first", "second"], SamplingParams())
+            results = backend.generate(["first", "second"], _cli_params())
 
         assert [result.text for result in results] == ["first", "second"]
         assert [messages[0].role for messages in calls] == ["user", "user"]
@@ -169,8 +183,8 @@ class TestCodexCLIBackendGeneration:
     @pytest.mark.parametrize(
         ("params", "needle"),
         [
-            (SamplingParams(temperature=0.1), "SamplingParams.temperature"),
-            (SamplingParams(extra={"reasoning_effort": "high"}), "SamplingParams.extra"),
+            (_cli_params(temperature=0.1), "SamplingParams.temperature"),
+            (_cli_params(extra={"reasoning_effort": "high"}), "SamplingParams.extra"),
         ],
     )
     def test_unsupported_sampling_params_raise(self, params: SamplingParams, needle: str):
@@ -189,7 +203,7 @@ class TestCodexCLIBackendGeneration:
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run") as mock_run:
             with pytest.raises(ValueError, match="text-only"):
-                backend.generate_chat([message], SamplingParams())
+                backend.generate_chat([message], _cli_params())
 
         mock_run.assert_not_called()
 
@@ -206,7 +220,7 @@ class TestCodexCLIBackendGeneration:
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
             with pytest.raises(PromptTooLongError, match="maximum context length exceeded"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_missing_output_file_is_quota_exhausted(self):
         backend = _make_backend()
@@ -221,7 +235,7 @@ class TestCodexCLIBackendGeneration:
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="last-message file"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_generic_nonzero_exit_is_quota_exhausted(self):
         backend = _make_backend()
@@ -236,7 +250,7 @@ class TestCodexCLIBackendGeneration:
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="exit code 1"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_timeout_is_quota_exhausted(self):
         backend = _make_backend()
@@ -246,7 +260,7 @@ class TestCodexCLIBackendGeneration:
 
         with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="timed out"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_batch_partial_failures_raise_partial_batch_error(self):
         backend = _make_backend(max_concurrency=2)
@@ -268,9 +282,22 @@ class TestCodexCLIBackendGeneration:
 
         with patch.object(backend, "_generate_chat_impl", side_effect=fake_impl):
             with pytest.raises(PartialBatchError) as exc_info:
-                backend.generate_chat_batch(messages_batch, SamplingParams())
+                backend.generate_chat_batch(messages_batch, _cli_params())
 
         error = exc_info.value
         assert isinstance(error.results[0], GenerationResult)
         assert error.results[0].text == "OK"
         assert isinstance(error.results[1], PromptTooLongError)
+
+
+def test_absent_cli_usage_is_unknown():
+    backend = _make_backend()
+
+    def run(cmd, **kwargs):
+        Path(cmd[cmd.index("--output-last-message") + 1]).write_text("answer")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with patch("llenvs.inference.backends.codex_cli.subprocess.run", side_effect=run):
+        result = backend.generate_chat([ChatMessage("user", "Hi")], _cli_params())
+    assert result.prompt_tokens is None and result.completion_tokens is None
+    assert result.cached_prompt_tokens is None

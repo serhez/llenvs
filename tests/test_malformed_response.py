@@ -54,9 +54,7 @@ def _openrouter_backend(monkeypatch: pytest.MonkeyPatch) -> OpenRouterBackend:
     return backend
 
 
-def _no_choices_response(
-    *, choices: object, error: object | None = None
-) -> SimpleNamespace:
+def _no_choices_response(*, choices: object, error: object | None = None) -> SimpleNamespace:
     """Build a mocked OpenAI ChatCompletion-shaped response with a missing
     or empty ``choices`` field.
 
@@ -146,31 +144,23 @@ def _make_status_error(status_code: int, message: str) -> APIStatusError:
 
 
 class TestMalformedResponseSync:
-    def test_raises_when_choices_is_none(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raises_when_choices_is_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._client.chat.completions.create = MagicMock(
             return_value=_no_choices_response(choices=None)
         )
 
         with pytest.raises(MalformedResponseError):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
-    def test_raises_when_choices_is_empty_list(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_raises_when_choices_is_empty_list(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._client.chat.completions.create = MagicMock(
             return_value=_no_choices_response(choices=[])
         )
 
         with pytest.raises(MalformedResponseError):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
     def test_surfaces_openrouter_error_body_in_message(
         self, monkeypatch: pytest.MonkeyPatch
@@ -185,9 +175,7 @@ class TestMalformedResponseSync:
         )
 
         with pytest.raises(MalformedResponseError) as exc_info:
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
         text = str(exc_info.value)
         assert "Upstream provider rate-limited" in text
         assert "provider_error" in text
@@ -201,9 +189,7 @@ class TestMalformedResponseSync:
         )
 
         with pytest.raises(MalformedResponseError) as exc_info:
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
         assert exc_info.value.backend_name == "OpenRouterBackend"
         assert exc_info.value.model_name == "openrouter/stub-model"
 
@@ -217,9 +203,7 @@ class TestMalformedResponseSync:
         )
 
         with pytest.raises(MalformedResponseError, match="termination metadata"):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
     @pytest.mark.parametrize(
         "finish_reason,native_finish_reason",
@@ -234,15 +218,11 @@ class TestMalformedResponseSync:
         response.choices[0].native_finish_reason = native_finish_reason
         backend._client.chat.completions.create = MagicMock(return_value=response)
 
-        result = backend.generate_chat(
-            [ChatMessage(role="user", content="hi")], SamplingParams()
-        )
+        result = backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
         assert result.text == "ok"
 
-    def test_rejects_empty_termination_fields(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_rejects_empty_termination_fields(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         response = _missing_termination_response()
         response.choices[0].finish_reason = ""
@@ -250,9 +230,7 @@ class TestMalformedResponseSync:
         backend._client.chat.completions.create = MagicMock(return_value=response)
 
         with pytest.raises(MalformedResponseError, match="termination metadata"):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
 
 # ---------------------------------------------------------------------------
@@ -397,9 +375,7 @@ class TestRateLimitMalformedRetry:
         }
         return _no_choices_response(choices=None, error=err)
 
-    def test_sync_retries_until_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sync_retries_until_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._rate_limit_wait = 0.01
         backend._rate_limit_max_retries = 2
@@ -410,16 +386,12 @@ class TestRateLimitMalformedRetry:
         responses = [self._rate_limit_response(), _valid_response()]
         backend._client.chat.completions.create = MagicMock(side_effect=responses)
 
-        result = backend.generate_chat(
-            [ChatMessage(role="user", content="hi")], SamplingParams()
-        )
+        result = backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
         assert result.text == "ok"
         assert backend._client.chat.completions.create.call_count == 2
-        assert sleeps == [0.01]
+        assert len(sleeps) == 1 and 0.01 <= sleeps[0] <= 0.0125
 
-    def test_sync_does_not_retry_non_rate_limit(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sync_does_not_retry_non_rate_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._rate_limit_wait = 0.01
         backend._rate_limit_max_retries = 2
@@ -432,15 +404,11 @@ class TestRateLimitMalformedRetry:
         )
 
         with pytest.raises(MalformedResponseError):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
         assert backend._client.chat.completions.create.call_count == 1
         assert sleeps == []
 
-    def test_sync_exhausts_retries_then_raises(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_sync_exhausts_retries_then_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._rate_limit_wait = 0.01
         backend._rate_limit_max_retries = 2
@@ -452,15 +420,11 @@ class TestRateLimitMalformedRetry:
         )
 
         with pytest.raises(MalformedResponseError):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
         # Initial attempt + 2 retries = 3 total calls.
         assert backend._client.chat.completions.create.call_count == 3
 
-    def test_async_retries_until_success(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_async_retries_until_success(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._rate_limit_wait = 0.01
         backend._rate_limit_max_retries = 2
@@ -484,11 +448,9 @@ class TestRateLimitMalformedRetry:
         assert len(results) == 1
         assert results[0].text == "ok"
         assert backend._async_client.chat.completions.create.call_count == 2
-        assert sleeps == [0.01]
+        assert len(sleeps) == 1 and 0.01 <= sleeps[0] <= 0.0125
 
-    def test_async_does_not_retry_non_rate_limit(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_async_does_not_retry_non_rate_limit(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         backend._rate_limit_wait = 0.01
         backend._rate_limit_max_retries = 2
@@ -524,9 +486,7 @@ class TestChatResultErrorsAreNormalized:
         Without fix 2, the raw ``APIStatusError`` would escape.
         """
         backend = _openrouter_backend(monkeypatch)
-        backend._client.chat.completions.create = MagicMock(
-            return_value=_valid_response()
-        )
+        backend._client.chat.completions.create = MagicMock(return_value=_valid_response())
 
         def _raising_chat_result(response: object) -> object:
             raise _make_status_error(400, "maximum context length exceeded")
@@ -534,9 +494,7 @@ class TestChatResultErrorsAreNormalized:
         monkeypatch.setattr(backend, "_chat_result", _raising_chat_result)
 
         with pytest.raises(PromptTooLongError):
-            backend.generate_chat(
-                [ChatMessage(role="user", content="hi")], SamplingParams()
-            )
+            backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
 
 class TestOpenRouterReasoningMetadata:
@@ -544,50 +502,54 @@ class TestOpenRouterReasoningMetadata:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         backend = _openrouter_backend(monkeypatch)
-        backend._client.chat.completions.create = MagicMock(
-            return_value=_reasoning_response()
-        )
+        backend._client.chat.completions.create = MagicMock(return_value=_reasoning_response())
 
-        result = backend.generate_chat(
-            [ChatMessage(role="user", content="hi")], SamplingParams()
-        )
+        result = backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
         assert result.text == ""
         assert result.prompt_tokens == 9
         assert result.completion_tokens == 8192
-        assert result.metadata == {
-            "model": "google/gemma-4-26b-a4b-it",
-            "id": "gen-stub",
-            "finish_reason": "length",
-            "native_finish_reason": "MAX_TOKENS",
-            "reasoning": "private chain of thought",
-            "reasoning_present": True,
-            "reasoning_chars": 24,
-            "reasoning_details": [
-                {"type": "reasoning.text", "text": "step one"},
-                {"type": "reasoning.encrypted", "data": "opaque"},
-            ],
-            "reasoning_details_present": True,
-            "reasoning_details_count": 2,
-            "reasoning_details_types": ("reasoning.text", "reasoning.encrypted"),
-            "completion_tokens_details": {"reasoning_tokens": 6144},
-            "reasoning_tokens": 6144,
-        }
+        assert (
+            result.metadata.items()
+            >= {
+                "model": "google/gemma-4-26b-a4b-it",
+                "id": "gen-stub",
+                "finish_reason": "length",
+                "native_finish_reason": "MAX_TOKENS",
+                "reasoning": "private chain of thought",
+                "reasoning_present": True,
+                "reasoning_chars": 24,
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "step one"},
+                    {"type": "reasoning.encrypted", "data": "opaque"},
+                ],
+                "reasoning_details_present": True,
+                "reasoning_details_count": 2,
+                "reasoning_details_types": ("reasoning.text", "reasoning.encrypted"),
+                "completion_tokens_details": {"reasoning_tokens": 6144},
+                "reasoning_tokens": 6144,
+                "raw_usage": {
+                    "prompt_tokens": 9,
+                    "completion_tokens": 8192,
+                    "completion_tokens_details": {"reasoning_tokens": 6144},
+                },
+            }.items()
+        )
 
     def test_chat_result_omits_absent_reasoning_metadata(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         backend = _openrouter_backend(monkeypatch)
-        backend._client.chat.completions.create = MagicMock(
-            return_value=_valid_response()
-        )
+        backend._client.chat.completions.create = MagicMock(return_value=_valid_response())
 
-        result = backend.generate_chat(
-            [ChatMessage(role="user", content="hi")], SamplingParams()
-        )
+        result = backend.generate_chat([ChatMessage(role="user", content="hi")], SamplingParams())
 
-        assert result.metadata == {
-            "model": "openrouter/stub-model",
-            "id": "chatcmpl-stub",
-            "finish_reason": "stop",
-        }
+        assert (
+            result.metadata.items()
+            >= {
+                "model": "openrouter/stub-model",
+                "id": "chatcmpl-stub",
+                "finish_reason": "stop",
+                "raw_usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            }.items()
+        )

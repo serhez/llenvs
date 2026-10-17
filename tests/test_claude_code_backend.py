@@ -25,6 +25,20 @@ from llenvs.inference import (
 from llenvs.inference.backends import ClaudeCodeBackend
 
 
+def _cli_params(**values):
+    defaults = dict(
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        top_k=None,
+        min_p=None,
+        repetition_penalty=None,
+        presence_penalty=None,
+        frequency_penalty=None,
+    )
+    return SamplingParams(**(defaults | values))
+
+
 def _make_backend(**kwargs: object) -> ClaudeCodeBackend:
     with patch(
         "llenvs.inference.backends.claude_code.shutil.which",
@@ -45,7 +59,12 @@ def _success_payload(text: str = "hello", **overrides: object) -> dict[str, obje
         "duration_ms": 123,
         "duration_api_ms": 100,
         "num_turns": 1,
-        "usage": {"input_tokens": 11, "output_tokens": 7},
+        "usage": {
+            "input_tokens": 11,
+            "output_tokens": 7,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+        },
     }
     payload.update(overrides)
     return payload
@@ -226,7 +245,7 @@ class TestClaudeCodeBackendPromptRendering:
             )
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(messages, SamplingParams(max_tokens=17))
+            result = backend.generate_chat(messages, _cli_params())
 
         prompt = captured["input"]
         assert isinstance(prompt, str)
@@ -257,9 +276,7 @@ class TestClaudeCodeBackendGeneration:
             )
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(
-                [ChatMessage(role="user", content="Hi")], SamplingParams()
-            )
+            result = backend.generate_chat([ChatMessage(role="user", content="Hi")], _cli_params())
 
         assert result.text == "hello world"
         assert result.finish_reason == StopReason.END_OF_TEXT
@@ -268,7 +285,7 @@ class TestClaudeCodeBackendGeneration:
         assert result.metadata["session_id"] == "session-abc"
         assert result.metadata["total_cost_usd"] == 0.001
         assert result.metadata["is_error"] is False
-        assert result.metadata["raw_usage"] == {"input_tokens": 11, "output_tokens": 7}
+        assert result.metadata["raw_usage"] == _success_payload()["usage"]
 
     def test_generate_chat_parses_content_string_fallback(self) -> None:
         backend = _make_backend()
@@ -282,9 +299,7 @@ class TestClaudeCodeBackendGeneration:
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(
-                [ChatMessage(role="user", content="Hi")], SamplingParams()
-            )
+            result = backend.generate_chat([ChatMessage(role="user", content="Hi")], _cli_params())
 
         assert result.text == "fallback text"
 
@@ -300,9 +315,7 @@ class TestClaudeCodeBackendGeneration:
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(payload), stderr="")
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(
-                [ChatMessage(role="user", content="Hi")], SamplingParams()
-            )
+            result = backend.generate_chat([ChatMessage(role="user", content="Hi")], _cli_params())
 
         assert result.text == "blocked text"
 
@@ -318,9 +331,7 @@ class TestClaudeCodeBackendGeneration:
             )
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(
-                [ChatMessage(role="user", content="Hi")], SamplingParams()
-            )
+            result = backend.generate_chat([ChatMessage(role="user", content="Hi")], _cli_params())
 
         assert result.finish_reason == StopReason.MAX_TOKENS
         assert result.metadata["stop_reason"] == "max_tokens"
@@ -337,7 +348,7 @@ class TestClaudeCodeBackendGeneration:
             )
 
         with patch.object(backend, "_generate_chat_impl", side_effect=fake_impl):
-            results = backend.generate(["first", "second"], SamplingParams())
+            results = backend.generate(["first", "second"], _cli_params())
 
         assert [r.text for r in results] == ["first", "second"]
         assert [m[0].role for m in calls] == ["user", "user"]
@@ -348,16 +359,16 @@ class TestClaudeCodeBackendValidation:
     @pytest.mark.parametrize(
         ("params", "needle"),
         [
-            (SamplingParams(temperature=0.1), "SamplingParams.temperature"),
-            (SamplingParams(top_p=0.9), "SamplingParams.top_p"),
-            (SamplingParams(top_k=40), "SamplingParams.top_k"),
-            (SamplingParams(presence_penalty=0.1), "SamplingParams.presence_penalty"),
-            (SamplingParams(frequency_penalty=0.1), "SamplingParams.frequency_penalty"),
-            (SamplingParams(n=2), "SamplingParams.n"),
-            (SamplingParams(stop_sequences=("X",)), "SamplingParams.stop_sequences"),
-            (SamplingParams(logprobs=True), "SamplingParams.logprobs"),
-            (SamplingParams(thinking_budget=100), "SamplingParams.thinking_budget"),
-            (SamplingParams(extra={"foo": "bar"}), "SamplingParams.extra"),
+            (_cli_params(temperature=0.1), "SamplingParams.temperature"),
+            (_cli_params(top_p=0.9), "SamplingParams.top_p"),
+            (_cli_params(top_k=40), "SamplingParams.top_k"),
+            (_cli_params(presence_penalty=0.1), "SamplingParams.presence_penalty"),
+            (_cli_params(frequency_penalty=0.1), "SamplingParams.frequency_penalty"),
+            (_cli_params(n=2), "SamplingParams.n"),
+            (_cli_params(stop_sequences=("X",)), "SamplingParams.stop_sequences"),
+            (_cli_params(logprobs=True), "SamplingParams.logprobs"),
+            (_cli_params(thinking_budget=100), "SamplingParams.thinking_budget"),
+            (_cli_params(extra={"foo": "bar"}), "SamplingParams.extra"),
         ],
     )
     def test_unsupported_sampling_params_raise(self, params: SamplingParams, needle: str) -> None:
@@ -366,21 +377,12 @@ class TestClaudeCodeBackendValidation:
         with pytest.raises(ValueError, match=needle):
             backend.generate_chat([ChatMessage(role="user", content="Hello")], params)
 
-    def test_max_tokens_is_accepted_but_ignored(self) -> None:
+    def test_hidden_max_tokens_is_rejected_before_subprocess(self) -> None:
         backend = _make_backend()
-
-        def fake_run(cmd, **kwargs):
-            return subprocess.CompletedProcess(
-                cmd, 0, stdout=json.dumps(_success_payload()), stderr=""
-            )
-
-        with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
-            result = backend.generate_chat(
-                [ChatMessage(role="user", content="Hi")],
-                SamplingParams(max_tokens=4096),
-            )
-
-        assert isinstance(result, GenerationResult)
+        with patch("llenvs.inference.backends.claude_code.subprocess.run") as run:
+            with pytest.raises(ValueError, match="max_tokens"):
+                backend.generate_chat([ChatMessage("user", "Hi")], _cli_params(max_tokens=4096))
+            run.assert_not_called()
 
     def test_image_messages_are_rejected_before_subprocess(self) -> None:
         backend = _make_backend()
@@ -392,7 +394,7 @@ class TestClaudeCodeBackendValidation:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run") as mock_run:
             with pytest.raises(ValueError, match="text-only"):
-                backend.generate_chat([message], SamplingParams())
+                backend.generate_chat([message], _cli_params())
 
         mock_run.assert_not_called()
 
@@ -407,7 +409,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(PromptTooLongError, match="Prompt is too long"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_prompt_too_long_via_nonzero_exit(self) -> None:
         backend = _make_backend()
@@ -422,7 +424,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(PromptTooLongError, match="maximum context length"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_quota_via_youve_hit(self) -> None:
         backend = _make_backend()
@@ -433,7 +435,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="weekly limit"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_quota_via_429_in_stderr(self) -> None:
         backend = _make_backend()
@@ -448,7 +450,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="exit code 1"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_quota_via_repeated_529(self) -> None:
         backend = _make_backend()
@@ -463,7 +465,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_auth_error_is_runtime_error_not_quota(self) -> None:
         backend = _make_backend()
@@ -474,7 +476,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(RuntimeError, match="authentication failed"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_auth_error_invalid_api_key_is_runtime_error(self) -> None:
         backend = _make_backend()
@@ -486,7 +488,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(RuntimeError, match="authentication failed"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_timeout_is_quota_exhausted(self) -> None:
         backend = _make_backend()
@@ -496,7 +498,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="timed out"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_generic_nonzero_exit_is_quota_exhausted(self) -> None:
         backend = _make_backend()
@@ -508,7 +510,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="exit code 1"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_non_json_stdout_is_quota_exhausted(self) -> None:
         backend = _make_backend()
@@ -518,7 +520,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="non-JSON output"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_missing_text_field_is_quota_exhausted(self) -> None:
         backend = _make_backend()
@@ -529,7 +531,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(QuotaExhaustedError, match="no recognized text field"):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
     def test_aup_refusal_via_is_error_payload_subtype_success(self) -> None:
         backend = _make_backend()
@@ -545,7 +547,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(RefusedByPolicyError, match="Usage Policy") as excinfo:
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
         assert excinfo.value.subtype == "success"
 
     def test_aup_refusal_via_anthropic_legal_url(self) -> None:
@@ -560,7 +562,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(RefusedByPolicyError) as excinfo:
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
         assert excinfo.value.subtype == "error_during_execution"
 
     def test_aup_refusal_via_nonzero_exit_stderr(self) -> None:
@@ -576,7 +578,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(RefusedByPolicyError, match="Usage Policy") as excinfo:
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
         # Non-JSON path: no subtype available.
         assert excinfo.value.subtype is None
 
@@ -593,7 +595,7 @@ class TestClaudeCodeBackendErrorClassification:
 
         with patch("llenvs.inference.backends.claude_code.subprocess.run", side_effect=fake_run):
             with pytest.raises(RefusedByPolicyError):
-                backend.generate_chat([ChatMessage(role="user", content="Hello")], SamplingParams())
+                backend.generate_chat([ChatMessage(role="user", content="Hello")], _cli_params())
 
 
 class TestClaudeCodeBackendBatching:
@@ -617,9 +619,16 @@ class TestClaudeCodeBackendBatching:
 
         with patch.object(backend, "_generate_chat_impl", side_effect=fake_impl):
             with pytest.raises(PartialBatchError) as exc_info:
-                backend.generate_chat_batch(messages_batch, SamplingParams())
+                backend.generate_chat_batch(messages_batch, _cli_params())
 
         error = exc_info.value
         assert isinstance(error.results[0], GenerationResult)
         assert error.results[0].text == "OK"
         assert isinstance(error.results[1], PromptTooLongError)
+
+
+def test_absent_cli_usage_is_unknown():
+    backend = _make_backend()
+    result = backend._handle_json_payload(_success_payload(usage={}), 0, "")
+    assert result.prompt_tokens is None and result.completion_tokens is None
+    assert result.cached_prompt_tokens is None

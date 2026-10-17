@@ -1,5 +1,6 @@
 """Tests for HuggingFace Transformers backend."""
 
+from copy import deepcopy
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -151,16 +152,17 @@ class TestHuggingFaceBackendUnit:
         assert kwargs["return_dict_in_generate"] is True
 
     def test_to_generate_kwargs_stop_sequences(self):
-        """Test stop sequences are converted to eos_token_ids."""
+        """Whole strings use native stopping; their first tokens are not EOS."""
         backend, mock_tokenizer, _, _ = self._create_mock_backend()
-        mock_tokenizer.encode.return_value = [42]
+        mock_tokenizer.encode.return_value = [42, 43]
 
         params = SamplingParams(stop_sequences=("STOP",))
 
         kwargs = backend._to_generate_kwargs(params)
 
-        # Should include original eos_token_id plus stop sequence token
-        assert 42 in kwargs["eos_token_id"] or kwargs["eos_token_id"] == [1, 42]
+        assert kwargs["eos_token_id"] == 1
+        assert kwargs["stop_strings"] == ["STOP"]
+        assert kwargs["tokenizer"] is mock_tokenizer
 
     def test_to_generate_kwargs_extra_params(self):
         """Test that extra params are passed through to generate kwargs."""
@@ -168,8 +170,8 @@ class TestHuggingFaceBackendUnit:
         params = SamplingParams(
             max_tokens=100,
             temperature=0.7,
+            repetition_penalty=1.2,
             extra={
-                "repetition_penalty": 1.2,
                 "num_beams": 4,
                 "length_penalty": 0.8,
             },
@@ -181,31 +183,43 @@ class TestHuggingFaceBackendUnit:
         assert kwargs["num_beams"] == 4
         assert kwargs["length_penalty"] == 0.8
 
-    def test_to_generate_kwargs_extra_overrides(self):
-        """Test that extra params can override computed values."""
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"do_sample": False},
+            {"temperature": 0.9},
+            {"top_k": 5},
+            {"repetition_penalty": 1.2},
+            {"max_new_tokens": 999},
+            {"num_return_sequences": 2},
+            {"input_ids": [[1, 2]]},
+        ],
+    )
+    def test_to_generate_kwargs_rejects_owned_keys_in_extras(self, extra):
+        """Typed controls and prompt inputs cannot be overridden through extras."""
         backend, _, _, _ = self._create_mock_backend()
-        params = SamplingParams(
-            temperature=0.7,
-            extra={"do_sample": False},  # Override the computed do_sample
-        )
+        params = SamplingParams(temperature=0.7, extra=extra)
 
-        kwargs = backend._to_generate_kwargs(params)
+        with pytest.raises(ValueError):
+            backend._to_generate_kwargs(params)
 
-        # extra should override the computed do_sample=True
-        assert kwargs["do_sample"] is False
-
-    def test_to_generate_kwargs_frequency_penalty_mapping(self):
-        """Test that frequency_penalty maps to repetition_penalty."""
+    @pytest.mark.parametrize("field", ["frequency_penalty", "presence_penalty"])
+    @pytest.mark.parametrize("value", [-0.5, 0.5])
+    def test_unsupported_additive_penalties_are_rejected(self, field, value):
+        """Multiplicative repetition penalties cannot approximate additive penalties."""
         backend, _, _, _ = self._create_mock_backend()
-        params = SamplingParams(
-            temperature=0.7,
-            frequency_penalty=0.5,
-        )
+        params = SamplingParams(temperature=0.7, **{field: value})
 
-        kwargs = backend._to_generate_kwargs(params)
+        with pytest.raises(ValueError, match=field):
+            backend._to_generate_kwargs(params)
 
-        # frequency_penalty should be converted to repetition_penalty
-        assert kwargs["repetition_penalty"] == 1.5  # 1.0 + 0.5
+    def test_multiple_choices_are_rejected_before_generation(self):
+        backend, _, model, _ = self._create_mock_backend()
+
+        with pytest.raises(ValueError, match="n"):
+            backend.generate(["prompt"], SamplingParams(n=2))
+
+        model.generate.assert_not_called()
 
     def test_to_generate_kwargs_extra_empty(self):
         """Test that empty extra dict doesn't affect kwargs."""
@@ -220,6 +234,212 @@ class TestHuggingFaceBackendUnit:
 
         assert kwargs["max_new_tokens"] == 100
         assert kwargs["do_sample"] is False
+
+
+@pytest.mark.skipif(not HAS_TRANSFORMERS, reason="transformers/torch not installed")
+class TestNativeGenerationDefaults:
+    """Exercise native configuration merging with a tiny, offline CPU model."""
+
+    @pytest.fixture
+    def backend(self):
+        from transformers import GenerationConfig, GPT2Config, GPT2LMHeadModel
+
+        from llenvs.inference.backends.huggingface import HuggingFaceBackend
+
+        model = GPT2LMHeadModel(
+            GPT2Config(vocab_size=8, n_layer=1, n_head=1, n_embd=8, eos_token_id=7)
+        ).eval()
+        model.generation_config = GenerationConfig(
+            max_new_tokens=2,
+            do_sample=True,
+            temperature=0.7,
+            top_p=0.81,
+            top_k=4,
+            min_p=0.12,
+            repetition_penalty=1.3,
+            pad_token_id=0,
+            eos_token_id=7,
+        )
+        tokenizer = MagicMock()
+        tokenizer.return_value = {
+            "input_ids": torch.tensor([[1, 2]]),
+            "attention_mask": torch.tensor([[1, 1]]),
+        }
+        tokenizer.pad_token_id, tokenizer.eos_token_id = 0, 7
+        tokenizer.__len__.return_value = 8
+        tokenizer.decode.return_value = "answer"
+        backend = HuggingFaceBackend.__new__(HuggingFaceBackend)
+        backend._model_path = "offline-tiny-model"
+        backend._model, backend._tokenizer = model, tokenizer
+        backend._torch, backend._device = torch, "cpu"
+        backend._chat_template_kwargs = {}
+        backend._is_vlm = False
+        yield backend
+        backend.close()
+
+    @pytest.mark.parametrize("inherit", [False, True])
+    def test_native_defaults_are_inherited_only_when_requested(self, backend, inherit):
+        original = deepcopy(backend.model.generation_config.to_dict())
+        params = (
+            SamplingParams(
+                max_tokens=None,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                min_p=None,
+                repetition_penalty=None,
+                presence_penalty=None,
+                frequency_penalty=None,
+            )
+            if inherit
+            else SamplingParams(max_tokens=1, temperature=0.6, top_p=0.83)
+        )
+        with patch.object(
+            backend.model,
+            "_get_logits_processor",
+            wraps=backend.model._get_logits_processor,
+        ) as native_processors:
+            result = backend.generate(["prompt"], params)[0]
+
+        effective = native_processors.call_args.kwargs["generation_config"]
+        expected = (
+            {
+                key: original[key]
+                for key in (
+                    "max_new_tokens",
+                    "do_sample",
+                    "temperature",
+                    "top_p",
+                    "top_k",
+                    "min_p",
+                    "repetition_penalty",
+                )
+            }
+            if inherit
+            else {
+                "max_new_tokens": 1,
+                "do_sample": True,
+                "temperature": 0.6,
+                "top_p": 0.83,
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+            }
+        )
+        assert {key: getattr(effective, key) for key in expected} == expected
+        assert backend.model.generation_config.to_dict() == original
+        assert result.metadata["request"]["top_k"] == expected["top_k"]
+        assert result.metadata["request"]["repetition_penalty"] == expected["repetition_penalty"]
+
+    def test_post_eos_batch_padding_is_not_sampled_output_or_scored(self, backend):
+        from types import SimpleNamespace
+
+        backend.tokenizer.return_value = {
+            "input_ids": torch.tensor([[1, 2], [1, 2]]),
+            "attention_mask": torch.ones((2, 2), dtype=torch.long),
+        }
+        outputs = SimpleNamespace(
+            sequences=torch.tensor([[1, 2, 3, 7, 0], [1, 2, 4, 5, 7]]),
+            scores=tuple(torch.zeros(2, 8) for _ in range(3)),
+        )
+        with patch.object(backend.model, "generate", return_value=outputs):
+            results = backend.generate(
+                ["first", "second"], SamplingParams(max_tokens=3, logprobs=True)
+            )
+        assert [result.completion_tokens for result in results] == [2, 3]
+        assert results[0].metadata["raw_token_ids"] == [3, 7]
+        assert [lp.token_id for lp in results[0].token_logprobs] == [3, 7]
+        assert results[0].finish_reason == StopReason.END_OF_TEXT
+
+    def test_multiple_greedy_continuations_keep_requested_decoding(self, backend):
+        backend.tokenizer.side_effect = lambda prompts, **kwargs: {
+            "input_ids": torch.tensor([[1, 2]] * len(prompts)),
+            "attention_mask": torch.ones((len(prompts), 2), dtype=torch.long),
+        }
+        with patch.object(backend.model, "generate", wraps=backend.model.generate) as generate:
+            results = backend.continue_from_prefix(
+                "prefix", SamplingParams(max_tokens=1, temperature=0), 2
+            )
+        assert len(results) == 2
+        assert generate.call_args.kwargs["do_sample"] is False
+        assert "temperature" not in generate.call_args.kwargs
+        assert all(result.metadata["is_continuation"] for result in results)
+
+    def test_token_phase_receipt_precedes_decoding_and_can_be_reparsed(self, backend):
+        events, receipts = [], []
+
+        class Observer:
+            def started(self, index, attempt):
+                events.append("started")
+
+            def received(self, index, receipt):
+                receipts.append(receipt)
+                events.append("received")
+
+            def completed(self, index, result):
+                events.append("completed")
+
+        def decode(*args, **kwargs):
+            assert events[-1] == "received"
+            return "answer"
+
+        backend.tokenizer.decode.side_effect = decode
+        with patch.object(backend.model, "generate", wraps=backend.model.generate) as generate:
+            result = backend._generate_tokens(
+                [1, 2],
+                SamplingParams(),
+                1,
+                phase_name="answer",
+                stop_id=None,
+                schema=None,
+                observer=Observer(),
+            )
+        assert events == ["started", "received", "completed"]
+        backend.tokenizer.decode.side_effect = None
+        assert backend.reparse_token_receipt(receipts[0]) == result
+        assert generate.call_count == 1
+
+    def test_phase_eos_at_thinking_budget_boundary_does_not_authorize_answer(self, backend):
+        with patch.object(backend.model, "generate", return_value=torch.tensor([[1, 2, 7]])):
+            phase = backend._generate_tokens(
+                [1, 2], SamplingParams(), 1, phase_name="reasoning", stop_id=99, schema=None
+            )
+        assert phase.token_ids == (7,)
+        assert phase.result.finish_reason == StopReason.END_OF_TEXT
+
+
+def test_qwen_vlm_loader_uses_one_resolved_revision_without_legacy_vision_import():
+    from types import SimpleNamespace
+
+    from llenvs.inference.backends.huggingface import HuggingFaceBackend
+
+    revision = "a" * 40
+    config = SimpleNamespace(model_type="qwen3_5", _commit_hash=revision)
+    model = SimpleNamespace(config=SimpleNamespace(max_position_embeddings=4096), dtype="bfloat16")
+    tokenizer = SimpleNamespace(pad_token="pad", eos_token="eos", padding_side="right")
+    native = SimpleNamespace(
+        AutoModelForCausalLM=MagicMock(),
+        AutoConfig=MagicMock(),
+        AutoTokenizer=MagicMock(),
+        AutoProcessor=MagicMock(),
+        AutoModelForImageTextToText=MagicMock(),
+    )
+    native.AutoConfig.from_pretrained.return_value = config
+    native.AutoTokenizer.from_pretrained.return_value = tokenizer
+    native.AutoModelForImageTextToText.from_pretrained.return_value = model
+    tensor_module = MagicMock()
+    tensor_module.cuda.is_available.return_value = False
+    tensor_module.backends.mps.is_available.return_value = False
+    with patch.dict("sys.modules", {"transformers": native, "torch": tensor_module}):
+        backend = HuggingFaceBackend("Qwen/model", revision="main", device="cpu")
+        for loader in (
+            native.AutoTokenizer,
+            native.AutoProcessor,
+            native.AutoModelForImageTextToText,
+        ):
+            assert loader.from_pretrained.call_args.kwargs["revision"] == revision
+        native.AutoModelForCausalLM.from_pretrained.assert_not_called()
+        backend.close()
 
 
 class TestConvertStopReason:
@@ -594,7 +814,7 @@ class TestHuggingFaceChatTemplateKwargs:
         # Mock generate to avoid the full pipeline
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -612,12 +832,12 @@ class TestHuggingFaceChatTemplateKwargs:
         assert call_kwargs[1].get("enable_thinking") is True
 
     def test_default_false_preserves_disabled_chat_template_kwargs(self):
-        """disable_thinking=False preserves backend-level no-thinking config."""
+        """reasoning_effort=None preserves backend-level no-thinking config."""
         backend = self._create_mock_backend({"enable_thinking": False})
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -633,13 +853,13 @@ class TestHuggingFaceChatTemplateKwargs:
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
         assert call_kwargs[1].get("enable_thinking") is False
 
-    def test_disable_thinking_overrides_chat_template_kwargs(self):
-        """Per-call disable_thinking overrides backend-level thinking config."""
+    def test_reasoning_effort_none_overrides_chat_template_kwargs(self):
+        """Per-call reasoning_effort_none overrides backend-level thinking config."""
         backend = self._create_mock_backend({"enable_thinking": True})
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -649,7 +869,7 @@ class TestHuggingFaceChatTemplateKwargs:
         ):
             backend.generate_chat(
                 [ChatMessage(role="user", content="hi")],
-                SamplingParams(max_tokens=10, disable_thinking=True),
+                SamplingParams(max_tokens=10, reasoning_effort="none"),
             )
 
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
@@ -661,7 +881,7 @@ class TestHuggingFaceChatTemplateKwargs:
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -678,13 +898,13 @@ class TestHuggingFaceChatTemplateKwargs:
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
         assert call_kwargs[1].get("enable_thinking") is True
 
-    def test_disable_thinking_overrides_batch_chat_template_kwargs(self):
+    def test_reasoning_effort_none_overrides_batch_chat_template_kwargs(self):
         """Batched second elicitation also disables chat-template thinking."""
         backend = self._create_mock_backend({"enable_thinking": True})
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -694,7 +914,7 @@ class TestHuggingFaceChatTemplateKwargs:
         ):
             backend.generate_chat_batch(
                 [[ChatMessage(role="user", content="hi")]],
-                SamplingParams(max_tokens=10, disable_thinking=True),
+                SamplingParams(max_tokens=10, reasoning_effort="none"),
             )
 
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
@@ -706,7 +926,7 @@ class TestHuggingFaceChatTemplateKwargs:
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -768,13 +988,13 @@ class TestHuggingFaceThinkingBudget:
         assert "logits_processor" in kwargs
         assert len(kwargs["logits_processor"]) == 1
 
-    def test_disable_thinking_skips_thinking_budget_processor(self):
-        """disable_thinking suppresses local thinking-budget intervention."""
+    def test_reasoning_effort_none_skips_thinking_budget_processor(self):
+        """reasoning_effort_none suppresses local thinking-budget intervention."""
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
             thinking_budget=512,
-            disable_thinking=True,
+            reasoning_effort="none",
         )
         kwargs = backend._to_generate_kwargs(params)
         assert "logits_processor" not in kwargs

@@ -6,9 +6,11 @@ and common data structures for generation.
 
 from __future__ import annotations
 
+import json
+import math
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import MISSING, dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields, replace
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any
 
@@ -158,9 +160,7 @@ class PartialBatchError(Exception):
         self.results = results
         self.failures = failures
         self.offending_indices = list(failures)
-        super().__init__(
-            f"Concurrent batch had {len(failures)}/{len(results)} failed items"
-        )
+        super().__init__(f"Concurrent batch had {len(failures)}/{len(results)} failed items")
 
 
 class MalformedResponseError(Exception):
@@ -235,6 +235,92 @@ class LogprobsNotReturnedError(RuntimeError):
         self.model_name = model_name
 
 
+class ReplayedBackendError(RuntimeError):
+    """Plain saved diagnostics for an error whose native SDK object is unavailable."""
+
+    def __init__(self, message, *, original_error_type, transient=False, status_code=None):
+        super().__init__(message)
+        self.original_error_type = original_error_type
+        self.transient = transient
+        self.status_code = status_code
+
+
+def encode_backend_error(error: BaseException) -> dict[str, Any]:
+    """Preserve handling semantics without saving SDK clients or tracebacks."""
+    from llenvs.inference.sampling import _record_value
+
+    attributes = {}
+    if isinstance(error, PromptTooLongError):
+        attributes = {
+            key: getattr(error, key)
+            for key in (
+                "model_name",
+                "max_model_len",
+                "batch_size",
+                "prompt_token_lengths",
+                "offending_indices",
+                "offending_prompts",
+            )
+        }
+    elif isinstance(error, RefusedByPolicyError):
+        attributes = {"subtype": error.subtype, "offending_indices": error.offending_indices}
+    elif isinstance(error, RecoverableInputError):
+        attributes = {"offending_indices": error.offending_indices}
+    elif isinstance(error, MalformedResponseError):
+        attributes = {
+            key: getattr(error, key) for key in ("backend_name", "model_name", "provider_error")
+        }
+    elif isinstance(error, LogprobsNotReturnedError):
+        attributes = {key: getattr(error, key) for key in ("backend_name", "model_name")}
+    status = getattr(error, "status_code", None) or getattr(
+        getattr(error, "response", None), "status_code", None
+    )
+    transient = not isinstance(error, (RecoverableInputError, QuotaExhaustedError)) and (
+        status == 429 or (isinstance(status, int) and status >= 500)
+    )
+    return _record_value(
+        {
+            "type": type(error).__name__,
+            "message": str(error),
+            "attributes": attributes,
+            "recoverable": isinstance(error, RecoverableInputError),
+            "transient": transient,
+            "fatal": not transient and not isinstance(error, RecoverableInputError),
+            "status_code": status,
+            "attempts": getattr(error, "attempts", None),
+            "elapsed_seconds": getattr(error, "elapsed_seconds", None),
+        }
+    )
+
+
+def restore_backend_error(saved: dict[str, Any]) -> BaseException:
+    constructors = {
+        cls.__name__: cls
+        for cls in (
+            PromptTooLongError,
+            RefusedByPolicyError,
+            RecoverableInputError,
+            MalformedResponseError,
+            LogprobsNotReturnedError,
+            QuotaExhaustedError,
+        )
+    }
+    constructor = constructors.get(saved["type"])
+    if constructor is not None:
+        error = constructor(saved["message"], **saved.get("attributes", {}))
+    else:
+        error = ReplayedBackendError(
+            saved["message"],
+            original_error_type=saved["type"],
+            transient=saved.get("transient", False),
+            status_code=saved.get("status_code"),
+        )
+    setattr(error, "recorded_error", deepcopy(saved))
+    for name in ("status_code", "attempts", "elapsed_seconds"):
+        setattr(error, name, deepcopy(saved.get(name)))
+    return error
+
+
 class StopReason(Enum):
     """Reason why generation stopped."""
 
@@ -252,13 +338,13 @@ class TokenLogprob:
 
     Attributes:
         token: The token string.
-        token_id: Token ID in vocabulary.
+        token_id: Native token ID, or None when the provider does not report it.
         logprob: Log probability of this token.
         top_logprobs: Optional top-k alternatives with their logprobs.
     """
 
     token: str
-    token_id: int
+    token_id: int | None
     logprob: float
     top_logprobs: dict[str, float] | None = None
 
@@ -298,11 +384,27 @@ class ScoringResult:
         prompt_tokens: Number of tokens in the prompt context.
         scored_tokens: Number of continuation tokens scored
             (equals ``len(token_scores)``).
+        metadata: Backend records and optional persistence provenance.
     """
 
     token_scores: tuple[TokenScore, ...]
     prompt_tokens: int = 0
     scored_tokens: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ResponseSchema:
+    """A detached JSON Schema for a backend's constrained answer decoder."""
+
+    schema: dict[str, Any]
+    name: str = "response"
+    strict: bool = True
+
+    def __post_init__(self) -> None:
+        if not self.name or not isinstance(self.schema, dict):
+            raise ValueError("ResponseSchema requires a name and an object schema")
+        object.__setattr__(self, "schema", json.loads(json.dumps(self.schema, allow_nan=False)))
 
 
 @dataclass(frozen=True)
@@ -315,14 +417,17 @@ class SamplingParams:
     vLLM, OpenAI API).
 
     Attributes:
-        max_tokens: Maximum tokens to generate.
-        temperature: Sampling temperature (0 = greedy).
-        top_p: Nucleus sampling threshold.
-        top_k: Top-k sampling (0 = disabled).
+        max_tokens: Maximum tokens to generate. None inherits the native default.
+        temperature: Sampling temperature (0 = greedy). None inherits the native default.
+        top_p: Nucleus sampling threshold (1 = disabled). None inherits the native default.
+        top_k: Top-k sampling (0 = disabled). None inherits the native default.
+        min_p: Minimum relative token probability (0 = disabled).
+        repetition_penalty: Multiplicative repetition penalty (1 = disabled).
         stop_sequences: Sequences that stop generation.
         presence_penalty: Penalty for token presence.
         frequency_penalty: Penalty for token frequency.
-        n: Number of completions to generate.
+        n: Must be 1 for operations returning one result per input. Prefix
+            continuation uses its explicit num_continuations argument.
         logprobs: Whether to return log probabilities.
         num_logprobs: Number of top logprobs to return per token.
         thinking_budget: Maximum thinking tokens. None = no budget.
@@ -330,23 +435,26 @@ class SamplingParams:
         thinking_budget_soft_ratio: Begin boosting ``</think>`` at this ratio.
         thinking_budget_suffix: Text forced when budget exhausted. None = bare
             ``</think>``.
-        disable_thinking: Disable backend thinking/reasoning for this call.
-            Defaults to False and preserves backend/configured thinking behavior.
+        reasoning_effort: Per-request reasoning level; None inherits the model default.
+        response_schema: Native constrained answer format, if supported.
+        after_reasoning_text: Supplied text inserted before the verified closing marker.
         second_elicitation_suffix: Suffix for follow-up on truncated outputs.
             None = disabled.
         second_elicitation_max_tokens: Token budget for the follow-up call.
         extra: Backend-specific parameters passed through to the underlying
-            inference library. For HuggingFace: repetition_penalty, do_sample,
-            num_beams, etc. For vLLM: best_of, use_beam_search, etc.
+            inference library. Owned typed controls cannot be overridden here.
+            For HuggingFace: num_beams, length_penalty, etc.
     """
 
-    max_tokens: int = 2048
-    temperature: float = 0.0
-    top_p: float = 1.0
-    top_k: int = 0
+    max_tokens: int | None = 2048
+    temperature: float | None = 0.0
+    top_p: float | None = 1.0
+    top_k: int | None = 0
+    min_p: float | None = 0.0
+    repetition_penalty: float | None = 1.0
     stop_sequences: tuple[str, ...] = ()
-    presence_penalty: float = 0.0
-    frequency_penalty: float = 0.0
+    presence_penalty: float | None = 0.0
+    frequency_penalty: float | None = 0.0
     n: int = 1
     logprobs: bool = False
     num_logprobs: int = 5
@@ -355,11 +463,52 @@ class SamplingParams:
     thinking_budget_per_block: bool = False
     thinking_budget_soft_ratio: float | None = None
     thinking_budget_suffix: str | None = None
-    disable_thinking: bool = False
+    reasoning_effort: str | None = None
+    response_schema: ResponseSchema | None = None
+    after_reasoning_text: str | None = None
     # Second elicitation
     second_elicitation_suffix: str | None = None
     second_elicitation_max_tokens: int = 256
     extra: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.reasoning_effort is not None and (
+            not isinstance(self.reasoning_effort, str) or not self.reasoning_effort
+        ):
+            raise ValueError("reasoning_effort must be a nonempty string or None")
+        if self.after_reasoning_text is not None and any(
+            marker in self.after_reasoning_text for marker in ("<think>", "</think>")
+        ):
+            raise ValueError("after_reasoning_text cannot contain reasoning delimiters")
+        for name in ("max_tokens", "top_k", "n", "num_logprobs"):
+            value = getattr(self, name)
+            if value is None and name in {"max_tokens", "top_k"}:
+                continue
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an integer")
+            if value < (0 if name in {"top_k", "num_logprobs"} else 1):
+                raise ValueError(f"{name} is outside its valid range")
+        for name in (
+            "temperature",
+            "top_p",
+            "min_p",
+            "repetition_penalty",
+            "presence_penalty",
+            "frequency_penalty",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a finite number or None")
+            if not math.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            if (
+                (name == "temperature" and value < 0)
+                or (name in {"top_p", "min_p"} and not 0 <= value <= 1)
+                or (name == "repetition_penalty" and value <= 0)
+            ):
+                raise ValueError(f"{name} is outside its valid range")
 
     def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore pickled params, filling fields added after serialization."""
@@ -393,13 +542,18 @@ class GenerationResult:
     finish_reason: StopReason = StopReason.UNKNOWN
     tool_calls: tuple[ToolCall, ...] = ()
     token_logprobs: tuple[TokenLogprob, ...] | None = None
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
+    cache_write_prompt_tokens: int | None = None
+    reasoning_tokens: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
-    def total_tokens(self) -> int:
+    def total_tokens(self) -> int | None:
         """Total tokens used (prompt + completion)."""
+        if self.prompt_tokens is None or self.completion_tokens is None:
+            return None
         return self.prompt_tokens + self.completion_tokens
 
     @property
@@ -612,6 +766,11 @@ class BackendCapabilities:
     supports_function_calling: bool = False
     supports_vision: bool = False
     supports_full_scoring: bool = False
+    supports_response_schema: bool = False
+    supports_schema_after_reasoning: bool = False
+    supports_after_reasoning_text: bool = False
+    supports_request_progress: bool = False
+    supports_explicit_sampling: bool = False
     max_batch_size: int | None = None
     max_context_length: int | None = None
     max_concurrency: int | None = None
@@ -623,6 +782,23 @@ class ModelBackend(ABC):
     Backends provide a uniform interface for different inference methods
     (local vLLM, API services, etc.).
     """
+
+    def descriptor(self) -> dict[str, Any]:
+        """Custom backends must describe the semantics needed for safe replay."""
+        raise NotImplementedError("Custom backends must implement descriptor()")
+
+    def validate_sampling(self, params: SamplingParams) -> None:
+        """Validate shared controls; custom backends must declare explicit support."""
+        from llenvs.inference.sampling import DECODING_FIELDS, validate_sampling
+
+        validate_sampling(params)
+        if not self.capabilities.supports_explicit_sampling:
+            hidden = [name for name in DECODING_FIELDS if getattr(params, name) is not None]
+            if hidden or any(
+                getattr(params, name) is not None
+                for name in ("reasoning_effort", "response_schema", "after_reasoning_text")
+            ):
+                raise ValueError("Backend controls are hidden or undeclared; omit them with None")
 
     @property
     @abstractmethod
@@ -779,18 +955,7 @@ class ModelBackend(ABC):
             raise NotImplementedError("This backend does not support logprobs")
 
         # Create params with logprobs enabled
-        params_with_logprobs = SamplingParams(
-            max_tokens=params.max_tokens,
-            temperature=params.temperature,
-            top_p=params.top_p,
-            top_k=params.top_k,
-            stop_sequences=params.stop_sequences,
-            presence_penalty=params.presence_penalty,
-            frequency_penalty=params.frequency_penalty,
-            n=params.n,
-            logprobs=True,
-            num_logprobs=num_logprobs,
-        )
+        params_with_logprobs = replace(params, logprobs=True, num_logprobs=num_logprobs)
         return self.generate(prompts, params_with_logprobs)
 
     def continue_from_prefix(
@@ -844,12 +1009,8 @@ class ModelBackend(ABC):
                 continuation.
         """
         if not self.capabilities.supports_prefix_continuation:
-            raise NotImplementedError(
-                "This backend does not support prefix continuation"
-            )
-        raise NotImplementedError(
-            "Subclass must implement generate_chat_with_prefix"
-        )
+            raise NotImplementedError("This backend does not support prefix continuation")
+        raise NotImplementedError("Subclass must implement generate_chat_with_prefix")
 
     def generate_chat_with_prefix_batch(
         self,
@@ -900,9 +1061,7 @@ class ModelBackend(ABC):
                 scoring (``capabilities.supports_full_scoring is False``).
         """
         if not self.capabilities.supports_full_scoring:
-            raise NotImplementedError(
-                "This backend does not support full scoring"
-            )
+            raise NotImplementedError("This backend does not support full scoring")
         raise NotImplementedError("Subclass must implement score_chat")
 
     def score_chat_batch(
@@ -922,10 +1081,7 @@ class ModelBackend(ABC):
         Returns:
             List of ``ScoringResult`` objects, one per input pair.
         """
-        return [
-            self.score_chat(msgs, cont)
-            for msgs, cont in zip(messages_batch, continuations)
-        ]
+        return [self.score_chat(msgs, cont) for msgs, cont in zip(messages_batch, continuations)]
 
     def generate_with_tools(
         self,

@@ -41,29 +41,60 @@ def http_server():
                 content = "".join(block.get("text", "") for block in content)
             status = 400 if content == "reject" else 200
             if status == 400:
-                payload = {"error": {"message": "Rejected by test server", "type": "invalid_request_error"}}
+                payload = {
+                    "error": {"message": "Rejected by test server", "type": "invalid_request_error"}
+                }
             elif self.path.endswith("/messages"):
                 payload = {
-                    "id": "fake", "type": "message", "role": "assistant", "model": "fake",
-                    "content": [{"type": "text", "text": content}], "stop_reason": "end_turn",
-                    "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "id": "fake",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "fake",
+                    "content": [{"type": "text", "text": content}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
                 }
             elif self.path.endswith("/chat/completions"):
                 payload = {
-                    "id": "fake", "object": "chat.completion", "created": 0, "model": "fake",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": content},
-                                 "finish_reason": "stop"}],
+                    "id": "fake",
+                    "object": "chat.completion",
+                    "created": 0,
+                    "model": "fake",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
                     "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
                 }
             else:
                 ids = body["prompt"]
                 payload = {
-                    "id": "fake", "object": "text_completion", "created": 0, "model": "fake",
-                    "choices": [{"index": 0, "text": "x", "finish_reason": "stop",
-                                 "prompt_logprobs": [None] + [
-                                     {str(token): {"logprob": -0.1, "rank": 1, "decoded_token": chr(token)}}
-                                     for token in ids[1:]
-                                 ]}],
+                    "id": "fake",
+                    "object": "text_completion",
+                    "created": 0,
+                    "model": "fake",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "text": "x",
+                            "finish_reason": "stop",
+                            "prompt_logprobs": [None]
+                            + [
+                                {
+                                    str(token): {
+                                        "logprob": -0.1,
+                                        "rank": 1,
+                                        "decoded_token": chr(token),
+                                    }
+                                }
+                                for token in ids[1:]
+                            ],
+                        }
+                    ],
                 }
             encoded = json.dumps(payload).encode()
             self.send_response(status)
@@ -77,7 +108,9 @@ def http_server():
                 pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}/v1", requests=requests)
@@ -92,8 +125,12 @@ def http_server():
 def backend(request, http_server):
     pytest.importorskip("anthropic" if request.param is AnthropicBackend else "openai")
     instance = request.param(
-        model="fake", api_key="dummy", base_url=http_server.url, max_retries=0,
-        max_concurrency=4, timeout=2,
+        model="fake",
+        api_key="dummy",
+        base_url=http_server.url,
+        max_retries=0,
+        max_concurrency=4,
+        timeout=2,
     )
     yield instance
     instance.close()
@@ -111,10 +148,14 @@ def test_loopback_server_handles_reused_connections_on_one_event_loop(http_serve
     sdk = pytest.importorskip("openai")
 
     async def run():
-        async with sdk.AsyncOpenAI(api_key="dummy", base_url=http_server.url, max_retries=0) as client:
+        async with sdk.AsyncOpenAI(
+            api_key="dummy", base_url=http_server.url, max_retries=0
+        ) as client:
             for i in range(6):
                 result = await client.chat.completions.create(
-                    model="fake", messages=[{"role": "user", "content": str(i)}], max_tokens=16,
+                    model="fake",
+                    messages=[{"role": "user", "content": str(i)}],
+                    max_tokens=16,
                 )
                 assert result.choices[0].message.content == str(i)
 
@@ -156,7 +197,9 @@ def test_sync_batch_api_works_inside_a_running_event_loop(backend, http_server):
 def test_backend_can_be_reused_from_different_caller_threads(backend, http_server):
     for batch in range(4):
         with ThreadPoolExecutor(max_workers=1) as pool:
-            result = pool.submit(backend.generate_chat_batch, [messages(str(batch))], PARAMS).result(timeout=10)
+            result = pool.submit(
+                backend.generate_chat_batch, [messages(str(batch))], PARAMS
+            ).result(timeout=10)
         assert result[0].text == str(batch)
     assert len(http_server.requests) == 4
 
@@ -194,7 +237,9 @@ def test_runtime_error_in_async_caller_does_not_repeat_the_operation():
 
 def test_real_http_failure_preserves_partial_results_and_backend_reusability(backend, http_server):
     with pytest.raises(PartialBatchError) as caught:
-        backend.generate_chat_batch([messages("left"), messages("reject"), messages("right")], PARAMS)
+        backend.generate_chat_batch(
+            [messages("left"), messages("reject"), messages("right")], PARAMS
+        )
     assert set(caught.value.failures) == {1}
     assert caught.value.results[0].text == "left"
     assert caught.value.results[2].text == "right"
@@ -214,7 +259,11 @@ def test_transport_exception_keeps_original_cause(backend, monkeypatch, tools):
     async def fail(**kwargs):
         raise error from cause
 
-    endpoint = backend._async_client.messages if isinstance(backend, AnthropicBackend) else backend._async_client.chat.completions
+    endpoint = (
+        backend._async_client.messages
+        if isinstance(backend, AnthropicBackend)
+        else backend._async_client.chat.completions
+    )
     monkeypatch.setattr(endpoint, "create", fail)
     with pytest.raises(PartialBatchError) as caught:
         if tools:
@@ -230,7 +279,9 @@ def test_local_scoring_and_chat_share_connection_lifetime(http_server):
     pytest.importorskip("openai")
     from llenvs.inference.backends.vllm_singularity import SingularityVLLMBackend
 
-    inner = OpenAIBackend(model="fake", api_key="dummy", base_url=http_server.url, max_retries=0, timeout=2)
+    inner = OpenAIBackend(
+        model="fake", api_key="dummy", base_url=http_server.url, max_retries=0, timeout=2
+    )
     outer = SingularityVLLMBackend.__new__(SingularityVLLMBackend)
     outer._openai = inner
     # This HTTP-only shell stands in for a healthy owned inference process.
@@ -272,15 +323,19 @@ def test_owned_server_refusal_survives_real_httpx_exception_wrapping(tmp_path):
         listener.listen()
         listener.close()
         inner = OpenAIBackend(
-            model="fake", api_key="dummy",
+            model="fake",
+            api_key="dummy",
             base_url=f"http://127.0.0.1:{port}/v1",
-            max_retries=0, timeout=2,
+            max_retries=0,
+            timeout=2,
         )
         outer = SingularityVLLMBackend.__new__(SingularityVLLMBackend)
         outer._openai = inner
         outer._proc = SimpleNamespace(poll=lambda: None)
         outer._log_path = str(tmp_path / "server.log")
         outer._server_failure = None
+        outer._reasoning_family = None
+        outer._chat_template_kwargs = {}
         try:
             with pytest.raises(PartialBatchError) as caught:
                 outer.generate_chat_batch([messages("test")], PARAMS)

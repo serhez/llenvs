@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from llenvs.inference.records import sum_known
+
 _VALID_TARGETS = frozenset({"console", "file", "wandb"})
 
 logger = logging.getLogger("llenvs.evaluation")
@@ -87,8 +89,8 @@ class _StepEvent:
     task_index: int
     step_num: int
     reward_total: float
-    prompt_tokens: int
-    completion_tokens: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
     has_tool_calls: bool
     num_tool_calls: int
 
@@ -152,11 +154,11 @@ class _ConsoleTarget:
 
     def on_step(self, event: _StepEvent) -> None:
         logger.debug(
-            "Task %d step %d: reward=%.3f tokens=%d",
+            "Task %d step %d: reward=%.3f tokens=%s",
             event.task_index,
             event.step_num,
             event.reward_total,
-            event.prompt_tokens + event.completion_tokens,
+            sum_known([event.prompt_tokens, event.completion_tokens]),
         )
 
     def on_error(self, event: _ErrorEvent) -> None:
@@ -277,7 +279,7 @@ class _WandbTarget:
         self._run.log(
             {
                 "step/reward": event.reward_total,
-                "step/tokens": event.prompt_tokens + event.completion_tokens,
+                "step/tokens": sum_known([event.prompt_tokens, event.completion_tokens]),
                 "step/prompt_tokens": event.prompt_tokens,
                 "step/completion_tokens": event.completion_tokens,
                 "step/num_tool_calls": event.num_tool_calls,

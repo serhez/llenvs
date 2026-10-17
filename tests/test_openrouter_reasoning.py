@@ -23,6 +23,8 @@ import pytest
 from llenvs.inference.backends.api import OpenRouterBackend
 from llenvs.inference.protocol import ChatMessage, SamplingParams
 
+NEUTRAL = {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0}
+
 
 def _chat_completion() -> SimpleNamespace:
     """Minimal ChatCompletion-shaped response (no logprobs needed here)."""
@@ -30,7 +32,10 @@ def _chat_completion() -> SimpleNamespace:
     choice = SimpleNamespace(message=message, finish_reason="stop", logprobs=None)
     usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
     return SimpleNamespace(
-        choices=[choice], model="test-model", id="chatcmpl-stub", usage=usage,
+        choices=[choice],
+        model="test-model",
+        id="chatcmpl-stub",
+        usage=usage,
     )
 
 
@@ -62,16 +67,15 @@ class TestThinkingBudgetMapping:
     ) -> None:
         backend = _openrouter_backend(monkeypatch)
         kwargs = _capture_kwargs(
-            backend, SamplingParams(thinking_budget=2048),
+            backend,
+            SamplingParams(thinking_budget=2048),
         )
-        assert kwargs.get("extra_body") == {"reasoning": {"max_tokens": 2048}}
+        assert kwargs.get("extra_body") == NEUTRAL | {"reasoning": {"max_tokens": 2048}}
 
-    def test_no_thinking_budget_omits_reasoning(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_thinking_budget_omits_reasoning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         backend = _openrouter_backend(monkeypatch)
         kwargs = _capture_kwargs(backend, SamplingParams())
-        assert "extra_body" not in kwargs
+        assert "reasoning" not in kwargs.get("extra_body", {})
 
     def test_thinking_budget_does_not_set_top_level_reasoning(
         self, monkeypatch: pytest.MonkeyPatch
@@ -80,7 +84,8 @@ class TestThinkingBudgetMapping:
         SDK does not know the field at the top level."""
         backend = _openrouter_backend(monkeypatch)
         kwargs = _capture_kwargs(
-            backend, SamplingParams(thinking_budget=512),
+            backend,
+            SamplingParams(thinking_budget=512),
         )
         assert "reasoning" not in kwargs
 
@@ -88,19 +93,15 @@ class TestThinkingBudgetMapping:
 class TestExtraMergeSemantics:
     """``params.extra`` interacts cleanly with the derived ``reasoning``."""
 
-    def test_user_extra_body_reasoning_overrides_thinking_budget(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When a caller explicitly puts ``reasoning`` in
-        ``extra.extra_body``, that escape hatch wins over the derived
-        ``reasoning.max_tokens`` mapped from ``thinking_budget``."""
+    def test_user_extra_reasoning_cannot_replace_typed_budget(self, monkeypatch):
         backend = _openrouter_backend(monkeypatch)
-        params = SamplingParams(
-            thinking_budget=2048,
-            extra={"extra_body": {"reasoning": {"effort": "high"}}},
-        )
-        kwargs = _capture_kwargs(backend, params)
-        assert kwargs["extra_body"] == {"reasoning": {"effort": "high"}}
+        with pytest.raises(ValueError):
+            _capture_kwargs(
+                backend,
+                SamplingParams(
+                    thinking_budget=2048, extra={"extra_body": {"reasoning": {"effort": "high"}}}
+                ),
+            )
 
     def test_user_extra_body_other_keys_coexist_with_reasoning(
         self, monkeypatch: pytest.MonkeyPatch
@@ -114,21 +115,19 @@ class TestExtraMergeSemantics:
             extra={"extra_body": {"provider": {"order": ["anthropic"]}}},
         )
         kwargs = _capture_kwargs(backend, params)
-        assert kwargs["extra_body"] == {
+        assert kwargs["extra_body"] == NEUTRAL | {
             "reasoning": {"max_tokens": 1024},
             "provider": {"order": ["anthropic"]},
         }
 
-    def test_user_extra_top_level_keys_pass_through(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_user_extra_top_level_keys_pass_through(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-``extra_body`` keys in ``params.extra`` keep flowing as
         top-level kwargs to the OpenAI SDK call (existing behavior)."""
         backend = _openrouter_backend(monkeypatch)
         params = SamplingParams(extra={"user": "u-123"})
         kwargs = _capture_kwargs(backend, params)
         assert kwargs.get("user") == "u-123"
-        assert "extra_body" not in kwargs
+        assert "reasoning" not in kwargs.get("extra_body", {})
 
     def test_user_extra_body_alone_without_thinking_budget(
         self, monkeypatch: pytest.MonkeyPatch
@@ -140,37 +139,26 @@ class TestExtraMergeSemantics:
             extra={"extra_body": {"provider": {"order": ["anthropic"]}}},
         )
         kwargs = _capture_kwargs(backend, params)
-        assert kwargs["extra_body"] == {"provider": {"order": ["anthropic"]}}
+        assert kwargs["extra_body"] == NEUTRAL | {"provider": {"order": ["anthropic"]}}
 
-    def test_disable_thinking_without_other_reasoning(
+    def test_reasoning_effort_none_without_other_reasoning(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """``disable_thinking`` explicitly disables OpenRouter reasoning."""
+        """``reasoning_effort_none`` explicitly disables OpenRouter reasoning."""
         backend = _openrouter_backend(monkeypatch)
-        params = SamplingParams(disable_thinking=True)
+        params = SamplingParams(reasoning_effort="none")
         kwargs = _capture_kwargs(backend, params)
-        assert kwargs["extra_body"] == {"reasoning": {"effort": "none"}}
+        assert kwargs["extra_body"] == NEUTRAL | {"reasoning": {"effort": "none"}}
 
-    def test_disable_thinking_overrides_reasoning_and_preserves_provider(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Per-call disable wins over all reasoning knobs, without dropping routing."""
+    def test_reasoning_effort_rejects_conflicting_extra(self, monkeypatch):
         backend = _openrouter_backend(monkeypatch)
-        params = SamplingParams(
-            thinking_budget=2048,
-            disable_thinking=True,
-            extra={
-                "extra_body": {
-                    "provider": {"order": ["anthropic"]},
-                    "reasoning": {"effort": "high"},
-                }
-            },
-        )
-        kwargs = _capture_kwargs(backend, params)
-        assert kwargs["extra_body"] == {
-            "provider": {"order": ["anthropic"]},
-            "reasoning": {"effort": "none"},
-        }
+        with pytest.raises(ValueError):
+            _capture_kwargs(
+                backend,
+                SamplingParams(
+                    reasoning_effort="none", extra={"extra_body": {"reasoning": {"effort": "high"}}}
+                ),
+            )
 
     def test_default_provider_coexists_with_derived_reasoning(
         self, monkeypatch: pytest.MonkeyPatch
@@ -179,7 +167,7 @@ class TestExtraMergeSemantics:
         backend = _openrouter_backend(monkeypatch)
         backend._default_provider = {"order": ["anthropic"]}
         kwargs = _capture_kwargs(backend, SamplingParams(thinking_budget=1024))
-        assert kwargs["extra_body"] == {
+        assert kwargs["extra_body"] == NEUTRAL | {
             "provider": {"order": ["anthropic"]},
             "reasoning": {"max_tokens": 1024},
         }

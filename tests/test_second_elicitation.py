@@ -60,6 +60,32 @@ def _gen_result(
 
 
 class TestConfigFields:
+    def test_merged_elicitation_retains_both_requests_and_sampled_records(self):
+        runner = _make_runner()
+        first = GenerationResult(
+            text="",
+            reasoning_tokens=2,
+            metadata={
+                "reasoning": "available thought",
+                "raw_token_ids": [4, 5],
+                "request": {"max_tokens": 2},
+                "requests": [{"max_tokens": 2}],
+            },
+        )
+        second = GenerationResult(
+            text="answer",
+            metadata={
+                "raw_token_ids": [6],
+                "request": {"max_tokens": 1},
+                "requests": [{"max_tokens": 1}],
+            },
+        )
+        merged = runner._merge_elicitation(first, second, "suffix")
+        assert merged.metadata["requests"] == [{"max_tokens": 2}, {"max_tokens": 1}]
+        assert merged.metadata["elicitation_results"][0]["metadata"]["raw_token_ids"] == [4, 5]
+        messages = runner._build_elicitation_messages([ChatMessage("user", "q")], first, "suffix")
+        assert messages[-2].reasoning == "available thought"
+
     def test_inference_config_defaults(self) -> None:
         from llenvs.core.config import InferenceConfig
 
@@ -96,13 +122,13 @@ class TestConfigFields:
         assert sp.extra["some_key"] == 42
         assert sp.second_elicitation_suffix == "Go."
 
-    def test_sampling_params_unpickle_backfills_disable_thinking(self) -> None:
+    def test_sampling_params_unpickle_backfills_reasoning_effort_none(self) -> None:
         """Old serialized SamplingParams get the new field's safe default."""
         state = SamplingParams().__dict__.copy()
-        state.pop("disable_thinking")
+        state.pop("reasoning_effort")
         restored = SamplingParams.__new__(SamplingParams)
         restored.__setstate__(state)
-        assert restored.disable_thinking is False
+        assert restored.reasoning_effort is None
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +287,7 @@ class TestSecondElicitation:
         assert second_call_params.max_tokens == 64
         # And that second_elicitation is disabled (no recursion)
         assert second_call_params.second_elicitation_suffix is None
-        assert second_call_params.disable_thinking is True
+        assert second_call_params.reasoning_effort == "none"
 
     def test_merged_metadata(self) -> None:
         """Combined result has second_elicitation: True in metadata."""
@@ -384,6 +410,12 @@ class TestBatchSecondElicitation:
         params = SamplingParams(
             max_tokens=4096,
             temperature=0.5,
+            top_p=0.83,
+            top_k=17,
+            min_p=0.08,
+            repetition_penalty=1.3,
+            presence_penalty=0.3,
+            frequency_penalty=-0.2,
             second_elicitation_suffix="wrap up",
             second_elicitation_max_tokens=128,
             thinking_budget=512,
@@ -396,15 +428,21 @@ class TestBatchSecondElicitation:
         ep = runner._elicitation_params()
         assert ep.max_tokens == 128
         assert ep.temperature == 0.5
+        assert ep.top_p == 0.83
+        assert ep.top_k == 17
+        assert ep.min_p == 0.08
+        assert ep.repetition_penalty == 1.3
+        assert ep.presence_penalty == 0.3
+        assert ep.frequency_penalty == -0.2
         assert ep.second_elicitation_suffix is None
         assert ep.thinking_budget is None
         assert ep.thinking_budget_per_block is False
         assert ep.thinking_budget_soft_ratio is None
         assert ep.thinking_budget_suffix is None
-        assert ep.disable_thinking is True
+        assert ep.reasoning_effort == "none"
         assert ep.extra == {"extra_body": {"provider": {"order": ["anthropic"]}}}
 
-    def test_default_sampling_params_do_not_disable_thinking(self) -> None:
+    def test_default_sampling_params_do_not_reasoning_effort_none(self) -> None:
         """Ordinary sampling params leave backend thinking behavior unchanged."""
         params = SamplingParams()
-        assert params.disable_thinking is False
+        assert params.reasoning_effort is None

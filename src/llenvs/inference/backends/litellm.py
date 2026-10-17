@@ -9,14 +9,15 @@ to the installed package, not this module (same pattern as
 
 import json
 import logging
-import time
+from dataclasses import replace
 from typing import Any
 
 from llenvs.core.tools import ToolCall, ToolDefinition
 from llenvs.inference.backends.api import (
+    _APIRequests,
+    _AsyncRunner,
     _format_no_choices_message,
     _get_field,
-    _is_rate_limit_malformed,
     _normalize_provider_error,
     _openai_stop_reason,
     _reasoning_metadata,
@@ -35,11 +36,13 @@ from llenvs.inference.protocol import (
     SamplingParams,
     TokenLogprob,
 )
+from llenvs.inference.records import normalize_usage, plain
+from llenvs.inference.sampling import sampling_metadata, validate_extra, validate_sampling
 
 logger = logging.getLogger(__name__)
 
 
-class LiteLLMBackend(ModelBackend):
+class LiteLLMBackend(_APIRequests, ModelBackend):
     """LiteLLM API backend.
 
     Routes requests through the ``litellm`` SDK, providing unified access
@@ -60,7 +63,7 @@ class LiteLLMBackend(ModelBackend):
         rate_limit_max_retries: int = 2,
         timeout: float | None = None,
         num_retries: int | None = None,
-        drop_params: bool = True,
+        drop_params: bool = False,
         extra_headers: dict[str, str] | None = None,
         **completion_kwargs: Any,
     ) -> None:
@@ -111,6 +114,11 @@ class LiteLLMBackend(ModelBackend):
         litellm.telemetry = False
         logging.getLogger("LiteLLM").setLevel(logging.WARNING)
 
+        if rate_limit_wait > 0:
+            if num_retries not in (None, 0):
+                raise ValueError("Backend retries require LiteLLM num_retries=0")
+            num_retries = 0
+        self._async_runner = _AsyncRunner()
         self._model = model
         self._api_key = api_key
         self._api_base = api_base
@@ -137,6 +145,7 @@ class LiteLLMBackend(ModelBackend):
         models behind a proxy.
         """
         return BackendCapabilities(
+            supports_explicit_sampling=not self._drop_params,
             supports_logprobs=True,
             supports_prefix_continuation=False,
             supports_batching=True,
@@ -144,6 +153,7 @@ class LiteLLMBackend(ModelBackend):
             supports_chat=True,
             supports_function_calling=True,
             supports_vision=True,
+            supports_request_progress=True,
             max_batch_size=None,
             max_context_length=None,  # Varies by model
             max_concurrency=self._max_concurrency,
@@ -160,19 +170,17 @@ class LiteLLMBackend(ModelBackend):
         litellm's module-level functions share global client pools across
         all instances — there is no per-instance session to release.
         """
+        runner = getattr(self, "_async_runner", None)
+        if runner is not None:
+            runner.close()
         self._closed = True
 
-    def generate(
-        self,
-        prompts: list[str],
-        params: SamplingParams,
-    ) -> list[GenerationResult]:
-        """Generate completions for text prompts."""
-        results = []
-        for prompt in prompts:
-            messages = [ChatMessage(role="user", content=prompt)]
-            results.append(self.generate_chat(messages, params))
-        return results
+    def generate(self, prompts, params, *, observer=None):
+        if observer is None:
+            return [self.generate_chat([ChatMessage("user", prompt)], params) for prompt in prompts]
+        return self.generate_chat_batch(
+            [[ChatMessage("user", prompt)] for prompt in prompts], params, observer=observer
+        )
 
     def _request_kwargs(
         self,
@@ -186,6 +194,9 @@ class LiteLLMBackend(ModelBackend):
         Shared by the chat and tools paths, so thinking budgets and
         logprobs apply to both.
         """
+        validate_sampling(params)
+        validate_extra(self._completion_kwargs)
+        validate_extra(params.extra, owned=("drop_params",))
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": [m.to_dict() for m in messages],
@@ -196,9 +207,19 @@ class LiteLLMBackend(ModelBackend):
             "frequency_penalty": params.frequency_penalty,
             "drop_params": self._drop_params,
         }
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
 
-        if params.top_k > 0:
+        if params.top_k is not None and params.top_k > 0:
             kwargs["top_k"] = params.top_k
+        for name, neutral in (("min_p", 0.0), ("repetition_penalty", 1.0)):
+            value = getattr(params, name)
+            if value is not None and value != neutral:
+                import litellm
+
+                supported = litellm.get_supported_openai_params(model=self._model) or []
+                if name not in supported:
+                    raise ValueError(f"{name} has no declared LiteLLM mapping for {self._model!r}")
+                kwargs[name] = value
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
         if params.logprobs:
@@ -220,7 +241,7 @@ class LiteLLMBackend(ModelBackend):
         # litellm's cross-provider budget knob (Anthropic ``thinking``,
         # Gemini thinking budget, ...). Providers without a budget concept
         # drop it via ``drop_params``.
-        if params.thinking_budget is not None and not params.disable_thinking:
+        if params.thinking_budget is not None and params.reasoning_effort != "none":
             kwargs["thinking"] = {
                 "type": "enabled",
                 "budget_tokens": params.thinking_budget,
@@ -245,13 +266,26 @@ class LiteLLMBackend(ModelBackend):
         # ``"none"`` is the cross-provider disable token: Anthropic's
         # reasoning_effort mapper rejects ``"disable"`` while accepting
         # ``"none"``; Gemini accepts both.
-        if params.disable_thinking:
-            kwargs["reasoning_effort"] = "none"
-            kwargs.pop("thinking", None)
+        if params.reasoning_effort is not None:
+            kwargs["reasoning_effort"] = params.reasoning_effort
+            if params.reasoning_effort == "none":
+                kwargs.pop("thinking", None)
 
         return kwargs
 
-    def _parse_response(self, response: Any) -> GenerationResult:
+    def _finish_response(
+        self, response: Any, kwargs: dict[str, Any], params: SamplingParams
+    ) -> GenerationResult:
+        result = self._ensure_logprobs_if_requested(self._parse_native_response(response), params)
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                **sampling_metadata(params, kwargs, capture="litellm_input"),
+            },
+        )
+
+    def _parse_native_response(self, response: Any) -> GenerationResult:
         """Convert a litellm ModelResponse (OpenAI format) to GenerationResult."""
         choices = getattr(response, "choices", None)
         if not choices:
@@ -275,7 +309,7 @@ class LiteLLMBackend(ModelBackend):
                 logprobs.append(
                     TokenLogprob(
                         token=token_info.token,
-                        token_id=0,  # OpenAI-format responses carry no token IDs
+                        token_id=None,  # OpenAI-format responses carry no token IDs
                         logprob=token_info.logprob,
                         top_logprobs=top_lps,
                     )
@@ -319,6 +353,7 @@ class LiteLLMBackend(ModelBackend):
                 metadata["reasoning_tokens"] = reasoning_tokens
 
         metadata.update(_reasoning_metadata(message))
+        metadata["raw_usage"] = plain(usage)
 
         hidden_params = getattr(response, "_hidden_params", None)
         if hidden_params is not None:
@@ -335,8 +370,7 @@ class LiteLLMBackend(ModelBackend):
             finish_reason=_openai_stop_reason(getattr(choice, "finish_reason", None)),
             tool_calls=tool_calls,
             token_logprobs=token_logprobs,
-            prompt_tokens=_get_field(usage, "prompt_tokens", 0) if usage else 0,
-            completion_tokens=(_get_field(usage, "completion_tokens", 0) if usage else 0),
+            **normalize_usage(usage),
             metadata=metadata,
         )
 
@@ -377,88 +411,68 @@ class LiteLLMBackend(ModelBackend):
             return RefusedByPolicyError(str(exc), offending_indices=[0])
         return _normalize_provider_error(exc, model_name=self._model)
 
-    def _completion_sync(
-        self,
-        kwargs: dict[str, Any],
-        params: SamplingParams,
-    ) -> GenerationResult:
-        """Call ``litellm.completion`` with error normalization and
-        rate-limit retries."""
+    def _dispatch(self, kwargs):
         import litellm
 
-        last_exc: BaseException | None = None
-        for attempt in range(self._rate_limit_max_retries + 1):
-            try:
-                try:
-                    response = litellm.completion(**kwargs)
-                    return self._ensure_logprobs_if_requested(
-                        self._parse_response(response), params
-                    )
-                except (litellm.RateLimitError, MalformedResponseError):
-                    raise
-                except Exception as exc:
-                    normalized = self._normalize_error(exc)
-                    if normalized is not exc:
-                        raise normalized from exc
-                    raise
-            except (litellm.RateLimitError, MalformedResponseError) as exc:
-                if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
-                    raise
-                if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
-                    raise
-                last_exc = exc
-                logger.warning(
-                    "Rate limited (%s), waiting %.0fs (attempt %d/%d)",
-                    type(exc).__name__,
-                    self._rate_limit_wait,
-                    attempt + 1,
-                    self._rate_limit_max_retries,
-                )
-                time.sleep(self._rate_limit_wait)
+        try:
+            return litellm.completion(**kwargs)
+        except Exception as exc:
+            normalized = self._normalize_error(exc)
+            if normalized is exc:
+                raise
+            raise normalized from exc
 
-        raise last_exc  # unreachable, but satisfies type checker
-
-    async def _completion_async(
-        self,
-        kwargs: dict[str, Any],
-        params: SamplingParams,
-    ) -> GenerationResult:
-        """Async variant of ``_completion_sync`` for concurrent batches."""
-        import asyncio
-
+    async def _dispatch_async(self, kwargs):
         import litellm
 
-        last_exc: BaseException | None = None
-        for attempt in range(self._rate_limit_max_retries + 1):
-            try:
-                try:
-                    response = await litellm.acompletion(**kwargs)
-                    return self._ensure_logprobs_if_requested(
-                        self._parse_response(response), params
-                    )
-                except (litellm.RateLimitError, MalformedResponseError):
-                    raise
-                except Exception as exc:
-                    normalized = self._normalize_error(exc)
-                    if normalized is not exc:
-                        raise normalized from exc
-                    raise
-            except (litellm.RateLimitError, MalformedResponseError) as exc:
-                if isinstance(exc, MalformedResponseError) and not _is_rate_limit_malformed(exc):
-                    raise
-                if self._rate_limit_wait <= 0 or attempt == self._rate_limit_max_retries:
-                    raise
-                last_exc = exc
-                logger.warning(
-                    "Rate limited (%s), waiting %.0fs (attempt %d/%d)",
-                    type(exc).__name__,
-                    self._rate_limit_wait,
-                    attempt + 1,
-                    self._rate_limit_max_retries,
-                )
-                await asyncio.sleep(self._rate_limit_wait)
+        try:
+            return await litellm.acompletion(**kwargs)
+        except Exception as exc:
+            normalized = self._normalize_error(exc)
+            if normalized is exc:
+                raise
+            raise normalized from exc
 
-        raise last_exc  # unreachable, but satisfies type checker
+    def _request_metadata(self, kwargs, params):
+        return sampling_metadata(params, kwargs, capture="litellm_input")
+
+    def _parse_response(self, response, params=None, metadata=None):
+        result = self._parse_native_response(response)
+        if params is not None:
+            result = self._ensure_logprobs_if_requested(result, params)
+        return replace(result, metadata={**result.metadata, **(metadata or {})})
+
+    def reparse_receipt(self, receipt, params):
+        from litellm import ModelResponse
+
+        return self._parse_response(
+            ModelResponse(**receipt["response"]), params, receipt["metadata"]
+        )
+
+    def descriptor(self):
+        from llenvs.inference.records import dependency_versions
+        from llenvs.inference.sampling import _record_value
+
+        return {
+            "identity": {
+                "backend": "litellm",
+                "protocol_version": 1,
+                "model": self._model,
+                "version_pinned": False,
+                "endpoint": _record_value({"url": self._api_base})["url"],
+                "drop_params": self._drop_params,
+                "num_retries": self._num_retries,
+                "completion_kwargs": _record_value(self._completion_kwargs),
+                "dependencies": dependency_versions("litellm"),
+            },
+            "provenance": {},
+        }
+
+    def _completion_sync(self, kwargs, params):
+        return self._request(kwargs, params)
+
+    async def _completion_async(self, kwargs, params):
+        return await self._request_async(kwargs, params)
 
     def generate_chat(
         self,
@@ -476,17 +490,14 @@ class LiteLLMBackend(ModelBackend):
         """Async version of generate_chat for concurrent batch execution."""
         return await self._completion_async(self._request_kwargs(messages, params), params)
 
-    def generate_chat_batch(
-        self,
-        messages_batch: list[list[ChatMessage]],
-        params: SamplingParams,
-    ) -> list[GenerationResult]:
-        """Generate responses for multiple conversations concurrently."""
+    def generate_chat_batch(self, messages_batch, params, *, observer=None):
+        requests = [self._request_kwargs(messages, params) for messages in messages_batch]
         return _run_concurrent(
-            lambda msgs: self._generate_chat_async(msgs, params),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
-            return_partial=getattr(self, "_return_partial_batch", True),
+            return_partial=True,
+            runner=self._async_runner,
         )
 
     def generate_with_tools(
@@ -512,16 +523,16 @@ class LiteLLMBackend(ModelBackend):
         return await self._completion_async(kwargs, params)
 
     def generate_with_tools_batch(
-        self,
-        messages_batch: list[list[ChatMessage]],
-        tools: list[ToolDefinition],
-        params: SamplingParams,
-        tool_choice: str = "auto",
-    ) -> list[GenerationResult]:
-        """Generate tool-calling responses for multiple conversations concurrently."""
+        self, messages_batch, tools, params, tool_choice="auto", *, observer=None
+    ):
+        requests = [
+            self._request_kwargs(messages, params, tools, tool_choice)
+            for messages in messages_batch
+        ]
         return _run_concurrent(
-            lambda msgs: self._generate_with_tools_async(msgs, tools, params, tool_choice),
-            messages_batch,
+            lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
             self._max_concurrency,
-            return_partial=getattr(self, "_return_partial_batch", True),
+            return_partial=True,
+            runner=self._async_runner,
         )

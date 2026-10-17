@@ -1,5 +1,7 @@
 """Tests for vLLM backend (fully mocked, no GPU required)."""
 
+from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -11,6 +13,106 @@ from llenvs.inference.protocol import (
     SamplingParams,
     StopReason,
 )
+
+
+class TestVLLMSamplingControls:
+    @pytest.fixture
+    def backend(self):
+        from llenvs.inference.backends.vllm import VLLMBackend
+
+        backend = VLLMBackend.__new__(VLLMBackend)
+        backend._model_path = "offline-model"
+        backend._tokenizer = MagicMock()
+        backend._VLLMSamplingParams = MagicMock(
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs)
+        )
+        backend._llm = MagicMock()
+        backend._is_v1 = False
+        backend._chat_template_kwargs = {}
+        backend._is_vlm = False
+        backend._max_context_length = 4096
+
+        def generate(prompts, params, **kwargs):
+            return [
+                SimpleNamespace(
+                    request_id="offline-request",
+                    prompt_token_ids=[1, 2],
+                    outputs=[
+                        SimpleNamespace(
+                            text=text, token_ids=[token], finish_reason="stop", logprobs=None
+                        )
+                        for text, token in [("first", 3), ("second", 4), ("third", 5)][: params.n]
+                    ],
+                )
+                for _ in prompts
+            ]
+
+        backend._llm.generate.side_effect = generate
+        return backend
+
+    def test_neutral_filters_and_penalties_are_explicit(self, backend):
+        result = backend.generate(["prompt"], SamplingParams(temperature=0.6, top_p=0.83))[0]
+
+        native = backend._llm.generate.call_args.args[1]
+        assert native.temperature == 0.6
+        assert native.top_p == 0.83
+        assert native.top_k in (0, -1)
+        assert native.min_p == 0.0
+        assert native.repetition_penalty == 1.0
+        assert native.presence_penalty == 0.0
+        assert native.frequency_penalty == 0.0
+        assert result.metadata["request"]["top_k"] in (0, -1)
+        assert result.metadata["request"]["repetition_penalty"] == 1.0
+
+    def test_non_neutral_native_controls_are_preserved(self, backend):
+        params = SamplingParams(top_k=17, min_p=0.08, repetition_penalty=1.3)
+
+        backend.generate(["prompt"], params)
+
+        native = backend._llm.generate.call_args.args[1]
+        assert native.top_k == 17
+        assert native.min_p == 0.08
+        assert native.repetition_penalty == 1.3
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            {"temperature": 0.9},
+            {"top_k": 5},
+            {"min_p": 0.1},
+            {"repetition_penalty": 1.2},
+            {"n": 2},
+            {"max_tokens": 999},
+        ],
+    )
+    def test_extras_cannot_replace_typed_controls(self, backend, extra):
+        with pytest.raises(ValueError):
+            backend.generate(["prompt"], SamplingParams(extra=extra))
+
+        backend._llm.generate.assert_not_called()
+
+    def test_multiple_choices_are_rejected_before_generation(self, backend):
+        with pytest.raises(ValueError, match="n"):
+            backend.generate(["prompt"], SamplingParams(n=2))
+
+        backend._llm.generate.assert_not_called()
+
+    def test_prefix_continuation_returns_every_draw_and_preserves_other_settings(self, backend):
+        params = SamplingParams(
+            max_tokens=71,
+            temperature=0.6,
+            top_p=0.83,
+            top_k=17,
+            min_p=0.08,
+            repetition_penalty=1.3,
+            extra={"seed": 123},
+        )
+        with patch.object(backend, "_to_vllm_params", wraps=backend._to_vllm_params) as convert:
+            results = backend.continue_from_prefix("prefix", params, num_continuations=3)
+
+        assert [result.text for result in results] == ["first", "second", "third"]
+        assert convert.call_args.args[0] == replace(params, n=3)
+        assert backend._llm.generate.call_args.args[1].n == 3
 
 
 class TestVLLMChatTemplateKwargs:
@@ -42,7 +144,7 @@ class TestVLLMChatTemplateKwargs:
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -60,12 +162,12 @@ class TestVLLMChatTemplateKwargs:
         assert call_kwargs[1].get("enable_thinking") is True
 
     def test_default_false_preserves_disabled_chat_template_kwargs(self):
-        """disable_thinking=False preserves backend-level no-thinking config."""
+        """reasoning_effort=None preserves backend-level no-thinking config."""
         backend = self._create_mock_backend({"enable_thinking": False})
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -81,13 +183,13 @@ class TestVLLMChatTemplateKwargs:
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
         assert call_kwargs[1].get("enable_thinking") is False
 
-    def test_disable_thinking_overrides_chat_template_kwargs(self):
-        """Per-call disable_thinking overrides backend-level thinking config."""
+    def test_reasoning_effort_none_overrides_chat_template_kwargs(self):
+        """Per-call reasoning_effort_none overrides backend-level thinking config."""
         backend = self._create_mock_backend({"enable_thinking": True})
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -97,7 +199,7 @@ class TestVLLMChatTemplateKwargs:
         ):
             backend.generate_chat(
                 [ChatMessage(role="user", content="hi")],
-                SamplingParams(max_tokens=10, disable_thinking=True),
+                SamplingParams(max_tokens=10, reasoning_effort="none"),
             )
 
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
@@ -109,7 +211,7 @@ class TestVLLMChatTemplateKwargs:
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -126,13 +228,13 @@ class TestVLLMChatTemplateKwargs:
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
         assert call_kwargs[1].get("enable_thinking") is True
 
-    def test_disable_thinking_overrides_batch_chat_template_kwargs(self):
+    def test_reasoning_effort_none_overrides_batch_chat_template_kwargs(self):
         """Batched second elicitation also disables chat-template thinking."""
         backend = self._create_mock_backend({"enable_thinking": True})
 
         with patch.object(
             backend,
-            "generate",
+            "_generate_rendered",
             return_value=[
                 GenerationResult(
                     text="ok",
@@ -142,7 +244,7 @@ class TestVLLMChatTemplateKwargs:
         ):
             backend.generate_chat_batch(
                 [[ChatMessage(role="user", content="hi")]],
-                SamplingParams(max_tokens=10, disable_thinking=True),
+                SamplingParams(max_tokens=10, reasoning_effort="none"),
             )
 
         call_kwargs = backend._tokenizer.apply_chat_template.call_args
@@ -195,13 +297,13 @@ class TestVLLMThinkingBudget:
         assert "logits_processors" in call_kwargs
         assert len(call_kwargs["logits_processors"]) == 1
 
-    def test_disable_thinking_skips_thinking_budget_processor(self):
-        """disable_thinking suppresses local thinking-budget intervention."""
+    def test_reasoning_effort_none_skips_thinking_budget_processor(self):
+        """reasoning_effort_none suppresses local thinking-budget intervention."""
         backend = self._create_mock_backend()
         params = SamplingParams(
             max_tokens=100,
             thinking_budget=512,
-            disable_thinking=True,
+            reasoning_effort="none",
         )
         backend._to_vllm_params(params)
 
@@ -395,8 +497,8 @@ class TestVLLMPromptTooLong:
         backend = VLLMBackend.__new__(VLLMBackend)
         backend._model_path = "test-model"
         backend._tokenizer = MagicMock()
-        backend._tokenizer.encode.side_effect = (
-            lambda text, add_special_tokens=False: [0] * (len(text) + (10 if add_special_tokens else 0))
+        backend._tokenizer.encode.side_effect = lambda text, add_special_tokens=False: (
+            [0] * (len(text) + (10 if add_special_tokens else 0))
         )
         backend._VLLMSamplingParams = MagicMock()
         backend._llm = MagicMock()

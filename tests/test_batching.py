@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
-import httpx
 
+import httpx
 import pytest
 from openai import BadRequestError
 
@@ -72,6 +72,17 @@ def _make_result(text: str) -> GenerationResult:
 def _make_messages(content: str) -> list[ChatMessage]:
     """Create a single-user-message conversation."""
     return [ChatMessage(role="user", content=content)]
+
+
+def _make_openai_backend():
+    """Construct a backend with fake clients and explicit request/retry defaults."""
+    from llenvs.inference.backends.api import OpenAIBackend
+
+    backend = object.__new__(OpenAIBackend)
+    backend._api_flavor = "openai"
+    backend._rate_limit_wait = 0.0
+    backend._rate_limit_max_retries = 2
+    return backend
 
 
 def _make_openai_bad_request(message: str) -> BadRequestError:
@@ -197,10 +208,10 @@ class TestDefaultGenerateWithToolsBatch:
 
 
 class TestVLLMBatchChat:
-    """Test vLLM generate_chat_batch routes through generate()."""
+    """Chat renders all prompts before native batch generation."""
 
     def test_batch_routes_through_generate(self):
-        """generate_chat_batch should convert all messages to prompts and call generate() once."""
+        """Render each conversation and preserve one result per input."""
         from llenvs.inference.backends.vllm import VLLMBackend
 
         # Create a mock that avoids actual vLLM initialization
@@ -224,7 +235,7 @@ class TestVLLMBatchChat:
         def fake_generate(prompts, params):
             return [_make_result(f"reply_to_{p}") for p in prompts]
 
-        backend.generate = fake_generate
+        backend._generate_rendered = fake_generate
 
         messages_batch = [
             _make_messages("hello"),
@@ -244,10 +255,10 @@ class TestVLLMBatchChat:
 
 
 class TestHuggingFaceBatchChat:
-    """Test HuggingFace generate_chat_batch routes through generate()."""
+    """Chat rendering preserves one native batch and its input order."""
 
     def test_batch_routes_through_generate(self):
-        """generate_chat_batch should convert messages to prompts and call generate() once."""
+        """Render each conversation and preserve one result per input."""
         from llenvs.inference.backends.huggingface import HuggingFaceBackend
 
         backend = object.__new__(HuggingFaceBackend)
@@ -270,7 +281,7 @@ class TestHuggingFaceBatchChat:
         def fake_generate(prompts, params):
             return [_make_result(f"hf_reply_{i}") for i in range(len(prompts))]
 
-        backend.generate = fake_generate
+        backend._generate_rendered = fake_generate
 
         messages_batch = [_make_messages("a"), _make_messages("b")]
         results = backend.generate_chat_batch(messages_batch, SamplingParams())
@@ -291,7 +302,7 @@ class TestHuggingFaceBatchChat:
         def fake_generate(prompts, params):
             return [_make_result(f"reply_{i}") for i in range(len(prompts))]
 
-        backend.generate = fake_generate
+        backend._generate_rendered = fake_generate
 
         messages_batch = [_make_messages("q1"), _make_messages("q2")]
         results = backend.generate_chat_batch(messages_batch, SamplingParams())
@@ -309,9 +320,7 @@ class TestOpenAIBatchChat:
 
     def test_batch_returns_correct_results(self, api_runner):
         """Batch should return one result per conversation."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
@@ -350,9 +359,7 @@ class TestOpenAIBatchChat:
 
     def test_empty_batch(self, api_runner):
         """Empty batch returns empty list."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
@@ -362,9 +369,7 @@ class TestOpenAIBatchChat:
 
     def test_concurrency_with_async_client(self, api_runner):
         """Verify that async client is used for concurrent generation."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 2
@@ -396,9 +401,7 @@ class TestOpenAIBatchChat:
 
     def test_partial_failures_raise_partial_batch_error(self, api_runner):
         """When partial-batch mode is enabled, successes are preserved in the error."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
@@ -444,9 +447,7 @@ class TestOpenAIBatchChat:
 
     def test_context_limit_error_normalized(self):
         """Context-limit BadRequest errors map to PromptTooLongError."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._model = "gpt-4o"
         backend._client = MagicMock()
         backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
@@ -459,9 +460,7 @@ class TestOpenAIBatchChat:
 
     def test_invalid_media_error_normalized(self):
         """Deterministic invalid-input errors map to RecoverableInputError."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._model = "gpt-4o"
         backend._client = MagicMock()
         backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
@@ -473,9 +472,7 @@ class TestOpenAIBatchChat:
 
     def test_content_policy_error_stays_fatal(self):
         """Safety/content-policy errors must not be normalized to recoverable."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._model = "gpt-4o"
         backend._client = MagicMock()
         backend._client.chat.completions.create.side_effect = _make_openai_bad_request(
@@ -491,9 +488,7 @@ class TestOpenAIBatchTools:
 
     def test_partial_failures_raise_partial_batch_error(self, api_runner):
         """Tool batches should preserve per-item successes on partial failure."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 10
@@ -541,9 +536,7 @@ class TestSyncToolExtraForwarding:
     """Sync tool calls should forward SamplingParams.extra just like batch async paths."""
 
     def test_openai_generate_with_tools_forwards_extra(self):
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._model = "gpt-4o"
         backend._client = MagicMock()
 
@@ -589,9 +582,7 @@ class TestSyncToolExtraForwarding:
             SamplingParams(extra={"metadata": {"run_id": "abc"}}),
         )
 
-        assert backend._client.messages.create.call_args.kwargs["metadata"] == {
-            "run_id": "abc"
-        }
+        assert backend._client.messages.create.call_args.kwargs["metadata"] == {"run_id": "abc"}
 
     def test_openrouter_generate_with_tools_forwards_extra(self):
         from llenvs.inference.backends.api import OpenRouterBackend
@@ -606,6 +597,9 @@ class TestSyncToolExtraForwarding:
         response.choices[0].error = None
         response.choices[0].message.content = "ok"
         response.choices[0].message.tool_calls = []
+        response.choices[0].message.reasoning = None
+        response.choices[0].message.reasoning_content = None
+        response.choices[0].message.reasoning_details = None
         response.choices[0].finish_reason = "stop"
         response.usage = MagicMock()
         response.usage.prompt_tokens = 5
@@ -709,13 +703,13 @@ class TestAnthropicBatchChat:
         backend._model = "claude-sonnet"
         backend._client = MagicMock()
 
-        class _AnthropicBadRequest(RuntimeError):
+        class _AnthropicBadRequestError(RuntimeError):
             def __init__(self, message: str) -> None:
                 super().__init__(message)
                 self.status_code = 400
                 self.body = {"error": {"message": message}}
 
-        backend._client.messages.create.side_effect = _AnthropicBadRequest(
+        backend._client.messages.create.side_effect = _AnthropicBadRequestError(
             "Invalid image input: image exceeds the maximum allowed size"
         )
 
@@ -795,9 +789,7 @@ class TestSemaphoreConcurrency:
 
     def test_max_concurrency_limits_parallel_calls(self, api_runner):
         """At most max_concurrency calls should be in-flight simultaneously."""
-        from llenvs.inference.backends.api import OpenAIBackend
-
-        backend = object.__new__(OpenAIBackend)
+        backend = _make_openai_backend()
         backend._async_runner = api_runner
         backend._model = "gpt-4o"
         backend._max_concurrency = 2
@@ -1014,6 +1006,30 @@ class BatchTrackingBackend(ModelBackend):
 
 class TestTrajectoryRunnerBatch:
     """Phase 2: TrajectoryRunner.run_batch() lockstep batching."""
+
+    @pytest.mark.parametrize("batched", [False, True])
+    def test_generation_usage_and_request_records_survive_in_trajectory(self, batched):
+        env = MockSingleTurnEnv(num_tasks=1)
+        backend = BatchTrackingBackend()
+        backend._next_result = lambda: GenerationResult(
+            text="answer",
+            prompt_tokens=None,
+            completion_tokens=4,
+            cached_prompt_tokens=2,
+            cache_write_prompt_tokens=1,
+            reasoning_tokens=3,
+            metadata={"request": {"temperature": 0}, "requests": [{"temperature": 0}]},
+        )
+        runner = TrajectoryRunner(environment=env, backend=backend)
+        result = (
+            runner.run_batch([0]).trajectory_results[0] if batched else runner.run_trajectory(0)
+        )
+        generation = result.trajectory.transitions[0].info["generation"]
+        assert generation["prompt_tokens"] is None
+        assert generation["cached_prompt_tokens"] == 2
+        assert generation["cache_write_prompt_tokens"] == 1
+        assert generation["reasoning_tokens"] == 3
+        assert generation["metadata"]["requests"] == [{"temperature": 0}]
 
     def test_single_turn_uses_batch_generation(self):
         """Single-turn tasks should use one batch call for all trajectories."""
@@ -2134,9 +2150,9 @@ class TestBackendTimeoutConfig:
     def test_openai_backend_accepts_timeout(self):
         from unittest.mock import patch
 
-        with patch("openai.OpenAI") as mock_sync, \
-             patch("openai.AsyncOpenAI") as mock_async:
+        with patch("openai.OpenAI") as mock_sync, patch("openai.AsyncOpenAI") as mock_async:
             from llenvs.inference.backends.api import OpenAIBackend
+
             OpenAIBackend(model="test", api_key="k", timeout=30.0, max_retries=5)
 
             sync_kwargs = mock_sync.call_args[1]
@@ -2149,36 +2165,40 @@ class TestBackendTimeoutConfig:
     def test_openai_backend_none_timeout_uses_sdk_defaults(self):
         from unittest.mock import patch
 
-        with patch("openai.OpenAI") as mock_sync, \
-             patch("openai.AsyncOpenAI") as mock_async:
+        with patch("openai.OpenAI") as mock_sync, patch("openai.AsyncOpenAI") as mock_async:
             from llenvs.inference.backends.api import OpenAIBackend
+
             OpenAIBackend(model="test", api_key="k")
 
             sync_kwargs = mock_sync.call_args[1]
+            assert mock_async.call_args[1] == sync_kwargs
             assert "timeout" not in sync_kwargs
             assert "max_retries" not in sync_kwargs
 
     def test_openrouter_backend_accepts_timeout(self):
         from unittest.mock import patch
 
-        with patch("openai.OpenAI") as mock_sync, \
-             patch("openai.AsyncOpenAI") as mock_async:
+        with patch("openai.OpenAI") as mock_sync, patch("openai.AsyncOpenAI") as mock_async:
             from llenvs.inference.backends.api import OpenRouterBackend
+
             OpenRouterBackend(model="test", api_key="k", timeout=30.0, max_retries=5)
 
             sync_kwargs = mock_sync.call_args[1]
             async_kwargs = mock_async.call_args[1]
             assert sync_kwargs["max_retries"] == 5
+            assert async_kwargs["max_retries"] == 5
             assert sync_kwargs["timeout"].connect == 30.0
+            assert async_kwargs["timeout"].connect == 30.0
 
     def test_openrouter_backend_none_timeout_uses_sdk_defaults(self):
         from unittest.mock import patch
 
-        with patch("openai.OpenAI") as mock_sync, \
-             patch("openai.AsyncOpenAI") as mock_async:
+        with patch("openai.OpenAI") as mock_sync, patch("openai.AsyncOpenAI") as mock_async:
             from llenvs.inference.backends.api import OpenRouterBackend
+
             OpenRouterBackend(model="test", api_key="k")
 
             sync_kwargs = mock_sync.call_args[1]
+            assert mock_async.call_args[1] == sync_kwargs
             assert "timeout" not in sync_kwargs
             assert "max_retries" not in sync_kwargs

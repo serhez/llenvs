@@ -7,7 +7,7 @@ handling the resumption of generation after each segment boundary.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol, runtime_checkable
 
 from llenvs.core.segmentation import Segmenter, TokenSegmenter
@@ -136,19 +136,7 @@ class TokenContinuationStrategy:
     ) -> tuple[str, str, GenerationResult]:
         """Generate one token-sized segment."""
         # Override max_tokens to produce exactly one segment
-        params = SamplingParams(
-            max_tokens=self.token_size,
-            temperature=sampling_params.temperature,
-            top_p=sampling_params.top_p,
-            top_k=sampling_params.top_k,
-            stop_sequences=sampling_params.stop_sequences,
-            presence_penalty=sampling_params.presence_penalty,
-            frequency_penalty=sampling_params.frequency_penalty,
-            n=sampling_params.n,
-            logprobs=sampling_params.logprobs,
-            num_logprobs=sampling_params.num_logprobs,
-            extra=sampling_params.extra,
-        )
+        params = replace(sampling_params, max_tokens=self.token_size)
 
         cont_messages = _build_continuation_messages(messages, accumulated_text)
         gen_result = self.backend.generate_chat(cont_messages, params)
@@ -162,19 +150,7 @@ class TokenContinuationStrategy:
         sampling_params: SamplingParams,
     ) -> list[tuple[str, str, GenerationResult]]:
         """Generate one token-sized segment for each trajectory."""
-        params = SamplingParams(
-            max_tokens=self.token_size,
-            temperature=sampling_params.temperature,
-            top_p=sampling_params.top_p,
-            top_k=sampling_params.top_k,
-            stop_sequences=sampling_params.stop_sequences,
-            presence_penalty=sampling_params.presence_penalty,
-            frequency_penalty=sampling_params.frequency_penalty,
-            n=sampling_params.n,
-            logprobs=sampling_params.logprobs,
-            num_logprobs=sampling_params.num_logprobs,
-            extra=sampling_params.extra,
-        )
+        params = replace(sampling_params, max_tokens=self.token_size)
 
         messages_batch = [
             _build_continuation_messages(ctx.messages, ctx.accumulated_text) for ctx in contexts
@@ -234,19 +210,7 @@ class BoundaryContinuationStrategy:
         working_buffer = buffer
         last_gen_result = _BUFFER_ONLY_RESULT
 
-        params = SamplingParams(
-            max_tokens=self.chunk_max_tokens,
-            temperature=sampling_params.temperature,
-            top_p=sampling_params.top_p,
-            top_k=sampling_params.top_k,
-            stop_sequences=sampling_params.stop_sequences,
-            presence_penalty=sampling_params.presence_penalty,
-            frequency_penalty=sampling_params.frequency_penalty,
-            n=sampling_params.n,
-            logprobs=sampling_params.logprobs,
-            num_logprobs=sampling_params.num_logprobs,
-            extra=sampling_params.extra,
-        )
+        params = replace(sampling_params, max_tokens=self.chunk_max_tokens)
 
         max_attempts = 10  # safety limit
         for _ in range(max_attempts):
@@ -306,19 +270,7 @@ class BoundaryContinuationStrategy:
             last_gen_results[i] = _BUFFER_ONLY_RESULT
 
         # Phase 2: Multi-round batch generation
-        params = SamplingParams(
-            max_tokens=self.chunk_max_tokens,
-            temperature=sampling_params.temperature,
-            top_p=sampling_params.top_p,
-            top_k=sampling_params.top_k,
-            stop_sequences=sampling_params.stop_sequences,
-            presence_penalty=sampling_params.presence_penalty,
-            frequency_penalty=sampling_params.frequency_penalty,
-            n=sampling_params.n,
-            logprobs=sampling_params.logprobs,
-            num_logprobs=sampling_params.num_logprobs,
-            extra=sampling_params.extra,
-        )
+        params = replace(sampling_params, max_tokens=self.chunk_max_tokens)
 
         max_attempts = 10
         for _ in range(max_attempts):

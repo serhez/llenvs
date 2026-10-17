@@ -12,6 +12,8 @@ import logging
 import shutil
 import subprocess
 import tempfile
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from llenvs.inference.protocol import (
@@ -26,6 +28,8 @@ from llenvs.inference.protocol import (
     SamplingParams,
     StopReason,
 )
+from llenvs.inference.records import credential_free, file_digest, normalize_usage
+from llenvs.inference.sampling import sampling_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -119,22 +123,6 @@ def _iter_usage_dicts(payload: Any) -> Any:
     elif isinstance(payload, list):
         for value in payload:
             yield from _iter_usage_dicts(value)
-
-
-def _coerce_int(value: Any) -> int:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    return 0
-
-
-def _usage_counts(usage: dict[str, Any] | None) -> tuple[int, int]:
-    if usage is None:
-        return 0, 0
-    prompt_tokens = _coerce_int(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
-    completion_tokens = _coerce_int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
-    return max(prompt_tokens, 0), max(completion_tokens, 0)
 
 
 def _is_context_limit_text(text: str) -> bool:
@@ -303,7 +291,7 @@ class ClaudeCodeBackend(ModelBackend):
         params: SamplingParams,
     ) -> GenerationResult:
         self._validate_params(params)
-        return self._generate_chat_impl(messages)
+        return self._record_request(self._generate_chat_impl(messages), params)
 
     def generate_chat_batch(
         self,
@@ -335,33 +323,105 @@ class ClaudeCodeBackend(ModelBackend):
         if failures:
             raise PartialBatchError(list(results), failures)
 
-        return [result for result in results if isinstance(result, GenerationResult)]
+        return [
+            self._record_request(result, params)
+            for result in results
+            if isinstance(result, GenerationResult)
+        ]
+
+    def descriptor(self):
+        import hashlib
+
+        from llenvs.inference.records import sanitized_argv
+
+        settings = {
+            name: getattr(self, "_" + name)
+            for name in (
+                "bare",
+                "tools",
+                "disallowed_tools",
+                "setting_sources",
+                "permission_mode",
+                "effort",
+                "max_budget_usd",
+                "fallback_model",
+                "exclude_dynamic_system_prompt_sections",
+                "no_session_persistence",
+                "strict_mcp_config",
+                "timeout",
+            )
+        }
+        settings["extra_args"] = sanitized_argv(self._extra_args)
+        for name in ("system_prompt", "append_system_prompt"):
+            value = getattr(self, "_" + name)
+            settings[name + "_sha256"] = (
+                hashlib.sha256(value.encode()).hexdigest() if value is not None else None
+            )
+        return {
+            "identity": {
+                "backend": "claude_code_cli",
+                "protocol_version": 1,
+                "model": self._model,
+                "version_pinned": False,
+                "controls_hidden": True,
+                "settings": credential_free(settings),
+                "executable_sha256": file_digest(self._command)
+                if Path(self._command).is_file()
+                else None,
+            },
+            "provenance": {"executable": self._command},
+        }
+
+    def _record_request(self, result, params):
+        return replace(
+            result,
+            metadata={
+                **result.metadata,
+                **sampling_metadata(
+                    params,
+                    {"model": self._model, **self.descriptor()["identity"]["settings"]},
+                    capture="cli_input",
+                ),
+            },
+        )
 
     def _validate_params(self, params: SamplingParams) -> None:
+        for name in (
+            "max_tokens",
+            "min_p",
+            "repetition_penalty",
+            "reasoning_effort",
+            "response_schema",
+            "after_reasoning_text",
+        ):
+            if getattr(params, name) is not None:
+                raise ValueError(
+                    f"SamplingParams.{name} is hidden or unsupported by this CLI; omit it with None"
+                )
         unsupported: list[tuple[str, bool, str]] = [
             (
                 "temperature",
-                params.temperature != 0.0,
+                params.temperature is not None,
                 "Claude Code CLI does not expose a direct equivalent.",
             ),
             (
                 "top_p",
-                params.top_p != 1.0,
+                params.top_p is not None,
                 "Claude Code CLI does not expose a direct equivalent.",
             ),
             (
                 "top_k",
-                params.top_k != 0,
+                params.top_k is not None,
                 "Claude Code CLI does not expose a direct equivalent.",
             ),
             (
                 "presence_penalty",
-                params.presence_penalty != 0.0,
+                params.presence_penalty is not None,
                 "Claude Code CLI does not expose a direct equivalent.",
             ),
             (
                 "frequency_penalty",
-                params.frequency_penalty != 0.0,
+                params.frequency_penalty is not None,
                 "Claude Code CLI does not expose a direct equivalent.",
             ),
             (
@@ -492,7 +552,6 @@ class ClaudeCodeBackend(ModelBackend):
         for usage in _iter_usage_dicts(payload):
             usage_dict = usage
             break
-        prompt_tokens, completion_tokens = _usage_counts(usage_dict)
         finish_reason = _claude_stop_reason(payload.get("stop_reason"))
 
         metadata = {
@@ -513,8 +572,7 @@ class ClaudeCodeBackend(ModelBackend):
         return GenerationResult(
             text=text,
             finish_reason=finish_reason,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
+            **normalize_usage(usage_dict, provider="anthropic"),
             metadata=metadata,
         )
 

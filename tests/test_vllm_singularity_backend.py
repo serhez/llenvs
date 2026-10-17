@@ -88,19 +88,60 @@ def patched(tmp_path, fake_sif, monkeypatch):
     mock_openai = MagicMock()
     mock_openai.return_value._async_runner = runner
     monkeypatch.setattr(mod, "OpenAIBackend", mock_openai)
+    monkeypatch.setattr(
+        mod, "resolve_model_revision", lambda model, revision=None, **kwargs: revision or "a" * 40
+    )
+    monkeypatch.setattr(
+        mod,
+        "native_runtime_identity",
+        lambda *args, **kwargs: {"version": "0.28.0", "content_sha256": "offline"},
+    )
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     monkeypatch.setattr(mod.os, "killpg", fake_killpg)
     monkeypatch.setattr(mod.os, "getpgid", lambda pid: pid)
+    exit_callbacks = []
+    monkeypatch.setattr(mod.atexit, "register", lambda callback: exit_callbacks.append(callback))
+    monkeypatch.setattr(mod.atexit, "unregister", lambda callback: None)
 
     yield {
         "module": mod,
         "proc_holder": fake_proc_holder,
         "killed": killed,
     }
+    for callback in exit_callbacks:
+        callback()
     runner.close()
 
 
 class TestSingularityVLLMBackendLifecycle:
+    def test_revision_and_reasoning_runtime_flags_are_explicit(self, patched):
+        mod = patched["module"]
+        revision = "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0"
+        backend = mod.SingularityVLLMBackend(
+            model_path="Qwen/Qwen3.8-27B",
+            revision=revision,
+            reasoning_family="qwen3.8",
+            launcher="native",
+        )
+        try:
+            argv = patched["proc_holder"]["p"].argv
+            assert argv[argv.index("--revision") + 1] == revision
+            assert argv[argv.index("--tokenizer-revision") + 1] == revision
+            assert argv[argv.index("--reasoning-parser") + 1] == "qwen3"
+            assert "--enable-prompt-tokens-details" in argv
+            assert backend._revision == revision
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize("launcher", ["native", "singularity"])
+    def test_owned_server_explicitly_uses_the_vllm_endpoint_dialect(self, patched, launcher):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="offline-model", launcher=launcher)
+        try:
+            assert mod.OpenAIBackend.call_args.kwargs["api_flavor"] == "vllm"
+        finally:
+            backend.close()
+
     def test_spawn_argv_contains_expected_flags(self, patched, fake_sif):
         mod = patched["module"]
 
@@ -267,51 +308,49 @@ class TestSingularityVLLMBackendLifecycle:
 
 
 class TestSingularityVLLMBackendThinkingToggle:
-    """``disable_thinking`` must reach the server as ``chat_template_kwargs``.
-
-    The server renders the chat template itself, so hybrid-reasoning models
-    (Qwen3) default to thinking unless the request carries
-    ``chat_template_kwargs={"enable_thinking": False}``.
-    """
+    """The owned server delegates typed effort to the shared vLLM request builder."""
 
     def _params(self, **kwargs):
         from llenvs.inference.protocol import SamplingParams
+
         return SamplingParams(max_tokens=8, **kwargs)
 
-    def test_generate_chat_injects_template_kwargs(self, patched):
+    def test_generate_chat_preserves_typed_effort_for_shared_builder(self, patched):
         mod = patched["module"]
-        backend = mod.SingularityVLLMBackend(model_path="m")
+        backend = mod.SingularityVLLMBackend(
+            model_path="m", chat_template_kwargs={"enable_thinking": True}
+        )
         try:
             msgs = _msgs("hi")
-            backend.generate_chat(msgs, self._params(disable_thinking=True))
+            backend.generate_chat(msgs, self._params(reasoning_effort="none"))
             (sent_msgs, sent_params), _ = backend._openai.generate_chat.call_args
             assert sent_msgs == msgs
-            assert sent_params.extra["extra_body"]["chat_template_kwargs"] == {
-                "enable_thinking": False
-            }
-            assert sent_params.disable_thinking is True
+            assert sent_params.extra == {}
+            assert sent_params.reasoning_effort == "none"
+            assert sent_params.reasoning_effort == "none"
         finally:
             backend.close()
 
-    def test_generate_chat_batch_injects_template_kwargs(self, patched):
+    def test_generate_chat_batch_preserves_typed_effort_for_shared_builder(self, patched):
         mod = patched["module"]
-        backend = mod.SingularityVLLMBackend(model_path="m")
+        backend = mod.SingularityVLLMBackend(
+            model_path="m", chat_template_kwargs={"enable_thinking": True}
+        )
         try:
             batch = [_msgs("a"), _msgs("b")]
-            backend.generate_chat_batch(batch, self._params(disable_thinking=True))
-            (sent_batch, sent_params), _ = (
-                backend._openai.generate_chat_batch.call_args
-            )
+            backend.generate_chat_batch(batch, self._params(reasoning_effort="none"))
+            (sent_batch, sent_params), _ = backend._openai.generate_chat_batch.call_args
             assert sent_batch == batch
-            assert sent_params.extra["extra_body"]["chat_template_kwargs"] == {
-                "enable_thinking": False
-            }
+            assert sent_params.extra == {}
+            assert sent_params.reasoning_effort == "none"
         finally:
             backend.close()
 
-    def test_no_disable_thinking_forwards_params_unchanged(self, patched):
+    def test_no_reasoning_effort_none_forwards_params_unchanged(self, patched):
         mod = patched["module"]
-        backend = mod.SingularityVLLMBackend(model_path="m")
+        backend = mod.SingularityVLLMBackend(
+            model_path="m", chat_template_kwargs={"enable_thinking": True}
+        )
         try:
             params = self._params()
             backend.generate_chat(_msgs("hi"), params)
@@ -320,33 +359,18 @@ class TestSingularityVLLMBackendThinkingToggle:
         finally:
             backend.close()
 
-    def test_caller_extra_preserved_and_wins_on_collision(self, patched):
+    def test_conflicting_request_reasoning_extra_raises(self, patched):
         mod = patched["module"]
-        backend = mod.SingularityVLLMBackend(model_path="m")
+        backend = mod.SingularityVLLMBackend(
+            model_path="m", chat_template_kwargs={"enable_thinking": True}
+        )
         try:
-            original_extra = {
-                "top_level": "kept",
-                "extra_body": {
-                    "other_field": "kept",
-                    "chat_template_kwargs": {"enable_thinking": True, "custom": 1},
-                },
-            }
-            params = self._params(disable_thinking=True, extra=original_extra)
-            backend.generate_chat(_msgs("hi"), params)
-            (_, sent_params), _ = backend._openai.generate_chat.call_args
-            assert sent_params.extra["top_level"] == "kept"
-            assert sent_params.extra["extra_body"]["other_field"] == "kept"
-            # Explicit caller values win over the injected default.
-            assert sent_params.extra["extra_body"]["chat_template_kwargs"] == {
-                "enable_thinking": True,
-                "custom": 1,
-            }
-            # The caller's params object and dicts are never mutated.
-            assert params.extra == original_extra
-            assert params.extra["extra_body"]["chat_template_kwargs"] == {
-                "enable_thinking": True,
-                "custom": 1,
-            }
+            extra = {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
+            params = self._params(reasoning_effort="none", extra=extra)
+            with pytest.raises(ValueError):
+                backend.generate_chat(_msgs("hi"), params)
+            backend._openai.generate_chat.assert_not_called()
+            assert params.extra == extra
         finally:
             backend.close()
 
@@ -354,9 +378,11 @@ class TestSingularityVLLMBackendThinkingToggle:
         """``generate`` takes pre-rendered text prompts — no chat template,
         so there is nothing to toggle and params pass through untouched."""
         mod = patched["module"]
-        backend = mod.SingularityVLLMBackend(model_path="m")
+        backend = mod.SingularityVLLMBackend(
+            model_path="m", chat_template_kwargs={"enable_thinking": True}
+        )
         try:
-            params = self._params(disable_thinking=True)
+            params = self._params(reasoning_effort="none")
             backend.generate(["raw prompt"], params)
             (_, sent_params), _ = backend._openai.generate.call_args
             assert sent_params is params
@@ -372,8 +398,9 @@ class _CharTokenizer:
     def __init__(self) -> None:
         self.template_kwargs_seen: list[dict] = []
 
-    def apply_chat_template(self, conversation, *, tokenize=False,
-                            add_generation_prompt=True, **kwargs) -> str:
+    def apply_chat_template(
+        self, conversation, *, tokenize=False, add_generation_prompt=True, **kwargs
+    ) -> str:
         self.template_kwargs_seen.append(kwargs)
         return self.PROMPT
 
@@ -395,25 +422,36 @@ class _FakeCompletions:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    async def create(self, *, model, prompt, max_tokens, temperature,
-                     extra_body=None, **kwargs):
-        self.calls.append({
-            "model": model, "prompt": list(prompt), "max_tokens": max_tokens,
-            "temperature": temperature, "extra_body": extra_body, **kwargs,
-        })
+    async def create(self, *, model, prompt, max_tokens, temperature, extra_body=None, **kwargs):
+        self.calls.append(
+            {
+                "model": model,
+                "prompt": list(prompt),
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "extra_body": extra_body,
+                **kwargs,
+            }
+        )
         full_ids = list(prompt)
         plps: list = [None]
         for pos in range(1, len(full_ids)):
             tid = full_ids[pos]
-            plps.append({
-                str(tid): {"logprob": round(-0.1 * pos, 4),
-                           "decoded_token": chr(tid), "rank": 1},
-            })
+            plps.append(
+                {
+                    str(tid): {
+                        "logprob": round(-0.1 * pos, 4),
+                        "decoded_token": chr(tid),
+                        "rank": 1,
+                    },
+                }
+            )
         return SimpleNamespace(choices=[SimpleNamespace(prompt_logprobs=plps)])
 
 
 def _msgs(text: str):
     from llenvs.inference.protocol import ChatMessage
+
     return [ChatMessage(role="user", content=text)]
 
 
@@ -426,7 +464,9 @@ def _wire_scoring(backend, tokenizer=None):
     return tok, fake
 
 
-@pytest.mark.parametrize("operation", ["generate", "generate_chat", "generate_chat_batch", "score_chat_batch"])
+@pytest.mark.parametrize(
+    "operation", ["generate", "generate_chat", "generate_chat_batch", "score_chat_batch"]
+)
 @pytest.mark.parametrize("returncode", [0, 1, -9])
 def test_exited_server_rejects_calls_without_http(patched, operation, returncode):
     from llenvs.inference.protocol import BackendProcessExitedError, SamplingParams
@@ -508,7 +548,9 @@ def test_generation_failure_checks_owned_process_without_losing_siblings(patched
 
     try:
         backend._openai.generate_chat_batch.side_effect = fail
-        expected = PartialBatchError if partial else BackendProcessExitedError if dead else ConnectionError
+        expected = (
+            PartialBatchError if partial else BackendProcessExitedError if dead else ConnectionError
+        )
         with pytest.raises(expected) as caught:
             backend.generate_chat_batch([_msgs("a"), _msgs("b")], SamplingParams())
         if not dead:
@@ -556,7 +598,11 @@ def test_refused_owned_server_is_fatal_even_while_launcher_is_alive(patched, par
     refused = OSError(errno.ECONNREFUSED, "connection refused")
     failure = ConnectionError("All connection attempts failed")
     failure.__cause__ = ExceptionGroup("connection attempts", [refused])
-    original = PartialBatchError([good, failure, cancellation], {1: failure, 2: cancellation}) if partial else failure
+    original = (
+        PartialBatchError([good, failure, cancellation], {1: failure, 2: cancellation})
+        if partial
+        else failure
+    )
     try:
         backend._openai.generate_chat_batch.side_effect = original
         with pytest.raises(PartialBatchError if partial else BackendProcessExitedError) as caught:
@@ -579,11 +625,14 @@ def test_refused_owned_server_is_fatal_even_while_launcher_is_alive(patched, par
         backend.close()
 
 
-@pytest.mark.parametrize("failure", [
-    TimeoutError("connection refused is mentioned, but this is a timeout"),
-    OSError(errno.ECONNRESET, "peer reset the connection"),
-    ConnectionError("connection refused"),
-])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError("connection refused is mentioned, but this is a timeout"),
+        OSError(errno.ECONNRESET, "peer reset the connection"),
+        ConnectionError("connection refused"),
+    ],
+)
 def test_live_server_transient_errors_are_not_misclassified_by_message(patched, failure):
     from llenvs.inference.protocol import SamplingParams
 
@@ -659,9 +708,7 @@ def test_server_exit_does_not_reclassify_cancellation(patched, partial):
         backend.close()
 
 
-def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(
-    tmp_path, monkeypatch
-):
+def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(tmp_path, monkeypatch):
     """Transformers 4.x expects a mapping where Gemma's v5 metadata has a list.
 
     The fallback must preserve those entries as ordinary additional special
@@ -671,9 +718,7 @@ def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(
     from llenvs.inference.backends import vllm_singularity as mod
 
     tokenizer_config = tmp_path / "tokenizer_config.json"
-    tokenizer_config.write_text(
-        json.dumps({"extra_special_tokens": ["<|video|>"]})
-    )
+    tokenizer_config.write_text(json.dumps({"extra_special_tokens": ["<|video|>"]}))
     sentinel = object()
 
     class _FakeAutoTokenizer:
@@ -710,13 +755,21 @@ def test_host_tokenizer_recovers_from_legacy_extra_special_tokens_shape(
 
 
 class TestSingularityVLLMBackendScoring:
-    @pytest.mark.parametrize("continuations", [
-        ["A", "B", "A"], ["", "A", "", "B", "A", ""],
-        ["B"], ["", "B", "", "B"],
-    ])
+    @pytest.mark.parametrize(
+        "continuations",
+        [
+            ["A", "B", "A"],
+            ["", "A", "", "B", "A", ""],
+            ["B"],
+            ["", "B", "", "B"],
+        ],
+    )
     @pytest.mark.parametrize("failure_kind", ["input", "connection", "fatal"])
     def test_partial_scoring_preserves_successes_and_original_indices(
-        self, patched, continuations, failure_kind,
+        self,
+        patched,
+        continuations,
+        failure_kind,
     ):
         from llenvs.inference.protocol import (
             PartialBatchError,
@@ -740,7 +793,8 @@ class TestSingularityVLLMBackendScoring:
             if ids[-1] == ord("B"):
                 raise failure
             return ScoringResult(
-                token_scores=(TokenScore("A", ord("A"), -2),), scored_tokens=1,
+                token_scores=(TokenScore("A", ord("A"), -2),),
+                scored_tokens=1,
             )
 
         try:
@@ -748,12 +802,11 @@ class TestSingularityVLLMBackendScoring:
             backend._score_one_async = score_one
             with pytest.raises(PartialBatchError) as caught:
                 backend.score_chat_batch(
-                    [_msgs(str(i)) for i in range(len(continuations))], continuations,
+                    [_msgs(str(i)) for i in range(len(continuations))],
+                    continuations,
                 )
             exc = caught.value
-            assert exc.failures == {
-                i: failure for i, c in enumerate(continuations) if c == "B"
-            }
+            assert exc.failures == {i: failure for i, c in enumerate(continuations) if c == "B"}
             assert len(exc.results) == len(continuations)
             for i, continuation in enumerate(continuations):
                 if continuation == "B":
@@ -782,7 +835,8 @@ class TestSingularityVLLMBackendScoring:
         try:
             _wire_scoring(backend)
             results = backend.score_chat_batch(
-                [_msgs("a"), _msgs("b")], ["AB", "C"],
+                [_msgs("a"), _msgs("b")],
+                ["AB", "C"],
             )
             assert len(results) == 2
             # item 0: continuation "AB" -> positions 7,8 -> logprobs -0.7,-0.8
@@ -820,8 +874,7 @@ class TestSingularityVLLMBackendScoring:
             tok, _ = _wire_scoring(backend)
             backend.score_chat_batch([_msgs("a")], ["AB"])
             assert tok.template_kwargs_seen
-            assert all(kw.get("enable_thinking") is False
-                       for kw in tok.template_kwargs_seen)
+            assert all(kw.get("enable_thinking") is False for kw in tok.template_kwargs_seen)
         finally:
             backend.close()
 
@@ -831,7 +884,8 @@ class TestSingularityVLLMBackendScoring:
         try:
             _tok, fake = _wire_scoring(backend)
             results = backend.score_chat_batch(
-                [_msgs("a"), _msgs("b")], ["", "AB"],
+                [_msgs("a"), _msgs("b")],
+                ["", "AB"],
             )
             # Only the non-empty continuation hits the server.
             assert len(fake.calls) == 1
@@ -868,8 +922,9 @@ class TestSingularityVLLMBackendScoring:
         loaded: list[str] = []
         fake_tok = _CharTokenizer()
         monkeypatch.setattr(
-            mod, "_load_hf_tokenizer",
-            lambda model_path: (loaded.append(model_path) or fake_tok),
+            mod,
+            "_load_hf_tokenizer",
+            lambda model_path, *, revision: loaded.append((model_path, revision)) or fake_tok,
         )
         backend = mod.SingularityVLLMBackend(model_path="some/model")
         try:
@@ -877,7 +932,7 @@ class TestSingularityVLLMBackendScoring:
             backend._openai._async_client.completions = fake
             backend.score_chat_batch([_msgs("a")], ["AB"])
             backend.score_chat_batch([_msgs("b")], ["CD"])
-            assert loaded == ["some/model"]  # loaded once, then memoized
+            assert loaded == [("some/model", "a" * 40)]
         finally:
             backend.close()
 
@@ -959,3 +1014,44 @@ class TestNativeLauncher:
         monkeypatch.setattr(mod.subprocess, "Popen", missing)
         with pytest.raises(RuntimeError, match="vllm binary not found"):
             mod.SingularityVLLMBackend(model_path="m", launcher="native")
+
+
+def test_owned_descriptor_ignores_incidental_ports_and_paths_but_records_effective_engine(
+    patched, tmp_path
+):
+    from pathlib import Path
+
+    mod = patched["module"]
+
+    class Tokenizer(_CharTokenizer):
+        chat_template = "template"
+
+        def get_vocab(self):
+            return {"a": 1}
+
+    def launch(port, name, dtype="torch.bfloat16"):
+        backend = mod.SingularityVLLMBackend(
+            model_path="repo/model", port=port, server_log_path=str(tmp_path / name)
+        )
+        backend._tokenizer = Tokenizer()
+        Path(backend._log_path).write_text(
+            "Initializing a V1 LLM engine (v0.28.0) with config: "
+            f"model='/incidental/{name}', revision={'a' * 40}, tokenizer_revision={'a' * 40}, "
+            f"dtype={dtype}, seed=42, tensor_parallel_size=1, enable_prefix_caching=False\n"
+        )
+        return backend
+
+    first, second, changed = (
+        launch(12001, "one.log"),
+        launch(12002, "two.log"),
+        launch(12003, "three.log", "torch.float16"),
+    )
+    try:
+        a, b, c = first.descriptor(), second.descriptor(), changed.descriptor()
+        assert a["identity"] == b["identity"]
+        assert a["provenance"]["port"] != b["provenance"]["port"]
+        assert a["identity"] != c["identity"]
+        assert a["identity"]["effective_engine_config"]["enable_prefix_caching"] is False
+    finally:
+        for backend in (first, second, changed):
+            backend.close()

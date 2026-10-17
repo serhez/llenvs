@@ -1,5 +1,13 @@
 """Inference layer for model backends and generation."""
 
+from llenvs.inference.decisions import (
+    DecisionBackend,
+    DecisionCapabilities,
+    DecisionOption,
+    DecisionRequest,
+    DecisionResult,
+)
+from llenvs.inference.persistence import CallStore, PersistentBackend, UnknownOutcomeError
 from llenvs.inference.prompting import (
     AnswerFormatInjector,
     ChainOfThoughtWrapper,
@@ -38,6 +46,7 @@ from llenvs.inference.protocol import (
     QuotaExhaustedError,
     RecoverableInputError,
     RefusedByPolicyError,
+    ResponseSchema,
     RetryExhaustedTransientError,
     SamplingParams,
     ScoringResult,
@@ -52,6 +61,15 @@ __all__ = [
     "ModelBackend",
     "BackendCapabilities",
     "SamplingParams",
+    "ResponseSchema",
+    "CallStore",
+    "PersistentBackend",
+    "UnknownOutcomeError",
+    "DecisionRequest",
+    "DecisionOption",
+    "DecisionResult",
+    "DecisionCapabilities",
+    "DecisionBackend",
     "GenerationResult",
     "ChatMessage",
     "ScoringResult",

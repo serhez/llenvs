@@ -75,6 +75,7 @@ nav:
     - Environments: guides/environments.md
     - Evaluation: guides/evaluation.md
     - Inference Backends: guides/backends.md
+    - Persistent Predictor Calls: guides/predictor-calls.md
     - Prompts: guides/prompts.md
     - Tools & Function Calling: guides/tools.md
     - Segmentation: guides/segmentation.md

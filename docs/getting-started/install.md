@@ -16,8 +16,9 @@ pip install llenvs[transformers]   # Local inference with HuggingFace Transforme
 pip install llenvs[openai]         # OpenAI API
 pip install llenvs[anthropic]      # Anthropic API
 pip install llenvs[litellm]        # 100+ providers via LiteLLM
+pip install llenvs[d3]             # HTTP client for an owned native d3 worker
 
-# Everything
+# Compatible adapters/backends (Decisions uses a separate environment)
 pip install llenvs[all]
 ```
 
@@ -67,9 +68,30 @@ The base package only requires:
 | `vllm` | `vllm>=0.4` | Local GPU inference with vLLM |
 | `transformers` | `transformers>=4.36`, `torch>=2.0`, `accelerate>=0.25` | Local inference with HuggingFace Transformers |
 | `openai` | `openai>=1.0` | OpenAI API access |
+| `decisions` | `openai>=3.26.0` | OpenAI Decisions; isolated from LiteLLM/`all` |
+| `d3` | `httpx>=0.28` | Native d3 worker client; worker installed separately |
 | `anthropic` | `anthropic>=0.20` | Anthropic API access |
-| `litellm` | `litellm>=1.70` | 100+ providers via the LiteLLM SDK |
-| `dev` | pytest, mypy, ruff | Development tools |
+| `litellm` | `litellm>=1.88.1` | 100+ providers via the LiteLLM SDK |
+| `dev` | pytest, ty, ruff, MkDocs | Development tools |
+
+### Decisions environment
+
+The `decisions` extra requires a newer OpenAI SDK than LiteLLM supports. Keep
+it separate from `litellm` and `all`; uv declares these combinations conflicting
+and locks their supported SDK versions independently. Ordinary OpenAI-compatible
+backends can remain in the LiteLLM environment.
+
+From a source checkout:
+
+```bash
+uv venv .venv-decisions
+uv pip install --python .venv-decisions/bin/python -e '.[decisions]' 'openai==3.31.0'
+.venv-decisions/bin/python your_predictor.py
+```
+
+Use this environment for Luna/Decisions qualification. GPU server dependencies
+belong in their own pinned runtime environments. See
+[persistent predictor calls](../guides/predictor-calls.md) for decision and d3 usage.
 
 ---
 

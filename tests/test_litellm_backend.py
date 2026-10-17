@@ -9,7 +9,7 @@ monkeypatch those on the ``litellm`` module — the analog of overwriting
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -163,8 +163,13 @@ class TestRequestKwargs:
         kwargs = _capture_kwargs(monkeypatch, backend, SamplingParams(top_k=40))
         assert kwargs["top_k"] == 40
 
-    def test_drop_params_default_true(self, monkeypatch):
+    def test_drop_params_defaults_to_native_strict_behavior(self, monkeypatch):
         backend = _backend()
+        kwargs = _capture_kwargs(monkeypatch, backend, SamplingParams())
+        assert kwargs["drop_params"] is False
+
+    def test_parameter_dropping_requires_explicit_opt_in(self, monkeypatch):
+        backend = _backend(drop_params=True)
         kwargs = _capture_kwargs(monkeypatch, backend, SamplingParams())
         assert kwargs["drop_params"] is True
 
@@ -205,6 +210,97 @@ class TestRequestKwargs:
         assert kwargs["user"] == "u-123"
 
 
+class TestSamplingRequestContract:
+    @pytest.fixture(params=["chat", "chat_batch", "tools", "tools_batch"])
+    def invoke(self, request, sample_tools):
+        def call(backend, params):
+            messages = [ChatMessage(role="user", content="go")]
+            if request.param == "chat":
+                return backend.generate_chat(messages, params)
+            if request.param == "chat_batch":
+                return backend.generate_chat_batch([messages], params)[0]
+            if request.param == "tools":
+                return backend.generate_with_tools(messages, sample_tools, params)
+            return backend.generate_with_tools_batch([messages], sample_tools, params)[0]
+
+        return call
+
+    @pytest.fixture
+    def completions(self, monkeypatch):
+        sync = MagicMock(return_value=_completion_response())
+        async_ = AsyncMock(return_value=_completion_response())
+        monkeypatch.setattr(litellm, "completion", sync)
+        monkeypatch.setattr(litellm, "acompletion", async_)
+        return sync, async_
+
+    def test_none_controls_are_omitted(self, invoke, completions):
+        params = SamplingParams(
+            max_tokens=None,
+            temperature=None,
+            top_p=None,
+            top_k=None,
+            min_p=None,
+            repetition_penalty=None,
+            presence_penalty=None,
+            frequency_penalty=None,
+        )
+        with _backend() as backend:
+            invoke(backend, params)
+
+        kwargs = next(mock.call_args.kwargs for mock in completions if mock.called)
+        assert (
+            not {
+                "max_tokens",
+                "temperature",
+                "top_p",
+                "top_k",
+                "min_p",
+                "repetition_penalty",
+                "presence_penalty",
+                "frequency_penalty",
+            }
+            & kwargs.keys()
+        )
+
+    @pytest.mark.parametrize("extra", [{"n": 2}, {"temperature": 0.9}, {"model": "other"}])
+    def test_owned_keys_in_extras_fail_before_calling_litellm(self, invoke, completions, extra):
+        with _backend() as backend:
+            with pytest.raises((ValueError, PartialBatchError)) as caught:
+                invoke(backend, SamplingParams(extra=extra))
+
+        if isinstance(caught.value, PartialBatchError):
+            assert set(caught.value.failures) == {0}
+            assert isinstance(caught.value.failures[0], ValueError)
+        for mock in completions:
+            mock.assert_not_called()
+
+    def test_multiple_choices_fail_before_calling_litellm(self, invoke, completions):
+        with _backend() as backend:
+            with pytest.raises((ValueError, PartialBatchError)) as caught:
+                invoke(backend, SamplingParams(n=2))
+
+        if isinstance(caught.value, PartialBatchError):
+            assert set(caught.value.failures) == {0}
+            assert isinstance(caught.value.failures[0], ValueError)
+        for mock in completions:
+            mock.assert_not_called()
+
+    @pytest.mark.parametrize("drop_params", [False, True])
+    def test_record_is_labeled_as_sdk_input_and_excludes_credentials(
+        self, invoke, completions, drop_params
+    ):
+        with _backend(api_key="offline-secret", drop_params=drop_params) as backend:
+            result = invoke(backend, SamplingParams(extra={"metadata": {"experiment": "pad"}}))
+
+        kwargs = next(mock.call_args.kwargs for mock in completions if mock.called)
+        assert result.metadata["request_capture"] == "litellm_input"
+        assert result.metadata["request"] == {
+            key: value for key, value in kwargs.items() if key not in {"messages", "api_key"}
+        }
+        kwargs["metadata"]["experiment"] = "changed"
+        assert result.metadata["request"]["metadata"]["experiment"] == "pad"
+
+
 class TestThinkingMapping:
     def test_thinking_budget_maps_to_thinking_param(self, monkeypatch):
         backend = _backend()
@@ -218,42 +314,41 @@ class TestThinkingMapping:
         assert "thinking" not in kwargs
         assert "reasoning_effort" not in kwargs
 
-    def test_disable_thinking_sets_reasoning_effort_none(self, monkeypatch):
+    def test_reasoning_effort_none_sets_reasoning_effort_none(self, monkeypatch):
         backend = _backend()
-        kwargs = _capture_kwargs(monkeypatch, backend, SamplingParams(disable_thinking=True))
+        kwargs = _capture_kwargs(monkeypatch, backend, SamplingParams(reasoning_effort="none"))
         assert kwargs["reasoning_effort"] == "none"
         assert "thinking" not in kwargs
 
-    def test_disable_thinking_wins_over_thinking_budget(self, monkeypatch):
+    def test_reasoning_effort_none_wins_over_thinking_budget(self, monkeypatch):
         backend = _backend()
         kwargs = _capture_kwargs(
             monkeypatch,
             backend,
-            SamplingParams(thinking_budget=2048, disable_thinking=True),
+            SamplingParams(thinking_budget=2048, reasoning_effort="none"),
         )
         assert kwargs["reasoning_effort"] == "none"
         assert "thinking" not in kwargs
 
-    def test_disable_thinking_wins_over_user_extra(self, monkeypatch):
+    def test_typed_effort_rejects_conflicting_extra(self, monkeypatch):
         backend = _backend()
-        params = SamplingParams(disable_thinking=True, extra={"reasoning_effort": "high"})
-        kwargs = _capture_kwargs(monkeypatch, backend, params)
-        assert kwargs["reasoning_effort"] == "none"
+        params = SamplingParams(reasoning_effort="none", extra={"reasoning_effort": "high"})
+        with pytest.raises(ValueError):
+            _capture_kwargs(monkeypatch, backend, params)
 
-    def test_user_extra_reasoning_effort_passthrough(self, monkeypatch):
+    def test_typed_effort_is_forwarded(self, monkeypatch):
         backend = _backend()
-        params = SamplingParams(extra={"reasoning_effort": "high"})
+        params = SamplingParams(reasoning_effort="high")
         kwargs = _capture_kwargs(monkeypatch, backend, params)
         assert kwargs["reasoning_effort"] == "high"
 
-    def test_user_extra_thinking_overrides_derived(self, monkeypatch):
+    def test_extra_cannot_replace_typed_thinking_budget(self, monkeypatch):
         backend = _backend()
         params = SamplingParams(
-            thinking_budget=2048,
-            extra={"thinking": {"type": "enabled", "budget_tokens": 64}},
+            thinking_budget=2048, extra={"thinking": {"type": "enabled", "budget_tokens": 64}}
         )
-        kwargs = _capture_kwargs(monkeypatch, backend, params)
-        assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 64}
+        with pytest.raises(ValueError, match="thinking"):
+            _capture_kwargs(monkeypatch, backend, params)
 
 
 class TestResponseParsing:
@@ -492,7 +587,7 @@ class TestRateLimitRetry:
         monkeypatch.setattr(litellm, "completion", create)
         result = backend.generate_chat([ChatMessage(role="user", content="go")], SamplingParams())
         assert result.text == "recovered"
-        assert sleeps == [15.0]
+        assert len(sleeps) == 1 and 15 <= sleeps[0] <= 18.75
 
     def test_retries_exhausted_reraises(self, monkeypatch):
         backend = _backend(rate_limit_wait=1.0, rate_limit_max_retries=2)
@@ -507,7 +602,7 @@ class TestRateLimitRetry:
         with pytest.raises(litellm.RateLimitError):
             backend.generate_chat([ChatMessage(role="user", content="go")], SamplingParams())
         assert create.call_count == 3  # initial + 2 retries
-        assert sleeps == [1.0, 1.0]
+        assert len(sleeps) == 2 and 1 <= sleeps[0] <= 1.25 and 2 <= sleeps[1] <= 2.5
 
     def test_no_wait_means_no_retry(self, monkeypatch):
         backend = _backend(rate_limit_wait=0.0)

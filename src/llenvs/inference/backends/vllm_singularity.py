@@ -31,7 +31,10 @@ import signal
 import socket
 import subprocess
 import time
+import uuid
 from collections.abc import Iterator
+from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, cast
 
@@ -45,6 +48,16 @@ from llenvs.inference.protocol import (
     PartialBatchError,
     SamplingParams,
     ScoringResult,
+)
+from llenvs.inference.records import (
+    content_manifest,
+    dependency_versions,
+    file_digest,
+    native_runtime_identity,
+    resolve_model_revision,
+    sanitized_argv,
+    tokenizer_identity,
+    vllm_engine_config,
 )
 from llenvs.inference.scoring_utils import (
     build_scoring_inputs,
@@ -77,29 +90,7 @@ def _connection_refused(error: BaseException | None) -> bool:
     return False
 
 
-def _with_request_thinking_toggle(params: SamplingParams) -> SamplingParams:
-    """Map ``params.disable_thinking`` onto vLLM's ``chat_template_kwargs``.
-
-    The server renders the chat template itself, so the only way to switch a
-    hybrid-reasoning model (e.g. Qwen3) out of thinking mode per request is
-    the ``chat_template_kwargs`` request field. Caller-supplied values in
-    ``params.extra["extra_body"]["chat_template_kwargs"]`` win on key
-    collisions — the explicit escape hatch has priority, matching the
-    ``extra_body`` merge convention of the API backends.
-    """
-    if not params.disable_thinking:
-        return params
-    extra = dict(params.extra) if params.extra else {}
-    extra_body = dict(extra.get("extra_body") or {})
-    extra_body["chat_template_kwargs"] = {
-        "enable_thinking": False,
-        **(extra_body.get("chat_template_kwargs") or {}),
-    }
-    extra["extra_body"] = extra_body
-    return dataclasses.replace(params, extra=extra)
-
-
-def _resolve_tokenizer_config_path(model_path: str) -> Path | None:
+def _resolve_tokenizer_config_path(model_path: str, revision: str | None = None) -> Path | None:
     """Resolve ``tokenizer_config.json`` locally without loading model weights."""
     local_path = Path(model_path)
     if local_path.is_dir():
@@ -109,7 +100,9 @@ def _resolve_tokenizer_config_path(model_path: str) -> Path | None:
     try:
         from transformers.utils.hub import cached_file
 
-        resolved = cached_file(model_path, "tokenizer_config.json")
+        resolved = cached_file(
+            model_path, "tokenizer_config.json", **({"revision": revision} if revision else {})
+        )
     except Exception:
         # This is a best-effort compatibility path reached only after the
         # normal tokenizer load has already failed. Preserve that original
@@ -118,9 +111,11 @@ def _resolve_tokenizer_config_path(model_path: str) -> Path | None:
     return Path(resolved) if resolved is not None else None
 
 
-def _legacy_extra_special_tokens(model_path: str) -> list[Any] | None:
+def _legacy_extra_special_tokens(model_path: str, revision: str | None = None) -> list[Any] | None:
     """Translate Transformers-5 list metadata for a Transformers-4 host."""
-    config_path = _resolve_tokenizer_config_path(model_path)
+    config_path = _resolve_tokenizer_config_path(
+        model_path, **({"revision": revision} if revision else {})
+    )
     if config_path is None:
         return None
     try:
@@ -140,7 +135,7 @@ def _legacy_extra_special_tokens(model_path: str) -> list[Any] | None:
     return combined
 
 
-def _load_hf_tokenizer(model_path: str) -> Any:
+def _load_hf_tokenizer(model_path: str, revision: str | None = None) -> Any:
     """Load the HF tokenizer for scoring-prompt rendering on the host.
 
     Only the tokenizer is fetched (no weights); it honors ``HF_HOME`` /
@@ -150,11 +145,15 @@ def _load_hf_tokenizer(model_path: str) -> Any:
     from transformers import AutoTokenizer
 
     try:
-        return AutoTokenizer.from_pretrained(model_path)
+        return AutoTokenizer.from_pretrained(
+            model_path, **({"revision": revision} if revision else {})
+        )
     except AttributeError as exc:
         if _LEGACY_EXTRA_SPECIAL_TOKENS_ERROR not in str(exc):
             raise
-        additional_special_tokens = _legacy_extra_special_tokens(model_path)
+        additional_special_tokens = _legacy_extra_special_tokens(
+            model_path, **({"revision": revision} if revision else {})
+        )
         if additional_special_tokens is None:
             raise
 
@@ -168,6 +167,7 @@ def _load_hf_tokenizer(model_path: str) -> Any:
             model_path,
             extra_special_tokens={},
             additional_special_tokens=additional_special_tokens,
+            **({"revision": revision} if revision else {}),
         )
 
 
@@ -198,8 +198,7 @@ def _resolve_launcher(explicit: str | None) -> str:
     launcher = explicit or os.environ.get("LLENVS_VLLM_LAUNCHER", "") or "singularity"
     if launcher not in _LAUNCHERS:
         raise ValueError(
-            f"SingularityVLLMBackend: unknown launcher {launcher!r}; "
-            f"expected one of {_LAUNCHERS}"
+            f"SingularityVLLMBackend: unknown launcher {launcher!r}; expected one of {_LAUNCHERS}"
         )
     return launcher
 
@@ -242,6 +241,8 @@ class SingularityVLLMBackend(ModelBackend):
         cuda_visible_devices: str | None = None,
         server_log_path: str | None = None,
         launcher: str | None = None,
+        revision: str | None = None,
+        reasoning_family: str | None = None,
     ) -> None:
         """Spawn ``vllm serve`` in the container and wait until it's healthy.
 
@@ -307,16 +308,43 @@ class SingularityVLLMBackend(ModelBackend):
         """
         self._closed = False
         self._model_path = model_path
+        self._reasoning_family = reasoning_family
+        self._requested_revision = revision
         self._proc: subprocess.Popen[bytes] | None = None
         self._server_failure: str | None = None
         self._log_fh: IO[bytes] | None = None
         self._openai: OpenAIBackend | None = None
         self._tokenizer: Any = None
-        self._chat_template_kwargs = chat_template_kwargs or {}
+        self._chat_template_kwargs = deepcopy(chat_template_kwargs or {})
+        owned_flags = {
+            "--host",
+            "--port",
+            "--model",
+            "--revision",
+            "--tokenizer",
+            "--tokenizer-revision",
+            "--tensor-parallel-size",
+            "-tp",
+            "--gpu-memory-utilization",
+            "--dtype",
+            "--served-model-name",
+            "--max-model-len",
+        }
+        if reasoning_family == "qwen3.8":
+            owned_flags |= {
+                "--reasoning-parser",
+                "--structured-outputs-config",
+                "--enable-prompt-tokens-details",
+            }
+        if any(str(arg).split("=", 1)[0] in owned_flags for arg in extra_vllm_args):
+            raise ValueError("extra_vllm_args cannot replace owned launch controls")
+        if reasoning_family == "qwen3.8":
+            self._chat_template_kwargs.setdefault("preserve_thinking", True)
         self._max_concurrency = max_concurrency
 
         self._launcher = _resolve_launcher(launcher)
         native = self._launcher == "native"
+        self._runtime_artifact = None
 
         # --- resolve sif (container launcher only) ---
         self._sif: str | None = None
@@ -361,6 +389,8 @@ class SingularityVLLMBackend(ModelBackend):
         if hf_offline is None:
             hf_offline = os.environ.get("LLENVS_HF_OFFLINE", "0") in ("1", "true", "True")
         self._hf_offline = bool(hf_offline)
+        self._revision = resolve_model_revision(model_path, revision, offline=self._hf_offline)
+        self._max_model_len = max_model_len
 
         # --- port + served model name ---
         self._port = port if port is not None else _pick_free_port()
@@ -391,6 +421,20 @@ class SingularityVLLMBackend(ModelBackend):
         ]
         if max_model_len is not None:
             vllm_serve_args.extend(["--max-model-len", str(max_model_len)])
+        if self._revision is not None:
+            vllm_serve_args.extend(
+                ["--revision", self._revision, "--tokenizer-revision", self._revision]
+            )
+        if reasoning_family == "qwen3.8":
+            vllm_serve_args.extend(
+                [
+                    "--reasoning-parser",
+                    "qwen3",
+                    "--enable-prompt-tokens-details",
+                    "--structured-outputs-config",
+                    '{"backend":"xgrammar","reasoning_parser":"qwen3","enable_in_reasoning":false}',
+                ]
+            )
         vllm_serve_args.extend(extra_vllm_args)
 
         if native:
@@ -404,6 +448,17 @@ class SingularityVLLMBackend(ModelBackend):
                 cast(str, self._sif),
                 *vllm_serve_args,
             ]
+        self._launch_argv = list(argv)
+        self._runtime_prefix = argv[: argv.index("vllm")] if not native else []
+        self._semantic_launch = {
+            "dtype": dtype,
+            "tensor_parallel_size": tensor_parallel_size,
+            "max_model_len": max_model_len,
+            "gpu_memory_utilization": gpu_memory_utilization,
+            "extra_vllm_args": list(extra_vllm_args),
+            "chat_template_kwargs": self._chat_template_kwargs,
+            "reasoning_family": reasoning_family,
+        }
 
         # --- build env (plain for native, SINGULARITYENV_* for the container) ---
         prefix = "" if native else "SINGULARITYENV_"
@@ -421,13 +476,16 @@ class SingularityVLLMBackend(ModelBackend):
         self._cuda_visible_devices = cuda_visible_devices
         for k, v in (extra_singularity_env or {}).items():
             env[f"{prefix}{k}"] = v
+        self._runtime_env = env
+        if native:
+            self._runtime_artifact = native_runtime_identity("vllm", "vllm", env=env)
 
         # --- log file ---
         if server_log_path is None:
             server_log_path = f".llenvs-vllm-serve-{self._port}.log"
         self._log_path = server_log_path
         self._log_fh = open(server_log_path, "ab", buffering=0)
-        self._log_fh.write(f"# {self._launcher} cmd: {shlex.join(argv)}\n".encode())
+        self._log_fh.write(f"# {self._launcher} cmd: {shlex.join(sanitized_argv(argv))}\n".encode())
 
         _log.info(
             "SingularityVLLMBackend: spawning vllm serve "
@@ -458,6 +516,8 @@ class SingularityVLLMBackend(ModelBackend):
             ) from e
 
         atexit.register(self._atexit_close)
+        self._instance_id = uuid.uuid4().hex
+        self._started_at = datetime.now(UTC).isoformat()
 
         # --- wait for /health ---
         try:
@@ -471,6 +531,10 @@ class SingularityVLLMBackend(ModelBackend):
             model=self._served_model_name,
             api_key="EMPTY",
             base_url=f"http://127.0.0.1:{self._port}/v1",
+            api_flavor="vllm",
+            reasoning_family=self._reasoning_family,
+            chat_template_kwargs=self._chat_template_kwargs,
+            max_retries=0,
             max_concurrency=max_concurrency,
         )
 
@@ -487,6 +551,7 @@ class SingularityVLLMBackend(ModelBackend):
     def capabilities(self) -> BackendCapabilities:
         base = self._openai.capabilities if self._openai else None
         return BackendCapabilities(
+            supports_explicit_sampling=True,
             # vllm serve returns logprobs over its OpenAI-compatible API, and all
             # chat calls proxy to the inner OpenAIBackend that parses them; surface
             # whatever that client reports (False only when closed).
@@ -500,8 +565,16 @@ class SingularityVLLMBackend(ModelBackend):
             # Scoring rides the same server via /v1/completions prompt_logprobs
             # (see score_chat_batch); available only while the server is live.
             supports_full_scoring=self._openai is not None,
+            supports_request_progress=True,
+            supports_response_schema=self._reasoning_family == "qwen3.8",
+            supports_schema_after_reasoning=self._reasoning_family == "qwen3.8",
+            supports_after_reasoning_text=self._reasoning_family == "qwen3.8",
             max_batch_size=None,
-            max_context_length=base.max_context_length if base else None,
+            max_context_length=self._max_model_len
+            or getattr(self, "_descriptor", {})
+            .get("identity", {})
+            .get("effective_engine_config", {})
+            .get("max_seq_len"),
             max_concurrency=base.max_concurrency if base else None,
         )
 
@@ -509,25 +582,233 @@ class SingularityVLLMBackend(ModelBackend):
     def model_name(self) -> str:
         return self._model_path
 
-    def generate(self, prompts: list[str], params: SamplingParams) -> list[GenerationResult]:
+    @property
+    def _api(self) -> OpenAIBackend:
+        if self._openai is None:
+            raise RuntimeError("Owned vLLM API client is closed")
+        return self._openai
+
+    def generate(
+        self, prompts: list[str], params: SamplingParams, *, observer=None
+    ) -> list[GenerationResult]:
         with self._server_request():
-            return self._openai.generate(prompts, params)
+            return self._api.generate(prompts, self._prepare_request(params), observer=observer)
 
     def generate_chat(
         self, messages: list[ChatMessage], params: SamplingParams
     ) -> GenerationResult:
         with self._server_request():
-            return self._openai.generate_chat(messages, _with_request_thinking_toggle(params))
+            if params.after_reasoning_text is not None:
+                from llenvs.inference.controlled import controlled_chat
+
+                if self.capabilities.max_context_length is None:
+                    self.descriptor()
+                return controlled_chat(self, messages, params)
+            return self._api.generate_chat(
+                messages,
+                self._prepare_request(params),
+            )
 
     def generate_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         params: SamplingParams,
+        *,
+        observer=None,
     ) -> list[GenerationResult]:
         with self._server_request():
-            return self._openai.generate_chat_batch(
-                messages_batch, _with_request_thinking_toggle(params)
+            if params.after_reasoning_text is not None:
+                import asyncio
+
+                from llenvs.inference.backends.api import _notify
+                from llenvs.inference.controlled import controlled_chat
+
+                if self.capabilities.max_context_length is None:
+                    self.descriptor()
+
+                async def one(item):
+                    index, messages = item
+                    result = await asyncio.to_thread(
+                        controlled_chat, self, messages, params, observer=observer, index=index
+                    )
+                    await _notify(observer, "completed", index, result)
+                    return result
+
+                return _run_concurrent(
+                    one,
+                    list(enumerate(messages_batch)),
+                    self._max_concurrency,
+                    return_partial=True,
+                    runner=self._api._async_runner,
+                )
+            return self._api.generate_chat_batch(
+                messages_batch,
+                self._prepare_request(params),
+                **({"observer": observer} if observer else {}),
             )
+
+    @property
+    def tokenizer(self):
+        return self._get_tokenizer()
+
+    def _chat_template_kwargs_for(self, params):
+        from llenvs.inference.reasoning import local_template_kwargs
+
+        return local_template_kwargs(
+            self._reasoning_family,
+            params.reasoning_effort,
+            self._chat_template_kwargs,
+            params.extra.get("extra_body", {}).get("chat_template_kwargs"),
+        )
+
+    def _prepare_request(self, params):
+        self._chat_template_kwargs_for(params)
+        if self._reasoning_family == "qwen3.8":
+            self._api._reasoning_tokenizer = self._get_tokenizer()
+        return params
+
+    def _generate_tokens(self, ids, params, budget, *, phase_name, stop_id, schema, observer=None):
+        from llenvs.inference.records import plain
+
+        phase_params = dataclasses.replace(
+            params,
+            max_tokens=budget,
+            thinking_budget=None,
+            reasoning_effort=None,
+            response_schema=None,
+            after_reasoning_text=None,
+        )
+        kwargs = self._api._request_kwargs([], phase_params)
+        kwargs.pop("messages")
+        kwargs.pop("top_logprobs", None)
+        kwargs["prompt"] = list(ids)
+        if params.logprobs:
+            kwargs["logprobs"] = params.num_logprobs
+        body = kwargs.setdefault("extra_body", {})
+        body.pop("chat_template_kwargs", None)
+        body.update(return_token_ids=True, skip_special_tokens=False)
+        if stop_id is not None:
+            body["stop_token_ids"] = [stop_id]
+        if schema is not None:
+            body["structured_outputs"] = {"json": deepcopy(schema.schema)}
+        if observer is not None:
+            observer.started(0, 0)
+        response = self._api._client.completions.create(**kwargs)
+        receipt = {
+            "response": plain(response),
+            "metadata": {
+                **self._api._request_metadata(kwargs, phase_params),
+                "phase": phase_name,
+                "prompt_token_ids": list(ids),
+                "request_id": getattr(response, "_request_id", None),
+            },
+        }
+        if observer is not None:
+            observer.received(0, receipt)
+        phase = self.reparse_token_receipt(receipt)
+        if observer is not None:
+            observer.completed(0, phase)
+        return phase
+
+    def reparse_token_receipt(self, receipt):
+        from llenvs.inference.backends.api import _openai_stop_reason
+        from llenvs.inference.controlled import TokenPhase
+        from llenvs.inference.protocol import TokenLogprob
+        from llenvs.inference.records import normalize_usage
+
+        raw = receipt["response"]
+        choices = raw.get("choices") or []
+        if len(choices) != 1 or "token_ids" not in choices[0]:
+            raise ValueError(
+                "Token-preserving completion requires one choice with native token_ids"
+            )
+        choice = choices[0]
+        ids = choice["token_ids"]
+        native = choice.get("logprobs")
+        logprobs = None
+        if native:
+            if len(ids) != len(native["token_logprobs"]):
+                raise ValueError("Completion logprobs do not align to raw token IDs")
+            logprobs = tuple(
+                TokenLogprob(token=token, token_id=token_id, logprob=probability, top_logprobs=top)
+                for token_id, token, probability, top in zip(
+                    ids,
+                    native["tokens"],
+                    native["token_logprobs"],
+                    native["top_logprobs"],
+                    strict=True,
+                )
+            )
+        return TokenPhase(
+            tuple(ids),
+            GenerationResult(
+                text=choice.get("text"),
+                token_logprobs=logprobs,
+                finish_reason=_openai_stop_reason(choice.get("finish_reason")),
+                **normalize_usage(raw.get("usage")),
+                metadata={**receipt["metadata"], "raw_usage": raw.get("usage")},
+            ),
+        )
+
+    def reparse_receipt(self, receipt, params):
+        self._prepare_request(params)
+        return self._api.reparse_receipt(receipt, params)
+
+    def descriptor(self):
+        from llenvs.inference.sampling import _record_value
+
+        if not hasattr(self, "_descriptor"):
+            tokenizer = self._get_tokenizer()
+            reported = ""
+            with open(self._log_path, encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if "Initializing a V1 LLM engine" in line and "with config:" in line:
+                        reported = line
+            effective = vllm_engine_config(reported)
+            if self._revision is not None and any(
+                effective.get(name) != self._revision for name in ("revision", "tokenizer_revision")
+            ):
+                raise ValueError("Server and host model/tokenizer revisions differ")
+            if self._runtime_artifact is None:
+                self._runtime_artifact = native_runtime_identity(
+                    "vllm", "vllm", launcher_prefix=self._runtime_prefix, env=self._runtime_env
+                )
+            self._descriptor = {
+                "identity": {
+                    "backend": "owned_vllm",
+                    "protocol_version": 1,
+                    "service": "owned_loopback",
+                    "api_flavor": "vllm",
+                    "model": self._model_path if self._revision else "local_content",
+                    "revision": self._revision,
+                    "version_pinned": True,
+                    "model_manifest": content_manifest(self._model_path)
+                    if self._revision is None
+                    else None,
+                    "container_sha256": file_digest(self._sif) if self._sif else None,
+                    "host_dependencies": dependency_versions(
+                        "transformers", "tokenizers", "openai"
+                    ),
+                    "runtime_artifact": self._runtime_artifact,
+                    "effective_engine_config": effective,
+                    **tokenizer_identity(tokenizer),
+                    **self._semantic_launch,
+                },
+                "provenance": _record_value(
+                    {
+                        "argv": sanitized_argv(self._launch_argv),
+                        "host": "127.0.0.1",
+                        "port": self._port,
+                        "pid": self._proc.pid,
+                        "instance_id": self._instance_id,
+                        "started_at": self._started_at,
+                        "model_path": self._model_path,
+                        "sif": self._sif,
+                        "selected_devices": self._cuda_visible_devices,
+                    }
+                ),
+            }
+        return deepcopy(self._descriptor)
 
     def score_chat(self, messages: list[ChatMessage], continuation: str) -> ScoringResult:
         return self.score_chat_batch([messages], [continuation])[0]
@@ -552,7 +833,11 @@ class SingularityVLLMBackend(ModelBackend):
         # has nowhere to put a thinking block, so render with thinking off.
         template_kwargs = {**self._chat_template_kwargs, "enable_thinking": False}
         _full_texts, prompt_lengths, full_token_ids, empty_results = build_scoring_inputs(
-            self._get_tokenizer(), template_kwargs, messages_batch, continuations
+            self._get_tokenizer(),
+            template_kwargs,
+            messages_batch,
+            continuations,
+            reasoning_family=getattr(self, "_reasoning_family", None),
         )
         if not full_token_ids:
             return [empty_results[i] for i in range(len(messages_batch))]
@@ -580,10 +865,7 @@ class SingularityVLLMBackend(ModelBackend):
         if partial:
             raise PartialBatchError(
                 results,
-                {
-                    i: entry for i, entry in enumerate(results)
-                    if isinstance(entry, BaseException)
-                },
+                {i: entry for i, entry in enumerate(results) if isinstance(entry, BaseException)},
             )
         return cast(list[ScoringResult], results)
 
@@ -608,12 +890,14 @@ class SingularityVLLMBackend(ModelBackend):
 
     def _get_tokenizer(self) -> Any:
         if self._tokenizer is None:
-            self._tokenizer = _load_hf_tokenizer(self._model_path)
+            self._tokenizer = _load_hf_tokenizer(self._model_path, revision=self._revision)
         return self._tokenizer
 
     # ---------- lifecycle ----------
 
-    def _server_error(self, failure: BaseException | None = None) -> BackendProcessExitedError | None:
+    def _server_error(
+        self, failure: BaseException | None = None
+    ) -> BackendProcessExitedError | None:
         if self._server_failure is not None:
             return BackendProcessExitedError(self._server_failure)
         rc = self._proc.poll() if self._proc is not None else None

@@ -28,8 +28,10 @@ gem = ["gem-llm>=0.1.0"]
 # vllm = ["vllm>=0.4"]
 transformers = ["transformers>=4.36", "torch>=2.0", "accelerate>=0.25"]
 openai = ["openai>=1.0"]
+decisions = ["openai>=3.26.0"]
+d3 = ["httpx>=0.28"]
 anthropic = ["anthropic>=0.20"]
-litellm = ["litellm>=1.70"]
+litellm = ["litellm>=1.88.1"]
 agentgym = ["agentenv>=0.0.1"]
 verifiers = ["verifiers>=0.1"]
 openenv = ["openenv-core>=0.1"]
@@ -54,7 +56,7 @@ wandb = ["wandb>=0.16"]
 rl = ["datasets>=2.14"]
 trl = ["trl>=0.7", "datasets>=2.14"]
 all = [
-  "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,gymnasium,alfworld,jericho,aviary,openai,anthropic,litellm,transformers,math-verify,rl,wandb]",
+  "llenvs[reasoning-gym,huggingface,gem,agentgym,verifiers,openenv,gymnasium,alfworld,jericho,aviary,openai,anthropic,litellm,transformers,math-verify,rl,wandb,d3]",
 ]
 dev = [
   "pytest>=7.0",
@@ -85,6 +87,13 @@ packages = ["src/llenvs"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+[tool.uv]
+# Decisions uses a newer OpenAI SDK than LiteLLM supports. Install separately.
+conflicts = [
+  [{ extra = "decisions" }, { extra = "litellm" }],
+  [{ extra = "decisions" }, { extra = "all" }],
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]

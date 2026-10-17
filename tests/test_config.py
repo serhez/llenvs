@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from llenvs.core.config import (
     EnvironmentConfig,
     EvalConfig,
@@ -364,21 +366,55 @@ class TestCreateSamplingParams:
         assert params.max_tokens == 2048
         assert params.top_p == 1.0
         assert params.top_k == 0
+        assert params.min_p == 0.0
+        assert params.repetition_penalty == 1.0
+        assert params.presence_penalty == 0.0
+        assert params.frequency_penalty == 0.0
         assert params.extra == {}
+
+    @pytest.mark.parametrize("inherit", [False, True])
+    def test_sampling_controls_survive_config_round_trip(self, inherit):
+        values = {
+            "max_tokens": 71,
+            "temperature": 0.6,
+            "top_p": 0.83,
+            "top_k": 17,
+            "min_p": 0.08,
+            "repetition_penalty": 1.3,
+            "presence_penalty": 0.3,
+            "frequency_penalty": -0.2,
+        }
+        if inherit:
+            values = dict.fromkeys(values)
+        data = {
+            "environments": [{"name": "test"}],
+            "model": {"backend": "openai", "model": "gpt-4o"},
+            "inference": values,
+        }
+
+        config = EvalConfig.from_dict(data)
+        params = create_sampling_params(config.inference)
+        serialized = config.to_dict()["inference"]
+
+        for field, value in values.items():
+            assert getattr(config.inference, field) == value
+            assert getattr(params, field) == value
+            assert serialized[field] == value
 
     def test_extra_params(self):
         """Test extra params are passed through."""
         inference_config = InferenceConfig(
             temperature=0.7,
+            repetition_penalty=1.2,
             extra={
-                "repetition_penalty": 1.2,
                 "num_beams": 4,
             },
         )
         params = create_sampling_params(inference_config)
 
         assert params.temperature == 0.7
-        assert params.extra == {"repetition_penalty": 1.2, "num_beams": 4}
+        assert params.repetition_penalty == 1.2
+        assert params.extra == {"num_beams": 4}
 
 
 class TestBackendFactory:

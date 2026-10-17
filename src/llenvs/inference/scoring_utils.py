@@ -29,6 +29,7 @@ from llenvs.inference.protocol import (
     ScoringResult,
     TokenScore,
 )
+from llenvs.inference.reasoning import local_chat_messages
 
 
 def build_scoring_inputs(
@@ -36,6 +37,8 @@ def build_scoring_inputs(
     chat_template_kwargs: dict[str, Any],
     messages_batch: list[list[ChatMessage]],
     continuations: list[str],
+    *,
+    reasoning_family: str | None = None,
 ) -> tuple[list[str], list[int], list[list[int]], dict[int, ScoringResult]]:
     """Prepare per-item scoring inputs from chat messages + continuations.
 
@@ -62,7 +65,7 @@ def build_scoring_inputs(
 
     for index, (messages, continuation) in enumerate(zip(messages_batch, continuations)):
         prompt_text = tokenizer.apply_chat_template(
-            [m.to_dict() for m in messages],
+            local_chat_messages(messages, reasoning_family),
             tokenize=False,
             add_generation_prompt=True,
             **chat_template_kwargs,

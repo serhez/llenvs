@@ -10,8 +10,11 @@ import logging
 import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
 from typing import TYPE_CHECKING, Any
+
+from llenvs.inference.records import USAGE_FIELDS, sum_known
 
 if TYPE_CHECKING:
     from llenvs.core.tool_parsing import ToolCallParser
@@ -63,6 +66,15 @@ _TRANSIENT_RETRY_MAX_DELAY = 8.0
 
 def _runner_now_monotonic() -> float:
     return time.monotonic()
+
+
+def _generation_info(result: GenerationResult) -> dict[str, Any]:
+    """Keep nullable usage and native request/sample provenance in transitions."""
+    return {
+        **{name: getattr(result, name) for name in USAGE_FIELDS},
+        "finish_reason": result.finish_reason.name,
+        "metadata": deepcopy(result.metadata),
+    }
 
 
 def _transient_retry_delay(retry_number: int) -> float:
@@ -279,8 +291,7 @@ def _summarize_active_trajectories(
     if not trajectories:
         return "[]"
     shown = ", ".join(
-        f"{trajectory.task_index}@{trajectory.step_count}"
-        for trajectory in trajectories[:limit]
+        f"{trajectory.task_index}@{trajectory.step_count}" for trajectory in trajectories[:limit]
     )
     if len(trajectories) > limit:
         return f"[{shown}, ...] ({len(trajectories)} total)"
@@ -534,7 +545,8 @@ class TrajectoryRunner:
     env_factory: Callable[[], Environment[Any]] | None = None
     restore_fn: Callable[[Environment[Any], State[Any]], State[Any]] | None = None
     last_environment_errors: dict[int, dict[str, Any]] = field(
-        default_factory=dict, init=False,
+        default_factory=dict,
+        init=False,
     )
 
     def _build_messages(
@@ -673,16 +685,16 @@ class TrajectoryRunner:
                     if tic is not None:
                         init_turn = trajectory.initial_state.metadata.step + 1
                         if max_steps is not None:
-                            init_text = tic.state_prefix.format(
-                                max_steps=max_steps,
-                                turn=init_turn,
-                                turns_remaining=max_steps - init_turn,
-                            ) + init_text
-                        else:
                             init_text = (
-                                tic.state_prefix_no_max.format(turn=init_turn)
+                                tic.state_prefix.format(
+                                    max_steps=max_steps,
+                                    turn=init_turn,
+                                    turns_remaining=max_steps - init_turn,
+                                )
                                 + init_text
                             )
+                        else:
+                            init_text = tic.state_prefix_no_max.format(turn=init_turn) + init_text
                     initial_obs_msg = ChatMessage(
                         role="user",
                         content=init_text,
@@ -782,13 +794,11 @@ class TrajectoryRunner:
             non_history_tokens = 0
             for msg in messages:
                 non_history_tokens += (
-                    budget.estimate_tokens(msg.content or "")
-                    + self._MSG_OVERHEAD_TOKENS
+                    budget.estimate_tokens(msg.content or "") + self._MSG_OVERHEAD_TOKENS
                 )
             if current_state_text is not None:
                 non_history_tokens += (
-                    budget.estimate_tokens(current_state_text)
-                    + self._MSG_OVERHEAD_TOKENS
+                    budget.estimate_tokens(current_state_text) + self._MSG_OVERHEAD_TOKENS
                 )
             if initial_obs_msg is not None:
                 non_history_tokens += (
@@ -797,8 +807,7 @@ class TrajectoryRunner:
                 )
             for pfx_msg in reconstructed_prefix_msgs:
                 non_history_tokens += (
-                    budget.estimate_tokens(pfx_msg.content or "")
-                    + self._MSG_OVERHEAD_TOKENS
+                    budget.estimate_tokens(pfx_msg.content or "") + self._MSG_OVERHEAD_TOKENS
                 )
             available = max(0, budget.max_prompt_tokens - non_history_tokens)
             history_messages = budget.build_history(history_entries, available)
@@ -809,16 +818,10 @@ class TrajectoryRunner:
             messages.extend(history_messages)
 
             # Phase 2: truncate current observation if still over budget
-            if (
-                current_state_text is not None
-                and budget.min_current_observation_chars is not None
-            ):
+            if current_state_text is not None and budget.min_current_observation_chars is not None:
                 total = non_history_tokens
                 for msg in history_messages:
-                    total += (
-                        budget.estimate_tokens(msg.content or "")
-                        + self._MSG_OVERHEAD_TOKENS
-                    )
+                    total += budget.estimate_tokens(msg.content or "") + self._MSG_OVERHEAD_TOKENS
                 excess = total - budget.max_prompt_tokens
                 if excess > 0:
                     from llenvs.evaluation.history import middle_truncate
@@ -834,7 +837,8 @@ class TrajectoryRunner:
                         int(cur_len - excess * cpt) - _MARKER_OVERHEAD,
                     )
                     current_state_text = middle_truncate(
-                        current_state_text, target_chars,
+                        current_state_text,
+                        target_chars,
                     )
         else:
             fn = self.history_fn if self.history_fn is not None else full_history
@@ -959,9 +963,7 @@ class TrajectoryRunner:
                         )
                     )
                 else:
-                    messages.append(
-                        ChatMessage(role="assistant", content=msg.get("content", ""))
-                    )
+                    messages.append(ChatMessage(role="assistant", content=msg.get("content", "")))
 
             elif role == "tool":
                 messages.append(
@@ -1183,8 +1185,7 @@ class TrajectoryRunner:
             non_history_tokens = 0
             for msg in messages:
                 non_history_tokens += (
-                    budget.estimate_tokens(msg.content or "")
-                    + self._MSG_OVERHEAD_TOKENS
+                    budget.estimate_tokens(msg.content or "") + self._MSG_OVERHEAD_TOKENS
                 )
             if current_user_message is not None:
                 non_history_tokens += (
@@ -1202,10 +1203,7 @@ class TrajectoryRunner:
             ):
                 total = non_history_tokens
                 for msg in history_messages:
-                    total += (
-                        budget.estimate_tokens(msg.content or "")
-                        + self._MSG_OVERHEAD_TOKENS
-                    )
+                    total += budget.estimate_tokens(msg.content or "") + self._MSG_OVERHEAD_TOKENS
                 excess = total - budget.max_prompt_tokens
                 if excess > 0:
                     from llenvs.evaluation.history import middle_truncate
@@ -1245,7 +1243,16 @@ class TrajectoryRunner:
     ) -> list[ChatMessage]:
         """Build continuation messages for second elicitation."""
         continued = list(messages)
-        continued.append(ChatMessage(role="assistant", content=(first_result.text or "") + suffix))
+        continued.append(
+            ChatMessage(
+                role="assistant",
+                content=(first_result.text or "") + suffix,
+                reasoning=first_result.metadata.get("reasoning"),
+                reasoning_details=tuple(
+                    deepcopy(first_result.metadata.get("reasoning_details") or ())
+                ),
+            )
+        )
         continued.append(
             ChatMessage(
                 role="user",
@@ -1266,7 +1273,7 @@ class TrajectoryRunner:
             thinking_budget_per_block=False,
             thinking_budget_soft_ratio=None,
             thinking_budget_suffix=None,
-            disable_thinking=True,
+            reasoning_effort="none",
             second_elicitation_suffix=None,
         )
 
@@ -1278,14 +1285,36 @@ class TrajectoryRunner:
     ) -> GenerationResult:
         """Merge first and second elicitation results."""
         merged_text = (first.text or "") + suffix + (second.text or "")
-        merged_meta = {**first.metadata, **second.metadata, "second_elicitation": True}
+        merged_meta = {
+            **first.metadata,
+            **second.metadata,
+            "second_elicitation": True,
+            "requests": [*first.metadata.get("requests", []), *second.metadata.get("requests", [])],
+            "elicitation_results": [
+                {
+                    "text": result.text,
+                    **_generation_info(result),
+                    "token_logprobs": [asdict(lp) for lp in result.token_logprobs]
+                    if result.token_logprobs is not None
+                    else None,
+                }
+                for result in (first, second)
+            ],
+        }
         return GenerationResult(
             text=merged_text,
             finish_reason=second.finish_reason,
             tool_calls=second.tool_calls,
             token_logprobs=None,
-            prompt_tokens=first.prompt_tokens + second.prompt_tokens,
-            completion_tokens=first.completion_tokens + second.completion_tokens,
+            prompt_tokens=sum_known([first.prompt_tokens, second.prompt_tokens]),
+            completion_tokens=sum_known([first.completion_tokens, second.completion_tokens]),
+            cached_prompt_tokens=sum_known(
+                [first.cached_prompt_tokens, second.cached_prompt_tokens]
+            ),
+            cache_write_prompt_tokens=sum_known(
+                [first.cache_write_prompt_tokens, second.cache_write_prompt_tokens]
+            ),
+            reasoning_tokens=sum_known([first.reasoning_tokens, second.reasoning_tokens]),
             metadata=merged_meta,
         )
 
@@ -1498,8 +1527,7 @@ class TrajectoryRunner:
 
         tools_text = self.tool_call_parser.format_tools(tools)
         modified_batch = [
-            self._inject_tools_in_messages(messages, tools_text)
-            for messages in messages_batch
+            self._inject_tools_in_messages(messages, tools_text) for messages in messages_batch
         ]
         try:
             raw_results = self.backend.generate_chat_batch(modified_batch, self.sampling_params)
@@ -1595,9 +1623,7 @@ class TrajectoryRunner:
             except Exception as exc:
                 offending = getattr(exc, "offending_indices", None)
                 if self._is_skippable_generation_failure(exc) and offending:
-                    offending_set = {
-                        idx for idx in offending if 0 <= idx < len(indexed_pending)
-                    }
+                    offending_set = {idx for idx in offending if 0 <= idx < len(indexed_pending)}
                     next_pending = []
                     progress_made = False
                     for pending_idx, (original_idx, item) in enumerate(indexed_pending):
@@ -1627,8 +1653,7 @@ class TrajectoryRunner:
                             transient_attempts.pop(original_idx, None)
                     if retryable:
                         max_retry_attempt = max(
-                            transient_attempts[original_idx]
-                            for original_idx, _ in retryable
+                            transient_attempts[original_idx] for original_idx, _ in retryable
                         )
                         delay = _transient_retry_delay(max_retry_attempt)
                         logger.warning(
@@ -1671,12 +1696,8 @@ class TrajectoryRunner:
         requests = list(zip(remaining, messages_batch, strict=False))
         first_obs = remaining[0].state.observation if remaining else None
         tools = list(first_obs.available_tools) if first_obs is not None else []
-        use_native_tools = bool(
-            tools and self.backend.capabilities.supports_function_calling
-        )
-        use_text_tools = bool(
-            tools and not use_native_tools and self.tool_call_parser is not None
-        )
+        use_native_tools = bool(tools and self.backend.capabilities.supports_function_calling)
+        use_text_tools = bool(tools and not use_native_tools and self.tool_call_parser is not None)
 
         def _mark_failed(trajectory: _ActiveTrajectory, error: Exception) -> None:
             trajectory.done = True
@@ -1689,14 +1710,11 @@ class TrajectoryRunner:
         ) -> None:
             if not isinstance(error, Exception):
                 raise TypeError(
-                    "on_generation_error expects Exception instances, "
-                    f"got {type(error).__name__}"
+                    f"on_generation_error expects Exception instances, got {type(error).__name__}"
                 )
             decision = on_generation_error(error)
             if decision not in {"skip", "abort", "raise"}:
-                raise ValueError(
-                    "on_generation_error must return 'skip', 'abort', or 'raise'"
-                )
+                raise ValueError("on_generation_error must return 'skip', 'abort', or 'raise'")
             if decision == "raise":
                 raise error
             if decision == "abort":
@@ -1753,9 +1771,7 @@ class TrajectoryRunner:
                 raise
             decision = on_generation_error(exc)
             if decision not in {"skip", "abort", "raise"}:
-                raise ValueError(
-                    "on_generation_error must return 'skip', 'abort', or 'raise'"
-                )
+                raise ValueError("on_generation_error must return 'skip', 'abort', or 'raise'")
             if decision == "raise":
                 raise
             for trajectory in remaining:
@@ -1776,12 +1792,8 @@ class TrajectoryRunner:
         requests = list(zip(remaining, messages_batch, strict=False))
         first_obs = remaining[0].state.observation
         tools = list(first_obs.available_tools)
-        use_native_tools = bool(
-            tools and self.backend.capabilities.supports_function_calling
-        )
-        use_text_tools = bool(
-            tools and not use_native_tools and self.tool_call_parser is not None
-        )
+        use_native_tools = bool(tools and self.backend.capabilities.supports_function_calling)
+        use_text_tools = bool(tools and not use_native_tools and self.tool_call_parser is not None)
 
         if use_native_tools:
             requests, gen_results = self._recover_generation_batch(
@@ -1825,10 +1837,7 @@ class TrajectoryRunner:
         remaining = [trajectory for trajectory, _ in requests]
         messages_batch = [messages for _, messages in requests]
 
-        if (
-            not remaining
-            or self.sampling_params.second_elicitation_suffix is None
-        ):
+        if not remaining or self.sampling_params.second_elicitation_suffix is None:
             return remaining, messages_batch, gen_results
 
         suffix = self._resolve_elicitation_suffix()
@@ -1847,7 +1856,7 @@ class TrajectoryRunner:
             return remaining, messages_batch, gen_results
 
         def _run_elicitation(
-            batch: list[tuple[_ActiveTrajectory, list[ChatMessage], GenerationResult]]
+            batch: list[tuple[_ActiveTrajectory, list[ChatMessage], GenerationResult]],
         ) -> list[GenerationResult]:
             elicitation_msgs = [
                 self._build_elicitation_messages(messages, first_result, suffix)
@@ -1974,11 +1983,7 @@ class TrajectoryRunner:
             step_result = self.environment.step(state, action)
 
             # Record transition
-            gen_info: dict[str, Any] = {
-                "prompt_tokens": gen_result.prompt_tokens,
-                "completion_tokens": gen_result.completion_tokens,
-                "finish_reason": gen_result.finish_reason.name,
-            }
+            gen_info = _generation_info(gen_result)
             if gen_result.has_tool_calls:
                 gen_info["has_tool_calls"] = True
                 gen_info["num_tool_calls"] = len(gen_result.tool_calls)
@@ -2288,11 +2293,7 @@ class TrajectoryRunner:
                         step_result.rewards.total,
                     )
 
-                    gen_info: dict[str, Any] = {
-                        "prompt_tokens": gen_result.prompt_tokens,
-                        "completion_tokens": gen_result.completion_tokens,
-                        "finish_reason": gen_result.finish_reason.name,
-                    }
+                    gen_info = _generation_info(gen_result)
                     if gen_result.has_tool_calls:
                         gen_info["has_tool_calls"] = True
                         gen_info["num_tool_calls"] = len(gen_result.tool_calls)
@@ -2546,9 +2547,7 @@ class TrajectoryRunner:
                         )
                         try:
                             step_result = step_futures[t.position].result()
-                            step_elapsed_sec = max(
-                                0.0, _runner_now_monotonic() - step_started_at
-                            )
+                            step_elapsed_sec = max(0.0, _runner_now_monotonic() - step_started_at)
                             logger.debug(
                                 "Trajectory round %d step done: task=%d duration=%.2fs done=%s truncated=%s reward=%.4f",
                                 round_index,
@@ -2559,11 +2558,7 @@ class TrajectoryRunner:
                                 step_result.rewards.total,
                             )
 
-                            gen_info: dict[str, Any] = {
-                                "prompt_tokens": gen_result.prompt_tokens,
-                                "completion_tokens": gen_result.completion_tokens,
-                                "finish_reason": gen_result.finish_reason.name,
-                            }
+                            gen_info = _generation_info(gen_result)
                             if gen_result.has_tool_calls:
                                 gen_info["has_tool_calls"] = True
                                 gen_info["num_tool_calls"] = len(gen_result.tool_calls)
@@ -3073,9 +3068,7 @@ class TrajectoryRunner:
                 raise error
             decision = on_environment_error(error)
             if decision not in {"skip", "raise"}:
-                raise ValueError(
-                    "on_environment_error must return 'skip' or 'raise'"
-                )
+                raise ValueError("on_environment_error must return 'skip' or 'raise'")
             if decision == "raise":
                 raise error
             trajectory.done = True
@@ -3436,11 +3429,7 @@ def _run_multi_lockstep(
                     extracted_action=step_result.extracted_action,
                     resolved_action=step_result.resolved_action,
                     info={
-                        "generation": {
-                            "prompt_tokens": gen_result.prompt_tokens,
-                            "completion_tokens": gen_result.completion_tokens,
-                            "finish_reason": gen_result.finish_reason.name,
-                        },
+                        "generation": _generation_info(gen_result),
                         "step": step_result.info,
                     },
                 )
@@ -3839,11 +3828,7 @@ class SegmentedTrajectoryRunner:
                 extracted_action=step_result.extracted_action,
                 resolved_action=step_result.resolved_action,
                 info={
-                    "generation": {
-                        "prompt_tokens": gen_result.prompt_tokens,
-                        "completion_tokens": gen_result.completion_tokens,
-                        "finish_reason": gen_result.finish_reason.name,
-                    },
+                    "generation": _generation_info(gen_result),
                     "step": step_result.info,
                 },
             )
@@ -3999,11 +3984,7 @@ class SegmentedTrajectoryRunner:
                 }
             else:
                 trans_info = {
-                    "generation": {
-                        "prompt_tokens": gen_result.prompt_tokens,
-                        "completion_tokens": gen_result.completion_tokens,
-                        "finish_reason": gen_result.finish_reason.name,
-                    },
+                    "generation": _generation_info(gen_result),
                     "step": step_result.info,
                 }
 
@@ -4241,11 +4222,7 @@ class SegmentedTrajectoryRunner:
                         }
                     else:
                         trans_info = {
-                            "generation": {
-                                "prompt_tokens": gen_result.prompt_tokens,
-                                "completion_tokens": gen_result.completion_tokens,
-                                "finish_reason": gen_result.finish_reason.name,
-                            },
+                            "generation": _generation_info(gen_result),
                             "step": step_result.info,
                         }
 

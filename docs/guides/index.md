@@ -32,6 +32,14 @@ In-depth guides covering every aspect of the library.
 
     [:octicons-arrow-right-24: Backends](backends.md)
 
+-   :material-database-check:{ .lg .middle } **Persistent Predictor Calls**
+
+    ---
+
+    Reasoning, schemas, durable draws, decision models and Batch recovery.
+
+    [:octicons-arrow-right-24: Predictor Calls](predictor-calls.md)
+
 -   :material-text-box-outline:{ .lg .middle } **Prompts**
 
     ---

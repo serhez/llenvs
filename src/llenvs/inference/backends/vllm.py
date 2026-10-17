@@ -15,10 +15,12 @@ import gc
 import io
 import logging
 import time
+import uuid
+from copy import deepcopy
+from dataclasses import replace
 from typing import Any
 
 from llenvs.core.state import ImageContent
-from llenvs.inference.scoring_utils import build_scoring_inputs
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
@@ -32,6 +34,9 @@ from llenvs.inference.protocol import (
     TokenLogprob,
     TokenScore,
 )
+from llenvs.inference.reasoning import local_chat_messages
+from llenvs.inference.sampling import DECODING_FIELDS, sampling_metadata, validate_sampling
+from llenvs.inference.scoring_utils import build_scoring_inputs
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,8 @@ _VLM_MODEL_TYPES = frozenset(
         "llava_next_video",
         "llava_onevision",
         "qwen2_vl",
+        "qwen3_5",
+        "qwen3_5_moe",
         "paligemma",
         "paligemma2",
         "internvl_chat",
@@ -138,6 +145,9 @@ class VLLMBackend(ModelBackend):
         tensor_parallel_size: Number of GPUs for tensor parallelism.
     """
 
+    _llm: Any
+    _tokenizer: Any
+
     def __init__(
         self,
         model_path: str,
@@ -147,6 +157,8 @@ class VLLMBackend(ModelBackend):
         gpu_memory_utilization: float = 0.9,
         seed: int = 42,
         chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_family: str | None = None,
+        request_progress: bool = False,
         post_shutdown_delay: float = 5.0,
         **vllm_kwargs: Any,
     ) -> None:
@@ -181,6 +193,8 @@ class VLLMBackend(ModelBackend):
         self._model_path = model_path
         self._VLLMSamplingParams = VLLMSamplingParams
         self._chat_template_kwargs = chat_template_kwargs or {}
+        self._reasoning_family = reasoning_family
+        self._request_progress = request_progress
         self._post_shutdown_delay = post_shutdown_delay
         self._closed = False
 
@@ -195,6 +209,15 @@ class VLLMBackend(ModelBackend):
         }
         if max_model_len is not None:
             llm_kwargs["max_model_len"] = max_model_len
+        if reasoning_family == "qwen3.8":
+            from vllm.config import StructuredOutputsConfig  # ty: ignore[unresolved-import]
+
+            if "structured_outputs_config" in vllm_kwargs:
+                raise ValueError("The configured reasoning family owns structured_outputs_config")
+            llm_kwargs["structured_outputs_config"] = StructuredOutputsConfig(
+                backend="xgrammar", reasoning_parser="qwen3", enable_in_reasoning=False
+            )
+        self._engine_settings = deepcopy(llm_kwargs)
 
         # Register V1 thinking budget processor class (no-op on vLLM <0.8)
         from llenvs.inference.thinking import make_v1_thinking_processor_class
@@ -204,18 +227,37 @@ class VLLMBackend(ModelBackend):
             existing = llm_kwargs.get("logits_processors") or []
             llm_kwargs["logits_processors"] = list(existing) + [v1_cls]
 
-        self._llm = LLM(**llm_kwargs)
+        if request_progress:
+            from vllm.engine.arg_utils import AsyncEngineArgs  # ty: ignore[unresolved-import]
+            from vllm.v1.engine.async_llm import AsyncLLM  # ty: ignore[unresolved-import]
+
+            from llenvs.inference.backends.api import _AsyncRunner
+
+            self._async_runner = _AsyncRunner()
+
+            async def build_engine():
+                return AsyncLLM.from_engine_args(AsyncEngineArgs(**llm_kwargs))
+
+            self._llm = self._async_runner.run(build_engine())
+        else:
+            self._llm = LLM(**llm_kwargs)
         self._tokenizer = self._llm.get_tokenizer()
 
         # Determine max context length
-        model_config = self._llm.llm_engine.model_config
+        model_config = (
+            self._llm.vllm_config.model_config
+            if request_progress
+            else self._llm.llm_engine.model_config
+        )
         self._max_context_length = getattr(model_config, "max_model_len", None)
 
         # Detect VLM
         self._is_vlm = _is_vlm_model(model_config)
 
         # Detect V1 engine (default since vLLM 0.8, V0 removed in 0.10)
-        engine_module = type(self._llm.llm_engine).__module__ or ""
+        engine_module = (
+            "vllm.v1.engine" if request_progress else type(self._llm.llm_engine).__module__ or ""
+        )
         self._is_v1 = ".v1." in engine_module or engine_module.startswith("v1.")
         self._has_v1_thinking_processor = self._is_v1 and v1_cls is not None
 
@@ -223,14 +265,19 @@ class VLLMBackend(ModelBackend):
     def capabilities(self) -> BackendCapabilities:
         """vLLM supports all major features."""
         return BackendCapabilities(
+            supports_explicit_sampling=True,
             supports_logprobs=True,
-            supports_prefix_continuation=True,
+            supports_prefix_continuation=not getattr(self, "_request_progress", False),
             supports_batching=True,
             supports_streaming=True,
             supports_chat=True,
             supports_function_calling=False,
             supports_vision=self._is_vlm,
-            supports_full_scoring=True,
+            supports_full_scoring=not getattr(self, "_request_progress", False),
+            supports_request_progress=getattr(self, "_request_progress", False),
+            supports_after_reasoning_text=getattr(self, "_reasoning_family", None) == "qwen3.8",
+            supports_response_schema=getattr(self, "_reasoning_family", None) == "qwen3.8",
+            supports_schema_after_reasoning=getattr(self, "_reasoning_family", None) == "qwen3.8",
             max_batch_size=None,  # Limited by GPU memory
             max_context_length=self._max_context_length,
         )
@@ -239,6 +286,65 @@ class VLLMBackend(ModelBackend):
     def model_name(self) -> str:
         """Get the model path/identifier."""
         return self._model_path
+
+    def descriptor(self):
+        from llenvs.inference.records import (
+            dependency_versions,
+            distribution_identity,
+            hardware_identity,
+            model_artifact,
+            tokenizer_identity,
+        )
+        from llenvs.inference.sampling import _record_value
+
+        if not hasattr(self, "_descriptor"):
+            engine = self._llm if self._request_progress else self._llm.llm_engine
+            config = engine.vllm_config
+            revision = getattr(config.model_config.hf_config, "_commit_hash", None) or getattr(
+                config.model_config, "revision", None
+            )
+            import torch
+
+            engine_settings = {
+                key: value
+                for key, value in self._engine_settings.items()
+                if key not in {"model", "tokenizer", "download_dir"}
+            }
+            device_count = (
+                config.parallel_config.tensor_parallel_size
+                * config.parallel_config.pipeline_parallel_size
+            )
+            self._descriptor = {
+                "identity": {
+                    "backend": "vllm",
+                    "protocol_version": 1,
+                    **model_artifact(self._model_path, revision),
+                    **tokenizer_identity(self._tokenizer),
+                    "engine": _record_value(engine_settings),
+                    "hardware": hardware_identity(torch, device_indices=range(device_count)),
+                    "effective_config": _record_value(
+                        {
+                            name: vars(getattr(config, name))
+                            for name in (
+                                "cache_config",
+                                "parallel_config",
+                                "scheduler_config",
+                                "compilation_config",
+                            )
+                        }
+                    ),
+                    "dtype": str(config.model_config.dtype),
+                    "quantization": config.model_config.quantization,
+                    "request_progress": self._request_progress,
+                    "runtime": distribution_identity("vllm"),
+                    "dependencies": dependency_versions(
+                        "vllm", "transformers", "torch", "tokenizers"
+                    ),
+                    "container_digest": None,
+                },
+                "provenance": {"model_path": self._model_path},
+            }
+        return deepcopy(self._descriptor)
 
     def _shutdown_engine(self, llm: Any) -> None:
         """Best-effort shutdown for pinned vLLM engine layouts."""
@@ -266,7 +372,15 @@ class VLLMBackend(ModelBackend):
 
         llm = getattr(self, "_llm", None)
         if llm is not None:
-            self._shutdown_engine(llm)
+            if getattr(self, "_request_progress", False):
+
+                async def shutdown():
+                    llm.shutdown()
+
+                self._async_runner.run(shutdown())
+                self._async_runner.close()
+            else:
+                self._shutdown_engine(llm)
 
         self._llm = None
         self._tokenizer = None
@@ -302,17 +416,33 @@ class VLLMBackend(ModelBackend):
         Maps common SamplingParams fields to vLLM arguments, then merges
         any backend-specific params from `extra`.
         """
-        kwargs: dict[str, Any] = {
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-            "top_p": params.top_p,
-            "n": params.n,
-            "presence_penalty": params.presence_penalty,
-            "frequency_penalty": params.frequency_penalty,
-        }
+        validate_sampling(params, single_result=False)
+        inherited = None
+        kwargs: dict[str, Any] = {"n": params.n}
+        if params.response_schema is not None:
+            if getattr(self, "_reasoning_family", None) != "qwen3.8":
+                raise ValueError("response_schema needs a configured structured-output runtime")
+            from vllm.sampling_params import (  # ty: ignore[unresolved-import]
+                StructuredOutputsParams,
+            )
 
-        if params.top_k > 0:
-            kwargs["top_k"] = params.top_k
+            kwargs["structured_outputs"] = StructuredOutputsParams(
+                json=deepcopy(params.response_schema.schema)
+            )
+        for name in DECODING_FIELDS:
+            value = getattr(params, name)
+            if value is None:
+                if inherited is None:
+                    if self._llm is None:
+                        raise RuntimeError("The vLLM backend is closed")
+                    if getattr(self, "_request_progress", False):
+                        inherited = self._VLLMSamplingParams(
+                            **self._llm.vllm_config.model_config.get_diff_sampling_param()
+                        )
+                    else:
+                        inherited = self._llm.get_default_sampling_params()
+                value = getattr(inherited, name)
+            kwargs[name] = value
 
         if params.stop_sequences:
             kwargs["stop"] = list(params.stop_sequences)
@@ -320,12 +450,12 @@ class VLLMBackend(ModelBackend):
         if params.logprobs:
             kwargs["logprobs"] = params.num_logprobs
 
-        # Merge backend-specific extra params (these take precedence)
+        # Detach nested options before adding any thinking processor arguments.
         if params.extra:
-            kwargs.update(params.extra)
+            kwargs.update(deepcopy(params.extra))
 
         # Thinking budget
-        if params.thinking_budget is not None and not params.disable_thinking:
+        if params.thinking_budget is not None and params.reasoning_effort != "none":
             if self._is_v1:
                 if not self._has_v1_thinking_processor:
                     raise ValueError(
@@ -358,41 +488,198 @@ class VLLMBackend(ModelBackend):
 
         return self._VLLMSamplingParams(**kwargs)
 
+    def _native_request(self, native: Any, params: SamplingParams) -> dict[str, Any]:
+        names = getattr(type(native), "__struct_fields__", None)
+        options = {name: getattr(native, name) for name in names} if names else vars(native)
+        options = {**options, "chat_template_kwargs": self._chat_template_kwargs_for(params)}
+        return sampling_metadata(params, options)
+
+    def reparse_receipt(self, receipt, params):
+        from types import SimpleNamespace
+
+        from llenvs.inference.reasoning import extract_local_reasoning
+
+        raw = receipt["output"]
+        native = SimpleNamespace(
+            token_ids=raw["token_ids"],
+            logprobs=[
+                {int(key): SimpleNamespace(**value) for key, value in position.items()}
+                if position is not None
+                else None
+                for position in raw["logprobs"]
+            ]
+            if raw["logprobs"] is not None
+            else None,
+        )
+        result = GenerationResult(
+            text=raw["text"],
+            finish_reason=_convert_stop_reason(raw["finish_reason"]),
+            prompt_tokens=len(raw["prompt_token_ids"]),
+            completion_tokens=len(raw["token_ids"]),
+            token_logprobs=self._extract_logprobs(native),
+            metadata={**receipt["metadata"], "request_id": raw["request_id"]},
+        )
+        if params.logprobs and not result.token_logprobs:
+            raise LogprobsNotReturnedError("Native vLLM omitted requested token logprobs")
+        if receipt.get("phase_name") is not None:
+            from llenvs.inference.controlled import TokenPhase
+
+            return TokenPhase(tuple(raw["token_ids"]), result)
+        return extract_local_reasoning(
+            result,
+            raw["token_ids"],
+            self._tokenizer,
+            reasoning_enabled=receipt.get("split_reasoning", True)
+            and getattr(self, "_reasoning_family", None) == "qwen3.8"
+            and self._chat_template_kwargs_for(params).get("enable_thinking", True),
+        )
+
+    async def _generate_one_async(
+        self, index, prompt, params, native, observer, *, phase_name=None, split_reasoning=True
+    ):
+        from llenvs.inference.backends.api import _notify
+
+        await _notify(observer, "started", index, 0)
+        try:
+            final = None
+            phase_options = {"reasoning_ended": True} if phase_name == "answer" else {}
+            async for output in self._llm.generate(
+                prompt, native, uuid.uuid4().hex, **phase_options
+            ):
+                if output.finished:
+                    final = output
+            if final is None:
+                raise RuntimeError("Native async engine returned no final output")
+            receipt = self._token_receipt(
+                final, native, params, phase_name=phase_name, split_reasoning=split_reasoning
+            )
+            await _notify(observer, "received", index, receipt)
+            result = self.reparse_receipt(receipt, params)
+            await _notify(observer, "completed", index, result)
+            return result
+        except Exception as exc:
+            await _notify(observer, "failed", index, exc)
+            raise
+
+    def _token_receipt(self, final, native, params, *, phase_name=None, split_reasoning=True):
+        completion = final.outputs[0]
+        return {
+            "split_reasoning": split_reasoning,
+            "phase_name": phase_name,
+            "params": params,
+            "output": {
+                "text": completion.text,
+                "token_ids": list(completion.token_ids),
+                "finish_reason": completion.finish_reason,
+                "prompt_token_ids": list(final.prompt_token_ids),
+                "logprobs": [
+                    {
+                        key: {
+                            "logprob": value.logprob,
+                            "decoded_token": value.decoded_token,
+                            "rank": getattr(value, "rank", None),
+                        }
+                        for key, value in position.items()
+                    }
+                    if position is not None
+                    else None
+                    for position in completion.logprobs
+                ]
+                if completion.logprobs is not None
+                else None,
+                "request_id": final.request_id,
+            },
+            "metadata": self._native_request(native, params),
+        }
+
+    def _generate_async_batch(self, prompts, params, *, observer=None, split_reasoning=True):
+        from llenvs.inference.backends.api import _run_concurrent
+
+        validate_sampling(params)
+        native = self._to_vllm_params(params)
+        return _run_concurrent(
+            lambda item: self._generate_one_async(
+                item[0], item[1], params, native, observer, split_reasoning=split_reasoning
+            ),
+            list(enumerate(prompts)),
+            max(1, len(prompts)),
+            return_partial=True,
+            runner=self._async_runner,
+        )
+
+    def _generate_tokens(self, ids, params, budget, *, phase_name, stop_id, schema, observer=None):
+        extra = deepcopy(params.extra)
+        extra["skip_special_tokens"] = False
+        if stop_id is not None:
+            extra["stop_token_ids"] = [stop_id]
+        phase_params = replace(
+            params,
+            max_tokens=budget,
+            after_reasoning_text=None,
+            response_schema=schema,
+            thinking_budget=None,
+            reasoning_effort=None,
+            extra=extra,
+        )
+        native = self._to_vllm_params(phase_params)
+        if getattr(self, "_request_progress", False):
+            return self._async_runner.run(
+                self._generate_one_async(
+                    0,
+                    {"prompt_token_ids": list(ids)},
+                    phase_params,
+                    native,
+                    observer,
+                    phase_name=phase_name,
+                )
+            )
+        if observer is not None:
+            observer.started(0, 0)
+        output = self._llm.generate([{"prompt_token_ids": list(ids)}], native, use_tqdm=False)[0]
+        receipt = self._token_receipt(output, native, phase_params, phase_name=phase_name)
+        if observer is not None:
+            observer.received(0, receipt)
+        result = self.reparse_token_receipt(receipt)
+        if observer is not None:
+            observer.completed(0, result)
+        return result
+
+    def reparse_token_receipt(self, receipt):
+        return self.reparse_receipt(receipt, receipt["params"])
+
     def _chat_template_kwargs_for(self, params: SamplingParams) -> dict[str, Any]:
         """Return chat-template kwargs for one generation call."""
-        if not params.disable_thinking:
-            return self._chat_template_kwargs
-        return {**self._chat_template_kwargs, "enable_thinking": False}
+        from llenvs.inference.reasoning import local_template_kwargs
+
+        return local_template_kwargs(
+            getattr(self, "_reasoning_family", None),
+            params.reasoning_effort,
+            self._chat_template_kwargs,
+        )
 
     def _extract_logprobs(self, output: Any) -> tuple[TokenLogprob, ...] | None:
         """Extract log probabilities from vLLM output."""
         if output.logprobs is None:
             return None
 
+        if len(output.logprobs) != len(output.token_ids):
+            raise ValueError("vLLM logprobs do not align with sampled token IDs")
         logprobs = []
-        for token_logprob in output.logprobs:
-            if token_logprob is None:
-                continue
-
-            # Get the chosen token's info
-            for token_id, logprob_obj in token_logprob.items():
-                # Build top logprobs dict
-                top_logprobs = None
-                if hasattr(logprob_obj, "top_logprobs") and logprob_obj.top_logprobs:
-                    top_logprobs = {tok: lp.logprob for tok, lp in logprob_obj.top_logprobs.items()}
-
-                logprobs.append(
-                    TokenLogprob(
-                        token=logprob_obj.decoded_token
-                        if hasattr(logprob_obj, "decoded_token")
-                        else str(token_id),
-                        token_id=token_id,
-                        logprob=logprob_obj.logprob,
-                        top_logprobs=top_logprobs,
-                    )
+        for token_id, candidates in zip(output.token_ids, output.logprobs, strict=True):
+            if candidates is None or token_id not in candidates:
+                raise ValueError("vLLM omitted a sampled token's log probability")
+            chosen = candidates[token_id]
+            logprobs.append(
+                TokenLogprob(
+                    token=getattr(chosen, "decoded_token", None) or str(token_id),
+                    token_id=token_id,
+                    logprob=chosen.logprob,
+                    top_logprobs={
+                        getattr(value, "decoded_token", None) or str(key): value.logprob
+                        for key, value in candidates.items()
+                    },
                 )
-                break  # Only first entry per position
-
+            )
         return tuple(logprobs) if logprobs else None
 
     def _generate_vlm(
@@ -412,6 +699,7 @@ class VLLMBackend(ModelBackend):
         Returns:
             List of GenerationResults.
         """
+        validate_sampling(params)
         vllm_params = self._to_vllm_params(params)
 
         if per_prompt_images:
@@ -452,16 +740,42 @@ class VLLMBackend(ModelBackend):
                     completion_tokens=len(completion.token_ids),
                     metadata={
                         "request_id": output.request_id,
+                        "raw_token_ids": list(completion.token_ids),
+                        **self._native_request(vllm_params, params),
                     },
                 )
             )
 
+        if getattr(self, "_reasoning_family", None) == "qwen3.8":
+            from llenvs.inference.reasoning import extract_local_reasoning
+
+            return [
+                extract_local_reasoning(
+                    result,
+                    result.metadata["raw_token_ids"],
+                    self._tokenizer,
+                    reasoning_enabled=self._chat_template_kwargs_for(params).get(
+                        "enable_thinking", True
+                    ),
+                )
+                for result in results
+            ]
         return results
 
-    def generate(
+    def generate(self, prompts, params, *, observer=None):
+        if params.reasoning_effort is not None:
+            raise ValueError("Local reasoning_effort requires generate_chat and its chat template")
+        if params.after_reasoning_text is not None:
+            raise ValueError("after_reasoning_text requires generate_chat")
+        return self._generate_rendered(prompts, params, split_reasoning=False, observer=observer)
+
+    def _generate_rendered(
         self,
         prompts: list[str],
         params: SamplingParams,
+        *,
+        split_reasoning=True,
+        observer=None,
     ) -> list[GenerationResult]:
         """Generate completions for text prompts.
 
@@ -475,6 +789,11 @@ class VLLMBackend(ModelBackend):
         Raises:
             PromptTooLongError: If any prompt exceeds the model's max context.
         """
+        validate_sampling(params)
+        if getattr(self, "_request_progress", False):
+            return self._generate_async_batch(
+                prompts, params, observer=observer, split_reasoning=split_reasoning
+            )
         vllm_params = self._to_vllm_params(params)
         try:
             outputs = self._llm.generate(prompts, vllm_params, use_tqdm=False)
@@ -522,16 +841,34 @@ class VLLMBackend(ModelBackend):
                     completion_tokens=len(completion.token_ids),
                     metadata={
                         "request_id": output.request_id,
+                        "raw_token_ids": list(completion.token_ids),
+                        **self._native_request(vllm_params, params),
                     },
                 )
             )
 
+        if split_reasoning and getattr(self, "_reasoning_family", None) == "qwen3.8":
+            from llenvs.inference.reasoning import extract_local_reasoning
+
+            return [
+                extract_local_reasoning(
+                    result,
+                    result.metadata["raw_token_ids"],
+                    self._tokenizer,
+                    reasoning_enabled=self._chat_template_kwargs_for(params).get(
+                        "enable_thinking", True
+                    ),
+                )
+                for result in results
+            ]
         return results
 
     def generate_chat_batch(
         self,
         messages_batch: list[list[ChatMessage]],
         params: SamplingParams,
+        *,
+        observer=None,
     ) -> list[GenerationResult]:
         """Generate responses for multiple conversations in one batched call.
 
@@ -541,16 +878,57 @@ class VLLMBackend(ModelBackend):
         """
         if not messages_batch:
             return []
+        if params.after_reasoning_text is not None:
+            if getattr(self, "_request_progress", False):
+                import asyncio
+
+                from llenvs.inference.backends.api import _notify, _run_concurrent
+                from llenvs.inference.controlled import controlled_chat
+
+                async def one(item):
+                    index, messages = item
+                    result = await asyncio.to_thread(
+                        controlled_chat, self, messages, params, observer=observer, index=index
+                    )
+                    await _notify(observer, "completed", index, result)
+                    return result
+
+                return _run_concurrent(
+                    one,
+                    list(enumerate(messages_batch)),
+                    max(1, len(messages_batch)),
+                    return_partial=True,
+                    runner=self._async_runner,
+                )
+            from llenvs.inference.controlled import controlled_chat
+
+            results = []
+            for index, messages in enumerate(messages_batch):
+                result = controlled_chat(self, messages, params, observer=observer, index=index)
+                if observer is not None:
+                    observer.completed(index, result)
+                results.append(result)
+            return results
 
         prompts = [
             self._tokenizer.apply_chat_template(
-                [m.to_dict() for m in msgs],
+                local_chat_messages(msgs, getattr(self, "_reasoning_family", None)),
                 tokenize=False,
                 add_generation_prompt=True,
                 **self._chat_template_kwargs_for(params),
             )
             for msgs in messages_batch
         ]
+        if getattr(self, "_request_progress", False):
+            if any(
+                message.images or message.content_blocks
+                for messages in messages_batch
+                for message in messages
+            ):
+                raise ValueError("Native request progress currently requires text-only prompts")
+            return self._generate_async_batch(prompts, params, observer=observer)
+        if observer is not None:
+            raise ValueError("Per-request progress requires request_progress=True")
 
         if self._is_vlm:
             per_prompt_images: list[list[Any]] = []
@@ -566,7 +944,7 @@ class VLLMBackend(ModelBackend):
             if has_any_images:
                 return self._generate_vlm(prompts, params, per_prompt_images)
 
-        return self.generate(prompts, params)
+        return self._generate_rendered(prompts, params)
 
     def generate_chat(
         self,
@@ -585,8 +963,12 @@ class VLLMBackend(ModelBackend):
         Returns:
             GenerationResult for the conversation.
         """
+        if params.after_reasoning_text is not None:
+            from llenvs.inference.controlled import controlled_chat
+
+            return controlled_chat(self, messages, params)
         # Convert to dict format for chat template
-        message_dicts = [m.to_dict() for m in messages]
+        message_dicts = local_chat_messages(messages, getattr(self, "_reasoning_family", None))
 
         # Apply chat template
         prompt = self._tokenizer.apply_chat_template(
@@ -604,7 +986,7 @@ class VLLMBackend(ModelBackend):
                 results = self._generate_vlm([prompt], params, [pil_images])
                 return results[0]
 
-        results = self.generate([prompt], params)
+        results = self._generate_rendered([prompt], params)
         return results[0]
 
     def continue_from_prefix(
@@ -626,18 +1008,9 @@ class VLLMBackend(ModelBackend):
             List of GenerationResults.
         """
         # Generate multiple continuations with n > 1
-        multi_params = SamplingParams(
-            max_tokens=params.max_tokens,
-            temperature=params.temperature,
-            top_p=params.top_p,
-            top_k=params.top_k,
-            stop_sequences=params.stop_sequences,
-            presence_penalty=params.presence_penalty,
-            frequency_penalty=params.frequency_penalty,
-            n=num_continuations,
-            logprobs=params.logprobs,
-            num_logprobs=params.num_logprobs,
-        )
+        if getattr(self, "_request_progress", False):
+            raise ValueError("Prefix continuation requires request_progress=False")
+        multi_params = replace(params, n=num_continuations)
 
         vllm_params = self._to_vllm_params(multi_params)
         outputs = self._llm.generate([prefix], vllm_params, use_tqdm=False)
@@ -661,7 +1034,10 @@ class VLLMBackend(ModelBackend):
                     token_logprobs=token_logprobs,
                     prompt_tokens=len(outputs[0].prompt_token_ids),
                     completion_tokens=len(completion.token_ids),
-                    metadata={"is_continuation": True},
+                    metadata={
+                        "is_continuation": True,
+                        **self._native_request(vllm_params, multi_params),
+                    },
                 )
             )
 
@@ -678,11 +1054,12 @@ class VLLMBackend(ModelBackend):
         """Generate a continuation from a partial assistant response.
 
         Applies the chat template, appends *assistant_prefix*, then
-        delegates to ``generate()`` which treats the full string as a
+        delegates to ``continue_from_prefix()`` which treats the full string as a
         prompt and returns only newly generated text.
         """
+        validate_sampling(params)
         prompt = self._tokenizer.apply_chat_template(
-            [m.to_dict() for m in messages],
+            local_chat_messages(messages, getattr(self, "_reasoning_family", None)),
             tokenize=False,
             add_generation_prompt=True,
             **self._chat_template_kwargs_for(params),
@@ -698,12 +1075,15 @@ class VLLMBackend(ModelBackend):
         params: SamplingParams,
     ) -> list[GenerationResult]:
         """Batched chat prefix continuation via a single vLLM generate call."""
+        validate_sampling(params)
+        if getattr(self, "_request_progress", False):
+            raise ValueError("Prefix continuation requires request_progress=False")
         if not messages_batch:
             return []
 
         prefixes = [
             self._tokenizer.apply_chat_template(
-                [m.to_dict() for m in msgs],
+                local_chat_messages(msgs, getattr(self, "_reasoning_family", None)),
                 tokenize=False,
                 add_generation_prompt=True,
                 **self._chat_template_kwargs_for(params),
@@ -819,8 +1199,14 @@ class VLLMBackend(ModelBackend):
         continuations: list[str],
     ) -> list[ScoringResult]:
         """Batched continuation scoring through vLLM prompt logprobs."""
+        if getattr(self, "_request_progress", False):
+            raise ValueError("Continuation scoring requires request_progress=False")
         full_texts, prompt_lengths, full_token_ids, empty_results = build_scoring_inputs(
-            self._tokenizer, self._chat_template_kwargs, messages_batch, continuations
+            self._tokenizer,
+            self._chat_template_kwargs,
+            messages_batch,
+            continuations,
+            reasoning_family=getattr(self, "_reasoning_family", None),
         )
 
         if not full_texts:
