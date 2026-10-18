@@ -1,6 +1,7 @@
 """Batch creation is journaled before dispatch and reconciled by exact identity."""
 
 import json
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from llenvs.inference.protocol import (
     PartialBatchError,
     QuotaExhaustedError,
     RefusedByPolicyError,
+    ReplayedBackendError,
     SamplingParams,
     encode_backend_error,
 )
@@ -127,6 +129,237 @@ def test_out_of_order_collection_replays_across_process_ownership(tmp_path):
         assert not collection.pending and not collection.failures
         assert collection.results[0].metadata["pricing_tier"] == "batch"
         assert len(client.creates) == 1
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize("reopen", [False, True])
+@pytest.mark.parametrize("second_view", ["remaining", "all"])
+def test_subset_collection_reports_each_key_as_batch_once(
+    tmp_path, validation, reopen, second_view
+):
+    client = Client()
+    batch = [[ChatMessage("user", str(index))] for index in range(5)]
+    with ExitStack() as stack:
+        store = stack.enter_context(
+            CallStore.open(tmp_path, run_descriptor={}, validation=validation)
+        )
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=list(range(5)))
+        subset = api.submit_chat_batch(batch[:2], SamplingParams(), repeat_ids=[0, 1])
+        client.outputs["output"] = b"\n".join(
+            json.dumps(completion(original.keys[index], str(index))).encode()
+            for index in reversed(range(5))
+        )
+        first = api.collect(subset)
+        assert [result.text for result in first.results] == ["0", "1"]
+        assert not first.failures and not first.pending
+        assert list(first.statuses.values()) == ["completed"]
+        assert [result.metadata["persistence"]["source"] for result in first.results] == [
+            "batch",
+            "batch",
+        ]
+        if reopen:
+            store.close()
+            store = stack.enter_context(
+                CallStore.open(tmp_path, run_descriptor={}, validation=validation)
+            )
+            api = OpenAIBatchBackend(backend(client), store)
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("Collection did not reuse retained Batch files")
+
+        client.files.create = client.files.content = forbidden
+        client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+        indices = [2, 3, 4] if second_view == "remaining" else list(range(5))
+        rebuilt = api.submit_chat_batch(
+            [batch[index] for index in indices], SamplingParams(), repeat_ids=indices
+        )
+        second = api.collect(rebuilt)
+        assert [result.text for result in second.results] == [str(index) for index in indices]
+        assert not second.failures and not second.pending
+        assert second.statuses == first.statuses
+        for index, result in zip(indices, second.results, strict=True):
+            assert result.metadata["persistence"] == {
+                "run_fingerprint": original.run_fingerprint,
+                "call_key": original.keys[index],
+                "source": "store" if index < 2 else "batch",
+                "previous_attempts": 0,
+            }
+            assert result.prompt_tokens == 3 and result.completion_tokens == 1
+        final = api.collect(original)
+        assert [result.metadata["persistence"]["source"] for result in final.results] == [
+            "store"
+        ] * 5
+        assert len(client.creates) == len(client.uploads) == 1
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize(
+    "failure_kind", ["refusal", "malformed", "missing_logprobs", "server", "expired", "unfinished"]
+)
+def test_subset_collection_preserves_first_named_failure_after_reopen(
+    tmp_path, validation, failure_kind
+):
+    client = Client()
+    batch = [[ChatMessage("user", str(index))] for index in range(5)]
+    params = SamplingParams(logprobs=failure_kind == "missing_logprobs")
+    terminal_status = "expired" if failure_kind == "expired" else "completed"
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(batch, params, repeat_ids=list(range(5)))
+        subset = api.submit_chat_batch(batch[:2], params, repeat_ids=[0, 1])
+        entries = [
+            completion(key, str(index), logprobs=params.logprobs)
+            for index, key in enumerate(original.keys)
+        ]
+        failed_key = original.keys[3]
+        if failure_kind == "unfinished":
+            entries.pop(3)
+        elif failure_kind == "expired":
+            entries[3] = {
+                "custom_id": failed_key,
+                "response": None,
+                "error": {"code": "batch_expired", "message": "Request was not executed"},
+            }
+        elif failure_kind == "server":
+            entries[3] = {
+                "custom_id": failed_key,
+                "response": {
+                    "status_code": 500,
+                    "body": {"error": {"code": "server_error", "message": "Try again"}},
+                },
+            }
+        else:
+            entries[3] = generated_failure(failed_key, failure_kind)
+        client.outputs["output"] = b"\n".join(json.dumps(entry).encode() for entry in entries)
+        client.batches.retrieve = lambda id: SimpleNamespace(
+            id=id, status=terminal_status, output_file_id="output", error_file_id=None
+        )
+        first = api.collect(subset)
+        assert [result.text for result in first.results] == ["0", "1"]
+        assert not first.failures and not first.pending
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("An unreported Batch outcome caused provider access or another submission")
+
+    client.files.create = client.files.content = forbidden
+    client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+    with CallStore.open(tmp_path, run_descriptor={}, validation=validation) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        remaining = api.submit_chat_batch(batch[2:], params, repeat_ids=[2, 3, 4])
+        second = api.collect(remaining)
+        assert [result.text if result else None for result in second.results] == ["2", None, "4"]
+        assert set(second.failures) == {1} and not second.pending
+        assert list(second.statuses.values()) == [terminal_status]
+        error = second.failures[1]
+        outcomes = [second.results[0], error, second.results[2]]
+        for key, outcome in zip(remaining.keys, outcomes, strict=True):
+            assert outcome.metadata["persistence"] == {
+                "run_fingerprint": original.run_fingerprint,
+                "call_key": key,
+                "source": "batch",
+                "previous_attempts": 0,
+            }
+        if failure_kind == "unfinished":
+            assert type(error).__name__ == "BatchUnfinished"
+        elif failure_kind == "expired":
+            assert error.code == "batch_expired"
+            assert error.status_code is None and not error.transient
+        elif failure_kind == "server":
+            assert error.code == "server_error"
+            assert error.status_code == 500 and error.transient
+        else:
+            assert isinstance(
+                error,
+                {
+                    "refusal": RefusedByPolicyError,
+                    "malformed": MalformedResponseError,
+                    "missing_logprobs": LogprobsNotReturnedError,
+                }[failure_kind],
+            )
+            assert error.status_code == 200 and not error.transient
+        again = api.collect(remaining)
+        assert set(again.failures) == {1} and not again.pending
+        assert again.failures[1].metadata["persistence"] == {
+            **error.metadata["persistence"],
+            "source": "store",
+        }
+        assert [
+            result.metadata["persistence"]["source"]
+            for result in [again.results[0], again.results[2]]
+        ] == ["store", "store"]
+        assert (
+            encode_backend_error(again.failures[1])["attempts"]
+            == encode_backend_error(error)["attempts"]
+        )
+        if failure_kind == "unfinished":
+            assert isinstance(again.failures[1], ReplayedBackendError)
+            assert again.failures[1].original_error_type == "BatchUnfinished"
+        assert len(client.creates) == len(client.uploads) == 1
+
+
+def test_waiting_subset_leaves_other_keys_new_for_a_later_collection(tmp_path):
+    client = Client()
+    batch = [[ChatMessage("user", text)] for text in ["a", "b", "c"]]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store, poll_interval=0)
+        original = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=[0, 1, 2])
+        subset = api.submit_chat_batch(batch[:2], SamplingParams(), repeat_ids=[0, 1])
+        client.outputs["partial"] = b"\n".join(
+            json.dumps(completion(original.keys[index], ["a", "b", "c"][index])).encode()
+            for index in [0, 2]
+        )
+        client.outputs["output"] = json.dumps(completion(original.keys[1], "b")).encode()
+        responses = iter(
+            [
+                SimpleNamespace(
+                    id="batch-1", status="in_progress", output_file_id="partial", error_file_id=None
+                ),
+                client.retrieve("batch-1"),
+            ]
+        )
+        client.batches.retrieve = lambda *args: next(responses)
+        first = api.collect(subset, wait=True)
+        assert [result.text for result in first.results] == ["a", "b"]
+        assert [result.metadata["persistence"]["source"] for result in first.results] == [
+            "batch",
+            "batch",
+        ]
+        client.batches.retrieve = lambda *args: pytest.fail("Terminal batch was retrieved again")
+        remaining = api.submit_chat_batch(batch[2:], SamplingParams(), repeat_ids=[2])
+        result = api.collect(remaining).results[0]
+        assert result.text == "c" and result.metadata["persistence"]["source"] == "batch"
+        assert api.collect(remaining).results[0].metadata["persistence"]["source"] == "store"
+
+
+def test_batch_unfinished_is_exported_on_first_collection_and_plain_on_replay(tmp_path):
+    from llenvs.inference.backends import BatchUnfinished
+    from llenvs.inference.backends.openai_batch import BatchUnfinished as NativeBatchUnfinished
+
+    assert BatchUnfinished is NativeBatchUnfinished
+    assert issubclass(BatchUnfinished, RuntimeError)
+    client = Client()
+    client.outputs["output"] = b""
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", "a")]], SamplingParams(), repeat_ids=[0]
+        )
+        first = api.collect(handle)
+        assert type(first.failures[0]) is BatchUnfinished
+        assert first.failures[0].metadata["persistence"]["source"] == "batch"
+        saved = encode_backend_error(first.failures[0])
+        assert saved["type"] == "BatchUnfinished"
+        assert saved["status_code"] is None and not saved["transient"]
+        assert saved["attempts"] is None
+    client.batches.retrieve = lambda *args: pytest.fail("Missing-output replay contacted provider")
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        error = OpenAIBatchBackend(backend(client), store).collect(handle).failures[0]
+        assert isinstance(error, ReplayedBackendError)
+        assert error.original_error_type == "BatchUnfinished"
+        assert error.metadata["persistence"]["source"] == "store"
+        assert error.status_code is None and not error.transient
+        assert error.attempts is None
 
 
 def test_collection_identifies_each_call_and_replays_without_mutating_saved_results(tmp_path):
@@ -1064,6 +1297,76 @@ def _collect_in_process(root, serialized, payload, connection):
             BatchHandle.from_dict(serialized)
         )
         connection.send([item.text for item in result.results])
+
+
+def _collect_subset_without_provider(root, serialized, connection):
+    client = Client()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("A later owner contacted the provider instead of using retained files")
+
+    client.files.create = client.files.content = forbidden
+    client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+    with CallStore.open(root, run_descriptor={}, validation="lazy") as store:
+        collection = OpenAIBatchBackend(backend(client), store).collect(
+            BatchHandle.from_dict(serialized)
+        )
+        assert not collection.failures and not collection.pending
+        connection.send(
+            {
+                "texts": [item.text for item in collection.results],
+                "sources": [item.metadata["persistence"]["source"] for item in collection.results],
+                "previous_attempts": [
+                    item.metadata["persistence"]["previous_attempts"] for item in collection.results
+                ],
+            }
+        )
+    connection.close()
+
+
+def test_subset_collection_reports_new_outcomes_to_a_later_process(tmp_path):
+    import multiprocessing
+
+    client = Client()
+    batch = [[ChatMessage("user", str(index))] for index in range(5)]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        original = api.submit_chat_batch(batch, SamplingParams(), repeat_ids=list(range(5)))
+        subset = api.submit_chat_batch(batch[:2], SamplingParams(), repeat_ids=[0, 1])
+        client.outputs["output"] = b"\n".join(
+            json.dumps(completion(key, str(index))).encode()
+            for index, key in enumerate(original.keys)
+        )
+        assert [item.metadata["persistence"]["source"] for item in api.collect(subset).results] == [
+            "batch",
+            "batch",
+        ]
+    remaining = BatchHandle(original.run_fingerprint, original.submissions, original.keys[2:])
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_collect_subset_without_provider, args=(str(tmp_path), remaining.to_dict(), child)
+    )
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(15), "Later owner did not return retained outcomes"
+        assert parent.recv() == {
+            "texts": ["2", "3", "4"],
+            "sources": ["batch", "batch", "batch"],
+            "previous_attempts": [0, 0, 0],
+        }
+        process.join(timeout=10)
+        assert process.exitcode == 0
+    finally:
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
+        parent.close()
+    client.batches.retrieve = lambda *args: pytest.fail("Returned outcomes contacted provider")
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        final = OpenAIBatchBackend(backend(client), store).collect(original)
+        assert [item.metadata["persistence"]["source"] for item in final.results] == ["store"] * 5
 
 
 def test_submit_and_collect_transfer_exclusive_ownership_between_processes(tmp_path):

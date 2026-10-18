@@ -41,6 +41,10 @@ class BatchCollection:
     statuses: dict[str, str] = field(default_factory=dict)
 
 
+class BatchUnfinished(RuntimeError):  # noqa: N818
+    """A terminal Batch left a requested slot without a durable output."""
+
+
 class OpenAIBatchBackend:
     """Submit and collect under the shared store's exclusive process ownership.
 
@@ -383,8 +387,13 @@ class OpenAIBatchBackend:
             if manifest["state"] == "resubmission_authorized":
                 statuses[identifier] = "resubmission_authorized"
                 continue
-            if manifest["state"] == "terminal" or not any(
-                self.store._records[key]["state"] != "completed"
+            settled = (
+                {"completed", "failed", "received"}
+                if manifest["state"] == "terminal"
+                else {"completed"}
+            )
+            if not any(
+                self.store._records[key]["state"] not in settled
                 and self.store._records[key].get("submission") == identifier
                 for key in selected
             ):
@@ -449,7 +458,8 @@ class OpenAIBatchBackend:
             for entry in read_entries():
                 key = entry["custom_id"]
                 if (
-                    self.store._records[key]["state"] == "completed"
+                    key not in selected
+                    or self.store._records[key]["state"] == "completed"
                     or self.store._records[key].get("submission") != identifier
                 ):
                     continue
@@ -481,7 +491,7 @@ class OpenAIBatchBackend:
                 if error is not None:
                     failures[key] = error
             if batch["status"] in {"completed", "expired", "cancelled", "failed"}:
-                for key in manifest["keys"]:
+                for key in selected:
                     if (
                         key not in seen
                         and self.store._records[key]["state"] != "completed"
@@ -492,7 +502,7 @@ class OpenAIBatchBackend:
                             "message": f"Batch {batch['status']} without a durable output",
                         }
                         self.store.update(key, "failed", error=error)
-                        failures[key] = RuntimeError(error["message"])
+                        failures[key] = BatchUnfinished(error["message"])
                 manifest["state"] = "terminal"
             self._write(manifest)
         results, indexed_failures, pending = ([], {}, [])

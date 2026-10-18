@@ -9,7 +9,12 @@ from llenvs.inference.backends.claude_code import ClaudeCodeBackend
 from llenvs.inference.backends.codex_cli import CodexCLIBackend
 from llenvs.inference.backends.huggingface import HuggingFaceBackend
 from llenvs.inference.backends.litellm import LiteLLMBackend
-from llenvs.inference.backends.openai_batch import BatchCollection, BatchHandle, OpenAIBatchBackend
+from llenvs.inference.backends.openai_batch import (
+    BatchCollection,
+    BatchHandle,
+    BatchUnfinished,
+    OpenAIBatchBackend,
+)
 from llenvs.inference.backends.vllm import VLLMBackend
 from llenvs.inference.backends.vllm_singularity import SingularityVLLMBackend
 
@@ -26,4 +31,5 @@ __all__ = [
     "OpenAIBatchBackend",
     "BatchHandle",
     "BatchCollection",
+    "BatchUnfinished",
 ]

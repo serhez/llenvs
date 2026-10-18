@@ -479,9 +479,29 @@ parsing; entries are matched by logical `custom_id`, rejecting unknown/duplicate
 IDs. Durable receipts and files can be recovered locally after parser/process
 failure. Completed draws replay without provider access.
 
-Terminal expiry/cancellation/failure collects every available success before
-marking unfinished slots failed. A later `submit_chat_batch()` replays stored
-failures with `source="store"`, including refusals, malformed responses, missing
+Collection normalizes and returns only the handle's keys, while retaining the
+complete provider output/error files. Outcomes outside the handle are deferred
+until a collection names those keys, even when the provider batch is already
+terminal. Later subsets use the retained files without retrieving the provider
+batch or downloading files again. The first collection returning a key's result
+or failure reports `source="batch"`; later collections report `source="store"`.
+This applies across overlapping handles, reopened stores and process ownership
+changes, including refusals, expired requests and missing outputs. Local receipt
+reparsing keeps `source="receipt"`. Attempt history and `previous_attempts` do not
+change merely because requests are collected in different groups.
+
+Outcome persistence and the caller's ledger are separate writes. A process can
+stop after committing an outcome but before the caller records it; a later
+collection then replays it from the store. Reconcile ledger entries by run,
+call key and attempt rather than assuming a replay proves the ledger already
+contains the outcome. A `batch` source identifies collection, not a charge:
+expired unexecuted requests were not run, and missing-output usage is unknown.
+
+Terminal expiry/cancellation/failure collects the handle's available successes
+before marking its unfinished slots failed. Unrequested keys still need
+collection before the store can be marked complete. A later
+`submit_chat_batch()` replays stored failures with `source="store"`, including
+refusals, malformed responses, missing
 logprobs and HTTP/per-request errors. A generated response may already be billed
 even when parsing fails. Replaying a failure preserves its receipt and attempt
 history without buying another draw.
@@ -493,7 +513,10 @@ and reported usage. Codes are taken from the per-request error or the response
 body's error. These fields survive saved-error replay, including typed refusals
 and malformed-response errors. `transient` follows the standard classification:
 rate-limit 429 and server statuses of 500 or above are transient; quota exhaustion
-is not. A missing output (`BatchUnfinished`) has no HTTP status or known attempt
+is not. A missing output raises `BatchUnfinished(RuntimeError)` on first
+collection, exported from `llenvs.inference.backends` and its `openai_batch`
+module. Its saved replay remains `ReplayedBackendError` with
+`original_error_type="BatchUnfinished"`. It has no HTTP status or known attempt
 usage and is not transient. Missing usage is unknown, not zero. Classification
 does not authorize dispatch; the resubmission rules below still apply.
 
