@@ -13,8 +13,10 @@ from llenvs.inference.protocol import (
     LogprobsNotReturnedError,
     MalformedResponseError,
     PartialBatchError,
+    QuotaExhaustedError,
     RefusedByPolicyError,
     SamplingParams,
+    encode_backend_error,
 )
 
 
@@ -242,6 +244,120 @@ def test_failed_collection_slots_identify_new_and_replayed_errors(tmp_path):
     with CallStore.open(tmp_path, run_descriptor={}) as store:
         replay = OpenAIBatchBackend(backend(client), store).collect(handle)
         assert replay.failures[1].metadata["persistence"] == {**provenance, "source": "store"}
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize(
+    "kind,status_code,code,transient",
+    [
+        ("http", 500, "server_error", True),
+        ("http", 503, "service_unavailable", True),
+        ("http", 500, None, True),
+        ("http", 429, "rate_limit_exceeded", True),
+        ("http", 400, "invalid_request_error", False),
+        ("http", 429, "insufficient_quota", False),
+        ("http", 429, "billing_hard_limit_reached", False),
+        ("expired", None, "batch_expired", False),
+        ("refusal", 200, None, False),
+        ("malformed", 200, None, False),
+        ("missing_logprobs", 200, None, False),
+    ],
+)
+def test_failed_slots_retain_status_code_classification_and_attempts_after_reopen(
+    tmp_path, validation, kind, status_code, code, transient
+):
+    client = Client()
+    params = SamplingParams(logprobs=kind == "missing_logprobs")
+    usage = {
+        "prompt_tokens": 11,
+        "completion_tokens": 5,
+        "prompt_tokens_details": {"cached_tokens": 7},
+        "completion_tokens_details": {"reasoning_tokens": 2},
+    }
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch([[ChatMessage("user", "question")]], params, repeat_ids=[0])
+        key = handle.keys[0]
+        if kind == "expired":
+            entry = {
+                "custom_id": key,
+                "response": None,
+                "error": {"code": code, "message": "Request was not executed before expiry"},
+            }
+        elif kind == "http":
+            entry = {
+                "custom_id": key,
+                "response": {
+                    "status_code": status_code,
+                    "request_id": "request-1",
+                    "body": {"error": {"code": code, "message": "Provider rejected request"}},
+                },
+                "error": None,
+            }
+            if status_code == 500:
+                entry["response"]["body"]["usage"] = usage
+        else:
+            entry = generated_failure(key, kind)
+            entry["response"]["request_id"] = "request-1"
+            entry["response"]["body"]["usage"] = usage
+        client.outputs["output"] = json.dumps(entry).encode()
+        first = api.collect(handle)
+        assert set(first.failures) == {0} and not first.pending
+        error = first.failures[0]
+        expected_attempts = [
+            {
+                "batch_id": "batch-1",
+                "endpoint": "/v1/chat/completions",
+                "pricing_tier": "batch",
+                "status_code": status_code,
+                "request_id": None if kind == "expired" else "request-1",
+                "response_id": key
+                if kind in {"refusal", "malformed", "missing_logprobs"}
+                else None,
+                "usage": usage if status_code in {200, 500} else None,
+            }
+        ]
+
+        def check(error, source):
+            assert error.status_code == status_code
+            assert error.code == code
+            assert error.transient is transient
+            assert error.attempts == expected_attempts
+            saved = encode_backend_error(error)
+            assert saved["status_code"] == status_code
+            assert saved["code"] == code
+            assert saved["transient"] is transient
+            assert saved["attempts"] == expected_attempts
+            assert error.metadata["persistence"] == {
+                "run_fingerprint": handle.run_fingerprint,
+                "call_key": key,
+                "source": source,
+                "previous_attempts": 0,
+            }
+            if code in {"insufficient_quota", "billing_hard_limit_reached"}:
+                assert isinstance(error, QuotaExhaustedError)
+            typed = {
+                "refusal": RefusedByPolicyError,
+                "malformed": MalformedResponseError,
+                "missing_logprobs": LogprobsNotReturnedError,
+            }.get(kind)
+            if typed is not None:
+                assert isinstance(error, typed)
+
+        check(error, "batch")
+        error.attempts[0]["status_code"] = 999
+        error.attempts[0]["usage"] = {"prompt_tokens": 999}
+        check(api.collect(handle).failures[0], "store")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Failure replay contacted the provider")
+
+    client.files.create = client.files.content = forbidden
+    client.batches.create = client.batches.retrieve = client.batches.list = forbidden
+    with CallStore.open(tmp_path, run_descriptor={}, validation=validation) as store:
+        replay = OpenAIBatchBackend(backend(client), store).collect(handle)
+        check(replay.failures[0], "store")
+        assert len(client.creates) == len(client.uploads) == 1
 
 
 def test_unknown_create_does_not_authorize_a_second_submission(tmp_path):
@@ -640,6 +756,10 @@ def test_missing_terminal_output_replays_failure_without_authorizing_another_dra
         )
         first = api.collect(original)
         assert first.results[0].text == "good" and set(first.failures) == {1}
+        saved = encode_backend_error(first.failures[1])
+        assert saved["status_code"] is None and saved["transient"] is False
+        assert saved["attempts"] is None
+        assert getattr(first.failures[1], "code", None) is None
         message = str(first.failures[1])
 
     def forbidden(*args, **kwargs):
@@ -653,6 +773,10 @@ def test_missing_terminal_output_replays_failure_without_authorizing_another_dra
         replay = api.collect(rebuilt)
         assert replay.results[1].text == "good" and set(replay.failures) == {0}
         assert str(replay.failures[0]) == message
+        saved = encode_backend_error(replay.failures[0])
+        assert saved["status_code"] is None and saved["transient"] is False
+        assert saved["attempts"] is None
+        assert getattr(replay.failures[0], "code", None) is None
         assert replay.failures[0].metadata["persistence"]["source"] == "store"
         assert store._records[original.keys[1]]["attempts"] == []
         assert len(client.creates) == len(client.uploads) == 1

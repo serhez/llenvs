@@ -486,6 +486,17 @@ logprobs and HTTP/per-request errors. A generated response may already be billed
 even when parsing fails. Replaying a failure preserves its receipt and attempt
 history without buying another draw.
 
+For failures with a retained Batch entry, the exception exposes `status_code`
+(including 200 for response-parsing failures), the optional provider error
+`code`, and a detached `attempts` list with request/response IDs, pricing tier
+and reported usage. Codes are taken from the per-request error or the response
+body's error. These fields survive saved-error replay, including typed refusals
+and malformed-response errors. `transient` follows the standard classification:
+rate-limit 429 and server statuses of 500 or above are transient; quota exhaustion
+is not. A missing output (`BatchUnfinished`) has no HTTP status or known attempt
+usage and is not transient. Missing usage is unknown, not zero. Classification
+does not authorize dispatch; the resubmission rules below still apply.
+
 The only automatically eligible failed slot is a per-request `batch_expired`
 error with no response in a terminal submission: the provider explicitly reports
 that this request was not executed. A later explicit `submit_chat_batch()` sends

@@ -287,6 +287,7 @@ def encode_backend_error(error: BaseException) -> dict[str, Any]:
             "transient": transient,
             "fatal": not transient and not isinstance(error, RecoverableInputError),
             "status_code": status,
+            "code": getattr(error, "code", None),
             "attempts": getattr(error, "attempts", None),
             "elapsed_seconds": getattr(error, "elapsed_seconds", None),
         }
@@ -316,7 +317,8 @@ def restore_backend_error(saved: dict[str, Any]) -> BaseException:
             status_code=saved.get("status_code"),
         )
     setattr(error, "recorded_error", deepcopy(saved))
-    for name in ("status_code", "attempts", "elapsed_seconds"):
+    setattr(error, "transient", saved.get("transient", False))
+    for name in ("status_code", "code", "attempts", "elapsed_seconds"):
         setattr(error, name, deepcopy(saved.get(name)))
     return error
 

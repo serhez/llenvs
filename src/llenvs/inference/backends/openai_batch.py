@@ -6,6 +6,7 @@ import uuid
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 
+from llenvs.inference.backends.api import _normalize_provider_error
 from llenvs.inference.persistence import CheckpointError, UnknownOutcomeError
 from llenvs.inference.protocol import (
     LogprobsNotReturnedError,
@@ -262,14 +263,27 @@ class OpenAIBatchBackend:
     def _commit_receipt(self, key, receipt, params):
         entry = receipt["batch_entry"]
         response = entry.get("response") or {}
+        provider_error = entry.get("error") or (response.get("body") or {}).get("error")
         try:
             if entry.get("error") or response.get("status_code") != 200:
-                raise ValueError(f"Batch request failed: {entry}")
+                error = ValueError(f"Batch request failed: {entry}")
+                setattr(error, "status_code", response.get("status_code"))
+                setattr(error, "provider_error", provider_error)
+                raise _normalize_provider_error(error, model_name=self.backend.model_name)
             result = self.backend.reparse_receipt(receipt, params)
             self.store.update(key, "completed", result=result)
         except CheckpointError:
             raise
         except Exception as exc:
+            setattr(exc, "status_code", response.get("status_code"))
+            setattr(
+                exc,
+                "code",
+                provider_error.get("code") if isinstance(provider_error, dict) else None,
+            )
+            setattr(exc, "attempts", deepcopy(receipt.get("metadata", {}).get("attempts")))
+            encoded = encode_backend_error(exc)
+            setattr(exc, "transient", encoded["transient"])
             definite = (
                 bool(entry.get("error"))
                 or response.get("status_code") != 200
@@ -280,7 +294,7 @@ class OpenAIBatchBackend:
             self.store.update(
                 key,
                 "failed" if definite else "received",
-                error=encode_backend_error(exc),
+                error=encoded,
                 receipt=receipt,
             )
             return exc
