@@ -337,7 +337,7 @@ class OpenAIBatchBackend:
             manifest["state"] = "submission_unknown"
         self._write(manifest)
 
-    def _collect_once(self, handle: BatchHandle, sources):
+    def _collect_once(self, handle: BatchHandle, sources, collection):
         if handle.run_fingerprint != self.store.fingerprint:
             raise ValueError("Batch handle belongs to another run")
         self.store._check()
@@ -370,15 +370,37 @@ class OpenAIBatchBackend:
                     else "batch",
                 ),
             )
-        statuses = {}
-        failures = {}
-        for key in dict.fromkeys(handle.keys):
+        indices = {}
+        for index, key in enumerate(handle.keys):
+            indices.setdefault(key, []).append(index)
+
+        def capture(key, error=None):
+            record = self.store._records[key]
+            for index in indices[key]:
+                if record["state"] == "completed":
+                    collection.results[index] = self.store._result(record["result"], sources[key])
+                    collection.failures.pop(index, None)
+                elif record["state"] == "failed" or (
+                    record["state"] == "received" and record.get("error")
+                ):
+                    collection.results[index] = None
+                    collection.failures[index] = self.store._error(
+                        error if error is not None else restore_backend_error(record["error"]),
+                        sources[key],
+                    )
+
+        statuses = collection.statuses
+        for key in indices:
             record = self.store._records[key]
             if record["state"] == "received":
                 manifest = self.store._journals[record["submission"]]
                 error = self._commit_receipt(key, record["receipt"], manifest["params"])
-                if error is not None:
-                    failures[key] = error
+                capture(key, error)
+            elif all(
+                collection.results[index] is None and index not in collection.failures
+                for index in indices[key]
+            ):
+                capture(key)
         for identifier in handle.submissions:
             manifest = deepcopy(self.store._journals[identifier])
             if not set(manifest["keys"]) & set(handle.keys):
@@ -488,8 +510,7 @@ class OpenAIBatchBackend:
                 }
                 self.store.update(key, "received", receipt=receipt)
                 error = self._commit_receipt(key, receipt, manifest["params"])
-                if error is not None:
-                    failures[key] = error
+                capture(key, error)
             if batch["status"] in {"completed", "expired", "cancelled", "failed"}:
                 for key in selected:
                     if (
@@ -502,46 +523,44 @@ class OpenAIBatchBackend:
                             "message": f"Batch {batch['status']} without a durable output",
                         }
                         self.store.update(key, "failed", error=error)
-                        failures[key] = BatchUnfinished(error["message"])
+                        capture(key, BatchUnfinished(error["message"]))
                 manifest["state"] = "terminal"
             self._write(manifest)
-        results, indexed_failures, pending = ([], {}, [])
-        for index, key in enumerate(handle.keys):
-            record = self.store._records[key]
-            if record["state"] == "completed":
-                results.append(self.store._result(record["result"], sources[key]))
-            else:
-                results.append(None)
-                if (
-                    record["state"] == "failed"
-                    or record["state"] == "received"
-                    and record.get("error")
-                ):
-                    indexed_failures[index] = self.store._error(
-                        failures.get(key, restore_backend_error(record["error"])),
-                        sources[key],
-                    )
-                else:
-                    pending.append(key)
-        collection = BatchCollection(results, indexed_failures, pending, statuses)
-        return collection
 
     def collect(self, handle, *, wait=False):
+        """Collect named outcomes; errors expose any progress as ``partial_collection``."""
         sources = {}
-        while True:
-            with self.store._batch_lock:
-                collection = self._collect_once(handle, sources)
-            if (
-                not wait
-                or not collection.pending
-                or any(
-                    status
-                    in {"submission_unknown", "duplicate_submissions", "resubmission_authorized"}
-                    for status in collection.statuses.values()
-                )
-            ):
-                return collection
-            time.sleep(self.poll_interval)
+        collection = BatchCollection([None] * len(handle.keys))
+        try:
+            while True:
+                try:
+                    with self.store._batch_lock:
+                        self._collect_once(handle, sources, collection)
+                finally:
+                    collection.pending = [
+                        key
+                        for index, key in enumerate(handle.keys)
+                        if collection.results[index] is None and index not in collection.failures
+                    ]
+                if (
+                    not wait
+                    or not collection.pending
+                    or any(
+                        status
+                        in {
+                            "submission_unknown",
+                            "duplicate_submissions",
+                            "resubmission_authorized",
+                        }
+                        for status in collection.statuses.values()
+                    )
+                ):
+                    return collection
+                time.sleep(self.poll_interval)
+        except BaseException as error:
+            if collection.failures or any(result is not None for result in collection.results):
+                setattr(error, "partial_collection", collection)
+            raise
 
     def generate_chat_batch(self, messages_batch, params, *, repeat_ids):
         collection = self.collect(

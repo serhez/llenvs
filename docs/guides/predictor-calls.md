@@ -490,8 +490,37 @@ changes, including refusals, expired requests and missing outputs. Local receipt
 reparsing keeps `source="receipt"`. Attempt history and `previous_attempts` do not
 change merely because requests are collected in different groups.
 
+If collection raises after obtaining any outcomes, the same exception carries
+`partial_collection`, a `BatchCollection` aligned with the handle. It includes
+results and per-slot failures already committed or replayed, their usual sources
+and attempt usage, the latest observed submission statuses, and uncollected keys
+as pending. This includes progress from earlier `wait=True` polls and progress
+before a retrieval, download or storage error. The exception's type and other
+attributes are unchanged. There is no `partial_collection` when no outcome was
+obtained.
+
+```python
+try:
+    collection = batch.collect(handle, wait=True)
+except Exception as error:
+    partial = getattr(error, "partial_collection", None)
+    if partial is not None:
+        record_outcomes(partial)  # The same ledger path as a normal return.
+    raise
+else:
+    record_outcomes(collection)
+```
+
+Carried outcomes count as returned: a later collection replays them with
+`source="store"`, while still-uncollected outcomes retain their usual first
+collection source. The collection-level exception does not turn pending keys
+into slot failures or authorize resubmission. Successful returns keep the same
+`BatchCollection` fields and alignment. Carried outcomes are detached from the
+store, just like normal returns.
+
 Outcome persistence and the caller's ledger are separate writes. A process can
-stop after committing an outcome but before the caller records it; a later
+stop without a caught exception after committing an outcome, or before the caller
+records a returned or carried outcome; a later
 collection then replays it from the store. Reconcile ledger entries by run,
 call key and attempt rather than assuming a replay proves the ledger already
 contains the outcome. A `batch` source identifies collection, not a charge:

@@ -1,14 +1,23 @@
 """Batch creation is journaled before dispatch and reconciled by exact identity."""
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from threading import Event
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from openai import APIConnectionError
 
 from llenvs.inference.backends.api import OpenAIBackend
-from llenvs.inference.backends.openai_batch import BatchHandle, OpenAIBatchBackend
-from llenvs.inference.persistence import CallStore, UnknownOutcomeError
+from llenvs.inference.backends.openai_batch import (
+    BatchCollection,
+    BatchHandle,
+    BatchUnfinished,
+    OpenAIBatchBackend,
+)
+from llenvs.inference.persistence import CallStore, CheckpointError, UnknownOutcomeError
 from llenvs.inference.protocol import (
     ChatMessage,
     LogprobsNotReturnedError,
@@ -100,6 +109,408 @@ def generated_failure(key, kind):
     else:
         assert kind == "missing_logprobs"
     return entry
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize("stage", ["retrieve", "download"])
+@pytest.mark.parametrize("outcome", ["success", "refusal", "server", "expired", "unfinished"])
+def test_collection_error_carries_committed_outcomes_and_reopens(
+    tmp_path, validation, stage, outcome
+):
+    client = Client()
+    error = APIConnectionError(request=httpx.Request("GET", "https://offline.invalid/batches"))
+    error.__cause__ = OSError("connection lost")
+    error.metadata = {"transport": "offline fixture"}
+    original_args, original_cause, original_request = error.args, error.__cause__, error.request
+    first_status = "expired" if outcome == "expired" else "completed"
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store, max_file_requests=2)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", str(index))] for index in range(4)],
+            SamplingParams(),
+            repeat_ids=list(range(4)),
+        )
+        assert len(handle.submissions) == 2
+        entries = [completion(handle.keys[0], "0"), completion(handle.keys[1], "1")]
+        if outcome == "refusal":
+            entries[1] = generated_failure(handle.keys[1], "refusal")
+        elif outcome == "server":
+            entries[1] = {
+                "custom_id": handle.keys[1],
+                "response": {
+                    "status_code": 503,
+                    "body": {"error": {"code": "server_error", "message": "Try again"}},
+                },
+            }
+        elif outcome == "expired":
+            entries[1] = {
+                "custom_id": handle.keys[1],
+                "response": None,
+                "error": {"code": "batch_expired", "message": "Not executed"},
+            }
+        elif outcome == "unfinished":
+            entries.pop()
+        client.outputs["batch-1"] = b"\n".join(json.dumps(entry).encode() for entry in entries)
+        client.outputs["batch-2"] = b"\n".join(
+            json.dumps(completion(handle.keys[index], str(index))).encode() for index in [3, 2]
+        )
+
+        def retrieve(identifier):
+            if stage == "retrieve" and identifier == "batch-2":
+                raise error
+            return SimpleNamespace(
+                id=identifier,
+                status=first_status if identifier == "batch-1" else "completed",
+                output_file_id=identifier,
+                error_file_id=None,
+            )
+
+        def download(identifier):
+            if stage == "download" and identifier == "batch-2":
+                raise error
+            return SimpleNamespace(content=client.outputs[identifier])
+
+        client.batches.retrieve, client.files.content = retrieve, download
+        with pytest.raises(APIConnectionError) as caught:
+            api.collect(handle)
+        assert caught.value is error
+        assert error.args == original_args and error.__cause__ is original_cause
+        assert error.request is original_request and error.metadata == {
+            "transport": "offline fixture"
+        }
+        partial = error.partial_collection
+        assert isinstance(partial, BatchCollection)
+        assert [result.text if result else None for result in partial.results] == [
+            "0",
+            "1" if outcome == "success" else None,
+            None,
+            None,
+        ]
+        assert partial.pending == list(handle.keys[2:])
+        assert set(partial.failures) == (set() if outcome == "success" else {1})
+        assert partial.statuses == {
+            handle.submissions[0]: first_status,
+            **({handle.submissions[1]: "completed"} if stage == "download" else {}),
+        }
+        outcomes = [partial.results[0], partial.results[1] or partial.failures[1]]
+        for key, result in zip(handle.keys[:2], outcomes, strict=True):
+            assert result.metadata["persistence"] == {
+                "run_fingerprint": handle.run_fingerprint,
+                "call_key": key,
+                "source": "batch",
+                "previous_attempts": 0,
+            }
+        assert partial.results[0].metadata["attempts"][0]["response_id"] == handle.keys[0]
+        assert partial.results[0].metadata["attempts"][0]["usage"] == {
+            "prompt_tokens": 3,
+            "completion_tokens": 1,
+        }
+        saved_error = encode_backend_error(partial.failures[1]) if partial.failures else None
+        if outcome == "unfinished":
+            assert type(partial.failures[1]) is BatchUnfinished
+            assert saved_error["status_code"] is None and saved_error["attempts"] is None
+        elif outcome == "refusal":
+            assert isinstance(partial.failures[1], RefusedByPolicyError)
+            assert saved_error["status_code"] == 200 and not saved_error["transient"]
+            assert saved_error["attempts"][0]["usage"]["prompt_tokens"] == 3
+        elif outcome == "server":
+            assert saved_error["status_code"] == 503 and saved_error["transient"]
+            assert saved_error["code"] == "server_error"
+        elif outcome == "expired":
+            assert saved_error["code"] == "batch_expired" and not saved_error["transient"]
+        partial.results[0].metadata["attempts"][0]["usage"]["prompt_tokens"] = 999
+        partial.results[0].metadata["persistence"]["source"] = "changed by caller"
+        if outcome == "refusal":
+            partial.failures[1].attempts[0]["usage"]["prompt_tokens"] = 999
+
+    resumed_client = Client()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Recovery resubmitted requests or fetched the first submission again")
+
+    def resume_retrieve(identifier):
+        assert identifier == "batch-2"
+        return SimpleNamespace(
+            id=identifier, status="completed", output_file_id=identifier, error_file_id=None
+        )
+
+    def resume_download(identifier):
+        assert identifier == "batch-2"
+        return SimpleNamespace(content=client.outputs[identifier])
+
+    resumed_client.files.create = resumed_client.batches.create = resumed_client.batches.list = (
+        forbidden
+    )
+    resumed_client.batches.retrieve, resumed_client.files.content = resume_retrieve, resume_download
+    with CallStore.open(tmp_path, run_descriptor={}, validation=validation) as store:
+        collection = OpenAIBatchBackend(backend(resumed_client), store).collect(handle)
+        assert [result.text if result else None for result in collection.results] == [
+            "0",
+            "1" if outcome == "success" else None,
+            "2",
+            "3",
+        ]
+        assert not collection.pending and set(collection.failures) == set(partial.failures)
+        for index, key in enumerate(handle.keys):
+            result = collection.results[index] or collection.failures[index]
+            assert result.metadata["persistence"] == {
+                "run_fingerprint": handle.run_fingerprint,
+                "call_key": key,
+                "source": "store" if index < 2 else "batch",
+                "previous_attempts": 0,
+            }
+        assert collection.results[0].metadata["attempts"][0]["usage"]["prompt_tokens"] == 3
+        if saved_error:
+            replayed = collection.failures[1]
+            if isinstance(replayed, ReplayedBackendError):
+                assert replayed.original_error_type == saved_error["type"]
+                assert encode_backend_error(replayed) == {
+                    **saved_error,
+                    "type": "ReplayedBackendError",
+                }
+            else:
+                assert encode_backend_error(replayed) == saved_error
+        assert len(client.creates) == len(client.uploads) == 2
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+def test_backend_close_preserves_committed_collection_progress(tmp_path, validation):
+    client = Client()
+    source = backend(client)
+    entered, release = Event(), Event()
+    error = APIConnectionError(request=httpx.Request("GET", "https://offline.invalid/batches"))
+    client.close = release.set
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(source, store, max_file_requests=1)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", "a")], [ChatMessage("user", "b")]],
+            SamplingParams(),
+            repeat_ids=[0, 1],
+        )
+        client.outputs["output"] = json.dumps(completion(handle.keys[0], "a")).encode()
+
+        def retrieve(identifier):
+            if identifier == "batch-2":
+                entered.set()
+                assert release.wait(5), "backend.close() did not release the blocked retrieval"
+                raise error
+            return client.retrieve(identifier)
+
+        client.batches.retrieve = retrieve
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(api.collect, handle)
+            try:
+                assert entered.wait(5), "Collection did not reach the second retrieval"
+                source.close()
+                assert source._client is None
+                with pytest.raises(APIConnectionError) as caught:
+                    future.result(timeout=5)
+                assert caught.value is error
+                partial = error.partial_collection
+                assert [result.text if result else None for result in partial.results] == [
+                    "a",
+                    None,
+                ]
+                assert partial.results[0].metadata["persistence"]["source"] == "batch"
+                assert not partial.failures and partial.pending == [handle.keys[1]]
+            finally:
+                release.set()
+    resumed = Client()
+    resumed.outputs["output"] = json.dumps(completion(handle.keys[1], "b")).encode()
+    with CallStore.open(tmp_path, run_descriptor={}, validation=validation) as store:
+        collection = OpenAIBatchBackend(backend(resumed), store).collect(handle)
+        assert [result.text for result in collection.results] == ["a", "b"]
+        assert [result.metadata["persistence"]["source"] for result in collection.results] == [
+            "store",
+            "batch",
+        ]
+        assert not collection.failures and not collection.pending and not resumed.creates
+
+
+@pytest.mark.parametrize("outcome", ["success", "unfinished"])
+def test_collection_error_preserves_progress_from_earlier_wait_polls(tmp_path, outcome):
+    client = Client()
+    error = APIConnectionError(request=httpx.Request("GET", "https://offline.invalid/batches"))
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store, max_file_requests=1, poll_interval=0)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", "a")], [ChatMessage("user", "b")]],
+            SamplingParams(),
+            repeat_ids=[0, 1],
+        )
+        client.outputs["output"] = (
+            json.dumps(completion(handle.keys[0], "a")).encode() if outcome == "success" else b""
+        )
+        polls = 0
+
+        def retrieve(identifier):
+            nonlocal polls
+            if identifier == "batch-1":
+                return client.retrieve(identifier)
+            polls += 1
+            if polls > 1:
+                raise error
+            return SimpleNamespace(
+                id=identifier, status="in_progress", output_file_id=None, error_file_id=None
+            )
+
+        client.batches.retrieve = retrieve
+        with pytest.raises(APIConnectionError) as caught:
+            api.collect(handle, wait=True)
+        assert caught.value is error and polls == 2
+        partial = error.partial_collection
+        if outcome == "success":
+            assert partial.results[0].text == "a" and not partial.failures
+            first = partial.results[0]
+        else:
+            assert partial.results[0] is None and set(partial.failures) == {0}
+            first = partial.failures[0]
+            assert type(first) is BatchUnfinished
+        assert first.metadata["persistence"]["source"] == "batch"
+        assert partial.results[1] is None and partial.pending == [handle.keys[1]]
+        assert partial.statuses == dict(
+            zip(handle.submissions, ["completed", "in_progress"], strict=True)
+        )
+        client.batches.retrieve = client.retrieve
+        client.outputs["output"] = json.dumps(completion(handle.keys[1], "b")).encode()
+        recovered = api.collect(handle, wait=True)
+        assert [
+            result.metadata["persistence"]["source"]
+            for result in [recovered.results[0] or recovered.failures[0], recovered.results[1]]
+        ] == [
+            "store",
+            "batch",
+        ]
+        assert partial.pending == [handle.keys[1]] and partial.results[1] is None
+        assert first.metadata["persistence"]["source"] == "batch"
+
+
+def test_collection_error_partway_through_commits_carries_results_and_failures(
+    tmp_path, monkeypatch
+):
+    client = Client()
+    error = CheckpointError("Injected failure before the third receipt was written")
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", str(index))] for index in range(3)],
+            SamplingParams(),
+            repeat_ids=list(range(3)),
+        )
+        client.outputs["output"] = b"\n".join(
+            json.dumps(entry).encode()
+            for entry in [
+                completion(handle.keys[0], "0"),
+                generated_failure(handle.keys[1], "refusal"),
+                completion(handle.keys[2], "2"),
+            ]
+        )
+        update = store.update
+
+        def fail_third(key, state, **changes):
+            if key == handle.keys[2] and state == "received":
+                raise error
+            return update(key, state, **changes)
+
+        monkeypatch.setattr(store, "update", fail_third)
+        with pytest.raises(CheckpointError) as caught:
+            api.collect(handle)
+        assert caught.value is error
+        partial = error.partial_collection
+        assert [result.text if result else None for result in partial.results] == ["0", None, None]
+        assert set(partial.failures) == {1} and partial.pending == [handle.keys[2]]
+        assert isinstance(partial.failures[1], RefusedByPolicyError)
+        for result in [partial.results[0], partial.failures[1]]:
+            assert result.metadata["persistence"]["source"] == "batch"
+    client.batches.retrieve = client.files.content = lambda *args: pytest.fail(
+        "Retained files not reused"
+    )
+    with CallStore.open(tmp_path, run_descriptor={}, validation="lazy") as store:
+        recovered = OpenAIBatchBackend(backend(client), store).collect(handle)
+        assert [result.text if result else None for result in recovered.results] == ["0", None, "2"]
+        assert set(recovered.failures) == {1} and not recovered.pending
+        assert [
+            result.metadata["persistence"]["source"]
+            for result in [recovered.results[0], recovered.failures[1], recovered.results[2]]
+        ] == ["store", "store", "batch"]
+
+
+def test_collection_error_keeps_store_receipt_and_batch_sources(tmp_path, monkeypatch):
+    client = Client()
+    error = APIConnectionError(request=httpx.Request("GET", "https://offline.invalid/batches"))
+    source = backend(client)
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(source, store, max_file_requests=1)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", str(index))] for index in range(4)],
+            SamplingParams(),
+            repeat_ids=list(range(4)),
+        )
+        for index in range(3):
+            client.outputs[f"batch-{index + 1}"] = json.dumps(
+                completion(handle.keys[index], str(index))
+            ).encode()
+
+        def retrieve(identifier):
+            if identifier == "batch-4":
+                raise error
+            return SimpleNamespace(
+                id=identifier, status="completed", output_file_id=identifier, error_file_id=None
+            )
+
+        client.batches.retrieve = retrieve
+        api.collect(
+            BatchHandle(handle.run_fingerprint, (handle.submissions[0],), (handle.keys[0],))
+        )
+        reparse = source.reparse_receipt
+        with monkeypatch.context() as patch:
+
+            def fail_parse(*args):
+                raise ValueError("Temporary local parser failure")
+
+            patch.setattr(source, "reparse_receipt", fail_parse)
+            failed = api.collect(
+                BatchHandle(handle.run_fingerprint, (handle.submissions[1],), (handle.keys[1],))
+            )
+            assert isinstance(failed.failures[0], ValueError)
+        assert source.reparse_receipt == reparse
+        with pytest.raises(APIConnectionError):
+            api.collect(handle)
+        partial = error.partial_collection
+        assert [result.text if result else None for result in partial.results] == [
+            "0",
+            "1",
+            "2",
+            None,
+        ]
+        assert [result.metadata["persistence"]["source"] for result in partial.results[:3]] == [
+            "store",
+            "receipt",
+            "batch",
+        ]
+        assert all(
+            result.metadata["persistence"]["previous_attempts"] == 0
+            for result in partial.results[:3]
+        )
+        assert not partial.failures and partial.pending == [handle.keys[3]]
+
+
+def test_collection_error_without_outcomes_keeps_the_original_exception(tmp_path):
+    client = Client()
+    error = APIConnectionError(request=httpx.Request("GET", "https://offline.invalid/batches"))
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", "a")]], SamplingParams(), repeat_ids=[0]
+        )
+
+        def fail_retrieve(*args):
+            raise error
+
+        client.batches.retrieve = fail_retrieve
+        with pytest.raises(APIConnectionError) as caught:
+            api.collect(handle)
+        assert caught.value is error and not hasattr(error, "partial_collection")
 
 
 def test_out_of_order_collection_replays_across_process_ownership(tmp_path):
