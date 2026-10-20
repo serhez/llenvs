@@ -211,6 +211,82 @@ requires the original invocation order. Use explicit IDs when regrouping work.
 `scope=...` separates phases/selections; `persist=lambda scope: ...` can exclude
 selected scopes from storage.
 
+### GCS journals
+
+Install `llenvs[gcs]` and pass a `GCSJournal` instead of a filesystem path:
+
+```python
+from llenvs.inference.persistence import CallStore
+from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+journal = GCSJournal(
+    bucket="experiment-artifacts",
+    prefix="model-calls/pilot",
+    cache_dir="./batch-file-cache",
+)
+with CallStore.open(
+    journal, run_descriptor={"experiment": "pilot", "shard": 0}, validation="lazy",
+) as store:
+    # Use PersistentBackend or OpenAIBatchBackend with this store.
+    pass
+```
+
+The bucket must already exist. Authentication uses the Storage SDK's normal
+mechanism; `client=...` accepts an already authorized client without constructing
+another one. Grant object read, create, replace and delete access for the journal,
+plus the required object-listing permission. Ordinary bucket IAM prefix
+conditions do not restrict the scope of listing; choose the bucket/access scope
+accordingly. See [GCS IAM conditions](https://docs.cloud.google.com/storage/docs/access-control/iam#conditions).
+The extra is independent of the inference backend extras.
+
+Call records, receipts, Batch journals and exact Batch file bytes are authoritative
+GCS objects. The local directory only caches Batch files; losing it does not lose
+call state. Without `cache_dir`, the open store uses a temporary directory and
+removes it on close. Batch transfers stream through disk with bounded transfer
+buffers. `blob_path()` materializes authoritative bytes and verifies them by
+default. `store.run_dir` is `None` for GCS; it remains a filesystem path for local
+stores. Use the store's methods rather than manipulating cloud objects directly.
+
+Each run has one persistent owner. Ownership has no timeout: a paused worker must
+not become eligible for replacement. Normal close conditionally releases exactly
+that owner. If a worker dies or ownership release cannot be confirmed, first
+confirm through the orchestrator that the old worker has terminated, then recover
+the observed owner token explicitly:
+
+```python
+owner = journal.current_owner(run_descriptor={"experiment": "pilot", "shard": 0})
+# Only after external confirmation that this owner's worker has terminated:
+journal.acknowledge_owner_termination(
+    run_descriptor={"experiment": "pilot", "shard": 0},
+    expected_owner=owner,
+    reason="Orchestrator confirmed termination of the previous worker",
+    confirmed_terminated=True,
+)
+```
+
+Recovery retains the assertion and reason before releasing ownership. It rejects
+a stale token and does not reset call attempts or authorize resubmission of an
+unknown outcome. The library does not query a scheduler. This contract requires
+termination; a separate ownership object is not transactional fencing against a
+still-running writer. Give concurrent shards
+distinct stable run descriptors.
+
+Writes use generation preconditions and bounded retries. Lost acknowledgements
+are reconciled against the operation's exact bytes; an unresolved storage failure
+poisons the store before further inference dispatch. Generation checks apply to
+ownership, call state, journals, artifacts and deletions. Storage retries never
+authorize another model draw. Keep the prefix private and trusted: journal pickles
+are executable Python artifacts, and checksums detect accidental corruption.
+External deletion or expiration of live journal objects invalidates replay
+guarantees. `mark_complete(delete=True)` removes the run's objects after checking
+for unresolved calls; ownership and recovery assertions remain separate.
+
+Lazy startup does not read or list completed calls. It still discovers submission
+journals and lifecycle records; full validation reads all retained records and
+referenced Batch files. GCS request, storage and transfer costs are additional to
+inference costs. Offline storage tests do not establish live-cloud performance or
+platform restart behavior.
+
 ### Call identity and reuse
 
 Persisted generation, decision and scoring results, and individual call errors,
@@ -228,7 +304,7 @@ carry `metadata["persistence"]`:
 | `source` | How this invocation obtained the result |
 |---|---|
 | `backend` | This invocation delegated the call to the backend |
-| `store` | A completed result or failed/unknown outcome was already retained locally |
+| `store` | A completed result or failed/unknown outcome was already retained in the journal |
 | `receipt` | A retained receipt was parsed locally |
 | `shared` | This position joined an already reserved call, including a duplicate batch position |
 | `batch` | This collection obtained an outcome from the retained Batch submission |

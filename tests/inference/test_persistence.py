@@ -802,7 +802,7 @@ def test_process_death_retains_individual_receipt_while_sibling_is_blocked(tmp_p
 
 
 def test_storage_failure_is_fatal_and_poisoned_store_dispatches_nothing(tmp_path, monkeypatch):
-    import llenvs.inference.persistence.store as mod
+    import llenvs.inference.persistence.storage.filesystem as mod
     from llenvs.inference.persistence import CheckpointError
 
     backend = Backend()

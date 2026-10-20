@@ -1,6 +1,6 @@
-"""Checksummed call journal, generalized from QVal's retained call store.
+"""Checksummed call journal with shared replay and provenance semantics.
 
-Pickles are trusted local artifacts. Checksums detect accidental corruption.
+Pickles are trusted journal artifacts. Checksums detect accidental corruption.
 """
 
 from __future__ import annotations
@@ -9,19 +9,16 @@ import asyncio
 import copy
 import dataclasses
 import enum
-import fcntl
 import hashlib
 import json
 import math
-import os
 import pickle
-import shutil
 import threading
 import uuid
 from collections import OrderedDict
 from collections.abc import Mapping, MutableMapping
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
 from llenvs.inference.protocol import (
@@ -32,6 +29,8 @@ from llenvs.inference.protocol import (
     encode_backend_error,
     restore_backend_error,
 )
+
+from .storage import Journal
 
 
 def _qualified_type(value: Any) -> str:
@@ -111,55 +110,27 @@ def _fingerprint(value: Any) -> str:
     return hashlib.sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
 
 
-def _fsync_directory(path: Path) -> None:
-    """Commit the directory entry; a failure invalidates the durability claim."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _atomic_write_bytes(path: Path, payload: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        with temporary.open("xb") as handle:
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _atomic_write_json(path: Path, value: Any) -> None:
-    payload = (_canonical_json(value) + "\n").encode("utf-8")
-    _atomic_write_bytes(path, payload)
-
-
-def _atomic_write_pickle(path: Path, value: Any) -> None:
-    record_payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
-    envelope = {
-        "payload_sha256": hashlib.sha256(record_payload).hexdigest(),
-        "payload": record_payload,
-    }
-    _atomic_write_bytes(
-        path,
-        pickle.dumps(envelope, protocol=pickle.HIGHEST_PROTOCOL),
+def _encode_pickle(value: Any) -> bytes:
+    payload = pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL)
+    return pickle.dumps(
+        {"payload_sha256": hashlib.sha256(payload).hexdigest(), "payload": payload},
+        protocol=pickle.HIGHEST_PROTOCOL,
     )
 
 
-def _read_checked_pickle(path: Path) -> Any:
-    envelope = pickle.loads(path.read_bytes())
+def _decode_pickle(data: bytes) -> Any:
+    envelope = pickle.loads(data)
     payload = envelope["payload"]
     if hashlib.sha256(payload).hexdigest() != envelope["payload_sha256"]:
-        raise ValueError(f"Checksum mismatch: {path.name}")
+        raise ValueError("Checksum mismatch")
     return pickle.loads(payload)
+
+
+def _run_identity(run_descriptor):
+    from llenvs.inference.records import credential_free
+
+    descriptor = _normalize(credential_free(run_descriptor))
+    return _fingerprint({"schema": 1, "run": descriptor}), descriptor
 
 
 class CheckpointError(RuntimeError):
@@ -183,6 +154,10 @@ class UnknownOutcomeError(CheckpointError):
         super().__init__(f"Outcome unknown for {key}; explicit recovery decision required")
 
 
+class _MissingRecordError(KeyError):
+    """Storage confirmed absence, rather than an error decoding retained bytes."""
+
+
 class _RecordIndex(MutableMapping):
     """Keep active reservations and a bounded cache; completed draws live on disk."""
 
@@ -192,18 +167,17 @@ class _RecordIndex(MutableMapping):
         self.cache = OrderedDict()
 
     def path(self, key):
-        return self.store.run_dir / "calls" / key[:2] / (key + ".pkl")
+        return f"calls/{key[:2]}/{key}.pkl"
 
     def __getitem__(self, key):
         with self.store._mutex:
             if key in self.volatile:
                 return self.volatile[key]
             if key not in self.cache:
-                path = self.path(key)
-                if not path.exists():
-                    raise KeyError(key)
                 try:
-                    self[key] = self.store._load(path)
+                    self.retain(key, self.store._load(self.path(key)))
+                except _MissingRecordError:
+                    raise KeyError(key) from None
                 except Exception as exc:
                     self.store._poison = exc
                     raise CheckpointCorruptionError(f"Invalid retained call {key}") from exc
@@ -211,23 +185,23 @@ class _RecordIndex(MutableMapping):
             return self.cache[key]
 
     def __setitem__(self, key, value):
-        with self.store._mutex:
-            if not self.path(key).exists():
-                self.volatile[key] = value
-                return
-            self.volatile.pop(key, None)
-            self.cache[key] = value
-            self.cache.move_to_end(key)
-            while len(self.cache) > 64:
-                self.cache.popitem(last=False)
+        self.volatile[key] = value
+
+    def retain(self, key, value):
+        self.volatile.pop(key, None)
+        self.cache[key] = value
+        self.cache.move_to_end(key)
+        while len(self.cache) > 64:
+            self.cache.popitem(last=False)
 
     def __delitem__(self, key):
         raise TypeError("Retained records can only be removed through mark_complete(delete=True)")
 
     def __iter__(self):
         yield from tuple(self.volatile)
-        for path in (self.store.run_dir / "calls").rglob("*.pkl"):
-            yield path.stem
+        for name in self.store._storage.names("calls/"):
+            if name.endswith(".pkl"):
+                yield PurePosixPath(name).stem
 
     def __len__(self):
         return sum(1 for _ in self)
@@ -260,35 +234,32 @@ class CallStore:
     @classmethod
     def open(
         cls,
-        root: str | Path,
+        root: str | Path | Journal,
         *,
         run_descriptor: Mapping[str, Any],
         validation: Literal["full", "lazy"] = "full",
     ) -> CallStore:
-        from llenvs.inference.records import credential_free
+        from .storage.filesystem import FilesystemJournal
 
         if validation not in {"full", "lazy"}:
             raise ValueError("validation must be 'full' or 'lazy'")
-        descriptor = _normalize(credential_free(run_descriptor))
-        fingerprint = _fingerprint({"schema": 1, "run": descriptor})
-        root = Path(root)
-        (root / ".locks").mkdir(parents=True, exist_ok=True)
-        handle = (root / ".locks" / (fingerprint + ".lock")).open("a+b")
+        fingerprint, descriptor = _run_identity(run_descriptor)
+        if isinstance(root, Journal):
+            journal = root
+        else:
+            root = Path(root)
+            journal = FilesystemJournal(root)
+        storage = journal.acquire(fingerprint)
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            handle.close()
-            raise CheckpointInUseError(f"Run {fingerprint} is already open") from exc
-        try:
-            return cls(root, fingerprint, descriptor, handle, validation=validation)
+            return cls(root, fingerprint, descriptor, storage, validation=validation)
         except BaseException:
-            handle.close()
+            storage.close()
             raise
 
-    def __init__(self, root, fingerprint, descriptor, handle, *, validation):
+    def __init__(self, root, fingerprint, descriptor, storage, *, validation):
         self.root, self.fingerprint = root, fingerprint
-        self.run_dir = root / fingerprint
-        self._handle = handle
+        self._storage = storage
+        self.run_dir = storage.run_dir
         self._mutex = threading.RLock()
         self._batch_lock = threading.RLock()
         self._closed = False
@@ -299,21 +270,25 @@ class CallStore:
         self._journals: dict[str, dict] = {}
         self._intent_submissions = {}
         manifest = {"schema": 1, "fingerprint": fingerprint, "run_descriptor": descriptor}
-        path = self.run_dir / "manifest.json"
         try:
-            if self.run_dir.exists():
-                if json.loads(path.read_text()) != manifest:
+            if storage.existing:
+                if json.loads(storage.read("manifest.json")) != manifest:
                     raise ValueError("manifest mismatch")
                 if validation == "full":
-                    for record_path in (self.run_dir / "calls").rglob("*.pkl"):
-                        self._load(record_path)
-                for lifecycle_path in (self.run_dir / "lifecycle").glob("*.pkl"):
-                    event = _read_checked_pickle(lifecycle_path)
+                    for name in storage.names("calls/"):
+                        if name.endswith(".pkl"):
+                            self._load(name)
+                for name in storage.names("lifecycle/"):
+                    if not name.endswith(".pkl"):
+                        continue
+                    event = _decode_pickle(storage.read(name))
                     if not isinstance(event, dict) or not isinstance(event.get("event"), str):
                         raise ValueError("Invalid lifecycle event")
-                for journal_path in (self.run_dir / "journals").glob("*.pkl"):
-                    journal = _read_checked_pickle(journal_path)
-                    if journal["run"] != fingerprint or journal["id"] != journal_path.stem:
+                for name in storage.names("journals/"):
+                    if not name.endswith(".pkl"):
+                        continue
+                    journal = _decode_pickle(storage.read(name))
+                    if journal["run"] != fingerprint or journal["id"] != PurePosixPath(name).stem:
                         raise ValueError("submission journal identity mismatch")
                     self._journals[journal["id"]] = journal
                     if validation == "full":
@@ -327,15 +302,20 @@ class CallStore:
                         for key in journal["keys"]:
                             self._intent_submissions[key] = journal["id"]
             else:
-                _atomic_write_json(path, manifest)
+                storage.write("manifest.json", (_canonical_json(manifest) + "\n").encode())
         except Exception as exc:
-            raise CheckpointCorruptionError(f"Invalid call store {self.run_dir}: {exc}") from exc
+            raise CheckpointCorruptionError(
+                f"Invalid call store {storage.location}: {exc}"
+            ) from exc
         self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llenvs-journal")
         self._write_slots = threading.BoundedSemaphore(64)
 
     def _load(self, path):
-        record = _read_checked_pickle(path)
-        if record["key"] != path.stem or record["run"] != self.fingerprint:
+        data = self._storage.read(path)
+        if data is None:
+            raise _MissingRecordError(path)
+        record = _decode_pickle(data)
+        if record["key"] != PurePosixPath(path).stem or record["run"] != self.fingerprint:
             raise ValueError("record identity mismatch")
         if path != self._records.path(record["key"]):
             raise ValueError("record shard mismatch")
@@ -435,11 +415,11 @@ class CallStore:
             if state == "completed":
                 _validate_result(record["result"])
             try:
-                _atomic_write_pickle(self._records.path(key), record)
+                self._storage.write(self._records.path(key), _encode_pickle(record))
             except Exception as exc:
                 self._poison = exc
                 raise CheckpointError(f"Cannot persist {state} for {key}") from exc
-            self._records[key] = record
+            self._records.retain(key, record)
             future = self._inflight.get(key)
             if state == "completed" and future is not None and not future.done():
                 future.set_result(copy.deepcopy(record["result"]))
@@ -494,7 +474,7 @@ class CallStore:
             if not identifier.isalnum() or journal["run"] != self.fingerprint:
                 raise ValueError("Invalid journal identity")
             try:
-                _atomic_write_pickle(self.run_dir / "journals" / (identifier + ".pkl"), journal)
+                self._storage.write(f"journals/{identifier}.pkl", _encode_pickle(journal))
             except Exception as exc:
                 self._poison = exc
                 raise CheckpointError("Cannot persist submission journal") from exc
@@ -513,27 +493,11 @@ class CallStore:
         ):
             raise ValueError("Invalid blob name")
         self._check()
-        directory = self.run_dir / "blobs"
-        directory.mkdir(exist_ok=True)
-        destination = directory / name
-        temporary = directory / ("." + name + "." + uuid.uuid4().hex + ".tmp")
-        digest, size = hashlib.sha256(), 0
         try:
-            with temporary.open("xb") as handle:
-                for chunk in [chunks] if isinstance(chunks, bytes) else chunks:
-                    handle.write(chunk)
-                    digest.update(chunk)
-                    size += len(chunk)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-            _fsync_directory(directory)
+            return self._storage.write_blob(name, chunks)
         except Exception as exc:
             self._poison = exc
             raise CheckpointError("Cannot persist exact Batch file bytes") from exc
-        finally:
-            temporary.unlink(missing_ok=True)
-        return {"name": name, "sha256": digest.hexdigest(), "size": size}
 
     def blob_path(self, entry, *, verify=True):
         name = entry["name"]
@@ -542,13 +506,12 @@ class CallStore:
             for character in name
         ):
             raise CheckpointCorruptionError("Invalid retained blob name")
-        path = self.run_dir / "blobs" / name
-        if verify:
-            from llenvs.inference.records import file_digest
-
-            if path.stat().st_size != entry["size"] or file_digest(path) != entry["sha256"]:
-                raise CheckpointCorruptionError(f"Retained Batch file checksum mismatch: {name}")
-        return path
+        self._check()
+        try:
+            return self._storage.blob_path(entry, verify=verify)
+        except Exception as exc:
+            self._poison = exc
+            raise CheckpointCorruptionError(f"Invalid retained Batch file: {name}") from exc
 
     async def update_async(self, key, state, **values):
         await asyncio.to_thread(self._write_slots.acquire)
@@ -591,8 +554,8 @@ class CallStore:
         with self._mutex:
             self._check()
             try:
-                _atomic_write_pickle(
-                    self.run_dir / "lifecycle" / (uuid.uuid4().hex + ".pkl"), dict(event)
+                self._storage.write(
+                    f"lifecycle/{uuid.uuid4().hex}.pkl", _encode_pickle(dict(event))
                 )
             except Exception as exc:
                 self._poison = exc
@@ -606,18 +569,20 @@ class CallStore:
             ):
                 raise UnknownOutcomeError("run has unresolved requests")
             try:
-                _atomic_write_json(self.run_dir / "complete.json", {"retained": not delete})
+                self._storage.write(
+                    "complete.json", _canonical_json({"retained": not delete}).encode()
+                )
+                if delete:
+                    self._storage.delete()
             except Exception as exc:
                 self._poison = exc
                 raise CheckpointError("Cannot persist run completion") from exc
-            if delete:
-                shutil.rmtree(self.run_dir)
 
     def close(self):
         if not self._closed:
             self._writer.shutdown(wait=True)
             self._closed = True
-            self._handle.close()
+            self._storage.close()
 
     def __enter__(self):
         return self
