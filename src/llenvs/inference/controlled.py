@@ -29,6 +29,7 @@ def controlled_chat(backend, messages, params, *, generate=None, observer=None, 
     prompt = tokenizer.apply_chat_template(
         local_chat_messages(messages, backend._reasoning_family),
         tokenize=True,
+        return_dict=False,
         add_generation_prompt=True,
         **template_kwargs,
     )

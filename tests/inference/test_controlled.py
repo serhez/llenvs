@@ -146,3 +146,98 @@ def test_inherited_disabled_template_skips_reasoning_phase():
     )
     assert seen == [([1, 80, 99, 10], "answer")]
     assert result.text == "answer"
+
+
+@pytest.mark.parametrize("real_tokenizer", [False, True], ids=["api-contract", "native-cpu"])
+@pytest.mark.parametrize("effort", ["none", "low"])
+@pytest.mark.parametrize("observed", [False, True], ids=["direct", "journal-observer"])
+def test_controlled_chat_uses_token_ids_with_dictionary_default_tokenizers(
+    real_tokenizer, effort, observed
+):
+    from types import SimpleNamespace
+
+    from llenvs.inference.controlled import controlled_chat
+    from llenvs.inference.protocol import ChatMessage
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, *, return_dict=True, enable_thinking, **kwargs):
+            prompt = [1, 0, 2] + ([] if enable_thinking else [99, 10])
+            return (
+                {"input_ids": prompt, "attention_mask": [1] * len(prompt)}
+                if return_dict
+                else prompt
+            )
+
+        def encode(self, text, **kwargs):
+            return [99] if text == "</think>" else [10] if text == "\n\n" else [80]
+
+        def decode(self, tokens, **kwargs):
+            return ",".join(map(str, tokens))
+
+    tokenizer = Tokenizer()
+    base = [1, 0, 2]
+    if real_tokenizer:
+        transformers = pytest.importorskip("transformers")
+        tokenizers = pytest.importorskip("tokenizers")
+        words = [f"token{i}" for i in range(100)]
+        for index, word in {
+            0: "[UNK]",
+            1: "hello",
+            99: "</think>",
+            10: "\n\n",
+            80: "suffix",
+            6: "answer",
+        }.items():
+            words[index] = word
+        tokenizer = transformers.PreTrainedTokenizerFast(
+            tokenizer_object=tokenizers.Tokenizer(
+                tokenizers.models.WordLevel(dict(zip(words, range(100))), unk_token="[UNK]")
+            ),
+            unk_token="[UNK]",
+            additional_special_tokens=["</think>"],
+        )
+        tokenizer.chat_template = "hello{% if not enable_thinking %}</think>\n\n{% endif %}"
+        base = [1]
+
+    seen, receipts = [], []
+
+    def generate(tokens, budget, *, phase_name, **options):
+        seen.append((list(tokens), phase_name))
+        return phase([4, 99] if phase_name == "reasoning" else [6])
+
+    class Observer:
+        def begin_phases(self, index):
+            assert index == 0
+
+        def run_phase(self, index, name, request, invoke, reparse):
+            receipts.append((list(request["prompt_token_ids"]), name))
+            return invoke(self)
+
+    backend = SimpleNamespace(
+        _reasoning_family="qwen3.8",
+        tokenizer=tokenizer,
+        _chat_template_kwargs_for=lambda params: {
+            "enable_thinking": params.reasoning_effort != "none",
+            "preserve_thinking": True,
+        },
+        capabilities=SimpleNamespace(max_context_length=100),
+        _generate_tokens=lambda tokens, params, budget, **options: generate(
+            tokens, budget, **options
+        ),
+        reparse_token_receipt=lambda receipt: pytest.fail("No receipt replay is needed"),
+    )
+    result = controlled_chat(
+        backend,
+        [ChatMessage(role="user", content="hello")],
+        SamplingParams(max_tokens=8, reasoning_effort=effort, after_reasoning_text="suffix"),
+        generate=generate,
+        observer=Observer() if observed else None,
+    )
+    expected = (
+        [(base, "reasoning"), (base + [4, 80, 99, 10], "answer")]
+        if effort != "none"
+        else [(base + [80, 99, 10], "answer")]
+    )
+    assert seen == expected
+    assert receipts == (expected if observed else [])
+    assert result.text == tokenizer.decode([6], skip_special_tokens=True)

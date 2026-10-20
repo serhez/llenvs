@@ -11,11 +11,12 @@ Small live probes cover Luna reasoning/schema requests, Decisions distributions,
 prefix-cache usage and OpenAI Batch submission/collection. These do not establish
 application-scale quotas, production cache savings or reconciled billing.
 
-Qwen/vLLM and native d3 have offline tests; their target GPU runtimes remain
-unqualified. Before using them for experiments, validate model loading, reasoning
-and schema behavior, token/logprob alignment, memory use, numerical correctness
-and process cleanup in the actual runtime. Container deployment also needs
-application termination and restart checks against its persistent storage.
+Qwen/vLLM and native d3 need GPU qualification for the exact model, runtime,
+hardware and settings being deployed. Offline tests alone do not establish
+model loading, reasoning and schema behavior, token/logprob alignment, memory
+use, numerical correctness or process cleanup. Validate these in the actual
+runtime. Container deployment also needs application termination and restart
+checks against its persistent storage.
 
 ## Reasoning and answer format
 
@@ -93,6 +94,9 @@ verified closing token or explicit thinking budget, then supplies:
 initial prompt IDs + sampled reasoning body IDs + supplied text IDs
                   + supplied closing marker IDs + answer separator IDs
 ```
+
+Tokenized template rendering explicitly requests a plain token-ID list; tokenizer
+metadata dictionaries are never passed as the phase's input tokens.
 
 The answer is a second generation, optionally constrained by the schema. The
 sampled phase-one closing token and its original logprob remain in the record,
@@ -487,8 +491,25 @@ frontend. It checks runtime source identity, health/API version, loaded revision
 choice limits, effective engine arguments, numerical contract and native golden
 status. Requests use the native `/v1/systemone` mapping and request runtime
 metadata. The served model ID can differ from its Hub repository name; responses
-are checked against the verified worker identity. Teardown signals only the owned
+are checked against the verified worker identity. The response's `model` names
+the served model, while `meta.model_id` names the card's repository, falling back
+to its model ID when no repository is reported. Teardown signals only the owned
 process group, with bounded SIGTERM/SIGKILL waits.
+
+Loading and warming health responses are retried until the startup deadline;
+terminal native `failed` health raises `RuntimeError` promptly. That error and
+a startup `TimeoutError` expose `startup_health`: the last valid, credential-safe
+`{"status_code": ..., "body": ...}` health snapshot, or `None` if no valid reply
+was received. Their messages include the last native reason, when present, and
+the worker log path. Transient connection failures or malformed nonready replies
+do not replace an earlier snapshot. Health responses must use API major 3.
+
+Ready workers with native golden status `matched` or `unverified` are accepted.
+`unverified` can mean the runtime has no reference for that accelerator; the
+original status and numerical contract remain in the descriptor's runtime card.
+Failed, pending, missing or unknown golden status is rejected. Native dtype and
+batching defaults are preserved, including `approximate` numerics when reported.
+Readiness does not establish independent numerical parity or batch invariance.
 
 The native decision3 family loads verified model artifacts through its own code.
 The model package's Python reference server is a separate parity-check path,

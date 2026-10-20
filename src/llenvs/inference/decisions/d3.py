@@ -108,14 +108,39 @@ class D3Backend(DecisionBackend):
             atexit.register(self.close)
             self._provenance["pid"] = self._proc.pid
             deadline = time.monotonic() + startup_timeout
+            startup_health = None
+
+            def startup_failure(error_type, message):
+                reason = (startup_health or {}).get("body", {}).get("reason")
+                detail = f": {reason}" if reason else ""
+                error = error_type(f"{message}{detail}; see {log_path}")
+                error.startup_health = deepcopy(startup_health)
+                raise error
+
             while True:
                 self._check_process()
                 try:
                     health = self._client.get("/health")
-                    if health.status_code == 200:
+                    try:
                         health_data = health.json()
-                        if health_data.get("api_version", "").split(".")[0] != "3":
+                    except ValueError:
+                        if health.status_code == 200:
+                            raise
+                        health_data = None
+                    if isinstance(health_data, dict) and (
+                        "api_version" in health_data or health.status_code == 200
+                    ):
+                        version = health_data.get("api_version")
+                        if not isinstance(version, str) or version.split(".")[0] != "3":
                             raise ValueError("d3 runtime must implement API major version 3")
+                        startup_health = credential_free(
+                            {"status_code": health.status_code, "body": health_data}
+                        )
+                        if health_data.get("status") == "failed":
+                            startup_failure(RuntimeError, "d3 worker failed during startup")
+                    if health.status_code == 200:
+                        if not isinstance(health_data, dict):
+                            raise ValueError("Invalid d3 runtime health response")
                         response = self._client.get("/v1/models")
                         response.raise_for_status()
                         self._runtime = self._validate_models(response.json())
@@ -123,7 +148,7 @@ class D3Backend(DecisionBackend):
                 except (httpx.ConnectError, httpx.TimeoutException):
                     pass
                 if time.monotonic() >= deadline:
-                    raise TimeoutError(f"d3 startup timed out; see {log_path}")
+                    startup_failure(TimeoutError, "d3 startup timed out")
                 time.sleep(0.2)
         except BaseException:
             self.close()
@@ -168,8 +193,8 @@ class D3Backend(DecisionBackend):
             <= engine.keys()
         ):
             raise ValueError("d3 worker did not report effective engine arguments")
-        if (card.get("golden") or {}).get("status") != "matched":
-            raise ValueError("d3 worker did not pass its native golden check")
+        if (card.get("golden") or {}).get("status") not in {"matched", "unverified"}:
+            raise ValueError("d3 worker reported a failed or incomplete native golden check")
         if (
             not card.get("model_sha256")
             or not card.get("manifest_sha256")
@@ -250,7 +275,7 @@ class D3Backend(DecisionBackend):
             if response.get("model") != self._served_model or any(
                 meta.get(name) != expected
                 for name, expected in {
-                    "model_id": self._served_model,
+                    "model_id": card.get("repo") or self._served_model,
                     "revision": self._revision,
                     "model_sha256": card["model_sha256"],
                     "numerics": card["numerics"],

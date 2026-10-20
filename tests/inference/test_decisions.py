@@ -160,7 +160,9 @@ def native_worker(monkeypatch, tmp_path):
         },
         "golden": {"status": "matched"},
     }
-    state = SimpleNamespace(card=card, launches=[], signals=[])
+    state = SimpleNamespace(
+        card=card, launches=[], signals=[], health_replies=None, health_requests=0
+    )
     exit_callbacks = []
     monkeypatch.setattr(atexit, "register", lambda callback: exit_callbacks.append(callback))
     monkeypatch.setattr(atexit, "unregister", lambda callback: None)
@@ -192,6 +194,14 @@ def native_worker(monkeypatch, tmp_path):
             pass
 
         def get(self, path):
+            if path == "/health":
+                index = state.health_requests
+                state.health_requests += 1
+                if state.health_replies:
+                    response = state.health_replies[min(index, len(state.health_replies) - 1)]
+                    if isinstance(response, Exception):
+                        raise response
+                    return response
             body = (
                 {"status": "ready", "api_version": "3.0.0"}
                 if path == "/health"
@@ -223,10 +233,157 @@ def native_worker(monkeypatch, tmp_path):
     monkeypatch.setattr(mod.os, "killpg", killpg)
     monkeypatch.setattr(httpx, "Client", Client)
     monkeypatch.setattr(httpx, "AsyncClient", AsyncClient)
-    state.create = lambda: D3Backend(log_path=tmp_path / "d3.log", shutdown_timeout=0.01)
+    state.create = lambda **kwargs: D3Backend(
+        log_path=tmp_path / "d3.log", shutdown_timeout=0.01, **kwargs
+    )
     yield state
     for callback in exit_callbacks:
         callback()
+
+
+def startup_clock(monkeypatch):
+    import llenvs.inference.decisions.d3 as mod
+
+    clock = SimpleNamespace(seconds=0)
+
+    def advance(seconds):
+        clock.seconds += seconds
+
+    monkeypatch.setattr(
+        mod, "time", SimpleNamespace(monotonic=lambda: clock.seconds, sleep=advance)
+    )
+    return clock
+
+
+def native_health(status, reason=None, *, api_version="3.0.0"):
+    import httpx
+
+    body = {"api_version": api_version, "status": status, "reason": reason, "model": "d3"}
+    return httpx.Response(
+        200 if status == "ready" else 503,
+        json=body,
+        request=httpx.Request("GET", "http://127.0.0.1:12345/health"),
+    )
+
+
+@pytest.mark.parametrize(
+    "status,reason",
+    [("loading", "verifying the package"), ("warming", "running the golden check")],
+)
+def test_native_d3_startup_timeout_retains_last_native_health(
+    native_worker, monkeypatch, status, reason
+):
+    import json
+    import signal
+
+    startup_clock(monkeypatch)
+    reply = native_health(status, reason)
+    native_worker.health_replies = [reply]
+    with pytest.raises(TimeoutError) as caught:
+        native_worker.create(startup_timeout=0.5)
+    assert reason in str(caught.value)
+    assert "d3.log" in str(caught.value)
+    assert caught.value.startup_health == {"status_code": 503, "body": reply.json()}
+    json.dumps(caught.value.startup_health, allow_nan=False)
+    assert native_worker.signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_native_d3_terminal_native_health_failure_raises_without_waiting_for_timeout(
+    native_worker, monkeypatch
+):
+    import signal
+
+    clock = startup_clock(monkeypatch)
+    reply = native_health("failed", "PackageError: checkpoint digest differs")
+    native_worker.health_replies = [reply]
+    with pytest.raises(RuntimeError, match="checkpoint digest differs") as caught:
+        native_worker.create(startup_timeout=1200)
+    assert native_worker.health_requests == 1
+    assert clock.seconds == 0
+    assert caught.value.startup_health == {"status_code": 503, "body": reply.json()}
+    assert native_worker.signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_native_d3_startup_health_does_not_expose_url_credentials(native_worker, monkeypatch):
+    import json
+
+    startup_clock(monkeypatch)
+    native_worker.health_replies = [
+        native_health(
+            "failed",
+            "download failed: https://name:synthetic-password@example.test/file"
+            "?token=synthetic-token&part=1",
+        )
+    ]
+    with pytest.raises(RuntimeError) as caught:
+        native_worker.create(startup_timeout=0.5)
+    text = str(caught.value) + json.dumps(caught.value.startup_health)
+    assert "synthetic-password" not in text and "synthetic-token" not in text
+    assert "https://example.test/file?part=1" in text
+
+
+def test_native_d3_startup_transport_error_keeps_last_observed_health(native_worker, monkeypatch):
+    import httpx
+
+    startup_clock(monkeypatch)
+    reply = native_health("loading", "loading weights on cuda:0")
+    native_worker.health_replies = [reply, httpx.ReadTimeout("synthetic read timeout")]
+    with pytest.raises(TimeoutError) as caught:
+        native_worker.create(startup_timeout=0.5)
+    assert "loading weights on cuda:0" in str(caught.value)
+    assert caught.value.startup_health == {"status_code": 503, "body": reply.json()}
+
+
+def test_native_d3_non_json_startup_reply_keeps_last_observed_health(native_worker, monkeypatch):
+    import httpx
+
+    startup_clock(monkeypatch)
+    reply = native_health("loading", "verifying the package")
+    native_worker.health_replies = [reply, httpx.Response(503, text="not a native health body")]
+    with pytest.raises(TimeoutError) as caught:
+        native_worker.create(startup_timeout=0.5)
+    assert caught.value.startup_health == {"status_code": 503, "body": reply.json()}
+
+
+def test_native_d3_startup_timeout_without_health_keeps_it_unknown(native_worker, monkeypatch):
+    import httpx
+
+    startup_clock(monkeypatch)
+    native_worker.health_replies = [httpx.ConnectError("synthetic connection unavailable")]
+    with pytest.raises(TimeoutError) as caught:
+        native_worker.create(startup_timeout=0.5)
+    assert caught.value.startup_health is None
+    assert "d3.log" in str(caught.value)
+
+
+def test_native_d3_nonready_health_still_enforces_api_version(native_worker, monkeypatch):
+    startup_clock(monkeypatch)
+    native_worker.health_replies = [native_health("loading", "resolving", api_version="2.0.0")]
+    with pytest.raises(ValueError, match="API"):
+        native_worker.create(startup_timeout=0.5)
+    assert native_worker.health_requests == 1
+
+
+def test_native_d3_retries_transient_startup_states_and_keeps_native_arguments(
+    native_worker, monkeypatch
+):
+    import httpx
+
+    startup_clock(monkeypatch)
+    native_worker.health_replies = [
+        httpx.ConnectError("not listening yet"),
+        native_health("loading", "retrying after transient failure (attempt 1 of 5)"),
+        native_health("warming", "running the golden check"),
+        native_health("ready"),
+    ]
+    backend = native_worker.create(startup_timeout=1)
+    try:
+        assert native_worker.health_requests == 4
+        assert native_worker.launches[0][0][:3] == ["vllm-srun", "serve", "vllm-sr/d3"]
+        assert "--dtype" not in native_worker.launches[0][0]
+        assert "--max-num-seqs" not in native_worker.launches[0][0]
+    finally:
+        backend.close()
 
 
 def test_native_d3_binds_loopback_and_terminates_only_its_owned_process_group(native_worker):
@@ -241,6 +398,102 @@ def test_native_d3_binds_loopback_and_terminates_only_its_owned_process_group(na
     backend.close()
     backend.close()
     assert native_worker.signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+@pytest.mark.parametrize("numerics", ["exact", "approximate"])
+@pytest.mark.parametrize("golden_status", ["matched", "unverified"])
+@pytest.mark.parametrize("explicit_args", [False, True], ids=["native-defaults", "explicit-args"])
+def test_native_d3_accepts_ready_unverified_workers_and_preserves_native_contract(
+    native_worker, numerics, golden_status, explicit_args
+):
+    from copy import deepcopy
+
+    golden = {
+        "status": golden_status,
+        "checked": 0 if golden_status == "unverified" else 5,
+        "matched": 0 if golden_status == "unverified" else 5,
+        "reference": None if golden_status == "unverified" else "rocm",
+    }
+    native_worker.card.update(numerics=numerics, golden=deepcopy(golden))
+    engine_args = ("--max-num-seqs", "1", "--dtype", "bfloat16") if explicit_args else ()
+    backend = native_worker.create(engine_args=engine_args)
+    try:
+        argv = native_worker.launches[0][0]
+        if explicit_args:
+            assert tuple(argv[-len(engine_args) :]) == engine_args
+        else:
+            assert "--max-num-seqs" not in argv and "--dtype" not in argv
+        card = backend.descriptor()["identity"]["runtime"]["data"][0]
+        assert card["golden"] == golden
+        assert card["numerics"] == numerics
+        assert backend.capabilities.deterministic is False
+        assert backend.capabilities.batch_invariant is False
+        native_worker.card["golden"]["status"] = "failed"
+        card["golden"]["status"] = "pending"
+        assert backend.descriptor()["identity"]["runtime"]["data"][0]["golden"] == golden
+    finally:
+        backend.close()
+
+
+@pytest.mark.parametrize(
+    "golden", [None, {}, {"status": "pending"}, {"status": "failed"}, {"status": "unknown"}]
+)
+def test_native_d3_still_rejects_missing_failed_or_incomplete_golden_checks(native_worker, golden):
+    native_worker.card["golden"] = golden
+    with pytest.raises(ValueError, match="golden"):
+        native_worker.create()
+    assert native_worker.signals
+
+
+def test_native_d3_unverified_golden_does_not_override_failed_readiness(native_worker):
+    native_worker.card.update(ready=False, golden={"status": "unverified"})
+    with pytest.raises(ValueError, match="readiness"):
+        native_worker.create()
+    assert native_worker.signals
+
+
+@pytest.mark.parametrize(
+    "served_id,repo,meta_id,response_model,rejected",
+    [
+        ("d3", "vllm-sr/d3", "vllm-sr/d3", "d3", False),
+        ("experiment-d3", "vllm-sr/d3", "vllm-sr/d3", "experiment-d3", False),
+        ("d3", "vllm-sr/d3", "d3", "d3", True),
+        ("d3", "vllm-sr/d3", "other/model", "d3", True),
+        ("d3", "vllm-sr/d3", "vllm-sr/d3", "vllm-sr/d3", True),
+        ("vllm-sr/d3", None, "vllm-sr/d3", "vllm-sr/d3", False),
+    ],
+)
+def test_native_d3_distinguishes_served_response_name_from_metadata_repository(
+    native_worker, served_id, repo, meta_id, response_model, rejected
+):
+    native_worker.card.update(id=served_id, repo=repo, golden={"status": "unverified"})
+    backend = native_worker.create()
+    receipt = {
+        "request": request(),
+        "response": {
+            "model": response_model,
+            "answers": {"decision": {"type": "choice", "probabilities": {"a": 0.25, "b": 0.75}}},
+            "usage": {"input_tokens": 8},
+            "meta": {
+                "model_id": meta_id,
+                "revision": native_worker.card["revision"],
+                "model_sha256": native_worker.card["model_sha256"],
+                "numerics": native_worker.card["numerics"],
+            },
+        },
+    }
+    try:
+        if rejected:
+            with pytest.raises(ValueError, match="identity"):
+                backend.reparse_receipt(receipt)
+        else:
+            result = backend.reparse_receipt(receipt)
+            assert result.probabilities == (0.75, 0.25)
+            assert result.prompt_tokens == 8
+            assert result.model == response_model
+            assert result.metadata["runtime_meta"] == receipt["response"]["meta"]
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize(
