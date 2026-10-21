@@ -12,6 +12,7 @@ from llenvs.inference.backends.litellm import LiteLLMBackend
 from llenvs.inference.backends.openai_batch import (
     BatchCollection,
     BatchHandle,
+    BatchStopped,
     BatchUnfinished,
     OpenAIBatchBackend,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "ClaudeCodeBackend",
     "OpenAIBatchBackend",
     "BatchHandle",
+    "BatchStopped",
     "BatchCollection",
     "BatchUnfinished",
 ]

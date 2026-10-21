@@ -611,6 +611,17 @@ submission UUID. It saves the upload ID before creation, includes the run/UUID/
 digest in provider metadata, and saves the returned Batch ID immediately. Pending
 or unknown submissions are not enqueued again.
 
+All pending call records are durable before the journal enters `creating`,
+immediately before the create call. An `intent`, including one with a saved upload
+ID or partially updated call records, resumes through submission or collection
+without a recovery acknowledgment; a saved upload ID is reused. A hard kill
+between the durable `creating` marker and HTTP dispatch remains uncertain: those operations
+cannot be atomic. Existing `creating` journals retain this conservative rule,
+even when some call records are not pending. A stop observed before invoking
+create, or a native client already known to be closed at that boundary, leaves
+the submission at `intent`. Arbitrary connection errors do not establish that
+creation was undispatched.
+
 Saving a handle is optional when the requests can be reconstructed. Reopen the
 same durable store and call `submit_chat_batch()` with the same requests,
 parameters and explicit repeat IDs to rebuild a handle. Request order and file
@@ -656,7 +667,7 @@ and attempt usage, the latest observed submission statuses, and uncollected keys
 as pending. This includes progress from earlier `wait=True` polls and progress
 before a retrieval, download or storage error. The exception's type and other
 attributes are unchanged. There is no `partial_collection` when no outcome was
-obtained.
+obtained, except for the cooperative stop described below.
 
 ```python
 try:
@@ -684,6 +695,67 @@ collection then replays it from the store. Reconcile ledger entries by run,
 call key and attempt rather than assuming a replay proves the ledger already
 contains the outcome. A `batch` source identifies collection, not a charge:
 expired unexecuted requests were not run, and missing-output usage is unknown.
+
+### Cooperative stopping
+
+`submit_chat_batch(..., stop=event)` and `collect(..., stop=event)` accept a
+caller-owned `threading.Event`. With no event, ordinary behavior is unchanged.
+After a check observes the event, the operation starts no more provider calls.
+Checks occur during preparation, before upload/create/list/retrieve/download,
+between submissions and between collection entries. Polling uses an
+interruptible wait. Already admitted storage work drains before the operation
+raises `BatchStopped(RuntimeError)`, exported from `llenvs.inference.backends`
+and its `openai_batch` module. A completed upload or download is retained before
+stopping. Already submitted remote batches are not cancelled.
+
+`BatchStopped` exposes:
+
+- `handle`: the recoverable `BatchHandle`, or `None` when submission stopped
+  before retaining recoverable work. A stopped submission can cover only a
+  subset of its inputs; use the original requests and repeat IDs to reconstruct
+  the full handle on restart. A stopped collection keeps its original handle.
+- `submission_states`: a snapshot mapping retained submission UUIDs to journal
+  states such as `intent`, `creating`, `pending` or `terminal`. These are local
+  journal states, rather than provider statuses or proof of remote execution.
+- `partial_collection`: for collection, an aligned `BatchCollection`, including
+  an empty one when nothing was obtained. For submission, this is `None`.
+  Collected results and failures keep their usual sources, usage and attempts;
+  uncollected keys remain pending.
+
+```python
+from threading import Event
+from llenvs.inference.backends import BatchStopped
+
+stop = Event()  # The application sets this from its shutdown path.
+try:
+    handle = batch.submit_chat_batch(messages, params, repeat_ids=repeat_ids, stop=stop)
+    collection = batch.collect(handle, wait=True, stop=stop)
+except BatchStopped as error:
+    if error.partial_collection is not None:
+        record_outcomes(error.partial_collection)
+    if error.handle is not None:
+        save_handle(error.handle.to_dict())
+    # Close the store only after the stopped operation has finished.
+else:
+    record_outcomes(collection)
+```
+
+A stop does not create slot failures, authorize resubmission or poison the store.
+Resume with the same durable store and requests/repeat IDs, or collect the saved
+handle. Retained collection files are reused, and committed outcomes are replayed
+without persisting them again. Clear or replace the event only after the stopped
+operation has finished.
+
+Stopping is cooperative, with no absolute shutdown deadline. An upload, download,
+create or storage operation already in progress can finish or raise its original
+error. The event cannot interrupt a blocked synchronous network call; configure
+SDK/storage timeouts and the application's drain allowance accordingly. Closing
+the SDK client can cause an in-flight call to fail, but does not prove that a
+create request was never sent. Store ownership is released only after admitted
+writes have drained. Qualify the complete shutdown path against the deployment's
+network latency and termination deadline.
+
+### Failed slots and resubmission
 
 Terminal expiry/cancellation/failure collects the handle's available successes
 before marking its unfinished slots failed. Unrequested keys still need

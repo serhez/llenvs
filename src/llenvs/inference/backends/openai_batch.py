@@ -45,6 +45,18 @@ class BatchUnfinished(RuntimeError):  # noqa: N818
     """A terminal Batch left a requested slot without a durable output."""
 
 
+class BatchStopped(RuntimeError):  # noqa: N818
+    """Cooperative stop with recoverable submission and collection progress."""
+
+    def __init__(
+        self, handle: BatchHandle | None = None, submission_states: dict[str, str] | None = None
+    ):
+        super().__init__("Batch operation stopped at a safe point")
+        self.handle = handle
+        self.submission_states = dict(submission_states or {})
+        self.partial_collection: BatchCollection | None = None
+
+
 class OpenAIBatchBackend:
     """Submit and collect under the shared store's exclusive process ownership.
 
@@ -79,6 +91,27 @@ class OpenAIBatchBackend:
 
     def _write(self, manifest):
         self.store.write_journal(manifest)
+
+    def _submission_states(self, handle):
+        return (
+            {
+                identifier: self.store._journals[identifier]["state"]
+                for identifier in handle.submissions
+            }
+            if handle is not None
+            else {}
+        )
+
+    def _stop(self, stop, handle=None):
+        if stop is not None and stop.is_set():
+            if callable(handle):
+                handle = handle()
+            raise BatchStopped(handle, self._submission_states(handle))
+
+    def _check_client(self):
+        is_closed = getattr(self.client, "is_closed", None)
+        if is_closed is not None and is_closed():
+            raise RuntimeError("OpenAI client is closed; Batch create was not dispatched")
 
     def _unknown_submission(self, manifest):
         error = UnknownOutcomeError(manifest["id"])
@@ -125,9 +158,13 @@ class OpenAIBatchBackend:
         )
         return identifier
 
-    def submit_chat_batch(self, messages_batch, params, *, repeat_ids):
+    def submit_chat_batch(self, messages_batch, params, *, repeat_ids, stop=None):
+        """Submit eligible calls; a cooperative stop raises ``BatchStopped``."""
+        self._stop(stop)
         with self.store._batch_lock, self.store._hold_records() as hold:
-            return self._submit_chat_batch(messages_batch, params, repeat_ids=repeat_ids, hold=hold)
+            return self._submit_chat_batch(
+                messages_batch, params, repeat_ids=repeat_ids, hold=hold, stop=stop
+            )
 
     def acknowledge_resubmission(self, submission_id, *, reason, accept_duplicate_expenditure):
         """Record authorization; only a subsequent explicit submit buys another draw."""
@@ -148,7 +185,7 @@ class OpenAIBatchBackend:
             manifest["state"] = "resubmission_authorized"
             self._write(manifest)
 
-    def _submit_chat_batch(self, messages_batch, params, *, repeat_ids, hold):
+    def _submit_chat_batch(self, messages_batch, params, *, repeat_ids, hold, stop):
         if len(repeat_ids) != len(messages_batch) or any(
             type(value) not in (str, int) for value in repeat_ids
         ):
@@ -156,6 +193,7 @@ class OpenAIBatchBackend:
         identity = self.descriptor()["identity"]
         # Validate every serialized request before reserving or uploading anything.
         for messages in messages_batch:
+            self._stop(stop)
             kwargs = self.backend._request_kwargs(messages, params)
             if {"extra_headers", "extra_query", "timeout"} & kwargs.keys():
                 raise ValueError("Batch does not support per-request transport options")
@@ -163,96 +201,149 @@ class OpenAIBatchBackend:
             if len(self._line("0" * 64, body)) > self.max_file_bytes:
                 raise ValueError("One serialized Batch request exceeds the file byte limit")
         keys, submissions, chunks, chunk, length = [], [], [], [], 0
+        known_keys = set()
         missing_keys = set()
-        reservations = self.store.reserve_many(
-            (
-                {
-                    "backend": identity,
-                    "scope": "batch",
-                    "operation": "chat",
-                    "arguments": {"input": messages, "params": params},
-                },
-                repeat,
-            )
-            for messages, repeat in zip(messages_batch, repeat_ids, strict=True)
-        )
-        for messages, (key, _, owner) in zip(messages_batch, reservations, strict=True):
-            keys.append(key)
-            hold(key)
-            record = self.store._records[key]
-            self.store._release(key)
-            existing = record.get("submission") or self.store._intent_submissions.get(key)
-            authorized = (
-                existing and self.store._journals[existing]["state"] == "resubmission_authorized"
-            )
-            entry = (record.get("receipt") or {}).get("batch_entry") or {}
-            if (
-                existing
-                and record["state"] != "completed"
-                and (
-                    authorized
-                    or record["state"] == "failed"
-                    and self.store._journals[existing]["state"] == "terminal"
-                    and entry.get("response") is None
-                    and (entry.get("error") or {}).get("code") == "batch_expired"
-                )
-            ):
-                history = record["attempts"] + [
-                    {
-                        "outcome_unknown": bool(authorized),
-                        **{
-                            name: deepcopy(record[name])
-                            for name in ("state", "error", "receipt", "submission")
-                            if name in record
-                        },
-                    }
-                ]
-                self.store.update(
-                    key, "reserved", attempts=history, error=None, receipt=None, submission=None
-                )
-                existing = None
-                owner = True
-            if existing:
-                if record.get("submission") is None:
-                    self.store.update(key, "reserved", submission=existing)
-                if existing not in submissions:
-                    submissions.append(existing)
-            elif (owner or record["state"] == "reserved") and key not in missing_keys:
-                missing_keys.add(key)
-                kwargs = self.backend._request_kwargs(messages, params)
-                metadata = self.backend._request_metadata(kwargs, params)
-                line = self._line(key, self.backend._serialized_body(kwargs))
-                if chunk and (
-                    len(chunk) >= self.max_file_requests or length + len(line) > self.max_file_bytes
-                ):
-                    chunks.append(self._prepare(chunk, params))
-                    chunk, length = [], 0
-                chunk.append((key, line, metadata))
-                length += len(line)
-        if chunk:
-            chunks.append(self._prepare(chunk, params))
-        for identifier in chunks:
-            if identifier not in submissions:
-                submissions.append(identifier)
-            self._submit(deepcopy(self.store._journals[identifier]))
-        return BatchHandle(self.store.fingerprint, tuple(submissions), tuple(keys))
 
-    def _submit(self, manifest):
+        def progress():
+            identifiers = tuple(dict.fromkeys([*submissions, *chunks]))
+            retained = known_keys | {
+                key
+                for identifier in identifiers
+                for key in self.store._journals[identifier]["keys"]
+            }
+            retained_keys = tuple(key for key in keys if key in retained)
+            return (
+                BatchHandle(self.store.fingerprint, identifiers, retained_keys)
+                if retained_keys
+                else None
+            )
+
+        def reservation_requests():
+            for messages, repeat in zip(messages_batch, repeat_ids, strict=True):
+                if stop is not None and stop.is_set():
+                    return
+                yield (
+                    {
+                        "backend": identity,
+                        "scope": "batch",
+                        "operation": "chat",
+                        "arguments": {"input": messages, "params": params},
+                    },
+                    repeat,
+                )
+
+        reservations = self.store.reserve_many(reservation_requests())
+        try:
+            keys = [key for key, _, _ in reservations]
+            for key in keys:
+                hold(key)
+            self._stop(stop, progress)
+            for messages, (key, _, owner) in zip(messages_batch, reservations, strict=True):
+                self._stop(stop, progress)
+                record = self.store._records[key]
+                self.store._release(key)
+                if record["state"] == "completed":
+                    known_keys.add(key)
+                existing = record.get("submission") or self.store._intent_submissions.get(key)
+                authorized = (
+                    existing
+                    and self.store._journals[existing]["state"] == "resubmission_authorized"
+                )
+                entry = (record.get("receipt") or {}).get("batch_entry") or {}
+                if (
+                    existing
+                    and record["state"] != "completed"
+                    and (
+                        authorized
+                        or record["state"] == "failed"
+                        and self.store._journals[existing]["state"] == "terminal"
+                        and entry.get("response") is None
+                        and (entry.get("error") or {}).get("code") == "batch_expired"
+                    )
+                ):
+                    history = record["attempts"] + [
+                        {
+                            "outcome_unknown": bool(authorized),
+                            **{
+                                name: deepcopy(record[name])
+                                for name in ("state", "error", "receipt", "submission")
+                                if name in record
+                            },
+                        }
+                    ]
+                    self.store.update(
+                        key, "reserved", attempts=history, error=None, receipt=None, submission=None
+                    )
+                    existing = None
+                    owner = True
+                if existing:
+                    if record.get("submission") is None:
+                        self.store.update(key, "reserved", submission=existing)
+                    if existing not in submissions:
+                        submissions.append(existing)
+                elif (owner or record["state"] == "reserved") and key not in missing_keys:
+                    missing_keys.add(key)
+                    kwargs = self.backend._request_kwargs(messages, params)
+                    metadata = self.backend._request_metadata(kwargs, params)
+                    line = self._line(key, self.backend._serialized_body(kwargs))
+                    if chunk and (
+                        len(chunk) >= self.max_file_requests
+                        or length + len(line) > self.max_file_bytes
+                    ):
+                        chunks.append(self._prepare(chunk, params))
+                        chunk, length = [], 0
+                        self._stop(stop, progress)
+                    chunk.append((key, line, metadata))
+                    length += len(line)
+            if chunk:
+                self._stop(stop, progress)
+                chunks.append(self._prepare(chunk, params))
+            submissions = list(dict.fromkeys([*submissions, *chunks]))
+            for identifier in submissions:
+                self._stop(stop, progress)
+                manifest = deepcopy(self.store._journals[identifier])
+                if manifest["state"] == "intent":
+                    self._submit(manifest, **({"stop": stop} if stop is not None else {}))
+            self._stop(stop, progress)
+            return BatchHandle(self.store.fingerprint, tuple(submissions), tuple(keys))
+        except BatchStopped as error:
+            error.handle = progress()
+            error.submission_states = self._submission_states(error.handle)
+            raise
+        finally:
+            for key, future, _ in reservations:
+                self.store._release(key, future)
+
+    def _submit(self, manifest, *, stop=None):
         if manifest["state"] != "intent":
             raise ValueError("Only an undispatched intent may be submitted")
+        handle = BatchHandle(self.store.fingerprint, (manifest["id"],), tuple(manifest["keys"]))
+        self._stop(stop, handle)
         if manifest["input_file_id"] is None:
-            with self.store.blob_path(manifest["input_blob"]).open("rb") as handle:
+            with self.store.blob_path(manifest["input_blob"]).open("rb") as stream:
+                self._stop(stop)
                 uploaded = self.client.files.create(
-                    file=("requests.jsonl", handle, "application/jsonl"), purpose="batch"
+                    file=("requests.jsonl", stream, "application/jsonl"), purpose="batch"
                 )
             manifest["input_file_id"] = uploaded.id
             self._write(manifest)
-        manifest["state"] = "creating"
-        self._write(manifest)
-
+        self._stop(stop)
         self.store.update_many(
             (key, "pending", {"submission": manifest["id"]}) for key in manifest["keys"]
         )
+        self._stop(stop)
+        self._check_client()
+        manifest["state"] = "creating"
+        self._write(manifest)
+        try:
+            self._stop(stop)
+            self._check_client()
+        except BaseException:
+            # Dispatch has not been invoked. A durable rollback keeps this
+            # interruption definite; a hard kill in this gap stays uncertain.
+            manifest["state"] = "intent"
+            self._write(manifest)
+            raise
         try:
             response = self.client.batches.create(
                 input_file_id=manifest["input_file_id"],
@@ -310,9 +401,10 @@ class OpenAIBatchBackend:
             return exc
         return None
 
-    def _reconcile(self, manifest):
+    def _reconcile(self, manifest, *, stop=None):
         after, matches, cursors = None, [], set()
         while True:
+            self._stop(stop)
             page = self.client.batches.list(**({"after": after} if after else {}), limit=100)
             for item in page.data:
                 raw = plain(item)
@@ -343,7 +435,7 @@ class OpenAIBatchBackend:
             manifest["state"] = "submission_unknown"
         self._write(manifest)
 
-    def _collect_once(self, handle: BatchHandle, sources, collection):
+    def _collect_once(self, handle: BatchHandle, sources, collection, *, stop=None):
         if handle.run_fingerprint != self.store.fingerprint:
             raise ValueError("Batch handle belongs to another run")
         self.store._check()
@@ -354,6 +446,8 @@ class OpenAIBatchBackend:
             raise ValueError("Invalid Batch handle submission")
 
         def validate_key(key):
+            if stop is not None and stop.is_set():
+                return
             record = self.store._records.get(key)
             if (
                 record is None
@@ -361,6 +455,15 @@ class OpenAIBatchBackend:
                 or record["request"].get("backend") != identity
             ):
                 raise ValueError("Batch handle contains an unknown or mismatched request")
+            intent = self.store._intent_submissions.get(key)
+            if (
+                record["state"] == "reserved"
+                and record.get("submission") is None
+                and intent in handle.submissions
+                and self.store._journals[intent]["state"] == "intent"
+            ):
+                self.store.update(key, "reserved", submission=intent)
+                record = self.store._records[key]
             if (
                 record["state"] != "completed"
                 and record.get("submission") not in handle.submissions
@@ -380,6 +483,7 @@ class OpenAIBatchBackend:
 
         for _ in self.store._parallel(validate_key, handle.keys):
             pass
+        self._stop(stop, handle)
         indices = {}
         for index, key in enumerate(handle.keys):
             indices.setdefault(key, []).append(index)
@@ -402,6 +506,8 @@ class OpenAIBatchBackend:
         statuses = collection.statuses
 
         def collect_retained(key):
+            if stop is not None and stop.is_set():
+                return
             if sources[key]["source"] == "batch":
                 return
             record = self.store._records[key]
@@ -417,6 +523,7 @@ class OpenAIBatchBackend:
 
         self.store._apply_many(collect_retained, indices)
         for identifier in handle.submissions:
+            self._stop(stop, handle)
             manifest = deepcopy(self.store._journals[identifier])
             if not set(manifest["keys"]) & set(handle.keys):
                 raise ValueError("Batch handle does not match its submission")
@@ -442,9 +549,10 @@ class OpenAIBatchBackend:
                 raise ValueError("Batch upload digest mismatch")
             self.store.blob_path(manifest["input_blob"])
             if manifest["state"] in {"creating", "submission_unknown"}:
-                self._reconcile(manifest)
+                self._reconcile(manifest, **({"stop": stop} if stop is not None else {}))
             if manifest["state"] == "intent":
-                self._submit(manifest)
+                self._submit(manifest, **({"stop": stop} if stop is not None else {}))
+            self._stop(stop, handle)
             if manifest["batch_id"] is None:
                 statuses[identifier] = manifest["state"]
                 continue
@@ -455,6 +563,7 @@ class OpenAIBatchBackend:
                 "cancelled",
                 "failed",
             }:
+                self._stop(stop, handle)
                 batch = plain(self.client.batches.retrieve(manifest["batch_id"]))
             if batch.get("id") != manifest["batch_id"] or any(
                 name in batch and batch[name] != manifest[name]
@@ -463,9 +572,13 @@ class OpenAIBatchBackend:
                 raise ValueError("Retrieved Batch does not match its submission manifest")
             statuses[identifier] = batch["status"]
             manifest["provider_batch"] = batch
+            if stop is not None and stop.is_set():
+                self._write(manifest)
+                self._stop(stop, handle)
             for kind in ("output_file_id", "error_file_id"):
                 file_id = batch.get(kind)
                 if file_id and file_id not in manifest["raw_files"]:
+                    self._stop(stop, handle)
                     if hasattr(self.client.files, "with_streaming_response"):
                         with self.client.files.with_streaming_response.content(file_id) as response:
                             blob = self.store.write_blob(
@@ -477,12 +590,15 @@ class OpenAIBatchBackend:
                         )
                     manifest["raw_files"][file_id] = blob
                     self._write(manifest)
+            self._stop(stop, handle)
             paths = [self.store.blob_path(blob) for blob in manifest["raw_files"].values()]
 
             def read_entries():
                 for path in paths:
                     with path.open("rb") as handle:
                         for line in handle:
+                            if stop is not None and stop.is_set():
+                                return
                             if line.strip():
                                 yield json.loads(line)
 
@@ -492,12 +608,13 @@ class OpenAIBatchBackend:
                 if key not in allowed or key in seen:
                     raise ValueError("Unknown or duplicate custom_id in Batch output")
                 seen.add(key)
+            self._stop(stop, handle)
 
             def commit_held_entry(entry):
                 key = entry["custom_id"]
                 if (
                     key not in selected
-                    or self.store._records[key]["state"] == "completed"
+                    or self.store._records[key]["state"] in {"completed", "failed"}
                     or self.store._records[key].get("submission") != identifier
                 ):
                     return
@@ -533,6 +650,8 @@ class OpenAIBatchBackend:
                 capture(key, error)
 
             def commit_entry(entry):
+                if stop is not None and stop.is_set():
+                    return
                 if entry["custom_id"] not in selected:
                     return
                 with self.store._hold_records() as hold:
@@ -540,12 +659,15 @@ class OpenAIBatchBackend:
                     commit_held_entry(entry)
 
             self.store._apply_many(commit_entry, read_entries())
+            self._stop(stop, handle)
             if batch["status"] in {"completed", "expired", "cancelled", "failed"}:
 
                 def missing_entry(key):
+                    if stop is not None and stop.is_set():
+                        return
                     if (
                         key not in seen
-                        and self.store._records[key]["state"] != "completed"
+                        and self.store._records[key]["state"] not in {"completed", "failed"}
                         and self.store._records[key].get("submission") == identifier
                     ):
                         error = {
@@ -556,10 +678,11 @@ class OpenAIBatchBackend:
                         capture(key, BatchUnfinished(error["message"]))
 
                 self.store._apply_many(missing_entry, selected)
+                self._stop(stop, handle)
                 manifest["state"] = "terminal"
             self._write(manifest)
 
-    def collect(self, handle, *, wait=False):
+    def collect(self, handle, *, wait=False, stop=None):
         """Collect named outcomes; errors expose any progress as ``partial_collection``."""
         sources = {}
         collection = BatchCollection([None] * len(handle.keys))
@@ -567,7 +690,14 @@ class OpenAIBatchBackend:
             while True:
                 try:
                     with self.store._batch_lock:
-                        self._collect_once(handle, sources, collection)
+                        self._stop(stop, handle)
+                        self._collect_once(
+                            handle,
+                            sources,
+                            collection,
+                            **({"stop": stop} if stop is not None else {}),
+                        )
+                        self._stop(stop, handle)
                 finally:
                     collection.pending = [
                         key
@@ -588,9 +718,16 @@ class OpenAIBatchBackend:
                     )
                 ):
                     return collection
-                time.sleep(self.poll_interval)
+                if stop is None:
+                    time.sleep(self.poll_interval)
+                elif stop.wait(self.poll_interval):
+                    self._stop(stop, handle)
         except BaseException as error:
-            if collection.failures or any(result is not None for result in collection.results):
+            if isinstance(error, BatchStopped):
+                error.handle = handle
+                error.submission_states = self._submission_states(handle)
+                error.partial_collection = collection
+            elif collection.failures or any(result is not None for result in collection.results):
                 setattr(error, "partial_collection", collection)
             raise
 
