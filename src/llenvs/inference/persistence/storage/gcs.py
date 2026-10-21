@@ -14,6 +14,7 @@ import tempfile
 import threading
 import uuid
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from importlib import import_module
 from pathlib import Path
 
@@ -50,32 +51,54 @@ class _GenerationConflictError(CheckpointError):
 
 
 class _Objects:
-    def __init__(self, client, bucket):
+    def __init__(self, client, bucket, max_concurrency):
         self.client = client
         self.bucket = client.bucket(bucket)
         self.observed = OrderedDict()
+        self.pinned = {}
+        self._mutex = threading.Lock()
+        self._slots = threading.BoundedSemaphore(max_concurrency)
 
     def remember(self, name, generation):
+        with self._mutex:
+            if name in self.pinned:
+                self.pinned[name][1] = generation
+            else:
+                self._remember(name, generation)
+
+    def _remember(self, name, generation):
         self.observed[name] = generation
         self.observed.move_to_end(name)
         while len(self.observed) > 256:
             self.observed.popitem(last=False)
+
+    def pin(self, name):
+        with self._mutex:
+            entry = self.pinned.setdefault(name, [0, self.observed.pop(name, None)])
+            entry[0] += 1
+
+    def unpin(self, name):
+        with self._mutex:
+            entry = self.pinned[name]
+            entry[0] -= 1
+            if not entry[0]:
+                self.pinned.pop(name)
+                if entry[1] is not None:
+                    self._remember(name, entry[1])
 
     def read(self, name):
         for attempt in range(_ATTEMPTS):
             blob = self.bucket.blob(name)
             try:
                 try:
-                    blob.reload(retry=None, timeout=_TIMEOUT)
+                    with self._slots:
+                        data = blob.download_as_bytes(retry=None, timeout=_TIMEOUT)
                 except Exception as exc:
                     if getattr(exc, "code", None) == 404:
                         self.remember(name, 0)
                         return None, 0
                     raise
                 generation = int(blob.generation)
-                data = blob.download_as_bytes(
-                    if_generation_match=generation, retry=None, timeout=_TIMEOUT
-                )
                 self.remember(name, generation)
                 return data, generation
             except Exception as exc:
@@ -85,27 +108,32 @@ class _Objects:
                     raise
 
     def generation(self, name):
-        if name not in self.observed:
+        with self._mutex:
+            cached = self.pinned[name][1] if name in self.pinned else self.observed.get(name)
+        if cached is None:
             for attempt in range(_ATTEMPTS):
                 blob = self.bucket.blob(name)
                 try:
-                    blob.reload(retry=None, timeout=_TIMEOUT)
-                    self.remember(name, int(blob.generation))
-                    break
+                    with self._slots:
+                        blob.reload(retry=None, timeout=_TIMEOUT)
+                    cached = int(blob.generation)
+                    self.remember(name, cached)
+                    return cached
                 except Exception as exc:
                     if getattr(exc, "code", None) == 404:
                         self.remember(name, 0)
-                        break
+                        return 0
                     if attempt + 1 == _ATTEMPTS or not _transient(exc):
                         raise
-        return self.observed[name]
+        return cached
 
     def commit(self, name, expected, upload, reconcile):
         """Retry one operation, reconciling its exact committed content first."""
         for attempt in range(_ATTEMPTS):
             blob = self.bucket.blob(name, chunk_size=8 * 1024 * 1024)
             try:
-                upload(blob, expected)
+                with self._slots:
+                    upload(blob, expected)
                 generation = int(blob.generation)
                 self.remember(name, generation)
                 return generation
@@ -138,9 +166,10 @@ class _Objects:
     def delete(self, name, expected):
         for attempt in range(_ATTEMPTS):
             try:
-                self.bucket.blob(name).delete(
-                    if_generation_match=expected, retry=None, timeout=_TIMEOUT
-                )
+                with self._slots:
+                    self.bucket.blob(name).delete(
+                        if_generation_match=expected, retry=None, timeout=_TIMEOUT
+                    )
                 self.remember(name, 0)
                 return
             except Exception as exc:
@@ -164,9 +193,18 @@ class GCSJournal:
     absent an explicit directory, each open store owns a temporary directory.
     The bucket must already exist. Use a private, trusted prefix without an
     external expiration policy for journal objects.
+
+    ``max_concurrency`` bounds record transfers (default 128). Groups contain at
+    most twice this many updates and check ownership once before their uploads.
+    Callers still wait for durability; changing this bound does not change call
+    identities or the on-disk format.
     """
 
-    def __init__(self, *, bucket: str, prefix: str, client=None, cache_dir=None):
+    def __init__(
+        self, *, bucket: str, prefix: str, client=None, cache_dir=None, max_concurrency=128
+    ):
+        if type(max_concurrency) is not int or max_concurrency < 1:
+            raise ValueError("max_concurrency must be a positive integer")
         if not bucket or "/" in bucket:
             raise ValueError("bucket must be a bucket name")
         prefix = prefix.strip("/")
@@ -179,7 +217,8 @@ class GCSJournal:
                 raise ImportError("GCS journals require the llenvs[gcs] extra") from exc
         self.bucket, self.prefix = bucket, prefix
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
-        self._objects = _Objects(client, bucket)
+        self.max_concurrency = max_concurrency
+        self._objects = _Objects(client, bucket, max_concurrency)
 
     def _owner_name(self, fingerprint):
         return f"{self.prefix}/.owners/{fingerprint}.json"
@@ -262,6 +301,10 @@ class _GCSRun:
         self._objects = journal._objects
         self._mutex = threading.RLock()
         self._closed = False
+        self.max_concurrency = journal.max_concurrency
+        self._workers = ThreadPoolExecutor(
+            max_workers=self.max_concurrency, thread_name_prefix="llenvs-gcs"
+        )
         self._temporary = None
         if journal.cache_dir is None:
             self._temporary = tempfile.TemporaryDirectory(prefix="llenvs-gcs-")
@@ -296,17 +339,41 @@ class _GCSRun:
             raise ValueError(f"GCS object checksum mismatch: {name}")
         return payload
 
+    def pin(self, name):
+        self._objects.pin(self.prefix + name)
+
+    def unpin(self, name):
+        self._objects.unpin(self.prefix + name)
+
     def write(self, name, payload):
         with self._mutex:
             self._check_owner()
-            key = self.prefix + name
-            expected = self._objects.generation(key)
-            header = _canonical_json(
-                {"operation": uuid.uuid4().hex, "sha256": hashlib.sha256(payload).hexdigest()}
-            ).encode()
-            self._objects.write(key, header + b"\n" + payload, expected)
+            self._write_record(name, payload)
             if name == "manifest.json" and not self.owner["initialized"]:
                 self._set_initialized(True)
+
+    def _write_record(self, name, payload):
+        key = self.prefix + name
+        expected = self._objects.generation(key)
+        header = _canonical_json(
+            {"operation": uuid.uuid4().hex, "sha256": hashlib.sha256(payload).hexdigest()}
+        ).encode()
+        self._objects.write(key, header + b"\n" + payload, expected)
+
+    def write_many(self, records):
+        with self._mutex:
+            self._check_owner()
+            futures = [
+                self._workers.submit(self._write_record, name, data) for name, data in records
+            ]
+            errors = []
+            for future in futures:
+                try:
+                    future.result()
+                    errors.append(None)
+                except BaseException as exc:
+                    errors.append(exc)
+            return errors
 
     def names(self, prefix):
         for blob in self._objects.client.list_blobs(
@@ -318,11 +385,13 @@ class _GCSRun:
         for attempt in range(_ATTEMPTS):
             blob = self._objects.bucket.blob(name, chunk_size=8 * 1024 * 1024)
             try:
-                blob.reload(retry=None, timeout=_TIMEOUT)
+                with self._objects._slots:
+                    blob.reload(retry=None, timeout=_TIMEOUT)
                 generation = int(blob.generation)
-                blob.download_to_filename(
-                    path, if_generation_match=generation, retry=None, timeout=_TIMEOUT
-                )
+                with self._objects._slots:
+                    blob.download_to_filename(
+                        path, if_generation_match=generation, retry=None, timeout=_TIMEOUT
+                    )
                 return generation
             except Exception as exc:
                 if attempt + 1 == _ATTEMPTS or not (
@@ -409,5 +478,6 @@ class _GCSRun:
                 )
             finally:
                 self._closed = True
+                self._workers.shutdown(wait=True)
                 if self._temporary is not None:
                     self._temporary.cleanup()

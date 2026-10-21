@@ -227,6 +227,7 @@ journal = GCSJournal(
     bucket="experiment-artifacts",
     prefix="model-calls/pilot",
     cache_dir="./batch-file-cache",
+    max_concurrency=128,
 )
 with CallStore.open(
     journal, run_descriptor={"experiment": "pilot", "shard": 0}, validation="lazy",
@@ -242,6 +243,22 @@ plus the required object-listing permission. Ordinary bucket IAM prefix
 conditions do not restrict the scope of listing; choose the bucket/access scope
 accordingly. See [GCS IAM conditions](https://docs.cloud.google.com/storage/docs/access-control/iam#conditions).
 The extra is independent of the inference backend extras.
+
+`max_concurrency` is a positive integer, defaulting to 128. It bounds concurrent
+record downloads and uploads, including reads for cold replay and full startup
+validation. It controls storage I/O independently of model-request concurrency;
+changing it does not change run or call identities. Lower it for a smaller I/O
+budget. Discovery, queued updates and the decoded-record cache are bounded;
+active requests and submission payloads require additional memory.
+
+Independent call updates join bounded write groups, with at most twice
+`max_concurrency` records per group and one ownership check before its uploads.
+Each caller waits for its own confirmed durable state. A started intent is
+durable before model dispatch, an answer is durable before it is returned, and
+updates of one key remain ordered. Batch retains its individual call records and
+state transitions; submission and collection write those records concurrently.
+Active calls retain their observed generations to avoid redundant metadata reads.
+Existing journals use the same object layout and remain readable.
 
 Call records, receipts, Batch journals and exact Batch file bytes are authoritative
 GCS objects. The local directory only caches Batch files; losing it does not lose
@@ -275,6 +292,11 @@ termination; a separate ownership object is not transactional fencing against a
 still-running writer. Give concurrent shards
 distinct stable run descriptors.
 
+The owner check and the group's writes are separate operations. A group already
+checked can finish if ownership changes during its uploads; a subsequent group
+checks again and refuses a different owner. This does not provide fencing for a
+paused worker. Recovery still requires confirmed termination.
+
 Writes use generation preconditions and bounded retries. Lost acknowledgements
 are reconciled against the operation's exact bytes; an unresolved storage failure
 poisons the store before further inference dispatch. Generation checks apply to
@@ -284,6 +306,11 @@ are executable Python artifacts, and checksums detect accidental corruption.
 External deletion or expiration of live journal objects invalidates replay
 guarantees. `mark_complete(delete=True)` removes the run's objects after checking
 for unresolved calls; ownership and recovery assertions remain separate.
+Finalization and close wait for active journal operations and run exclusively.
+A handle whose run was deleted refuses subsequent calls; close it normally to
+release ownership.
+Close also releases active generation metadata and fails unresolved local waiters
+with `CheckpointError`; it does not resolve an uncertain provider outcome.
 
 Lazy startup does not read or list completed calls. It still discovers submission
 journals and lifecycle records; full validation reads all retained records and

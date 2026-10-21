@@ -18,6 +18,8 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Mapping, MutableMapping
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
@@ -31,6 +33,7 @@ from llenvs.inference.protocol import (
 )
 
 from .storage import Journal
+from .writer import GroupWriter, MaintenanceGate, operation
 
 
 def _qualified_type(value: Any) -> str:
@@ -170,37 +173,48 @@ class _RecordIndex(MutableMapping):
         return f"calls/{key[:2]}/{key}.pkl"
 
     def __getitem__(self, key):
-        with self.store._mutex:
-            if key in self.volatile:
-                return self.volatile[key]
-            if key not in self.cache:
-                try:
-                    self.retain(key, self.store._load(self.path(key)))
-                except _MissingRecordError:
-                    raise KeyError(key) from None
-                except Exception as exc:
-                    self.store._poison = exc
-                    raise CheckpointCorruptionError(f"Invalid retained call {key}") from exc
-            self.cache.move_to_end(key)
-            return self.cache[key]
+        with self.store._key_lock(key):
+            with self.store._mutex:
+                if key in self.volatile:
+                    return self.volatile[key]
+                if key in self.cache:
+                    self.cache.move_to_end(key)
+                    return self.cache[key]
+            try:
+                record = self.store._load(self.path(key))
+            except _MissingRecordError:
+                raise KeyError(key) from None
+            except Exception as exc:
+                self.store._fail(exc)
+                raise CheckpointCorruptionError(f"Invalid retained call {key}") from exc
+            with self.store._mutex:
+                self.retain(key, record)
+                return record
 
     def __setitem__(self, key, value):
-        self.volatile[key] = value
+        with self.store._mutex:
+            self.volatile[key] = value
 
     def retain(self, key, value):
+        if key in self.store._inflight or key in self.store._pins:
+            self.cache.pop(key, None)
+            self.volatile[key] = value
+            return
         self.volatile.pop(key, None)
         self.cache[key] = value
         self.cache.move_to_end(key)
-        while len(self.cache) > 64:
+        while len(self.cache) > max(64, self.store._storage.max_concurrency * 2):
             self.cache.popitem(last=False)
 
     def __delitem__(self, key):
         raise TypeError("Retained records can only be removed through mark_complete(delete=True)")
 
     def __iter__(self):
-        yield from tuple(self.volatile)
+        with self.store._mutex:
+            active = set(self.volatile)
+        yield from active
         for name in self.store._storage.names("calls/"):
-            if name.endswith(".pkl"):
+            if name.endswith(".pkl") and PurePosixPath(name).stem not in active:
                 yield PurePosixPath(name).stem
 
     def __len__(self):
@@ -261,23 +275,32 @@ class CallStore:
         self._storage = storage
         self.run_dir = storage.run_dir
         self._mutex = threading.RLock()
+        self._gate = MaintenanceGate()
+        self._key_locks = {}
+        self._pins = {}
         self._batch_lock = threading.RLock()
         self._closed = False
+        self._deleted = False
         self._poison: BaseException | None = None
         self._occurrences: dict[str, int] = {}
         self._inflight: dict[str, Future] = {}
         self._records = _RecordIndex(self)
         self._journals: dict[str, dict] = {}
         self._intent_submissions = {}
+        self._reader = ThreadPoolExecutor(
+            max_workers=storage.max_concurrency, thread_name_prefix="llenvs-read"
+        )
         manifest = {"schema": 1, "fingerprint": fingerprint, "run_descriptor": descriptor}
         try:
             if storage.existing:
                 if json.loads(storage.read("manifest.json")) != manifest:
                     raise ValueError("manifest mismatch")
                 if validation == "full":
-                    for name in storage.names("calls/"):
-                        if name.endswith(".pkl"):
-                            self._load(name)
+                    for _ in self._parallel(
+                        self._load,
+                        (name for name in storage.names("calls/") if name.endswith(".pkl")),
+                    ):
+                        pass
                 for name in storage.names("lifecycle/"):
                     if not name.endswith(".pkl"):
                         continue
@@ -294,21 +317,97 @@ class CallStore:
                     if validation == "full":
                         for blob in [journal["input_blob"], *journal.get("raw_files", {}).values()]:
                             self.blob_path(blob)
-                        for key in journal["keys"]:
-                            record = self._records[key]
-                            if record["request"].get("scope") != "batch":
+
+                        def check_key(key):
+                            if self._records[key]["request"].get("scope") != "batch":
                                 raise ValueError("Submission references a non-Batch call")
+
+                        for _ in self._parallel(check_key, journal["keys"]):
+                            pass
                     if journal["state"] == "intent":
                         for key in journal["keys"]:
                             self._intent_submissions[key] = journal["id"]
             else:
                 storage.write("manifest.json", (_canonical_json(manifest) + "\n").encode())
         except Exception as exc:
+            self._reader.shutdown(wait=True)
             raise CheckpointCorruptionError(
                 f"Invalid call store {storage.location}: {exc}"
             ) from exc
-        self._writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llenvs-journal")
-        self._write_slots = threading.BoundedSemaphore(64)
+        self._commits = GroupWriter(storage, self._fail)
+        self._writer = ThreadPoolExecutor(
+            max_workers=self._commits.capacity, thread_name_prefix="llenvs-observer"
+        )
+        self._write_slots = threading.BoundedSemaphore(self._commits.capacity)
+
+    @contextmanager
+    def _key_lock(self, key):
+        with self._gate.shared():
+            with self._mutex:
+                entry = self._key_locks.setdefault(key, [threading.RLock(), 0])
+                entry[1] += 1
+            try:
+                with entry[0]:
+                    yield
+            finally:
+                with self._mutex:
+                    entry[1] -= 1
+                    if not entry[1]:
+                        self._key_locks.pop(key)
+
+    def _parallel(self, function, values):
+        """Bound discovery, futures and decoded objects independently of store size."""
+        with self._gate.shared():
+            values = iter(values)
+            while chunk := list(islice(values, self._storage.max_concurrency)):
+                if self._storage.max_concurrency == 1:
+                    yield from map(function, chunk)
+                else:
+                    yield from self._reader.map(function, chunk)
+
+    def _fail(self, error):
+        with self._mutex:
+            self._poison = error
+            for future in self._inflight.values():
+                if not future.done():
+                    future.set_exception(CheckpointError("Call store failed to persist progress"))
+
+    def _release(self, key, future=None):
+        with self._mutex:
+            if future is None or self._inflight.get(key) is future:
+                if self._inflight.pop(key, None) is not None:
+                    self._storage.unpin(self._records.path(key))
+                if (
+                    key in self._records.volatile
+                    and self._records.volatile[key]["state"] != "reserved"
+                ):
+                    self._records.retain(key, self._records.volatile[key])
+
+    @contextmanager
+    def _hold_records(self):
+        keys = set()
+
+        def hold(key):
+            with self._mutex:
+                if key not in keys:
+                    keys.add(key)
+                    self._pins[key] = self._pins.get(key, 0) + 1
+                    self._storage.pin(self._records.path(key))
+                    if key in self._records.cache:
+                        self._records.volatile[key] = self._records.cache.pop(key)
+
+        with self._gate.shared():
+            try:
+                yield hold
+            finally:
+                with self._mutex:
+                    for key in keys:
+                        self._storage.unpin(self._records.path(key))
+                        self._pins[key] -= 1
+                        if not self._pins[key]:
+                            self._pins.pop(key)
+                            if key in self._records.volatile:
+                                self._records.retain(key, self._records.volatile[key])
 
     def _load(self, path):
         data = self._storage.read(path)
@@ -338,10 +437,31 @@ class CallStore:
     def _check(self):
         if self._closed:
             raise CheckpointError("Call store is closed")
+        if self._deleted:
+            raise CheckpointError("Call store was deleted")
         if self._poison is not None:
             raise CheckpointError("Call store is poisoned by a storage failure") from self._poison
 
     def reserve(self, request: dict, repeat_id) -> tuple[str, Future, bool]:
+        return self._reserve_prepared(self._prepare_request(request, repeat_id))
+
+    def reserve_many(self, requests):
+        prepared = (self._prepare_request(request, repeat) for request, repeat in requests)
+        return list(self._parallel(self._reserve_prepared, prepared))
+
+    def _reserve_entry(self, prepared):
+        with self._key_lock(prepared[0]):
+            key, future, owner = self._reserve_prepared(prepared)
+            provenance = self._provenance(key, self._result_source(key, future, owner))
+            return key, future, owner, provenance
+
+    def _reserve_entries(self, requests):
+        if len(requests) == 1:
+            return [self._reserve_entry(self._prepare_request(*requests[0]))]
+        prepared = (self._prepare_request(request, repeat) for request, repeat in requests)
+        return list(self._parallel(self._reserve_entry, prepared))
+
+    def _prepare_request(self, request, repeat_id):
         with self._mutex:
             self._check()
             request = dict(request)
@@ -382,47 +502,101 @@ class CallStore:
                     raise TypeError("repeat_id must be an int, str or None")
                 request["repeat"] = {"explicit": repeat_id}
             key = _fingerprint(request)
-            if key in self._inflight:
-                return key, self._inflight[key], False
-            future = Future()
-            self._inflight[key] = future
+            return key, request
+
+    def _reserve_prepared(self, prepared):
+        key, request = prepared
+        with self._key_lock(key):
+            with self._mutex:
+                self._check()
+                if key in self._inflight:
+                    return key, self._inflight[key], False
+                future = Future()
+                self._inflight[key] = future
+                self._storage.pin(self._records.path(key))
             record = self._records.get(key)
-            if record is not None:
-                if record["state"] == "completed":
-                    future.set_result(copy.deepcopy(record["result"]))
-                    return key, future, False
-                if record["state"] in {"started", "pending"}:
-                    future.set_exception(UnknownOutcomeError(key))
-                    return key, future, False
-                if record["state"] == "failed":
-                    future.set_exception(restore_backend_error(record["error"]))
-                    return key, future, False
-            else:
-                self._records[key] = {
-                    "key": key,
-                    "run": self.fingerprint,
-                    "request": request,
-                    "state": "reserved",
-                    "attempts": [],
-                }
+            with self._mutex:
+                self._check()
+                if record is not None:
+                    if record["state"] == "completed":
+                        future.set_result(copy.deepcopy(record["result"]))
+                        return key, future, False
+                    if record["state"] in {"started", "pending"}:
+                        future.set_exception(UnknownOutcomeError(key))
+                        return key, future, False
+                    if record["state"] == "failed":
+                        future.set_exception(restore_backend_error(record["error"]))
+                        return key, future, False
+                else:
+                    self._records[key] = {
+                        "key": key,
+                        "run": self.fingerprint,
+                        "request": request,
+                        "state": "reserved",
+                        "attempts": [],
+                    }
             return key, future, True
 
     def update(self, key, state, **values):
-        with self._mutex:
+        with self._key_lock(key):
             self._check()
             record = copy.deepcopy(self._records[key])
             record.update(values, state=state)
             if state == "completed":
                 _validate_result(record["result"])
+
+            def committed():
+                with self._mutex:
+                    self._records.retain(key, record)
+                    future = self._inflight.get(key)
+                    if state == "completed" and future is not None and not future.done():
+                        future.set_result(copy.deepcopy(record["result"]))
+
             try:
-                self._storage.write(self._records.path(key), _encode_pickle(record))
+                self._commits.submit(
+                    self._records.path(key), _encode_pickle(record), committed
+                ).result()
             except Exception as exc:
-                self._poison = exc
+                self._fail(exc)
                 raise CheckpointError(f"Cannot persist {state} for {key}") from exc
-            self._records.retain(key, record)
-            future = self._inflight.get(key)
-            if state == "completed" and future is not None and not future.done():
-                future.set_result(copy.deepcopy(record["result"]))
+
+    def update_many(self, updates):
+        """Wait for every bounded update, retaining confirmed partial progress."""
+
+        def update(entry):
+            key, state, values = entry
+            self.update(key, state, **values)
+
+        self._apply_many(update, updates)
+
+    @operation
+    def _apply_many(self, function, values):
+        error = None
+
+        def invoke(value):
+            try:
+                return function(value)
+            finally:
+                self._write_slots.release()
+
+        for chunk in self._chunks(values):
+            futures = []
+            for value in chunk:
+                self._write_slots.acquire()
+                futures.append(self._writer.submit(invoke, value))
+            for future in futures:
+                try:
+                    future.result()
+                except BaseException as exc:
+                    if error is None:
+                        error = exc
+            if error is not None:
+                raise error
+
+    def _chunks(self, values):
+        values = iter(values)
+        while chunk := list(islice(values, self._commits.capacity)):
+            yield chunk
 
     def _result_source(self, key, future, owner):
         if owner:
@@ -437,8 +611,7 @@ class CallStore:
         return result
 
     def _provenance(self, key, source):
-        with self._mutex:
-            previous_attempts = len(self._records[key]["attempts"])
+        previous_attempts = len(self._records[key]["attempts"])
         return {
             "run_fingerprint": self.fingerprint,
             "call_key": key,
@@ -468,7 +641,7 @@ class CallStore:
 
     def write_journal(self, journal: dict):
         """Commit a submission manifest, including exact upload and output bytes."""
-        with self._mutex:
+        with self._key_lock("journal/" + journal["id"]):
             self._check()
             identifier = journal["id"]
             if not identifier.isalnum() or journal["run"] != self.fingerprint:
@@ -476,15 +649,17 @@ class CallStore:
             try:
                 self._storage.write(f"journals/{identifier}.pkl", _encode_pickle(journal))
             except Exception as exc:
-                self._poison = exc
+                self._fail(exc)
                 raise CheckpointError("Cannot persist submission journal") from exc
-            self._journals[identifier] = copy.deepcopy(journal)
-            for key in journal["keys"]:
-                if journal["state"] == "intent":
-                    self._intent_submissions[key] = identifier
-                elif self._intent_submissions.get(key) == identifier:
-                    self._intent_submissions.pop(key)
+            with self._mutex:
+                self._journals[identifier] = copy.deepcopy(journal)
+                for key in journal["keys"]:
+                    if journal["state"] == "intent":
+                        self._intent_submissions[key] = identifier
+                    elif self._intent_submissions.get(key) == identifier:
+                        self._intent_submissions.pop(key)
 
+    @operation
     def write_blob(self, name, chunks):
         """Stream exact upload/output bytes into an atomic, checksummed artifact."""
         if not name or any(
@@ -496,9 +671,10 @@ class CallStore:
         try:
             return self._storage.write_blob(name, chunks)
         except Exception as exc:
-            self._poison = exc
+            self._fail(exc)
             raise CheckpointError("Cannot persist exact Batch file bytes") from exc
 
+    @operation
     def blob_path(self, entry, *, verify=True):
         name = entry["name"]
         if not name or any(
@@ -510,7 +686,7 @@ class CallStore:
         try:
             return self._storage.blob_path(entry, verify=verify)
         except Exception as exc:
-            self._poison = exc
+            self._fail(exc)
             raise CheckpointCorruptionError(f"Invalid retained Batch file: {name}") from exc
 
     async def update_async(self, key, state, **values):
@@ -528,7 +704,7 @@ class CallStore:
             raise ValueError(
                 "A reason and explicit acceptance of duplicate expenditure are required"
             )
-        with self._mutex:
+        with self._key_lock(key):
             self._check()
             record = self._records[key]
             if record["state"] not in {"started", "failed"}:
@@ -547,22 +723,20 @@ class CallStore:
                 outcome_unknown=False,
                 submission=None,
             )
-            self._inflight.pop(key, None)
+            self._release(key)
 
+    @operation
     def lifecycle(self, event: Mapping[str, Any]):
         """Persist an independent provenance event without changing request identity."""
-        with self._mutex:
-            self._check()
-            try:
-                self._storage.write(
-                    f"lifecycle/{uuid.uuid4().hex}.pkl", _encode_pickle(dict(event))
-                )
-            except Exception as exc:
-                self._poison = exc
-                raise CheckpointError("Cannot persist lifecycle event") from exc
+        self._check()
+        try:
+            self._storage.write(f"lifecycle/{uuid.uuid4().hex}.pkl", _encode_pickle(dict(event)))
+        except Exception as exc:
+            self._fail(exc)
+            raise CheckpointError("Cannot persist lifecycle event") from exc
 
     def mark_complete(self, *, delete: bool = False):
-        with self._mutex:
+        with self._gate.exclusive():
             self._check()
             if any(
                 record["state"] not in {"completed", "failed"} for record in self._records.values()
@@ -574,6 +748,7 @@ class CallStore:
                 )
                 if delete:
                     self._storage.delete()
+                    self._deleted = True
             except Exception as exc:
                 self._poison = exc
                 raise CheckpointError("Cannot persist run completion") from exc
@@ -581,8 +756,16 @@ class CallStore:
     def close(self):
         if not self._closed:
             self._writer.shutdown(wait=True)
-            self._closed = True
-            self._storage.close()
+            with self._gate.exclusive():
+                if not self._closed:
+                    self._commits.close()
+                    self._reader.shutdown(wait=True)
+                    self._closed = True
+                    for key, future in list(self._inflight.items()):
+                        if not future.done():
+                            future.set_exception(CheckpointError("Call store is closed"))
+                        self._release(key, future)
+                    self._storage.close()
 
     def __enter__(self):
         return self
@@ -611,6 +794,7 @@ class _Observer:
         self.store.update(
             key, "started", attempt=attempt, attempts=history, error=None, receipt=None
         )
+        self.store._check()
 
     def received(self, index, receipt):
         self.store.update(self.keys[index], "received", receipt=copy.deepcopy(receipt))
@@ -619,11 +803,11 @@ class _Observer:
         self.store.update(self.keys[index], "phased")
 
     def run_phase(self, index, name, arguments, delegate, reparse):
-        with self.store._mutex:
-            key, future, owner = self.store.reserve(
+        key, future, owner, provenance = self.store._reserve_entry(
+            self.store._prepare_request(
                 {"parent": self.keys[index], "phase": name, "arguments": arguments}, 0
             )
-            provenance = self.store._provenance(key, self.store._result_source(key, future, owner))
+        )
         if owner:
             child = _Observer(self.store, [key])
             try:
@@ -646,9 +830,8 @@ class _Observer:
         except UnknownOutcomeError as exc:
             raise self.store._error(exc, provenance) from exc
         finally:
-            with self.store._mutex:
-                if future.done() and self.store._inflight.get(key) is future:
-                    self.store._inflight.pop(key)
+            if future.done():
+                self.store._release(key, future)
 
     def completed(self, index, outcome):
         self.store.update(self.keys[index], "completed", result=outcome)
@@ -905,20 +1088,21 @@ class PersistentBackend:
         if len(repeats) != len(batch):
             raise ValueError("repeat_ids must align with the requests")
         entries, missing, keys = [], [], []
-        for request, repeat in zip(batch, repeats, strict=True):
-            with self._store._mutex:
-                key, future, owner = self._store.reserve(
-                    {
-                        "backend": self._backend.descriptor()["identity"],
-                        "scope": self._scope,
-                        "operation": operation,
-                        "arguments": {"input": request, **arguments},
-                    },
-                    repeat,
-                )
-                provenance = self._store._provenance(
-                    key, self._store._result_source(key, future, owner)
-                )
+        requests = [
+            (
+                {
+                    "backend": self._backend.descriptor()["identity"],
+                    "scope": self._scope,
+                    "operation": operation,
+                    "arguments": {"input": request, **arguments},
+                },
+                repeat,
+            )
+            for request, repeat in zip(batch, repeats, strict=True)
+        ]
+        reservations = self._store._reserve_entries(requests)
+        owned_futures = {}
+        for request, (key, future, owner, provenance) in zip(batch, reservations, strict=True):
             entries.append((key, future, provenance))
             if owner:
                 record = self._store._records[key]
@@ -930,10 +1114,12 @@ class PersistentBackend:
                         )
                         self._store.update(key, "completed", result=result)
                     except BaseException as exc:
-                        future.set_exception(exc)
+                        if not future.done():
+                            future.set_exception(exc)
                 else:
                     missing.append(request)
                     keys.append(key)
+                    owned_futures[key] = future
         if missing:
             observer = _Observer(self._store, keys)
             phase_progress = (
@@ -952,22 +1138,20 @@ class PersistentBackend:
                 if len(results) != len(missing):
                     raise ValueError("Backend returned the wrong number of results")
                 for index, result in enumerate(results):
-                    if not self._store._inflight[keys[index]].done():
+                    if not owned_futures[keys[index]].done():
                         observer.completed(index, result)
             except BaseException as exc:
                 if isinstance(exc, CheckpointError):
                     if isinstance(exc, UnknownOutcomeError):
+                        parent = (
+                            self._store._records.get(exc.key, {}).get("request", {}).get("parent")
+                        )
                         with self._store._mutex:
-                            parent = (
-                                self._store._records.get(exc.key, {})
-                                .get("request", {})
-                                .get("parent")
-                            )
                             future = self._store._inflight.get(parent)
                             if parent in keys and future is not None:
                                 if not future.done():
                                     future.set_exception(exc)
-                                self._store._inflight.pop(parent)
+                                self._store._release(parent, future)
                     raise
                 failures = (
                     exc.failures
@@ -975,7 +1159,7 @@ class PersistentBackend:
                     else dict.fromkeys(range(len(keys)), exc)
                 )
                 for index, key in enumerate(keys):
-                    future = self._store._inflight[key]
+                    future = owned_futures[key]
                     if not future.done():
                         if index not in failures and isinstance(exc, PartialBatchError):
                             observer.completed(index, exc.results[index])
@@ -998,9 +1182,8 @@ class PersistentBackend:
                 outcomes.append(error)
                 failures[index] = error
             finally:
-                with self._store._mutex:
-                    if future.done() and self._store._inflight.get(key) is future:
-                        self._store._inflight.pop(key)
+                if future.done():
+                    self._store._release(key, future)
         if failures:
             raise PartialBatchError(outcomes, failures)
         return outcomes

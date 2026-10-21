@@ -48,6 +48,8 @@ class FilesystemJournal:
 
 
 class _FilesystemRun:
+    max_concurrency = 1
+
     def __init__(self, run_dir, handle):
         self.run_dir = run_dir
         self.location = str(run_dir)
@@ -60,8 +62,26 @@ class _FilesystemRun:
         except FileNotFoundError:
             return None
 
+    def pin(self, name):
+        pass
+
+    def unpin(self, name):
+        pass
+
     def write(self, name, payload):
         _atomic_write_bytes(self.run_dir / name, payload)
+
+    def write_many(self, records):
+        records = list(records)
+        errors = []
+        for name, payload in records:
+            try:
+                self.write(name, payload)
+                errors.append(None)
+            except BaseException as exc:
+                errors.extend([exc] * (len(records) - len(errors)))
+                break
+        return errors
 
     def names(self, prefix):
         for path in (self.run_dir / prefix).rglob("*"):
