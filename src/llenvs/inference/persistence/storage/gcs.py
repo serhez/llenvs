@@ -225,10 +225,11 @@ class GCSJournal:
     The bucket must already exist. Use a private, trusted prefix without an
     external expiration policy for journal objects.
 
-    ``max_concurrency`` bounds record transfers (default 128). At most two groups
-    overlap, each containing at most this many updates and checking ownership
-    before its uploads. A single worker keeps writes serial. Callers still wait
-    for durability; these bounds do not change identities or the on-disk format.
+    ``max_concurrency`` bounds record transfers and the rolling admitted-write
+    window (default 128). Each bounded cohort checks ownership before uploads;
+    confirmed writes are acknowledged independently. A single worker keeps
+    writes serial. Callers still wait for durability; these bounds do not change
+    identities or the on-disk format.
 
     Owned clients get a connection pool at least as large as ``max_concurrency``.
     A supplied client keeps its transport unless ``connection_pool_size`` requests

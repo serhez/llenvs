@@ -1,10 +1,13 @@
 """Bounded journal admission with independent durable acknowledgements."""
 
 import threading
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import partial, wraps
+
+_ADMISSION_SECONDS = 0.1
 
 
 class MaintenanceGate:
@@ -106,17 +109,38 @@ class GroupWriter:
 
     def _admit(self, first, limit):
         group = [first]
+        finished = False
+
+        def completed(item, future):
+            nonlocal finished
+            with self._condition:
+                finished = True
+                self._finished_write(item, future)
 
         def records():
             with self._condition:
                 if self._error is not None:
                     return
+            deadline = time.monotonic() + _ADMISSION_SECONDS
             yield first[0], first[1]
-            # Ownership is checked before consumption. Reserve a bounded share
-            # of the window, including arrivals during the owner read.
+            # Ownership is checked before consumption. Later arrivals can use
+            # this bounded cohort only until its first completion or deadline.
             while len(group) < limit:
                 with self._condition:
-                    if self._error is not None or not self._pending:
+                    while (
+                        not self._pending
+                        and self._error is None
+                        and not self._closed
+                        and not finished
+                        and (remaining := deadline - time.monotonic()) > 0
+                    ):
+                        self._condition.wait(remaining)
+                    if (
+                        self._error is not None
+                        or finished
+                        or time.monotonic() >= deadline
+                        or not self._pending
+                    ):
                         return
                     following = self._pending.popleft()
                     self._condition.notify_all()
@@ -128,7 +152,7 @@ class GroupWriter:
             for future in self.storage.submit_writes(records()):
                 item = group[yielded]
                 yielded += 1
-                future.add_done_callback(partial(self._finished_write, item))
+                future.add_done_callback(partial(completed, item))
         except BaseException as exc:
             error = exc
         with self._condition:

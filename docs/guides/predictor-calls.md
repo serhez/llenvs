@@ -270,12 +270,18 @@ those transports yourself and omit `connection_pool_size`.
 
 Independent call updates share a rolling window of at most `max_concurrency`
 admitted records. Each bounded cohort checks ownership before its uploads.
+While those uploads run, later queued writes can join the checked cohort for
+at most 100 ms after its first record is admitted. The cohort ends sooner on
+its first native completion, its reserved record limit or a fatal failure.
+The deadline does not extend when more writes arrive. Each admitted write starts
+immediately; the coordinator does not wait to fill a cohort before uploading.
 In a healthy store, each confirmed write is acknowledged and releases its window
 slot without waiting for another write in its cohort. Ownership reads for later
 cohorts do not block those acknowledgements. Queued updates and observer work are bounded
 by twice `max_concurrency` (one for a single storage worker). Record transfers
 also obey the shared I/O limit. A single storage worker and filesystem journals
 keep writes serial.
+Close stops waiting for new arrivals and drains queued and admitted writes.
 Each caller waits for its own confirmed durable state. A started intent is
 durable before model dispatch, an answer is durable before it is returned, and
 updates of one key remain ordered. Batch retains its individual call records and

@@ -3,9 +3,11 @@
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 
+from llenvs.inference.persistence import writer as writer_module
 from llenvs.inference.persistence.writer import GroupWriter
 
 
@@ -180,7 +182,7 @@ def test_slow_successor_owner_read_does_not_block_a_durable_acknowledgement():
     entered, release = threading.Event(), threading.Event()
     with controlled_writer() as (storage, writer, submit, published, failures):
         first = submit("first")
-        storage.wait_for("first")
+        storage.wait_for_admission("first")
 
         def check(index):
             entered.set()
@@ -368,3 +370,229 @@ def test_pending_payload_queue_applies_backpressure_until_a_window_slot_is_relea
             assert isinstance(blocked.result(timeout=2), Future)
         finally:
             storage.drain()
+
+
+@pytest.fixture
+def admission_clock(monkeypatch):
+    """Control the admission deadline independently of thread scheduling."""
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(
+        writer_module,
+        "time",
+        SimpleNamespace(monotonic=lambda: clock.now),
+        raising=False,
+    )
+
+    def advance(writer, seconds):
+        with writer._condition:
+            clock.now += seconds
+            writer._condition.notify_all()
+
+    clock.advance = advance
+    return clock
+
+
+def wait_for_open_cohort(storage, name):
+    storage.wait_for(name)
+    with storage.condition:
+        assert not storage.condition.wait_for(lambda: name in storage.admitted, 0.02), (
+            "An unfinished cohort closed as soon as its input queue became empty"
+        )
+
+
+@pytest.mark.parametrize("concurrency", [2, 4, 128])
+def test_later_arrivals_use_the_active_bounded_owner_check(admission_clock, concurrency):
+    with controlled_writer(concurrency) as (storage, writer, submit, published, failures):
+        first = submit("first")
+        wait_for_open_cohort(storage, "first")
+        later = submit("later")
+        storage.wait_for("later")
+        assert storage.checks == 1, "A later arrival paid another owner-read round trip"
+        assert not first.done() and not later.done() and not published
+        storage.finish("later")
+        later.result(timeout=1)
+        assert published == ["later"] and not first.done() and not failures
+
+
+def test_checked_cohort_cannot_accept_after_its_100ms_deadline(admission_clock):
+    with controlled_writer() as (storage, writer, submit, published, failures):
+        submit("first")
+        wait_for_open_cohort(storage, "first")
+        admission_clock.advance(writer, 0.099)
+        submit("before-deadline")
+        storage.wait_for("before-deadline")
+        assert storage.checks == 1
+        admission_clock.advance(writer, 0.002)
+        submit("after-deadline")
+        storage.wait_for("after-deadline")
+        assert storage.checks == 2, "An expired cohort reused its owner observation"
+        assert not published and not failures
+
+
+@pytest.mark.parametrize("finished", ["first", "later"])
+def test_first_native_completion_ends_cohort_without_delaying_its_ack(admission_clock, finished):
+    with controlled_writer() as (storage, writer, submit, published, failures):
+        acknowledgements = {"first": submit("first")}
+        wait_for_open_cohort(storage, "first")
+        acknowledgements["later"] = submit("later")
+        storage.wait_for("later")
+        assert storage.checks == 1
+        storage.finish(finished)
+        acknowledgements[finished].result(timeout=1)
+        storage.wait_for_admission("first", "later")
+        submit("successor")
+        storage.wait_for("successor")
+        assert storage.checks == 2 and published == [finished] and not failures
+        other = "later" if finished == "first" else "first"
+        assert not acknowledgements[other].done()
+
+
+@pytest.mark.parametrize("concurrency", [2, 4])
+def test_open_cohort_keeps_the_write_window_and_queue_limits(admission_clock, concurrency):
+    with controlled_writer(concurrency) as (storage, writer, submit, published, failures):
+        first = submit("record-0")
+        wait_for_open_cohort(storage, "record-0")
+        for index in range(1, concurrency):
+            submit(f"record-{index}")
+            storage.wait_for(f"record-{index}")
+        assert storage.checks == 1
+        queued = submit("queued")
+        with storage.condition:
+            assert not storage.condition.wait_for(lambda: "queued" in storage.accepted, 0.02)
+        storage.finish("record-0")
+        first.result(timeout=1)
+        storage.wait_for("queued")
+        assert storage.checks == 2 and not queued.done() and not failures
+
+
+@pytest.mark.parametrize("failure_kind", ["native", "callback", "external"])
+def test_idle_admission_wakes_on_failure_and_preserves_confirmed_siblings(
+    admission_clock, failure_kind
+):
+    error = OSError("Synthetic failure while a checked cohort awaits arrivals")
+    with controlled_writer() as (storage, writer, submit, published, failures):
+
+        def fail_callback():
+            raise error
+
+        bad = submit("bad", fail_callback if failure_kind == "callback" else None)
+        wait_for_open_cohort(storage, "bad")
+        good = submit("good")
+        storage.wait_for("good")
+        assert storage.checks == 1
+        if failure_kind == "external":
+            writer.fail(error)
+        else:
+            storage.finish("bad", error if failure_kind == "native" else None)
+        wait_for_error(writer, error)
+        queued = submit("queued")
+        storage.wait_for_admission("bad", "good")
+        assert "queued" not in storage.accepted and not failures
+        if failure_kind == "external":
+            storage.finish("bad")
+        storage.finish("good")
+        good.result(timeout=1)
+        if failure_kind == "external":
+            bad.result(timeout=1)
+        else:
+            with pytest.raises(OSError) as caught:
+                bad.result(timeout=1)
+            assert caught.value is error
+        with pytest.raises(OSError) as caught:
+            queued.result(timeout=1)
+        assert caught.value is error
+        assert failures == [(error, published)] and "good" in published
+
+
+def test_expired_checked_cohort_cannot_bypass_a_replacement_owner(admission_clock):
+    error = OSError("Synthetic ownership change before successor admission")
+    with controlled_writer() as (storage, writer, submit, published, failures):
+        first = submit("first")
+        wait_for_open_cohort(storage, "first")
+
+        def reject_successor(index):
+            assert index == 2
+            raise error
+
+        storage.before_admission = reject_successor
+        admission_clock.advance(writer, 0.101)
+        refused = submit("refused")
+        wait_for_error(writer, error)
+        assert "refused" not in storage.accepted and not failures and not refused.done()
+        storage.finish("first")
+        first.result(timeout=1)
+        with pytest.raises(OSError) as caught:
+            refused.result(timeout=1)
+        assert caught.value is error
+        assert published == ["first"] and failures == [(error, ["first"])]
+
+
+def test_close_wakes_an_idle_cohort_but_waits_for_its_native_write(admission_clock):
+    with (
+        controlled_writer() as (storage, writer, submit, published, failures),
+        ThreadPoolExecutor(max_workers=1) as worker,
+    ):
+        first = submit("first")
+        wait_for_open_cohort(storage, "first")
+        closing = worker.submit(writer.close)
+        storage.wait_for_admission("first")
+        assert not closing.done() and not first.done()
+        storage.finish("first")
+        first.result(timeout=1)
+        closing.result(timeout=1)
+        assert published == ["first"] and not failures
+
+
+def test_serial_storage_never_lingers_for_another_record(admission_clock):
+    with controlled_writer(1) as (storage, writer, submit, published, failures):
+        first = submit("first")
+        storage.wait_for_admission("first")
+        storage.finish("first")
+        first.result(timeout=1)
+        second = submit("second")
+        storage.wait_for_admission("second")
+        storage.finish("second")
+        second.result(timeout=1)
+        assert storage.checks == 2 and published == ["first", "second"] and not failures
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+def test_native_gcs_late_arrival_uses_one_check_and_keeps_both_intents_durable(
+    gcs_root, cloud, admission_clock, monkeypatch, validation
+):
+    from llenvs.inference.persistence import CallStore
+    from tests.inference.persistence.test_throughput import DelayedIO
+
+    io = DelayedIO(cloud, monkeypatch)
+    journal = gcs_root(max_concurrency=4)
+    run = {"experiment": "bounded-admission"}
+    entered = {index: threading.Event() for index in range(2)}
+    release = threading.Event()
+    with CallStore.open(journal, run_descriptor=run, validation="lazy") as store:
+        keys = [store.reserve({"input": index}, 0)[0] for index in range(2)]
+        indices = {key: index for index, key in enumerate(keys)}
+
+        def hold(kind, name, record):
+            if kind == "put" and record is not None:
+                entered[indices[record["key"]]].set()
+                assert release.wait(5)
+
+        io.reset()
+        io.before = hold
+        with ThreadPoolExecutor(max_workers=2) as worker:
+            first = worker.submit(store.update, keys[0], "started")
+            try:
+                assert entered[0].wait(2)
+                second = worker.submit(store.update, keys[1], "started")
+                assert entered[1].wait(2)
+                assert io.owner_reads == 1
+                assert not first.done() and not second.done()
+                release.set()
+                first.result(timeout=2)
+                second.result(timeout=2)
+            finally:
+                release.set()
+                io.before = None
+    with CallStore.open(journal, run_descriptor=run, validation=validation) as store:
+        assert all(store._records[key]["state"] == "started" for key in keys)
+        assert all(not store._records[key]["attempts"] for key in keys)
