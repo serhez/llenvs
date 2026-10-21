@@ -268,11 +268,14 @@ shrinks larger pools. Configure pools before concurrent use of that client.
 Custom adapters and wrapped transports reject explicit automatic tuning; configure
 those transports yourself and omit `connection_pool_size`.
 
-Independent call updates join at most two overlapping write groups, each with at
-most `max_concurrency` records and one ownership check before its uploads. Their
-combined admitted-record bound is twice `max_concurrency`; record transfers still
-obey the shared I/O limit. A single storage worker and filesystem journals keep
-writes serial.
+Independent call updates share a rolling window of at most `max_concurrency`
+admitted records. Each bounded cohort checks ownership before its uploads.
+In a healthy store, each confirmed write is acknowledged and releases its window
+slot without waiting for another write in its cohort. Ownership reads for later
+cohorts do not block those acknowledgements. Queued updates and observer work are bounded
+by twice `max_concurrency` (one for a single storage worker). Record transfers
+also obey the shared I/O limit. A single storage worker and filesystem journals
+keep writes serial.
 Each caller waits for its own confirmed durable state. A started intent is
 durable before model dispatch, an answer is durable before it is returned, and
 updates of one key remain ordered. Batch retains its individual call records and
@@ -314,15 +317,16 @@ termination; a separate ownership object is not transactional fencing against a
 still-running writer. Give concurrent shards
 distinct stable run descriptors.
 
-The owner check and the group's writes are separate operations. Up to two already
-checked groups can finish if ownership changes during their uploads; a subsequent
-group checks again and refuses a different owner. This does not provide fencing
-for a paused worker. Recovery still requires confirmed termination.
+The owner check and record writes are separate operations. Already checked
+records can finish if ownership changes during their uploads, bounded by the
+`max_concurrency` window across all cohorts. Each subsequent cohort checks again
+and refuses a different owner. This does not provide fencing for a paused
+worker. Recovery still requires confirmed termination.
 
 Writes use generation preconditions and bounded retries. Lost acknowledgements
 are reconciled against the operation's exact bytes. A fatal storage, decoding or
-serialization failure rejects new requests and stops admission of new write
-groups. Already admitted groups drain and publish confirmed outcomes before
+serialization failure rejects new requests and stops admission of new writes.
+Already accepted writes drain and publish confirmed outcomes before
 unresolved outcome waiters fail. This also applies when the failure is in a
 separate Batch journal, file transfer or lifecycle operation: a confirmed call
 still returns with its original source. Intent acknowledgements are held during
@@ -336,7 +340,8 @@ are executable Python artifacts, and checksums detect accidental corruption.
 External deletion or expiration of live journal objects invalidates replay
 guarantees. `mark_complete(delete=True)` removes the run's objects after checking
 for unresolved calls; ownership and recovery assertions remain separate.
-Finalization and close wait for active journal operations and run exclusively.
+Finalization and close wait for active journal operations and accepted native
+writes, including when further admission fails, and run exclusively.
 A handle whose run was deleted refuses subsequent calls; close it normally to
 release ownership.
 Close also releases active generation metadata and fails unresolved local waiters

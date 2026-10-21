@@ -232,12 +232,13 @@ def gcs_root(cloud, tmp_path):
 
     pytest.importorskip("google.cloud.storage")
 
-    def root():
+    def root(*, max_concurrency=128):
         return GCSJournal(
             bucket="synthetic-bucket",
             prefix="journal-fixture",
             client=cloud.client(),
             cache_dir=tmp_path / "disposable-cache",
+            max_concurrency=max_concurrency,
         )
 
     return root

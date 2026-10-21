@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 
 import pytest
@@ -21,6 +23,201 @@ from llenvs.inference.protocol import (
     SamplingParams,
 )
 from tests.inference.test_openai_batch import Client, backend, completion, generated_failure
+
+
+@pytest.fixture(params=["filesystem", "gcs"])
+def native_storage(request, tmp_path):
+    if request.param == "filesystem":
+        from llenvs.inference.persistence.storage.filesystem import FilesystemJournal
+
+        journal = FilesystemJournal(tmp_path / "native-contract")
+    else:
+        journal = request.getfixturevalue("gcs_root")(max_concurrency=4)
+    storage = journal.acquire("native-future-contract")
+    storage.write("manifest.json", b"{}")
+    try:
+        yield storage
+    finally:
+        storage.close()
+
+
+def test_native_storage_yields_one_durable_future_per_consumed_record(native_storage):
+    records = [("probe/first", b"first"), ("probe/second", b"second")]
+    futures = list(native_storage.submit_writes(iter(records)))
+    assert len(futures) == len(records) and all(isinstance(f, Future) for f in futures)
+    for future, (name, payload) in zip(futures, records, strict=True):
+        assert future.result(timeout=2) is None
+        assert native_storage.read(name) == payload
+
+
+def test_native_write_failure_retains_its_exception_and_never_claims_durability(
+    native_storage, monkeypatch
+):
+    storage = native_storage
+    error = OSError("Synthetic native durable-write failure")
+    method = "write" if storage.run_dir is not None else "_write_record"
+    write = getattr(storage, method)
+    consumed = []
+
+    def fail(name, payload):
+        if name == "probe/bad":
+            raise error
+        return write(name, payload)
+
+    def records():
+        for name in ["first", "bad", "last"]:
+            consumed.append(name)
+            yield f"probe/{name}", name.encode()
+
+    monkeypatch.setattr(storage, method, fail)
+    futures = list(storage.submit_writes(records()))
+    assert len(futures) == len(consumed)
+    assert futures[0].result(timeout=2) is None
+    with pytest.raises(OSError) as caught:
+        futures[1].result(timeout=2)
+    assert caught.value is error and storage.read("probe/bad") is None
+    if storage.max_concurrency == 1:
+        assert consumed == ["first", "bad"] and storage.read("probe/last") is None
+    else:
+        assert futures[2].result(timeout=2) is None
+        assert storage.read("probe/last") == b"last"
+
+
+def test_gcs_futures_are_returned_in_input_order_without_a_completion_barrier(
+    gcs_root, monkeypatch
+):
+    storage = gcs_root(max_concurrency=3).acquire("native-order-contract")
+    entered, release = threading.Event(), threading.Event()
+    write = storage._write_record
+
+    def hold(name, payload):
+        if name == "probe/slow":
+            entered.set()
+            assert release.wait(5)
+        return write(name, payload)
+
+    monkeypatch.setattr(storage, "_write_record", hold)
+    try:
+        futures = list(storage.submit_writes([("probe/slow", b"slow"), ("probe/fast", b"fast")]))
+        assert entered.wait(2)
+        assert futures[1].result(timeout=1) is None
+        assert storage.read("probe/fast") == b"fast"
+        assert not futures[0].done() and storage.read("probe/slow") is None
+    finally:
+        release.set()
+        storage.close()
+
+
+@pytest.mark.parametrize("maintenance", ["close", "delete"])
+@pytest.mark.parametrize("admission_failure", [None, "iterator", "executor"])
+def test_gcs_maintenance_waits_for_accepted_futures_after_submission_returns_or_raises(
+    gcs_root, monkeypatch, maintenance, admission_failure
+):
+    storage = gcs_root(max_concurrency=2).acquire("native-maintenance-contract")
+    storage.write("manifest.json", b"{}")
+    entered, release, finalizing = threading.Event(), threading.Event(), threading.Event()
+    error = OSError("Synthetic interrupted native admission")
+    write = storage._write_record
+
+    def hold(name, payload):
+        entered.set()
+        assert release.wait(5)
+        return write(name, payload)
+
+    def records():
+        yield "probe/held", b"held"
+        if admission_failure == "iterator":
+            raise error
+        if admission_failure == "executor":
+            yield "probe/not-accepted", b"not accepted"
+
+    monkeypatch.setattr(storage, "_write_record", hold)
+    if admission_failure == "executor":
+        submit = storage._workers.submit
+        calls = 0
+
+        def reject_later(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise error
+            return submit(*args, **kwargs)
+
+        monkeypatch.setattr(storage._workers, "submit", reject_later)
+
+    def finish():
+        finalizing.set()
+        getattr(storage, maintenance)()
+
+    try:
+        iterator = iter(storage.submit_writes(records()))
+        accepted = next(iterator)
+        if admission_failure is None:
+            assert list(iterator) == []
+        else:
+            with pytest.raises(OSError) as caught:
+                next(iterator)
+            assert caught.value is error
+        assert entered.wait(2) and not accepted.done()
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            finishing = worker.submit(finish)
+            try:
+                assert finalizing.wait(2)
+                with pytest.raises(TimeoutError):
+                    finishing.result(timeout=0.05)
+                owner, _ = storage.journal._owner(storage.fingerprint)
+                assert owner["owner"] == storage.owner["owner"], "Owner released before drain"
+                release.set()
+                assert accepted.result(timeout=2) is None
+                finishing.result(timeout=2)
+            finally:
+                release.set()
+        expected = None if maintenance == "delete" else b"held"
+        assert storage.read("probe/held") == expected
+        assert storage.read("probe/not-accepted") is None
+    finally:
+        release.set()
+        storage.close()
+
+
+def test_gcs_owner_failure_does_not_consume_or_submit_unchecked_records(gcs_root, monkeypatch):
+    storage = gcs_root().acquire("native-owner-contract")
+    error = CheckpointError("Synthetic owner displacement")
+    consumed = []
+
+    def check():
+        raise error
+
+    def records():
+        consumed.append("unchecked")
+        yield "probe/unchecked", b"unchecked"
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(storage, "_check_owner", check)
+            with pytest.raises(CheckpointError) as caught:
+                list(storage.submit_writes(records()))
+            assert caught.value is error
+        assert not consumed and storage.read("probe/unchecked") is None
+    finally:
+        storage.close()
+
+
+def test_gcs_successful_future_includes_exact_byte_lost_acknowledgement_reconciliation(
+    gcs_root, cloud
+):
+    storage = gcs_root().acquire("native-reconciliation-contract")
+    cloud.fail("after", predicate=lambda name: name.endswith("probe/receipt"))
+    try:
+        [future] = list(storage.submit_writes([("probe/receipt", b"exact receipt")]))
+        assert future.result(timeout=2) is None
+        assert storage.read("probe/receipt") == b"exact receipt"
+        assert (
+            sum(kind == "put" and name.endswith("probe/receipt") for kind, name in cloud.operations)
+            == 1
+        )
+    finally:
+        storage.close()
 
 
 def _unavailable_artifact():

@@ -730,12 +730,12 @@ with CallStore.open(root, run_descriptor={}) as store:
     key,_,_=store.reserve({"synthetic":"finalization"},0)
     store.update(key,"failed",error={"type":"RuntimeError","message":"definite synthetic failure"})
     entered, release, finalizing = threading.Event(), threading.Event(), threading.Event()
-    write=store._storage.write_many
+    write=store._storage.submit_writes
     def blocked(records):
         entered.set()
         assert release.wait(5)
         return write(records)
-    store._storage.write_many=blocked
+    store._storage.submit_writes=blocked
     def finish():
         finalizing.set()
         try:store.mark_complete(delete=sys.argv[5]=="True")
@@ -817,8 +817,8 @@ def test_an_independent_group_finishes_while_an_earlier_upload_is_held(journal_s
         assert [r["state"] for r in io.records if r["key"] == first] == ["started", "received"]
 
 
-def test_failed_group_drains_confirmed_siblings_before_poisoning_waiters(
-    journal_store, io, monkeypatch
+def test_failed_record_drains_confirmed_siblings_before_poisoning_waiters(
+    journal_store, io, monkeypatch, gcs_root
 ):
     first_entered, second_entered = threading.Event(), threading.Event()
     release_failure, release_success, failure_reported = (
@@ -826,7 +826,10 @@ def test_failed_group_drains_confirmed_siblings_before_poisoning_waiters(
         threading.Event(),
         threading.Event(),
     )
-    with journal_store() as store, ThreadPoolExecutor(max_workers=3) as callers:
+    with (
+        journal_store(journal=gcs_root(max_concurrency=2)) as store,
+        ThreadPoolExecutor(max_workers=3) as callers,
+    ):
         first, _, _ = store.reserve({"synthetic": "failure"}, 0)
         second, result, _ = store.reserve({"synthetic": "success"}, 0)
         third, _, _ = store.reserve({"synthetic": "queued"}, 0)
@@ -844,15 +847,18 @@ def test_failed_group_drains_confirmed_siblings_before_poisoning_waiters(
                 second_entered.set()
                 assert release_success.wait(5)
 
-        write_many = store._storage.write_many
+        submit_writes = store._storage.submit_writes
 
         def observe(records):
-            errors = write_many(records)
-            if any(error is not None for error in errors):
-                failure_reported.set()
-            return errors
+            def finished(future):
+                if future.exception() is not None:
+                    failure_reported.set()
 
-        monkeypatch.setattr(store._storage, "write_many", observe)
+            for future in submit_writes(records):
+                future.add_done_callback(finished)
+                yield future
+
+        monkeypatch.setattr(store._storage, "submit_writes", observe)
         io.before = gate
         failed = callers.submit(
             store.update, first, "completed", result=GenerationResult(text="lost")
@@ -890,12 +896,12 @@ def test_failed_group_drains_confirmed_siblings_before_poisoning_waiters(
             unknown.result()
 
 
-def test_two_checked_groups_can_finish_after_takeover_but_the_queued_group_cannot(
+def test_checked_window_can_finish_after_takeover_but_queued_records_cannot(
     journal_store, io, gcs_root
 ):
     entered = [threading.Event(), threading.Event()]
     release = threading.Event()
-    old = journal_store()
+    old = journal_store(journal=gcs_root(max_concurrency=2))
     keys = [old.reserve({"synthetic": index}, 0)[0] for index in range(3)]
 
     def gate(kind, name, record):
@@ -915,7 +921,7 @@ def test_two_checked_groups_can_finish_after_takeover_but_the_queued_group_canno
             journal.acknowledge_owner_termination(
                 run_descriptor=RUN,
                 expected_owner=journal.current_owner(run_descriptor=RUN),
-                reason="Synthetic takeover while both checked groups are deliberately held",
+                reason="Synthetic takeover while the checked write window is deliberately held",
                 confirmed_terminated=True,
             )
             with journal_store():
@@ -1264,10 +1270,13 @@ def test_collection_keeps_confirmed_progress_during_an_independent_failure(
         assert len(client.creates) == len(client.uploads) == 1
 
 
-def test_independent_storage_failure_drains_both_groups_and_refuses_the_queue(
-    journal_store, io, monkeypatch
+def test_independent_storage_failure_drains_the_window_and_refuses_the_queue(
+    journal_store, io, monkeypatch, gcs_root
 ):
-    with journal_store() as store, ThreadPoolExecutor(max_workers=4) as callers:
+    with (
+        journal_store(journal=gcs_root(max_concurrency=2)) as store,
+        ThreadPoolExecutor(max_workers=4) as callers,
+    ):
         reservations = [store.reserve({"synthetic": index}, 0) for index in range(3)]
         first_key, first_result, _ = reservations[0]
         second_key, second_result, _ = reservations[1]

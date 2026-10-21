@@ -5,6 +5,7 @@ import hashlib
 import os
 import shutil
 import uuid
+from concurrent.futures import Future
 from pathlib import Path
 
 
@@ -71,17 +72,17 @@ class _FilesystemRun:
     def write(self, name, payload):
         _atomic_write_bytes(self.run_dir / name, payload)
 
-    def write_many(self, records):
-        records = list(records)
-        errors = []
+    def submit_writes(self, records):
         for name, payload in records:
+            future = Future()
             try:
                 self.write(name, payload)
-                errors.append(None)
             except BaseException as exc:
-                errors.extend([exc] * (len(records) - len(errors)))
-                break
-        return errors
+                future.set_exception(exc)
+                yield future
+                return
+            future.set_result(None)
+            yield future
 
     def names(self, prefix):
         for path in (self.run_dir / prefix).rglob("*"):

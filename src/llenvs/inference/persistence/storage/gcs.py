@@ -411,22 +411,15 @@ class _GCSRun:
         ).encode()
         self._objects.write(key, header + b"\n" + payload, expected)
 
-    def write_many(self, records):
+    def submit_writes(self, records):
         with self._gate.shared():
-            # Close and deletion wait for admitted groups. Independent owner
-            # reads and uploads can overlap without holding the metadata mutex.
+            # Native futures outlive admission. Keep maintenance behind every
+            # accepted upload, including when later admission raises.
             self._check_owner()
-            futures = [
-                self._workers.submit(self._write_record, name, data) for name, data in records
-            ]
-            errors = []
-            for future in futures:
-                try:
-                    future.result()
-                    errors.append(None)
-                except BaseException as exc:
-                    errors.append(exc)
-            return errors
+            for name, data in records:
+                future = self._workers.submit(self._write_record, name, data)
+                self._gate.track(future)
+                yield future
 
     def names(self, prefix):
         for blob in self._objects.client.list_blobs(
