@@ -334,7 +334,7 @@ class CallStore:
             raise CheckpointCorruptionError(
                 f"Invalid call store {storage.location}: {exc}"
             ) from exc
-        self._commits = GroupWriter(storage, self._fail)
+        self._commits = GroupWriter(storage, self._fail_waiters)
         self._writer = ThreadPoolExecutor(
             max_workers=self._commits.capacity, thread_name_prefix="llenvs-observer"
         )
@@ -367,7 +367,18 @@ class CallStore:
 
     def _fail(self, error):
         with self._mutex:
-            self._poison = error
+            self._poison = self._poison or error
+        commits = getattr(self, "_commits", None)
+        if commits is None:
+            # Startup validation can fail before the writer exists.
+            self._fail_waiters(error)
+        else:
+            # Do not wait under the metadata lock: admitted completions need it.
+            commits.fail(error)
+
+    def _fail_waiters(self, error):
+        with self._mutex:
+            self._poison = self._poison or error
             for future in self._inflight.values():
                 if not future.done():
                     future.set_exception(CheckpointError("Call store failed to persist progress"))
@@ -439,8 +450,12 @@ class CallStore:
             raise CheckpointError("Call store is closed")
         if self._deleted:
             raise CheckpointError("Call store was deleted")
-        if self._poison is not None:
-            raise CheckpointError("Call store is poisoned by a storage failure") from self._poison
+        error = self._poison
+        commits = getattr(self, "_commits", None)
+        if error is None and commits is not None:
+            error = commits.error
+        if error is not None:
+            raise CheckpointError("Call store is poisoned by a storage failure") from error
 
     def reserve(self, request: dict, repeat_id) -> tuple[str, Future, bool]:
         return self._reserve_prepared(self._prepare_request(request, repeat_id))

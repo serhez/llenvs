@@ -24,6 +24,169 @@ RUN = {"experiment": "storage-contract"}
 MESSAGES = [ChatMessage("user", "synthetic request")]
 
 
+@pytest.fixture
+def native_storage_client():
+    storage = pytest.importorskip("google.cloud.storage")
+    from google.auth.credentials import AnonymousCredentials
+    from requests import Session
+
+    client = storage.Client(
+        project="synthetic-project", credentials=AnonymousCredentials(), _http=Session()
+    )
+    yield client
+    client.close()
+
+
+def test_owned_storage_client_has_a_pool_for_all_record_workers(native_storage_client, monkeypatch):
+    import google.cloud.storage
+
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    monkeypatch.setattr(google.cloud.storage, "Client", lambda: native_storage_client)
+    GCSJournal(bucket="synthetic-bucket", prefix="pooled", max_concurrency=32)
+    for scheme in ("http://", "https://"):
+        adapter = native_storage_client._http.get_adapter(scheme + "storage.example.invalid")
+        assert adapter._pool_maxsize >= 32
+        assert adapter.max_retries.total == 0
+
+
+def test_supplied_storage_client_keeps_its_transport_by_default(native_storage_client):
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    session = native_storage_client._http
+    adapters = dict(session.adapters)
+    GCSJournal(bucket="synthetic-bucket", prefix="pooled", client=native_storage_client)
+    assert native_storage_client._http is session
+    assert dict(session.adapters) == adapters
+
+
+@pytest.mark.parametrize("size", [32, 64])
+def test_explicit_pool_size_preserves_provided_auth_session_and_retry_policy(
+    native_storage_client, size
+):
+    from requests.adapters import HTTPAdapter
+
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    session = native_storage_client._http
+    original = HTTPAdapter(pool_connections=7, pool_maxsize=10, max_retries=3, pool_block=True)
+    session.mount("https://", original)
+    GCSJournal(
+        bucket="synthetic-bucket",
+        prefix="pooled",
+        client=native_storage_client,
+        max_concurrency=32,
+        connection_pool_size=size,
+    )
+    adapter = session.get_adapter("https://storage.example.invalid")
+    assert native_storage_client._http is session
+    assert adapter._pool_maxsize >= size
+    assert adapter.max_retries == original.max_retries
+    assert adapter._pool_connections == 7 and adapter._pool_block is True
+
+
+def test_explicit_pool_size_never_shrinks_a_larger_existing_pool(native_storage_client):
+    from requests.adapters import HTTPAdapter
+
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    original = HTTPAdapter(pool_maxsize=256)
+    native_storage_client._http.mount("https://", original)
+    GCSJournal(
+        bucket="synthetic-bucket",
+        prefix="pooled",
+        client=native_storage_client,
+        max_concurrency=32,
+        connection_pool_size=64,
+    )
+    assert native_storage_client._http.get_adapter("https://storage.example.invalid") is original
+
+
+def test_pool_configuration_refuses_custom_adapters_without_replacing_them(native_storage_client):
+    from requests.adapters import HTTPAdapter
+
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    class CustomTLSAdapter(HTTPAdapter):
+        pass
+
+    session = native_storage_client._http
+    session.mount("https://", CustomTLSAdapter())
+    before = dict(session.adapters)
+    with pytest.raises(ValueError):
+        GCSJournal(
+            bucket="synthetic-bucket",
+            prefix="pooled",
+            client=native_storage_client,
+            max_concurrency=32,
+            connection_pool_size=64,
+        )
+    assert dict(session.adapters) == before
+
+
+def test_pool_configuration_never_bypasses_an_unsupported_transport_wrapper(native_storage_client):
+    from types import SimpleNamespace
+
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    session = native_storage_client._http
+    wrapper = SimpleNamespace(delegate=session, close=session.close)
+    native_storage_client._http_internal = wrapper
+    with pytest.raises(ValueError):
+        GCSJournal(
+            bucket="synthetic-bucket",
+            prefix="pooled",
+            client=native_storage_client,
+            max_concurrency=32,
+            connection_pool_size=64,
+        )
+    assert native_storage_client._http is wrapper
+
+
+@pytest.mark.parametrize("size", [0, -1, True, 1.5, 31])
+def test_explicit_pool_size_is_an_integer_at_least_the_io_limit(native_storage_client, size):
+    from llenvs.inference.persistence.storage.gcs import GCSJournal
+
+    before = dict(native_storage_client._http.adapters)
+    with pytest.raises(ValueError):
+        GCSJournal(
+            bucket="synthetic-bucket",
+            prefix="pooled",
+            client=native_storage_client,
+            max_concurrency=32,
+            connection_pool_size=size,
+        )
+    assert dict(native_storage_client._http.adapters) == before
+
+
+def test_new_call_uses_conditional_creation_without_a_second_metadata_read(
+    gcs_stores, cloud, draw, monkeypatch
+):
+    from tests.inference.persistence.conftest import Blob
+
+    reloads, writes = [], []
+    reload, mutate = Blob.reload, cloud.mutate
+
+    def note_reload(blob, **kwargs):
+        reloads.append(blob.name)
+        return reload(blob, **kwargs)
+
+    def note_write(key, data, expected):
+        if "/calls/" in key[1]:
+            writes.append(expected)
+        return mutate(key, data, expected)
+
+    monkeypatch.setattr(Blob, "reload", note_reload)
+    monkeypatch.setattr(cloud, "mutate", note_write)
+    with gcs_stores() as store:
+        result = PersistentBackend(draw, store).generate_chat(
+            MESSAGES, SamplingParams(), repeat_id=0
+        )
+        assert result.text == "synthetic request" and draw.calls == 1
+    assert writes[0] == 0 and all(value > 0 for value in writes[1:])
+    assert not any("/calls/" in name for name in reloads)
+
+
 def recover(journal, owner, **overrides):
     arguments = {
         "run_descriptor": RUN,

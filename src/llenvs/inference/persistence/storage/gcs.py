@@ -25,9 +25,40 @@ from ..store import (
     _canonical_json,
     _run_identity,
 )
+from ..writer import MaintenanceGate
 
 _ATTEMPTS = 3
 _TIMEOUT = 30
+
+
+def _configure_pool(client, size):
+    from requests import Session
+    from requests.adapters import HTTPAdapter
+
+    session = client._http
+    if not isinstance(session, Session) or any(
+        type(adapter) is not HTTPAdapter for adapter in session.adapters.values()
+    ):
+        raise ValueError("Connection pool tuning requires a Requests session with native adapters")
+    # Validate the entire transport before replacing anything. Keep its auth,
+    # retry policy, proxy handling and blocking behavior intact.
+    replacements = [
+        (
+            prefix,
+            adapter,
+            HTTPAdapter(
+                pool_connections=adapter._pool_connections,
+                pool_maxsize=size,
+                max_retries=adapter.max_retries,
+                pool_block=adapter._pool_block,
+            ),
+        )
+        for prefix, adapter in session.adapters.items()
+        if adapter._pool_maxsize < size
+    ]
+    for prefix, previous, replacement in replacements:
+        session.mount(prefix, replacement)
+        previous.close()
 
 
 def _transient(error):
@@ -194,17 +225,33 @@ class GCSJournal:
     The bucket must already exist. Use a private, trusted prefix without an
     external expiration policy for journal objects.
 
-    ``max_concurrency`` bounds record transfers (default 128). Groups contain at
-    most twice this many updates and check ownership once before their uploads.
-    Callers still wait for durability; changing this bound does not change call
-    identities or the on-disk format.
+    ``max_concurrency`` bounds record transfers (default 128). At most two groups
+    overlap, each containing at most this many updates and checking ownership
+    before its uploads. A single worker keeps writes serial. Callers still wait
+    for durability; these bounds do not change identities or the on-disk format.
+
+    Owned clients get a connection pool at least as large as ``max_concurrency``.
+    A supplied client keeps its transport unless ``connection_pool_size`` requests
+    tuning. Configure it before using the client concurrently; custom adapters
+    and wrapped transports cannot be tuned automatically.
     """
 
     def __init__(
-        self, *, bucket: str, prefix: str, client=None, cache_dir=None, max_concurrency=128
+        self,
+        *,
+        bucket: str,
+        prefix: str,
+        client=None,
+        cache_dir=None,
+        max_concurrency=128,
+        connection_pool_size=None,
     ):
         if type(max_concurrency) is not int or max_concurrency < 1:
             raise ValueError("max_concurrency must be a positive integer")
+        if connection_pool_size is not None and (
+            type(connection_pool_size) is not int or connection_pool_size < max_concurrency
+        ):
+            raise ValueError("connection_pool_size must be an integer at least max_concurrency")
         if not bucket or "/" in bucket:
             raise ValueError("bucket must be a bucket name")
         prefix = prefix.strip("/")
@@ -215,6 +262,9 @@ class GCSJournal:
                 client = import_module("google.cloud.storage").Client()
             except ImportError as exc:
                 raise ImportError("GCS journals require the llenvs[gcs] extra") from exc
+            connection_pool_size = connection_pool_size or max_concurrency
+        if connection_pool_size is not None:
+            _configure_pool(client, connection_pool_size)
         self.bucket, self.prefix = bucket, prefix
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.max_concurrency = max_concurrency
@@ -300,6 +350,7 @@ class _GCSRun:
         self.location = f"gs://{journal.bucket}/{self.prefix}"
         self._objects = journal._objects
         self._mutex = threading.RLock()
+        self._gate = MaintenanceGate()
         self._closed = False
         self.max_concurrency = journal.max_concurrency
         self._workers = ThreadPoolExecutor(
@@ -346,7 +397,7 @@ class _GCSRun:
         self._objects.unpin(self.prefix + name)
 
     def write(self, name, payload):
-        with self._mutex:
+        with self._gate.shared(), self._mutex:
             self._check_owner()
             self._write_record(name, payload)
             if name == "manifest.json" and not self.owner["initialized"]:
@@ -361,7 +412,9 @@ class _GCSRun:
         self._objects.write(key, header + b"\n" + payload, expected)
 
     def write_many(self, records):
-        with self._mutex:
+        with self._gate.shared():
+            # Close and deletion wait for admitted groups. Independent owner
+            # reads and uploads can overlap without holding the metadata mutex.
             self._check_owner()
             futures = [
                 self._workers.submit(self._write_record, name, data) for name, data in records
@@ -402,7 +455,7 @@ class _GCSRun:
     def write_blob(self, name, chunks):
         from llenvs.inference.records import file_digest
 
-        with self._mutex:
+        with self._gate.shared(), self._mutex:
             self._check_owner()
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             digest, size = hashlib.sha256(), 0
@@ -443,7 +496,7 @@ class _GCSRun:
     def blob_path(self, entry, *, verify):
         from llenvs.inference.records import file_digest
 
-        with self._mutex:
+        with self._gate.shared(), self._mutex:
             self._check_owner()
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             destination = self.cache_dir / entry["name"]
@@ -460,7 +513,7 @@ class _GCSRun:
             return destination
 
     def delete(self):
-        with self._mutex:
+        with self._gate.exclusive(), self._mutex:
             self._check_owner()
             for name in self.names(""):
                 key = self.prefix + name
@@ -468,7 +521,7 @@ class _GCSRun:
             self._set_initialized(False)
 
     def close(self):
-        with self._mutex:
+        with self._gate.exclusive(), self._mutex:
             if self._closed:
                 return
             try:

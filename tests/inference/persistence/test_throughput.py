@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -519,7 +521,7 @@ def test_changed_owner_refuses_the_next_group_before_any_new_call(journal_store,
         assert draw.calls == 16 and not io.records
 
 
-def test_owner_taken_during_a_group_prevents_the_waiting_group(journal_store, io, gcs_root):
+def test_single_io_worker_refuses_waiting_groups_after_takeover(journal_store, io, gcs_root):
     from llenvs.inference.persistence.storage.gcs import GCSJournal
 
     entered, release = threading.Event(), threading.Event()
@@ -527,7 +529,7 @@ def test_owner_taken_during_a_group_prevents_the_waiting_group(journal_store, io
         bucket="synthetic-bucket",
         prefix="ownership-groups",
         client=io.cloud.client(),
-        max_concurrency=4,
+        max_concurrency=1,
     )
     old = journal_store(journal=journal)
     keys = []
@@ -547,17 +549,19 @@ def test_owner_taken_during_a_group_prevents_the_waiting_group(journal_store, io
         try:
             assert entered.wait(5)
             waiting = [workers.submit(old.update, key, "started") for key in keys[1:]]
-            owner = journal.current_owner(run_descriptor=RUN)
-            journal.acknowledge_owner_termination(
-                run_descriptor=RUN,
-                expected_owner=owner,
-                confirmed_terminated=True,
-                reason="Synthetic owner change during a deliberately blocked group",
-            )
             replacement = GCSJournal(
                 bucket="synthetic-bucket",
                 prefix="ownership-groups",
                 client=io.cloud.client(),
+            )
+            # Recovery uses an independent client's transport; the old client's
+            # only I/O slot is deliberately occupied by the blocked upload.
+            owner = replacement.current_owner(run_descriptor=RUN)
+            replacement.acknowledge_owner_termination(
+                run_descriptor=RUN,
+                expected_owner=owner,
+                confirmed_terminated=True,
+                reason="Synthetic owner change during a deliberately blocked group",
             )
             with journal_store(journal=replacement):
                 release.set()
@@ -778,3 +782,537 @@ with CallStore.open(root, run_descriptor={}) as store:
         if process.poll() is None:
             process.kill()
             process.communicate(timeout=5)
+
+
+def test_an_independent_group_finishes_while_an_earlier_upload_is_held(journal_store, io):
+    entered, release, advanced = threading.Event(), threading.Event(), threading.Event()
+    with journal_store() as store, ThreadPoolExecutor(max_workers=3) as callers:
+        first, _, _ = store.reserve({"synthetic": "slow"}, 0)
+        second, second_result, _ = store.reserve({"synthetic": "independent"}, 0)
+
+        def hold(kind, name, record):
+            if record and record["key"] == first:
+                if record["state"] == "started":
+                    entered.set()
+                    assert release.wait(5)
+                else:
+                    advanced.set()
+
+        io.before = hold
+        slow = callers.submit(store.update, first, "started")
+        try:
+            assert entered.wait(3)
+            independent = callers.submit(
+                store.update, second, "completed", result=GenerationResult(text="durable")
+            )
+            later = callers.submit(store.update, first, "received", receipt={"text": "later"})
+            independent.result(timeout=2)
+            assert second_result.result(timeout=1).text == "durable"
+            assert not slow.done() and not later.done() and not advanced.is_set()
+        finally:
+            release.set()
+        slow.result(timeout=3)
+        later.result(timeout=3)
+        assert advanced.is_set()
+        assert [r["state"] for r in io.records if r["key"] == first] == ["started", "received"]
+
+
+def test_failed_group_drains_confirmed_siblings_before_poisoning_waiters(
+    journal_store, io, monkeypatch
+):
+    first_entered, second_entered = threading.Event(), threading.Event()
+    release_failure, release_success, failure_reported = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    with journal_store() as store, ThreadPoolExecutor(max_workers=3) as callers:
+        first, _, _ = store.reserve({"synthetic": "failure"}, 0)
+        second, result, _ = store.reserve({"synthetic": "success"}, 0)
+        third, _, _ = store.reserve({"synthetic": "queued"}, 0)
+        store.update(first, "started")
+        store.update(second, "started")
+
+        def gate(kind, name, record):
+            if not record or record["state"] != "completed":
+                return
+            if record["key"] == first:
+                first_entered.set()
+                assert release_failure.wait(5)
+                raise io.cloud.error(503)
+            if record["key"] == second:
+                second_entered.set()
+                assert release_success.wait(5)
+
+        write_many = store._storage.write_many
+
+        def observe(records):
+            errors = write_many(records)
+            if any(error is not None for error in errors):
+                failure_reported.set()
+            return errors
+
+        monkeypatch.setattr(store._storage, "write_many", observe)
+        io.before = gate
+        failed = callers.submit(
+            store.update, first, "completed", result=GenerationResult(text="lost")
+        )
+        try:
+            assert first_entered.wait(3)
+            succeeded = callers.submit(
+                store.update, second, "completed", result=GenerationResult(text="retained")
+            )
+            assert second_entered.wait(2), "The second group never overlapped the first"
+            queued = callers.submit(store.update, third, "started")
+            release_failure.set()
+            assert failure_reported.wait(3)
+            with pytest.raises(TimeoutError):
+                failed.result(timeout=0.05)
+            assert not result.done(), "A successful sibling was poisoned before its write finished"
+            release_success.set()
+            with pytest.raises(CheckpointError):
+                failed.result(timeout=3)
+            succeeded.result(timeout=3)
+            assert result.result(timeout=1).text == "retained"
+            with pytest.raises(CheckpointError):
+                queued.result(timeout=3)
+            assert not any(r["key"] == third for r in io.records)
+        finally:
+            release_failure.set()
+            release_success.set()
+    io.before = None
+    with journal_store() as reopened:
+        _, replay, owner = reopened.reserve({"synthetic": "success"}, 0)
+        assert not owner and replay.result().text == "retained"
+        _, unknown, owner = reopened.reserve({"synthetic": "failure"}, 0)
+        assert not owner
+        with pytest.raises(UnknownOutcomeError):
+            unknown.result()
+
+
+def test_two_checked_groups_can_finish_after_takeover_but_the_queued_group_cannot(
+    journal_store, io, gcs_root
+):
+    entered = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    old = journal_store()
+    keys = [old.reserve({"synthetic": index}, 0)[0] for index in range(3)]
+
+    def gate(kind, name, record):
+        if record and record["key"] in keys[:2]:
+            entered[keys.index(record["key"])].set()
+            assert release.wait(5)
+
+    io.before = gate
+    with ThreadPoolExecutor(max_workers=3) as callers:
+        first = callers.submit(old.update, keys[0], "started")
+        try:
+            assert entered[0].wait(3)
+            second = callers.submit(old.update, keys[1], "started")
+            assert entered[1].wait(2), "The second group did not pass its owner check"
+            queued = callers.submit(old.update, keys[2], "started")
+            journal = gcs_root()
+            journal.acknowledge_owner_termination(
+                run_descriptor=RUN,
+                expected_owner=journal.current_owner(run_descriptor=RUN),
+                reason="Synthetic takeover while both checked groups are deliberately held",
+                confirmed_terminated=True,
+            )
+            with journal_store():
+                release.set()
+                first.result(timeout=3)
+                second.result(timeout=3)
+                with pytest.raises(CheckpointError):
+                    queued.result(timeout=3)
+            assert {record["key"] for record in io.records} == set(keys[:2])
+        finally:
+            release.set()
+
+
+def test_close_drains_both_groups_before_releasing_owner_and_generations(journal_store, io):
+    entered = [threading.Event(), threading.Event()]
+    release = threading.Event()
+    store = journal_store()
+    keys = [store.reserve({"synthetic": index}, 0)[0] for index in range(2)]
+
+    def gate(kind, name, record):
+        if record and record["key"] in keys:
+            entered[keys.index(record["key"])].set()
+            assert release.wait(5)
+
+    io.before = gate
+    with ThreadPoolExecutor(max_workers=3) as callers:
+        first = callers.submit(store.update, keys[0], "started")
+        try:
+            assert entered[0].wait(3)
+            second = callers.submit(store.update, keys[1], "started")
+            assert entered[1].wait(2), "Close must cover actual overlapping groups"
+            closing = callers.submit(store.close)
+            with pytest.raises(TimeoutError):
+                closing.result(timeout=0.05)
+            release.set()
+            first.result(timeout=3)
+            second.result(timeout=3)
+            closing.result(timeout=3)
+            assert not store._storage._objects.pinned
+        finally:
+            release.set()
+
+
+def test_filesystem_writes_remain_serial_with_the_parallel_coordinator(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    with (
+        CallStore.open(tmp_path, run_descriptor=RUN) as store,
+        ThreadPoolExecutor(max_workers=2) as callers,
+    ):
+        keys = [store.reserve({"synthetic": index}, 0)[0] for index in range(2)]
+        write = store._storage.write
+
+        def gate(name, data):
+            if keys[0] in name:
+                entered.set()
+                assert release.wait(5)
+            return write(name, data)
+
+        monkeypatch.setattr(store._storage, "write", gate)
+        first = callers.submit(store.update, keys[0], "started")
+        try:
+            assert entered.wait(3)
+            second = callers.submit(store.update, keys[1], "started")
+            with pytest.raises(TimeoutError):
+                second.result(timeout=0.05)
+        finally:
+            release.set()
+        first.result(timeout=3)
+        second.result(timeout=3)
+
+
+@contextmanager
+def held_call_state(store, monkeypatch, state, *, key=None):
+    """Hold a real call write after its group has been admitted."""
+    entered, release, keys = threading.Event(), threading.Event(), []
+    method = "write" if store.run_dir is not None else "_write_record"
+    write = getattr(store._storage, method)
+
+    def hold(name, payload):
+        if name.startswith("calls/"):
+            record = pickle.loads(pickle.loads(payload)["payload"])
+            if record["state"] == state and (key is None or record["key"] == key):
+                keys.append(record["key"])
+                entered.set()
+                assert release.wait(10), "The test did not release the admitted write"
+        return write(name, payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store._storage, method, hold)
+        try:
+            yield entered, release, keys
+        finally:
+            release.set()
+
+
+def prepare_independent_failure(stores, kind):
+    """Retain valid fixtures, then reopen so a record read is genuinely cold."""
+    if kind not in {"journal", "blob_read", "record_read"}:
+        return {}
+    with stores() as store:
+        if kind == "journal":
+            api = OpenAIBatchBackend(backend(Client()), store)
+            handle = api.submit_chat_batch(
+                [messages("unrelated")], SamplingParams(), repeat_ids=[0]
+            )
+            return {"journal": copy.deepcopy(store._journals[handle.submissions[0]])}
+        if kind == "blob_read":
+            return {"blob": store.write_blob("retainedInput", b"synthetic retained input")}
+        request = {"synthetic": "cold-record"}
+        key, _, _ = store.reserve(request, 0)
+        store.update(key, "completed", result=GenerationResult(text="seed"))
+        return {"request": request, "key": key}
+
+
+def independent_failure(store, kind, fixture, monkeypatch):
+    """Fail the actual store operation at its storage boundary, without paid I/O."""
+    error = OSError("Synthetic independent storage failure")
+    observed = threading.Event()
+
+    def fail(*args, **kwargs):
+        observed.set()
+        raise error
+
+    if kind in {"lifecycle", "journal"}:
+        write = store._storage.write
+        prefix = "lifecycle/" if kind == "lifecycle" else "journals/"
+
+        def write_or_fail(name, payload):
+            return fail() if name.startswith(prefix) else write(name, payload)
+
+        monkeypatch.setattr(store._storage, "write", write_or_fail)
+        operation = (
+            partial(store.lifecycle, {"event": "synthetic independent diagnostic"})
+            if kind == "lifecycle"
+            else partial(store.write_journal, fixture["journal"])
+        )
+    elif kind == "blob_write":
+        monkeypatch.setattr(store._storage, "write_blob", fail)
+        operation = partial(store.write_blob, "independentInput", b"synthetic input")
+    elif kind == "blob_read":
+        monkeypatch.setattr(store._storage, "blob_path", fail)
+        operation = partial(store.blob_path, fixture["blob"])
+    else:
+        assert kind == "record_read"
+        read = store._storage.read
+        name = store._records.path(fixture["key"])
+        monkeypatch.setattr(
+            store._storage, "read", lambda path: fail() if path == name else read(path)
+        )
+        operation = partial(store.reserve, fixture["request"], 0)
+    return operation, error, observed
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize("kind", ["lifecycle", "journal", "blob_write", "blob_read", "record_read"])
+def test_independent_failure_drains_a_confirmed_draw_before_poisoning(
+    stores, monkeypatch, kind, validation
+):
+    fixture = prepare_independent_failure(stores, kind)
+    draw, params = ConcurrentDraw(), SamplingParams(max_tokens=8)
+    with stores() as store, ThreadPoolExecutor(max_workers=3) as callers:
+        wrapper = PersistentBackend(draw, store)
+        with held_call_state(store, monkeypatch, "completed") as (entered, release, keys):
+            completed = callers.submit(wrapper.generate_chat, messages("kept"), params, repeat_id=0)
+            try:
+                assert entered.wait(3) and draw.calls == 1
+                outcome = store._inflight[keys[0]]
+                with monkeypatch.context() as fault:
+                    operation, error, observed = independent_failure(store, kind, fixture, fault)
+                    failing = callers.submit(operation)
+                    assert observed.wait(3)
+                    refused = callers.submit(
+                        wrapper.generate_chat, messages("must not dispatch"), params, repeat_id=1
+                    )
+                    with pytest.raises(CheckpointError):
+                        refused.result(timeout=3)
+                    assert draw.calls == 1
+                    with pytest.raises(TimeoutError):
+                        outcome.result(timeout=0.05)
+                    release.set()
+                    with pytest.raises(CheckpointError) as caught:
+                        failing.result(timeout=3)
+                    assert caught.value.__cause__ is error
+                    answer = completed.result(timeout=3)
+                    assert answer.text == "kept"
+                    assert answer.metadata["persistence"]["source"] == "backend"
+                    assert answer.metadata["persistence"]["previous_attempts"] == 0
+                    assert outcome.result().text == "kept"
+            finally:
+                release.set()
+        with pytest.raises(CheckpointError):
+            wrapper.generate_chat(messages("still poisoned"), params, repeat_id=2)
+    with stores(validation=validation) as reopened:
+        replay = PersistentBackend(draw, reopened).generate_chat(
+            messages("kept"), params, repeat_id=0
+        )
+        assert replay.text == "kept" and draw.calls == 1
+        assert replay.metadata["persistence"] == {
+            **answer.metadata["persistence"],
+            "source": "store",
+        }
+
+
+def test_serialization_failure_does_not_hide_an_admitted_completion(stores, monkeypatch):
+    draw, params = ConcurrentDraw(), SamplingParams(max_tokens=8)
+    with stores() as store, ThreadPoolExecutor(max_workers=3) as callers:
+        bad_key, _, _ = store.reserve({"synthetic": "cannot-pickle"}, 0)
+        wrapper = PersistentBackend(draw, store)
+        with held_call_state(store, monkeypatch, "completed") as (entered, release, keys):
+            completed = callers.submit(wrapper.generate_chat, messages("kept"), params, repeat_id=0)
+            try:
+                assert entered.wait(3)
+                outcome = store._inflight[keys[0]]
+                invalid = GenerationResult(text="invalid", metadata={"lock": threading.Lock()})
+                failing = callers.submit(store.update, bad_key, "completed", result=invalid)
+                try:
+                    failing.result(timeout=0.05)
+                except (TimeoutError, CheckpointError):
+                    pass
+                refused = callers.submit(
+                    wrapper.generate_chat, messages("must not dispatch"), params, repeat_id=1
+                )
+                with pytest.raises(CheckpointError):
+                    refused.result(timeout=3)
+                with pytest.raises(TimeoutError):
+                    outcome.result(timeout=0.05)
+                release.set()
+                with pytest.raises(CheckpointError) as caught:
+                    failing.result(timeout=3)
+                assert isinstance(caught.value.__cause__, TypeError)
+                answer = completed.result(timeout=3)
+                assert answer.text == "kept" and draw.calls == 1
+                assert answer.metadata["persistence"]["source"] == "backend"
+            finally:
+                release.set()
+
+
+def test_independent_failure_blocks_dispatch_from_an_admitted_intent(stores, monkeypatch):
+    draw, params = ConcurrentDraw(), SamplingParams(max_tokens=8)
+    with stores() as store, ThreadPoolExecutor(max_workers=2) as callers:
+        wrapper = PersistentBackend(draw, store)
+        with held_call_state(store, monkeypatch, "started") as (entered, release, keys):
+            started = callers.submit(
+                wrapper.generate_chat, messages("must not run"), params, repeat_id=0
+            )
+            try:
+                assert entered.wait(3) and draw.calls == 0
+                with monkeypatch.context() as fault:
+                    operation, error, observed = independent_failure(store, "lifecycle", {}, fault)
+                    failing = callers.submit(operation)
+                    assert observed.wait(3)
+                    try:
+                        failing.result(timeout=0.05)
+                    except (TimeoutError, CheckpointError):
+                        pass
+                    release.set()
+                    with pytest.raises(CheckpointError):
+                        failing.result(timeout=3)
+                    with pytest.raises(CheckpointError):
+                        started.result(timeout=3)
+                    assert draw.calls == 0
+            finally:
+                release.set()
+    with stores() as reopened:
+        with pytest.raises(UnknownOutcomeError):
+            PersistentBackend(draw, reopened).generate_chat(
+                messages("must not run"), params, repeat_id=0
+            )
+        assert draw.calls == 0
+
+
+@pytest.mark.parametrize("validation", ["full", "lazy"])
+@pytest.mark.parametrize("first_outcome", ["success", "refusal"])
+def test_collection_keeps_confirmed_progress_during_an_independent_failure(
+    stores, monkeypatch, validation, first_outcome
+):
+    client, params = Client(), SamplingParams()
+    with stores() as store, ThreadPoolExecutor(max_workers=3) as callers:
+        api = OpenAIBatchBackend(backend(client), store)
+        handle = api.submit_chat_batch(
+            [messages("first"), messages("second")], params, repeat_ids=[0, 1]
+        )
+        first_entry = completion(handle.keys[0], "first")
+        if first_outcome == "refusal":
+            first_entry["response"]["body"]["choices"][0]["message"].update(
+                content=None, refusal="Synthetic policy refusal"
+            )
+        client.outputs["output"] = b"\n".join(
+            json.dumps(entry).encode()
+            for entry in [first_entry, completion(handle.keys[1], "second")]
+        )
+        state = "completed" if first_outcome == "success" else "failed"
+        second_entered, release_second = threading.Event(), threading.Event()
+        update = store.update
+
+        def hold_second(key, state, **values):
+            if key == handle.keys[1]:
+                second_entered.set()
+                assert release_second.wait(10)
+            return update(key, state, **values)
+
+        monkeypatch.setattr(store, "update", hold_second)
+        with held_call_state(store, monkeypatch, state, key=handle.keys[0]) as (
+            entered,
+            release,
+            _,
+        ):
+            collecting = callers.submit(api.collect, handle)
+            try:
+                assert entered.wait(3)
+                if store._storage.max_concurrency > 1:
+                    assert second_entered.wait(3)
+                with monkeypatch.context() as fault:
+                    operation, error, observed = independent_failure(store, "lifecycle", {}, fault)
+                    failing = callers.submit(operation)
+                    assert observed.wait(3)
+                    try:
+                        failing.result(timeout=0.05)
+                    except (TimeoutError, CheckpointError):
+                        pass
+                    refused = callers.submit(store.reserve, {"synthetic": "new work"}, 0)
+                    with pytest.raises(CheckpointError):
+                        refused.result(timeout=3)
+                    release.set()
+                    release_second.set()
+                    with pytest.raises(CheckpointError) as outside:
+                        failing.result(timeout=3)
+                    assert outside.value.__cause__ is error
+                    with pytest.raises(CheckpointError) as caught:
+                        collecting.result(timeout=3)
+                partial = caught.value.partial_collection
+                assert len(partial.results) == 2 and partial.pending == [handle.keys[1]]
+                first = partial.results[0] if first_outcome == "success" else partial.failures[0]
+                assert first.metadata["persistence"]["source"] == "batch"
+                assert first.metadata["persistence"]["previous_attempts"] == 0
+                assert 1 not in partial.failures
+            finally:
+                release.set()
+                release_second.set()
+    with stores(validation=validation) as reopened:
+        replay = OpenAIBatchBackend(backend(client), reopened).collect(handle)
+        assert not replay.pending and replay.results[1].text == "second"
+        first = replay.results[0] if first_outcome == "success" else replay.failures[0]
+        assert first.metadata["persistence"]["source"] == "store"
+        assert replay.results[1].metadata["persistence"]["source"] == "batch"
+        assert len(client.creates) == len(client.uploads) == 1
+
+
+def test_independent_storage_failure_drains_both_groups_and_refuses_the_queue(
+    journal_store, io, monkeypatch
+):
+    with journal_store() as store, ThreadPoolExecutor(max_workers=4) as callers:
+        reservations = [store.reserve({"synthetic": index}, 0) for index in range(3)]
+        first_key, first_result, _ = reservations[0]
+        second_key, second_result, _ = reservations[1]
+        queued_key = reservations[2][0]
+        with (
+            held_call_state(store, monkeypatch, "completed", key=first_key) as first,
+            held_call_state(store, monkeypatch, "completed", key=second_key) as second,
+        ):
+            first_write = callers.submit(
+                store.update, first_key, "completed", result=GenerationResult(text="first")
+            )
+            try:
+                assert first[0].wait(3)
+                second_write = callers.submit(
+                    store.update, second_key, "completed", result=GenerationResult(text="second")
+                )
+                assert second[0].wait(3)
+                queued_write = callers.submit(store.update, queued_key, "started")
+                io.cloud.fail(
+                    "before", predicate=lambda name: "/lifecycle/" in name, persistent=True
+                )
+                failing = callers.submit(store.lifecycle, {"event": "synthetic failure"})
+                try:
+                    failing.result(timeout=0.05)
+                except (TimeoutError, CheckpointError):
+                    pass
+                with pytest.raises(CheckpointError):
+                    store.reserve({"synthetic": "refused"}, 0)
+                for outcome in (first_result, second_result):
+                    with pytest.raises(TimeoutError):
+                        outcome.result(timeout=0.05)
+                first[1].set()
+                with pytest.raises(TimeoutError):
+                    second_result.result(timeout=0.05)
+                second[1].set()
+                with pytest.raises(CheckpointError):
+                    failing.result(timeout=3)
+                first_write.result(timeout=3)
+                second_write.result(timeout=3)
+                assert first_result.result().text == "first"
+                assert second_result.result().text == "second"
+                with pytest.raises(CheckpointError):
+                    queued_write.result(timeout=3)
+                assert {record["key"] for record in io.records} == {first_key, second_key}
+            finally:
+                first[1].set()
+                second[1].set()
+                io.cloud.fault = None

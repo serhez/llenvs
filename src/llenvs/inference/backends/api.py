@@ -42,6 +42,27 @@ from llenvs.inference.sampling import sampling_metadata, validate_sampling
 OPENROUTER_RESPONSE_PROTOCOL_VERSION = "require-termination-v1"
 
 
+def _configure_openai_timeout(client_args, connect, read):
+    if read is not None and (
+        isinstance(read, bool)
+        or not isinstance(read, (int, float))
+        or not math.isfinite(read)
+        or read <= 0
+    ):
+        raise ValueError("read_timeout must be finite and positive")
+    if connect is None and read is None:
+        return
+    import httpx
+    from openai import DEFAULT_TIMEOUT
+
+    values = DEFAULT_TIMEOUT.as_dict()
+    if connect is not None:
+        values["connect"] = connect
+    if read is not None:
+        values["read"] = read
+    client_args["timeout"] = httpx.Timeout(**values)
+
+
 async def _notify(observer, method, index, value):
     if observer is None:
         return
@@ -792,6 +813,7 @@ class OpenAIBackend(_APIRequests, ModelBackend):
         chat_template_kwargs: dict[str, Any] | None = None,
         rate_limit_wait: float = 0.0,
         rate_limit_max_retries: int = 2,
+        read_timeout: float | None = None,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenAI backend.
@@ -802,8 +824,9 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             base_url: Custom API base URL.
             organization: OpenAI organization ID.
             max_concurrency: Maximum concurrent requests for batch generation.
-            timeout: Connect timeout in seconds.  The overall read timeout
-                stays at the SDK default (600s).  ``None`` uses SDK defaults.
+            timeout: Connect timeout in seconds. ``None`` uses the SDK default.
+            read_timeout: Read timeout in seconds, independently of connection
+                establishment. ``None`` keeps the SDK default (600s).
             max_retries: Maximum SDK-level retries for transient errors
                 (timeouts, connection errors, 5xx).  ``None`` uses SDK
                 defaults unless backend rate-limit retries are enabled.
@@ -859,10 +882,7 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             client_args["base_url"] = base_url
         if organization is not None:
             client_args["organization"] = organization
-        if timeout is not None:
-            import httpx
-
-            client_args["timeout"] = httpx.Timeout(timeout=600.0, connect=timeout)
+        _configure_openai_timeout(client_args, timeout, read_timeout)
         if max_retries is not None:
             client_args["max_retries"] = max_retries
 
@@ -1516,6 +1536,7 @@ class OpenRouterBackend(_APIRequests, ModelBackend):
         timeout: float | None = None,
         max_retries: int | None = None,
         provider: dict[str, Any] | None = None,
+        read_timeout: float | None = None,
         **client_kwargs: Any,
     ) -> None:
         """Initialize OpenRouter backend.
@@ -1538,8 +1559,9 @@ class OpenRouterBackend(_APIRequests, ModelBackend):
                 the SDK's rate-limit handling.
             rate_limit_max_retries: Maximum number of rate-limit retries before
                 giving up and re-raising the error.
-            timeout: Connect timeout in seconds.  The overall read timeout
-                stays at the SDK default (600s).  ``None`` uses SDK defaults.
+            timeout: Connect timeout in seconds. ``None`` uses the SDK default.
+            read_timeout: Read timeout in seconds, independently of connection
+                establishment. ``None`` keeps the SDK default (600s).
             max_retries: Maximum SDK-level retries for transient errors
                 (timeouts, connection errors, 5xx).  ``None`` uses SDK
                 default (2).
@@ -1591,10 +1613,7 @@ class OpenRouterBackend(_APIRequests, ModelBackend):
         }
         if headers:
             client_args["default_headers"] = headers
-        if timeout is not None:
-            import httpx
-
-            client_args["timeout"] = httpx.Timeout(timeout=600.0, connect=timeout)
+        _configure_openai_timeout(client_args, timeout, read_timeout)
         if max_retries is not None:
             client_args["max_retries"] = max_retries
 

@@ -143,6 +143,126 @@ def messages(text):
 PARAMS = SamplingParams(max_tokens=16)
 
 
+@pytest.mark.parametrize("backend_type", [OpenAIBackend, OpenRouterBackend])
+@pytest.mark.parametrize("connect,read", [(None, None), (2.0, None), (None, 0.25), (2.0, 0.25)])
+def test_read_timeout_is_independent_of_connect_and_preserves_sdk_defaults(
+    backend_type, connect, read
+):
+    sdk = pytest.importorskip("openai")
+    kwargs = {}
+    if connect is not None:
+        kwargs["timeout"] = connect
+    if read is not None:
+        kwargs["read_timeout"] = read
+    instance = backend_type(
+        model="fake", api_key="dummy", base_url="http://127.0.0.1:1/v1", max_retries=0, **kwargs
+    )
+    try:
+        for client in (instance._client, instance._async_client):
+            assert client.timeout.read == (sdk.DEFAULT_TIMEOUT.read if read is None else read)
+            assert client.timeout.connect == (
+                sdk.DEFAULT_TIMEOUT.connect if connect is None else connect
+            )
+            assert client.timeout.write == sdk.DEFAULT_TIMEOUT.write
+            assert client.timeout.pool == sdk.DEFAULT_TIMEOUT.pool
+            assert client.max_retries == 0
+    finally:
+        instance.close()
+
+
+@pytest.mark.parametrize("backend_type", [OpenAIBackend, OpenRouterBackend])
+@pytest.mark.parametrize("read", [0, -1, True, "2", float("nan"), float("inf")])
+def test_invalid_read_timeouts_are_rejected_before_constructing_clients(
+    backend_type, read, monkeypatch
+):
+    sdk = pytest.importorskip("openai")
+
+    def forbidden(**kwargs):
+        raise AssertionError("Invalid timeout reached the SDK constructor")
+
+    monkeypatch.setattr(sdk, "OpenAI", forbidden)
+    monkeypatch.setattr(sdk, "AsyncOpenAI", forbidden)
+    with pytest.raises(ValueError):
+        backend_type(model="fake", api_key="dummy", read_timeout=read)
+
+
+def test_read_timeout_does_not_change_model_or_call_identity():
+    first = OpenAIBackend(model="fake", api_key="dummy", read_timeout=1, max_retries=0)
+    second = OpenAIBackend(model="fake", api_key="dummy", read_timeout=3, max_retries=0)
+    try:
+        assert first.descriptor()["identity"] == second.descriptor()["identity"]
+    finally:
+        first.close()
+        second.close()
+
+
+def test_decisions_uses_the_configured_read_timeout():
+    sdk = pytest.importorskip("openai")
+    if not hasattr(sdk.AsyncOpenAI, "decisions"):
+        pytest.skip("Decisions requires the isolated SDK 3 environment")
+    from llenvs.inference.decisions.openai import OpenAIDecisionBackend
+
+    instance = OpenAIDecisionBackend(api_key="dummy", timeout=2, read_timeout=0.25)
+    try:
+        for client in (instance._client, instance._async_client):
+            assert client.timeout.read == 0.25 and client.timeout.connect == 2
+            assert client.max_retries == 0
+    finally:
+        instance.close()
+
+
+def test_real_read_timeout_keeps_a_durable_unknown_without_another_request(tmp_path):
+    from llenvs.inference.persistence import CallStore, PersistentBackend, UnknownOutcomeError
+
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    class StalledResponse(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            entered.set()
+            release.wait(5)
+            self.close_connection = True
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), StalledResponse) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        instance = None
+        try:
+            instance = OpenAIBackend(
+                model="fake",
+                api_key="dummy",
+                base_url=f"http://127.0.0.1:{server.server_port}/v1",
+                timeout=1,
+                read_timeout=0.05,
+                max_retries=0,
+            )
+            with CallStore.open(tmp_path / "calls", run_descriptor={}) as store:
+                wrapped = PersistentBackend(instance, store)
+                with pytest.raises(UnknownOutcomeError) as first:
+                    wrapped.generate_chat(messages("stalled"), PARAMS, repeat_id=0)
+                assert entered.is_set() and len(calls) == 1
+                with pytest.raises(UnknownOutcomeError) as second:
+                    wrapped.generate_chat(messages("stalled"), PARAMS, repeat_id=0)
+                assert second.value.key == first.value.key and len(calls) == 1
+            with CallStore.open(tmp_path / "calls", run_descriptor={}) as reopened:
+                with pytest.raises(UnknownOutcomeError):
+                    PersistentBackend(instance, reopened).generate_chat(
+                        messages("stalled"), PARAMS, repeat_id=0
+                    )
+            assert len(calls) == 1
+        finally:
+            release.set()
+            if instance is not None:
+                instance.close()
+            server.shutdown()
+            worker.join(timeout=3)
+        assert not worker.is_alive()
+
+
 def test_loopback_server_handles_reused_connections_on_one_event_loop(http_server):
     """Positive control: no server failure or SDK retry is needed."""
     sdk = pytest.importorskip("openai")

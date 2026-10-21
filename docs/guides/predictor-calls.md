@@ -185,6 +185,14 @@ loader metadata is not accepted as a digest of the executed code.
 Instance startup/provenance and observed shutdown are separate lifecycle records. A hard kill can leave shutdown
 time unknown; GPU allocation accounting belongs to the caller.
 
+`OpenAIBackend` and `OpenRouterBackend` accept independent connect `timeout` and
+`read_timeout` values, in seconds. `read_timeout` must be finite and positive;
+omitting it keeps the SDK default of 600 seconds. Both synchronous and async
+clients use these settings. `OpenAIDecisionBackend` accepts them through the same
+transport. They do not change model or call identity. A read timeout after
+dispatch leaves an unknown outcome in a persistent store; a shorter timeout does
+not make that draw safe to repeat. Use `max_retries=0` to disable SDK retries.
+
 ## Retaining individual draws
 
 ```python
@@ -251,13 +259,27 @@ changing it does not change run or call identities. Lower it for a smaller I/O
 budget. Discovery, queued updates and the decoded-record cache are bounded;
 active requests and submission payloads require additional memory.
 
-Independent call updates join bounded write groups, with at most twice
-`max_concurrency` records per group and one ownership check before its uploads.
+Clients created by `GCSJournal` have connection pools at least as large as
+`max_concurrency`. Supplied clients keep their transports by default. To enlarge
+the pools of a supplied native Requests session, pass
+`connection_pool_size=256` (or another integer at least `max_concurrency`). This
+preserves its authentication, retry policy and pool blocking settings, and never
+shrinks larger pools. Configure pools before concurrent use of that client.
+Custom adapters and wrapped transports reject explicit automatic tuning; configure
+those transports yourself and omit `connection_pool_size`.
+
+Independent call updates join at most two overlapping write groups, each with at
+most `max_concurrency` records and one ownership check before its uploads. Their
+combined admitted-record bound is twice `max_concurrency`; record transfers still
+obey the shared I/O limit. A single storage worker and filesystem journals keep
+writes serial.
 Each caller waits for its own confirmed durable state. A started intent is
 durable before model dispatch, an answer is durable before it is returned, and
 updates of one key remain ordered. Batch retains its individual call records and
 state transitions; submission and collection write those records concurrently.
 Active calls retain their observed generations to avoid redundant metadata reads.
+The absence read for a new call supplies its generation-zero creation precondition;
+its first write needs no separate metadata read.
 Existing journals use the same object layout and remain readable.
 
 Call records, receipts, Batch journals and exact Batch file bytes are authoritative
@@ -292,14 +314,22 @@ termination; a separate ownership object is not transactional fencing against a
 still-running writer. Give concurrent shards
 distinct stable run descriptors.
 
-The owner check and the group's writes are separate operations. A group already
-checked can finish if ownership changes during its uploads; a subsequent group
-checks again and refuses a different owner. This does not provide fencing for a
-paused worker. Recovery still requires confirmed termination.
+The owner check and the group's writes are separate operations. Up to two already
+checked groups can finish if ownership changes during their uploads; a subsequent
+group checks again and refuses a different owner. This does not provide fencing
+for a paused worker. Recovery still requires confirmed termination.
 
 Writes use generation preconditions and bounded retries. Lost acknowledgements
-are reconciled against the operation's exact bytes; an unresolved storage failure
-poisons the store before further inference dispatch. Generation checks apply to
+are reconciled against the operation's exact bytes. A fatal storage, decoding or
+serialization failure rejects new requests and stops admission of new write
+groups. Already admitted groups drain and publish confirmed outcomes before
+unresolved outcome waiters fail. This also applies when the failure is in a
+separate Batch journal, file transfer or lifecycle operation: a confirmed call
+still returns with its original source. Intent acknowledgements are held during
+the drain, preventing new model dispatch from those writes. The failing operation
+can report its error before other admitted writes finish; close waits for them.
+Batch collection errors retain confirmed progress in `partial_collection`.
+Generation checks apply to
 ownership, call state, journals, artifacts and deletions. Storage retries never
 authorize another model draw. Keep the prefix private and trusted: journal pickles
 are executable Python artifacts, and checksums detect accidental corruption.
