@@ -1132,6 +1132,83 @@ def test_retained_batch_files_stream_and_are_validated_on_reopen(tmp_path):
         CallStore.open(tmp_path, run_descriptor={})
 
 
+@pytest.mark.parametrize("stage", ["retrieve", "stream"])
+def test_a_connection_lost_while_collecting_leaves_the_store_open_for_the_next_collection(
+    tmp_path, stage
+):
+    """A caller may collect again in the same process after a connection drops,
+    whether a Batch was being retrieved or its output was streaming. A broken
+    stream is raised as the SDK's connection error, like a connection lost
+    before the body, and the next collection gets every outcome without
+    creating, uploading or downloading again what the first one retained."""
+    client = Client()
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        api = OpenAIBatchBackend(backend(client), store, max_file_requests=2)
+        handle = api.submit_chat_batch(
+            [[ChatMessage("user", str(index))] for index in range(4)],
+            SamplingParams(),
+            repeat_ids=list(range(4)),
+        )
+        outputs = {
+            identifier: b"\n".join(
+                json.dumps(completion(handle.keys[index], str(index))).encode() for index in indices
+            )
+            for identifier, indices in (("batch-1", [0, 1]), ("batch-2", [2, 3]))
+        }
+        lost = ConnectionResetError("connection reset by peer")
+        retrieved, streamed = [], []
+
+        def retrieve(identifier):
+            retrieved.append(identifier)
+            if stage == "retrieve" and retrieved == ["batch-1", "batch-2"]:
+                raise APIConnectionError(
+                    request=httpx.Request("GET", "https://offline.invalid/batches")
+                )
+            return SimpleNamespace(
+                id=identifier, status="completed", output_file_id=identifier, error_file_id=None
+            )
+
+        class Stream:
+            def __init__(self, identifier):
+                self.identifier = identifier
+                streamed.append(identifier)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+            def iter_bytes(self):
+                payload = outputs[self.identifier]
+                yield payload[:5]
+                if stage == "stream" and streamed == ["batch-1", "batch-2"]:
+                    raise lost
+                yield payload[5:]
+
+        client.batches.retrieve = retrieve
+        client.files.with_streaming_response = SimpleNamespace(content=Stream)
+        client.files.content = lambda id: pytest.fail(
+            "Batch output was buffered instead of streamed"
+        )
+        with pytest.raises(APIConnectionError) as caught:
+            api.collect(handle)
+        if stage == "stream":
+            assert caught.value.__cause__ is lost
+        partial = caught.value.partial_collection
+        assert [result.text if result else None for result in partial.results] == [
+            "0",
+            "1",
+            None,
+            None,
+        ]
+        collection = api.collect(handle)
+        assert [result.text for result in collection.results] == ["0", "1", "2", "3"]
+        assert not collection.pending and not collection.failures
+        assert len(client.creates) == 2 and len(client.uploads) == 2
+        assert retrieved.count("batch-1") == 1 and streamed.count("batch-1") == 1
+
+
 def test_paginated_reconciliation_adopts_only_exact_submission_identity(tmp_path):
     client = Client()
 

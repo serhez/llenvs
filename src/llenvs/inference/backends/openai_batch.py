@@ -57,6 +57,17 @@ class BatchStopped(RuntimeError):  # noqa: N818
         self.partial_collection: BatchCollection | None = None
 
 
+def _streamed(response):
+    """A streamed body's bytes. A stream that breaks off is raised as the SDK
+    raises a connection lost before the body, so callers handle both alike."""
+    from openai import APIConnectionError
+
+    try:
+        yield from response.iter_bytes()
+    except Exception as exc:
+        raise APIConnectionError(request=getattr(response, "http_request", None)) from exc
+
+
 class OpenAIBatchBackend:
     """Submit and collect under the shared store's exclusive process ownership.
 
@@ -582,7 +593,7 @@ class OpenAIBatchBackend:
                     if hasattr(self.client.files, "with_streaming_response"):
                         with self.client.files.with_streaming_response.content(file_id) as response:
                             blob = self.store.write_blob(
-                                identifier + "_" + file_id, response.iter_bytes()
+                                identifier + "_" + file_id, _streamed(response)
                             )
                     else:
                         blob = self.store.write_blob(

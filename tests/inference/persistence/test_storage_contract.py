@@ -400,6 +400,27 @@ def test_exact_streamed_artifacts_survive_a_fresh_open(stores):
         assert reopened.blob_path(entry).read_bytes() == payload
 
 
+def test_a_source_that_fails_partway_is_raised_unchanged_and_leaves_the_store_open(stores):
+    """The source's failure, such as a provider connection lost while a Batch
+    output streams, says nothing about the storage, so it must not poison the
+    store: the same name is written whole afterwards and survives a fresh open."""
+    payload = bytes(range(256)) * 64
+    lost = ConnectionResetError("synthetic provider stream lost")
+
+    def broken():
+        yield payload[:4096]
+        raise lost
+
+    with stores() as store:
+        with pytest.raises(ConnectionResetError) as caught:
+            store.write_blob("synthetic-output", broken())
+        assert caught.value is lost
+        entry = store.write_blob("synthetic-output", iter([payload]))
+        assert entry["size"] == len(payload)
+    with stores() as reopened:
+        assert reopened.blob_path(entry).read_bytes() == payload
+
+
 @pytest.mark.parametrize("outcome", ["success", "refusal", "unfinished"])
 @pytest.mark.parametrize("validation", ["full", "lazy"])
 def test_batch_reopen_preserves_first_collection_and_partial_error_sources(

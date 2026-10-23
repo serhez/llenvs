@@ -676,16 +676,32 @@ class CallStore:
 
     @operation
     def write_blob(self, name, chunks):
-        """Stream exact upload/output bytes into an atomic, checksummed artifact."""
+        """Stream exact upload/output bytes into an atomic, checksummed artifact.
+
+        A failure of ``chunks`` itself, such as a provider stream that breaks
+        off, is raised unchanged and leaves the store open; only a failure to
+        persist the bytes poisons it.
+        """
         if not name or any(
             character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
             for character in name
         ):
             raise ValueError("Invalid blob name")
         self._check()
+        failed = []
+
+        def source():
+            try:
+                yield from [chunks] if isinstance(chunks, bytes) else chunks
+            except Exception as exc:
+                failed.append(exc)
+                raise
+
         try:
-            return self._storage.write_blob(name, chunks)
+            return self._storage.write_blob(name, source())
         except Exception as exc:
+            if failed and exc is failed[0]:
+                raise
             self._fail(exc)
             raise CheckpointError("Cannot persist exact Batch file bytes") from exc
 
