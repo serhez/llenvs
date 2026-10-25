@@ -754,9 +754,16 @@ operation has finished.
 
 Stopping is cooperative, with no absolute shutdown deadline. An upload, download,
 create or storage operation already in progress can finish or raise its original
-error. The event cannot interrupt a blocked synchronous network call; configure
-SDK/storage timeouts and the application's drain allowance accordingly. Closing
-the SDK client can cause an in-flight call to fail, but does not prove that a
+error. The event cannot interrupt a blocked synchronous network call, and closing
+the synchronous SDK client does not end one either: against a server that never
+answered, the request ran until its timeout on Linux and macOS. Configure
+SDK/storage timeouts and the application's drain allowance accordingly.
+`OpenAIBatchBackend(..., poll_timeout=seconds)` bounds each request that
+retrieves or lists batches, which a collection spends most of its time in; polls
+only read, so a stopped collection whose poll stalls raises that poll's timeout
+error within `poll_timeout`. Uploads, creates and downloads keep the client's
+timeout: a create cut short can leave an unknown outcome, and a large download
+can wait long for its first byte. Closing the SDK client does not prove that a
 create request was never sent. Store ownership is released only after admitted
 writes have drained. Qualify the complete shutdown path against the deployment's
 network latency and termination deadline.

@@ -3,6 +3,7 @@
 import inspect
 import json
 import selectors
+import socket
 import subprocess
 import sys
 import threading
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from openai import OpenAI
+from openai import APITimeoutError, OpenAI
 
 from llenvs.inference.backends import openai_batch
 from llenvs.inference.backends.openai_batch import BatchHandle, OpenAIBatchBackend
@@ -332,6 +333,107 @@ def test_stop_wakes_a_waiting_collection_without_another_poll(stores, stop_contr
             assert error.partial_collection.pending == list(handle.keys) and len(polls) == 1
         finally:
             stop.set()
+
+
+@pytest.fixture
+def stalled():
+    """A server that accepts connections and never answers, as a provider whose
+    response stalls; ``accepted`` is set once a request is in flight."""
+    server = socket.create_server(("127.0.0.1", 0))
+    server.settimeout(0.05)
+    accepted, closing, held = threading.Event(), threading.Event(), []
+
+    def accept():
+        while not closing.is_set():
+            try:
+                held.append(server.accept()[0])
+            except TimeoutError:
+                continue
+            accepted.set()
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    yield SimpleNamespace(url=f"http://127.0.0.1:{server.getsockname()[1]}/v1", accepted=accepted)
+    closing.set()
+    thread.join()
+    for connection in held:
+        connection.close()
+    server.close()
+
+
+def test_a_stop_reaches_a_collection_whose_poll_stalls_within_the_poll_timeout(
+    stores, stop_contract, stalled
+):
+    """The event cannot interrupt a blocked request, and closing the SDK client
+    does not end one either, so a stalled poll would hold a stopped collection
+    for the client's whole timeout. The poll's own timeout bounds it."""
+    stop_contract()
+    stop, submitting = threading.Event(), Client()
+    client = OpenAI(api_key="offline", base_url=stalled.url, max_retries=0, timeout=60)
+    # The same endpoint, since requests are keyed by it.
+    submitting.base_url = str(client.base_url)
+    with stores() as store:
+        handle = OpenAIBatchBackend(backend(submitting), store).submit_chat_batch(
+            requests(1), SamplingParams(), repeat_ids=[0]
+        )
+        api = OpenAIBatchBackend(backend(client), store, poll_timeout=0.5)
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            collecting = worker.submit(api.collect, handle, wait=True, stop=stop)
+            assert stalled.accepted.wait(5)
+            started = time.monotonic()
+            stop.set()
+            with pytest.raises(APITimeoutError):
+                collecting.result(timeout=10)
+            assert time.monotonic() - started < 2
+        client.close()
+
+
+def test_only_polls_carry_the_poll_timeout(stores):
+    """Retrieving and listing batches only read, so cutting one short loses
+    nothing. A create cut short can leave an unknown outcome, and a download of
+    a large file can wait long for its first byte, so uploads, creates and
+    downloads keep the client's own timeout."""
+    client, seen = Client(), Counter()
+
+    def timed(label, operation):
+        def invoke(*args, timeout=None, **kwargs):
+            seen[label, timeout] += 1
+            return operation(*args, **kwargs)
+
+        return invoke
+
+    def uncertain(**kwargs):
+        client.creates.append(kwargs)
+        raise TimeoutError("Synthetic lost create acknowledgement")
+
+    client.files.create = timed("upload", client.files.create)
+    client.files.content = timed("download", client.files.content)
+    client.batches.create = timed("create", client.batches.create)
+    client.batches.retrieve = timed("retrieve", client.batches.retrieve)
+    client.batches.list = timed("list", client.batches.list)
+    with stores() as store:
+        api = OpenAIBatchBackend(backend(client), store, poll_timeout=7.5)
+        handle = api.submit_chat_batch(requests(1), SamplingParams(), repeat_ids=[0])
+        client.outputs["output"] = json.dumps(completion(handle.keys[0], "a")).encode()
+        assert [result.text for result in api.collect(handle).results] == ["a"]
+        client.batches.create = timed("create", uncertain)
+        with pytest.raises(UnknownOutcomeError):
+            api.submit_chat_batch(requests(1), SamplingParams(), repeat_ids=[1])
+        unknown = api.submit_chat_batch(requests(1), SamplingParams(), repeat_ids=[1])
+        assert api.collect(unknown).pending == list(unknown.keys)
+    assert {label: timeout for label, timeout in seen} == {
+        "upload": None,
+        "create": None,
+        "retrieve": 7.5,
+        "download": None,
+        "list": 7.5,
+    }
+
+
+@pytest.mark.parametrize("value", [0, -1.0, float("inf"), float("nan"), True, "5"])
+def test_a_poll_timeout_is_a_finite_positive_number(value):
+    with pytest.raises(ValueError, match="poll_timeout"):
+        OpenAIBatchBackend(backend(Client()), None, poll_timeout=value)
 
 
 def test_stop_between_reconciliation_pages_keeps_creation_unknown(stores, stop_contract):

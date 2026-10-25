@@ -1,6 +1,7 @@
 """Retained, reconciled Chat Completions Batch submissions."""
 
 import json
+import math
 import time
 import uuid
 from copy import deepcopy
@@ -73,6 +74,11 @@ class OpenAIBatchBackend:
 
     A failed create is reconciled by exact metadata and input-file identity. No
     listing match remains uncertain; collection never creates a replacement.
+
+    ``poll_timeout`` bounds, in seconds, each request that retrieves or lists
+    batches; ``None`` keeps the client's timeout. Polls only read, so a stopped
+    collection whose poll stalls ends within it. Uploads, creates and downloads
+    keep the client's timeout.
     """
 
     def __init__(
@@ -83,15 +89,24 @@ class OpenAIBatchBackend:
         max_file_requests=50_000,
         max_file_bytes=200_000_000,
         poll_interval=10,
+        poll_timeout=None,
     ):
         if backend._api_flavor != "openai" or backend._client.max_retries != 0:
             raise ValueError("Batch requires native OpenAI and SDK max_retries=0")
+        if poll_timeout is not None and (
+            isinstance(poll_timeout, bool)
+            or not isinstance(poll_timeout, (int, float))
+            or not math.isfinite(poll_timeout)
+            or poll_timeout <= 0
+        ):
+            raise ValueError("poll_timeout must be finite and positive")
         if not 1 <= max_file_requests <= 50_000 or not 1 <= max_file_bytes <= 200_000_000:
             raise ValueError("Batch file limits exceed the provider contract")
         self.backend, self.store = backend, store
         self.client = backend._client
         self.max_file_requests, self.max_file_bytes = max_file_requests, max_file_bytes
         self.poll_interval = poll_interval
+        self._polls = {} if poll_timeout is None else {"timeout": poll_timeout}
 
     def descriptor(self):
         descriptor = self.backend.descriptor()
@@ -416,7 +431,9 @@ class OpenAIBatchBackend:
         after, matches, cursors = None, [], set()
         while True:
             self._stop(stop)
-            page = self.client.batches.list(**({"after": after} if after else {}), limit=100)
+            page = self.client.batches.list(
+                **({"after": after} if after else {}), limit=100, **self._polls
+            )
             for item in page.data:
                 raw = plain(item)
                 metadata = raw.get("metadata") or {}
@@ -575,7 +592,7 @@ class OpenAIBatchBackend:
                 "failed",
             }:
                 self._stop(stop, handle)
-                batch = plain(self.client.batches.retrieve(manifest["batch_id"]))
+                batch = plain(self.client.batches.retrieve(manifest["batch_id"], **self._polls))
             if batch.get("id") != manifest["batch_id"] or any(
                 name in batch and batch[name] != manifest[name]
                 for name in ("endpoint", "input_file_id")
