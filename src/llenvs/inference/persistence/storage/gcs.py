@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import tempfile
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -27,8 +29,32 @@ from ..store import (
 )
 from ..writer import MaintenanceGate
 
-_ATTEMPTS = 3
 _TIMEOUT = 30
+# A passing error is tried again after a random wait up to a bound that starts at
+# one second and doubles up to a minute, until two minutes have passed: Cloud
+# Storage's truncated exponential backoff, with its client libraries' defaults.
+# Requests pass ``retry=None`` so that a lost acknowledgement is reconciled
+# before the next try.
+_FIRST_WAIT, _LONGEST_WAIT, _PATIENCE = 1.0, 60.0, 120.0
+_clock, _sleep = time.monotonic, time.sleep
+
+
+class _Retry:
+    """The waits between the tries of one storage operation."""
+
+    def __init__(self):
+        self.deadline = _clock() + _PATIENCE
+        self.bound = _FIRST_WAIT
+
+    def wait(self):
+        """Wait before the next try and return True, or return False when the
+        wait would end past the operation's patience."""
+        wait = random.uniform(0.0, self.bound)
+        if _clock() + wait > self.deadline:
+            return False
+        _sleep(wait)
+        self.bound = min(2 * self.bound, _LONGEST_WAIT)
+        return True
 
 
 def _configure_pool(client, size):
@@ -118,7 +144,8 @@ class _Objects:
                     self._remember(name, entry[1])
 
     def read(self, name):
-        for attempt in range(_ATTEMPTS):
+        retry = _Retry()
+        while True:
             blob = self.bucket.blob(name)
             try:
                 try:
@@ -133,8 +160,9 @@ class _Objects:
                 self.remember(name, generation)
                 return data, generation
             except Exception as exc:
-                if attempt + 1 == _ATTEMPTS or not (
-                    _transient(exc) or getattr(exc, "code", None) in {404, 412}
+                if (
+                    not (_transient(exc) or getattr(exc, "code", None) in {404, 412})
+                    or not retry.wait()
                 ):
                     raise
 
@@ -142,7 +170,8 @@ class _Objects:
         with self._mutex:
             cached = self.pinned[name][1] if name in self.pinned else self.observed.get(name)
         if cached is None:
-            for attempt in range(_ATTEMPTS):
+            retry = _Retry()
+            while True:
                 blob = self.bucket.blob(name)
                 try:
                     with self._slots:
@@ -154,13 +183,14 @@ class _Objects:
                     if getattr(exc, "code", None) == 404:
                         self.remember(name, 0)
                         return 0
-                    if attempt + 1 == _ATTEMPTS or not _transient(exc):
+                    if not _transient(exc) or not retry.wait():
                         raise
         return cached
 
     def commit(self, name, expected, upload, reconcile):
         """Retry one operation, reconciling its exact committed content first."""
-        for attempt in range(_ATTEMPTS):
+        retry = _Retry()
+        while True:
             blob = self.bucket.blob(name, chunk_size=8 * 1024 * 1024)
             try:
                 with self._slots:
@@ -177,7 +207,7 @@ class _Objects:
                     return generation
                 if generation != expected:
                     raise _GenerationConflictError(f"Another operation changed {name}") from exc
-                if attempt + 1 == _ATTEMPTS:
+                if not retry.wait():
                     raise CheckpointError(f"Cannot confirm durable write: {name}") from exc
 
     def write(self, name, payload, expected):
@@ -195,7 +225,8 @@ class _Objects:
         )
 
     def delete(self, name, expected):
-        for attempt in range(_ATTEMPTS):
+        retry = _Retry()
+        while True:
             try:
                 with self._slots:
                     self.bucket.blob(name).delete(
@@ -212,7 +243,7 @@ class _Objects:
                     return
                 if generation != expected:
                     raise _GenerationConflictError(f"Another operation changed {name}") from exc
-                if attempt + 1 == _ATTEMPTS:
+                if not retry.wait():
                     raise CheckpointError(f"Cannot confirm deletion: {name}") from exc
 
 
@@ -429,7 +460,8 @@ class _GCSRun:
             yield blob.name[len(self.prefix) :]
 
     def _download(self, name, path):
-        for attempt in range(_ATTEMPTS):
+        retry = _Retry()
+        while True:
             blob = self._objects.bucket.blob(name, chunk_size=8 * 1024 * 1024)
             try:
                 with self._objects._slots:
@@ -441,9 +473,10 @@ class _GCSRun:
                     )
                 return generation
             except Exception as exc:
-                if attempt + 1 == _ATTEMPTS or not (
-                    _transient(exc) or getattr(exc, "code", None) in {404, 412}
-                ):
+                # A missing object is the caller's answer and is not waited
+                # on; an object replaced between its metadata and its bytes is
+                # read again.
+                if not (_transient(exc) or getattr(exc, "code", None) == 412) or not retry.wait():
                     raise
 
     def write_blob(self, name, chunks):

@@ -219,6 +219,31 @@ class Blob:
         self.cloud.mutate(self.key, None, if_generation_match)
 
 
+@pytest.fixture(autouse=True)
+def storage_clock(monkeypatch):
+    """The GCS journal's clock, which each wait between tries advances at once,
+    so that a test of a long storage outage takes no real time."""
+    from llenvs.inference.persistence.storage import gcs
+
+    class Clock:
+        def __init__(self):
+            self.now, self.waits, self.lock = 0.0, [], threading.Lock()
+
+        def time(self):
+            with self.lock:
+                return self.now
+
+        def sleep(self, seconds):
+            with self.lock:
+                self.waits.append(seconds)
+                self.now += seconds
+
+    clock = Clock()
+    monkeypatch.setattr(gcs, "_clock", clock.time)
+    monkeypatch.setattr(gcs, "_sleep", clock.sleep)
+    return clock
+
+
 @pytest.fixture
 def cloud():
     return Cloud()

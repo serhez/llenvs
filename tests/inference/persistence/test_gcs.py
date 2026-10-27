@@ -365,6 +365,87 @@ def test_failed_persistence_after_a_draw_keeps_unknown_or_reparseable_state(
         assert draw.calls == 1
 
 
+def outage(cloud, clock, when, seconds):
+    """Fail every storage operation of one kind for ``seconds`` from now."""
+    end = clock.time() + seconds
+    cloud.fail(when, predicate=lambda name: clock.time() < end, persistent=True)
+
+
+def test_a_write_that_succeeds_at_once_never_waits(gcs_stores, draw, storage_clock):
+    with gcs_stores() as store:
+        PersistentBackend(draw, store).generate_chat(MESSAGES, SamplingParams(), repeat_id="a")
+    assert storage_clock.waits == []
+
+
+def test_a_write_waits_out_a_storage_outage_of_a_minute_without_another_draw(
+    gcs_stores, cloud, draw, storage_clock
+):
+    params = SamplingParams(max_tokens=16)
+    with gcs_stores() as store:
+        outage(cloud, storage_clock, "before", 60)
+        result = PersistentBackend(draw, store).generate_chat(MESSAGES, params, repeat_id="a")
+        assert result.text == "synthetic request" and draw.calls == 1
+        assert storage_clock.time() >= 60
+    with gcs_stores() as store:
+        replay = PersistentBackend(draw, store).generate_chat(MESSAGES, params, repeat_id="a")
+        assert replay.metadata["persistence"]["source"] == "store" and draw.calls == 1
+
+
+def test_a_reopened_store_waits_out_a_storage_outage_of_reads(
+    gcs_stores, cloud, draw, storage_clock
+):
+    params = SamplingParams(max_tokens=16)
+    with gcs_stores() as store:
+        PersistentBackend(draw, store).generate_chat(MESSAGES, params, repeat_id="a")
+    outage(cloud, storage_clock, "read", 60)
+    with gcs_stores() as store:
+        replay = PersistentBackend(draw, store).generate_chat(MESSAGES, params, repeat_id="a")
+        assert replay.metadata["persistence"]["source"] == "store" and draw.calls == 1
+    assert storage_clock.time() >= 60
+
+
+def test_batch_files_wait_out_a_storage_outage_on_upload_and_download(
+    gcs_stores, cloud, storage_clock
+):
+    with gcs_stores() as store:
+        outage(cloud, storage_clock, "before", 60)
+        entry = store.write_blob("input-fixture", [b"synthetic batch file"])
+        outage(cloud, storage_clock, "read", 60)
+        assert store.blob_path(entry).read_bytes() == b"synthetic batch file"
+    assert storage_clock.time() >= 120
+
+
+def test_a_missing_object_found_while_reconciling_costs_no_wait(gcs_stores, cloud, storage_clock):
+    with gcs_stores() as store:
+        cloud.fail("before")
+        entry = store.write_blob("input-fixture", [b"synthetic batch file"])
+        assert store.blob_path(entry).read_bytes() == b"synthetic batch file"
+    assert len(storage_clock.waits) == 1
+
+
+def test_a_write_gives_up_on_an_outage_after_one_to_two_minutes_without_a_draw(
+    gcs_stores, cloud, draw, storage_clock
+):
+    wrapper = PersistentBackend(draw, gcs_stores())
+    cloud.fail("before", persistent=True)
+    with pytest.raises(CheckpointError):
+        wrapper.generate_chat(MESSAGES, SamplingParams(), repeat_id="a")
+    assert draw.calls == 0
+    assert 60 < storage_clock.time() <= 120
+
+
+def test_waits_grow_from_at_most_a_second_and_never_exceed_a_minute(
+    gcs_stores, cloud, draw, storage_clock
+):
+    wrapper = PersistentBackend(draw, gcs_stores())
+    cloud.fail("before", persistent=True)
+    with pytest.raises(CheckpointError):
+        wrapper.generate_chat(MESSAGES, SamplingParams(), repeat_id="a")
+    waits = storage_clock.waits
+    assert len(waits) >= 6
+    assert all(0 <= wait <= min(2.0**index, 60.0) for index, wait in enumerate(waits))
+
+
 def test_conflicting_generation_is_not_mistaken_for_our_lost_ack(gcs_stores, cloud, draw):
     store = gcs_stores()
     wrapper = PersistentBackend(draw, store)
