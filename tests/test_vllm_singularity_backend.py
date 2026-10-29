@@ -172,6 +172,34 @@ class TestSingularityVLLMBackendLifecycle:
         finally:
             backend.close()
 
+    def test_read_timeout_reaches_the_inner_client(self, patched):
+        """A reasoning model's answer of tens of thousands of tokens can take
+        longer than the SDK's default read timeout of 600 seconds."""
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m", read_timeout=3600.0)
+        try:
+            assert mod.OpenAIBackend.call_args.kwargs["read_timeout"] == 3600.0
+        finally:
+            backend.close()
+
+    def test_without_read_timeout_the_inner_client_keeps_the_sdk_default(self, patched):
+        mod = patched["module"]
+        backend = mod.SingularityVLLMBackend(model_path="m")
+        try:
+            assert mod.OpenAIBackend.call_args.kwargs.get("read_timeout") is None
+        finally:
+            backend.close()
+
+    @pytest.mark.parametrize("value", [0, -1.0, float("inf"), float("nan")])
+    def test_a_malformed_read_timeout_is_refused_before_the_server_starts(
+        self, patched, value
+    ):
+        """The server takes minutes to start, so the value is checked first."""
+        mod = patched["module"]
+        with pytest.raises(ValueError, match="read_timeout"):
+            mod.SingularityVLLMBackend(model_path="m", read_timeout=value)
+        assert "p" not in patched["proc_holder"]
+
     def test_cuda_visible_devices_passed_via_env(self, patched):
         mod = patched["module"]
 
@@ -1054,4 +1082,40 @@ def test_owned_descriptor_ignores_incidental_ports_and_paths_but_records_effecti
         assert a["identity"]["effective_engine_config"]["enable_prefix_caching"] is False
     finally:
         for backend in (first, second, changed):
+            backend.close()
+
+
+def test_owned_descriptor_does_not_depend_on_the_read_timeout(patched, tmp_path):
+    """How long the client waits changes no answer, so a store opened with one
+    timeout accepts a server started with another."""
+    from pathlib import Path
+
+    mod = patched["module"]
+
+    class Tokenizer(_CharTokenizer):
+        chat_template = "template"
+
+        def get_vocab(self):
+            return {"a": 1}
+
+    def launch(name, read_timeout):
+        backend = mod.SingularityVLLMBackend(
+            model_path="repo/model",
+            server_log_path=str(tmp_path / name),
+            read_timeout=read_timeout,
+        )
+        backend._tokenizer = Tokenizer()
+        Path(backend._log_path).write_text(
+            "Initializing a V1 LLM engine (v0.28.0) with config: "
+            f"model='repo/model', revision={'a' * 40}, tokenizer_revision={'a' * 40}, "
+            "dtype=torch.bfloat16, seed=42, tensor_parallel_size=1, "
+            "enable_prefix_caching=False\n"
+        )
+        return backend
+
+    default, longer = launch("default.log", None), launch("longer.log", 3600.0)
+    try:
+        assert default.descriptor()["identity"] == longer.descriptor()["identity"]
+    finally:
+        for backend in (default, longer):
             backend.close()

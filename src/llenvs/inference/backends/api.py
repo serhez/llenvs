@@ -42,7 +42,7 @@ from llenvs.inference.sampling import sampling_metadata, validate_sampling
 OPENROUTER_RESPONSE_PROTOCOL_VERSION = "require-termination-v1"
 
 
-def _configure_openai_timeout(client_args, connect, read):
+def _check_read_timeout(read):
     if read is not None and (
         isinstance(read, bool)
         or not isinstance(read, (int, float))
@@ -50,6 +50,10 @@ def _configure_openai_timeout(client_args, connect, read):
         or read <= 0
     ):
         raise ValueError("read_timeout must be finite and positive")
+
+
+def _configure_openai_timeout(client_args, connect, read):
+    _check_read_timeout(read)
     if connect is None and read is None:
         return
     import httpx

@@ -38,7 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, cast
 
-from llenvs.inference.backends.api import OpenAIBackend, _run_concurrent
+from llenvs.inference.backends.api import OpenAIBackend, _check_read_timeout, _run_concurrent
 from llenvs.inference.protocol import (
     BackendCapabilities,
     BackendProcessExitedError,
@@ -243,6 +243,7 @@ class SingularityVLLMBackend(ModelBackend):
         launcher: str | None = None,
         revision: str | None = None,
         reasoning_family: str | None = None,
+        read_timeout: float | None = None,
     ) -> None:
         """Spawn ``vllm serve`` in the container and wait until it's healthy.
 
@@ -269,6 +270,10 @@ class SingularityVLLMBackend(ModelBackend):
             health_poll_interval: Seconds between ``/health`` polls.
             max_concurrency: Forwarded to the inner ``OpenAIBackend`` for
                 batched chat calls.
+            read_timeout: Seconds the inner ``OpenAIBackend`` waits for a
+                response, for answers that outlast the SDK's default of 600
+                seconds. ``None`` keeps the default. It changes no answer, so
+                it stays out of the backend's identity.
             extra_vllm_args: Extra CLI flags passed to ``vllm serve``
                 (e.g. ``("--swap-space", "4")``).
             extra_singularity_env: Extra env vars to forward into the
@@ -303,9 +308,12 @@ class SingularityVLLMBackend(ModelBackend):
                 directly instead of via ``SINGULARITYENV_*``.
 
         Raises:
+            ValueError: if ``read_timeout`` is not finite and positive, before
+                the server starts.
             RuntimeError: if the ``.sif`` can't be located, the subprocess
                 dies during startup, or the health check times out.
         """
+        _check_read_timeout(read_timeout)
         self._closed = False
         self._model_path = model_path
         self._reasoning_family = reasoning_family
@@ -536,6 +544,7 @@ class SingularityVLLMBackend(ModelBackend):
             chat_template_kwargs=self._chat_template_kwargs,
             max_retries=0,
             max_concurrency=max_concurrency,
+            read_timeout=read_timeout,
         )
 
         _log.info(

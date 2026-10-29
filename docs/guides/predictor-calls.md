@@ -189,7 +189,10 @@ time unknown; GPU allocation accounting belongs to the caller.
 `read_timeout` values, in seconds. `read_timeout` must be finite and positive;
 omitting it keeps the SDK default of 600 seconds. Both synchronous and async
 clients use these settings. `OpenAIDecisionBackend` accepts them through the same
-transport. They do not change model or call identity. A read timeout after
+transport. `SingularityVLLMBackend` accepts `read_timeout` for the client it
+places in front of its server, for answers that take longer than ten minutes to
+generate; it is checked before the server starts. They do not change model or
+call identity. A read timeout after
 dispatch leaves an unknown outcome in a persistent store; a shorter timeout does
 not make that draw safe to repeat. Use `max_retries=0` to disable SDK retries.
 
