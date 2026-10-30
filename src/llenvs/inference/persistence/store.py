@@ -23,6 +23,7 @@ from itertools import islice
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
+from llenvs.inference.decisions.protocol import DecisionRequest
 from llenvs.inference.protocol import (
     ChatMessage,
     GenerationResult,
@@ -67,7 +68,8 @@ def _normalize(value: Any) -> Any:
             "value": _normalize(value.value),
         }
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        # Absent reasoning must not change the identity of ordinary saved calls.
+        # Absent reasoning, and a decision's absent cache settings, must not
+        # change the identity of ordinary saved calls.
         return {
             "__dataclass__": _qualified_type(value),
             "fields": {
@@ -77,6 +79,11 @@ def _normalize(value: Any) -> Any:
                     isinstance(value, ChatMessage)
                     and field.name in {"reasoning", "reasoning_details"}
                     and not getattr(value, field.name)
+                )
+                and not (
+                    isinstance(value, DecisionRequest)
+                    and field.name in {"cache_mode", "cache_key"}
+                    and getattr(value, field.name) is None
                 )
             },
         }

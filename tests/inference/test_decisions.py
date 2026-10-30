@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -85,6 +86,40 @@ def test_openai_wire_contract_and_usage():
     assert result.probabilities == (0.75, 0.25)
     assert result.prompt_tokens == 10 and result.completion_tokens == 0
     assert backend.capabilities.version_pinned is False
+
+
+def test_openai_sends_the_cache_mode_and_key_when_a_request_sets_them():
+    backend = OpenAIDecisionBackend.__new__(OpenAIDecisionBackend)
+    backend._model = "gpt-6-luna"
+    cached = replace(request(), cache_mode="explicit", cache_key="state")
+    assert backend._request_kwargs(cached) == backend._request_kwargs(request()) | {
+        "prompt_cache_options": {"mode": "explicit"},
+        "prompt_cache_key": "state",
+    }
+
+
+def test_d3_ignores_the_cache_mode_and_key():
+    """d3 has no prompt cache."""
+    backend = D3Backend.__new__(D3Backend)
+    backend._model = "vllm-sr/d3"
+    cached = replace(request(), cache_mode="explicit", cache_key="state")
+    assert backend._request_kwargs(cached) == backend._request_kwargs(request())
+
+
+def test_a_decision_without_cache_fields_keeps_its_stored_identity():
+    """Calls stored before decisions had cache fields are found again; a set
+    field is part of the identity."""
+    from llenvs.inference.persistence.store import _fingerprint, _normalize
+
+    assert set(_normalize(request())["fields"]) == {"context", "question", "options"}
+    for changes in ({"cache_mode": "explicit"}, {"cache_key": "state"}):
+        assert _fingerprint(replace(request(), **changes)) != _fingerprint(request())
+
+
+@pytest.mark.parametrize("changes", [{"cache_mode": "always"}, {"cache_key": " "}])
+def test_an_unknown_cache_mode_or_a_blank_cache_key_is_rejected(changes):
+    with pytest.raises(ValueError, match="cache"):
+        replace(request(), **changes)
 
 
 def test_openai_refusal_is_an_explicit_failure():

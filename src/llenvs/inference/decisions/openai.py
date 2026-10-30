@@ -48,6 +48,11 @@ class OpenAIDecisionBackend(DecisionBackend):
         return descriptor
 
     def _request_kwargs(self, request):
+        cache = {}
+        if request.cache_mode is not None:
+            cache["prompt_cache_options"] = {"mode": request.cache_mode}
+        if request.cache_key is not None:
+            cache["prompt_cache_key"] = request.cache_key
         return {
             "model": self._model,
             "input": deepcopy(request.context),
@@ -69,7 +74,7 @@ class OpenAIDecisionBackend(DecisionBackend):
                     ],
                 }
             ],
-        }
+        } | cache
 
     def reparse_receipt(self, receipt):
         request, response = receipt["request"], receipt["response"]

@@ -17,11 +17,24 @@ class DecisionOption:
 
 @dataclass(frozen=True)
 class DecisionRequest:
+    """A decision to ask. ``cache_mode`` and ``cache_key`` steer a provider's
+    prompt cache: ``"explicit"`` caches only up to the boundaries the context
+    marks, and the key partitions reuse; a backend without a cache ignores
+    both."""
+
     context: str | list | dict
     question: str
     options: tuple[DecisionOption, ...]
+    cache_mode: str | None = None
+    cache_key: str | None = None
 
     def __post_init__(self):
+        if self.cache_mode not in (None, "implicit", "explicit"):
+            raise ValueError(f"Unknown decision cache mode: {self.cache_mode!r}")
+        if self.cache_key is not None and (
+            not isinstance(self.cache_key, str) or not self.cache_key.strip()
+        ):
+            raise ValueError("A decision cache key must be nonempty text")
         labels = [option.value for option in self.options]
         if not 2 <= len(labels) <= 255 or any(
             not isinstance(label, str) or not label.strip() for label in labels
