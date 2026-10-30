@@ -1,5 +1,6 @@
 """Decision responses must contain the complete requested distribution."""
 
+import asyncio
 import math
 from types import SimpleNamespace
 
@@ -98,6 +99,31 @@ def test_openai_refusal_is_an_explicit_failure():
                 },
             }
         )
+
+
+def test_openai_refusal_keeps_the_attempts_it_was_billed_for():
+    """A refused decision is billed for its input, so its error carries the
+    attempts with their usage, as a parsed result's metadata does."""
+    usage = {
+        "input_tokens": 10,
+        "output_tokens": 0,
+        "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 8},
+    }
+
+    async def create(**kwargs):
+        return {
+            "model": "gpt-6-luna",
+            "answers": [{"type": "refusal", "name": "decision", "refusal": "No"}],
+            "usage": usage,
+        }
+
+    backend = OpenAIDecisionBackend.__new__(OpenAIDecisionBackend)
+    backend._model = "gpt-6-luna"
+    backend._async_client = SimpleNamespace(decisions=SimpleNamespace(create=create))
+    with pytest.raises(RefusedByPolicyError) as raised:
+        asyncio.run(backend._decide(0, request(), None))
+    (attempt,) = raised.value.attempts
+    assert attempt["status_code"] == 200 and attempt["usage"] == usage
 
 
 def test_d3_uses_systemone_contract_and_label_mapping():

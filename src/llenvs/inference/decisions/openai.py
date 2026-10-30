@@ -140,6 +140,8 @@ class OpenAIDecisionBackend(DecisionBackend):
             try:
                 result = self.reparse_receipt(receipt)
             except Exception as exc:
+                # A response that cannot be read, a refusal among them, was billed.
+                setattr(exc, "attempts", deepcopy(attempts))
                 await _notify(observer, "failed", index, exc)
                 raise
             await _notify(observer, "completed", index, result)
