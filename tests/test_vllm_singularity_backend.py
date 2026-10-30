@@ -191,9 +191,7 @@ class TestSingularityVLLMBackendLifecycle:
             backend.close()
 
     @pytest.mark.parametrize("value", [0, -1.0, float("inf"), float("nan")])
-    def test_a_malformed_read_timeout_is_refused_before_the_server_starts(
-        self, patched, value
-    ):
+    def test_a_malformed_read_timeout_is_refused_before_the_server_starts(self, patched, value):
         """The server takes minutes to start, so the value is checked first."""
         mod = patched["module"]
         with pytest.raises(ValueError, match="read_timeout"):
@@ -1118,4 +1116,57 @@ def test_owned_descriptor_does_not_depend_on_the_read_timeout(patched, tmp_path)
         assert default.descriptor()["identity"] == longer.descriptor()["identity"]
     finally:
         for backend in (default, longer):
+            backend.close()
+
+
+def test_owned_descriptor_does_not_depend_on_the_number_of_copies_of_the_model(patched, tmp_path):
+    """Data parallelism runs each request on one of several identical copies of
+    the model, so a store opened with one number of copies accepts a server
+    started with another. The flag stays in the launch's provenance, and other
+    extra flags still enter the identity."""
+    from pathlib import Path
+
+    mod = patched["module"]
+
+    class Tokenizer(_CharTokenizer):
+        chat_template = "template"
+
+        def get_vocab(self):
+            return {"a": 1}
+
+    def launch(name, extra):
+        backend = mod.SingularityVLLMBackend(
+            model_path="repo/model",
+            server_log_path=str(tmp_path / name),
+            extra_vllm_args=extra,
+        )
+        backend._tokenizer = Tokenizer()
+        Path(backend._log_path).write_text(
+            "Initializing a V1 LLM engine (v0.28.0) with config: "
+            f"model='repo/model', revision={'a' * 40}, tokenizer_revision={'a' * 40}, "
+            "dtype=torch.bfloat16, seed=42, tensor_parallel_size=1, "
+            "enable_prefix_caching=False\n"
+        )
+        return backend
+
+    one = launch("one.log", ("--max-num-seqs", "256"))
+    copies = [
+        launch("eight.log", ("--max-num-seqs", "256", "--data-parallel-size", "8")),
+        launch("four.log", ("--data-parallel-size=4", "--max-num-seqs", "256")),
+        launch("two.log", ("-dp", "2", "--max-num-seqs", "256")),
+    ]
+    other = launch("other.log", ("--max-num-seqs", "128", "--data-parallel-size", "8"))
+    try:
+        identity = one.descriptor()["identity"]
+        for backend in copies:
+            descriptor = backend.descriptor()
+            assert descriptor["identity"] == identity
+            argv = descriptor["provenance"]["argv"]
+            assert any(
+                arg in {"--data-parallel-size", "-dp"} or arg.startswith("--data-parallel-size=")
+                for arg in argv
+            )
+        assert other.descriptor()["identity"] != identity
+    finally:
+        for backend in (one, *copies, other):
             backend.close()

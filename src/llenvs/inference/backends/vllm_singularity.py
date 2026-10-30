@@ -193,6 +193,24 @@ def _resolve_default(explicit: str | None, env_var: str) -> str | None:
 
 _LAUNCHERS = ("singularity", "native")
 
+# vLLM's flags for the number of identical copies of the model that one server
+# holds. Each request runs on one copy, so the number changes no answer and
+# stays out of the backend's identity.
+_COPIES_FLAGS = ("--data-parallel-size", "-dp")
+
+
+def _without_copies(args) -> list[str]:
+    """The extra flags without those of ``_COPIES_FLAGS`` and their values."""
+    kept, value = [], False
+    for arg in map(str, args):
+        if value:
+            value = False
+        elif arg in _COPIES_FLAGS:
+            value = True
+        elif arg.split("=", 1)[0] not in _COPIES_FLAGS:
+            kept.append(arg)
+    return kept
+
 
 def _resolve_launcher(explicit: str | None) -> str:
     launcher = explicit or os.environ.get("LLENVS_VLLM_LAUNCHER", "") or "singularity"
@@ -275,7 +293,9 @@ class SingularityVLLMBackend(ModelBackend):
                 seconds. ``None`` keeps the default. It changes no answer, so
                 it stays out of the backend's identity.
             extra_vllm_args: Extra CLI flags passed to ``vllm serve``
-                (e.g. ``("--swap-space", "4")``).
+                (e.g. ``("--swap-space", "4")``). They enter the backend's
+                identity, except ``--data-parallel-size``: each request runs
+                on one of the server's identical copies of the model.
             extra_singularity_env: Extra env vars to forward into the
                 container (each gets ``SINGULARITYENV_`` prefix). ``HF_HOME``
                 and ``HF_HUB_OFFLINE`` are handled automatically.
@@ -463,7 +483,7 @@ class SingularityVLLMBackend(ModelBackend):
             "tensor_parallel_size": tensor_parallel_size,
             "max_model_len": max_model_len,
             "gpu_memory_utilization": gpu_memory_utilization,
-            "extra_vllm_args": list(extra_vllm_args),
+            "extra_vllm_args": _without_copies(extra_vllm_args),
             "chat_template_kwargs": self._chat_template_kwargs,
             "reasoning_family": reasoning_family,
         }
