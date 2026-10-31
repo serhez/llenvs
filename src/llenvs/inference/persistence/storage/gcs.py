@@ -88,11 +88,23 @@ def _configure_pool(client, size):
 
 
 def _transient(error):
+    # A connection that breaks while a response's bytes arrive surfaces as
+    # requests' ChunkedEncodingError or urllib3's ProtocolError, not as a
+    # ConnectionError.
+    from requests.exceptions import ChunkedEncodingError, Timeout
     from requests.exceptions import ConnectionError as RequestsConnectionError
-    from requests.exceptions import Timeout
+    from urllib3.exceptions import ProtocolError
 
     return isinstance(
-        error, (ConnectionError, TimeoutError, RequestsConnectionError, Timeout)
+        error,
+        (
+            ConnectionError,
+            TimeoutError,
+            RequestsConnectionError,
+            Timeout,
+            ChunkedEncodingError,
+            ProtocolError,
+        ),
     ) or getattr(error, "code", None) in {
         408,
         429,

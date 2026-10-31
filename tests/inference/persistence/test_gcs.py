@@ -415,6 +415,36 @@ def test_batch_files_wait_out_a_storage_outage_on_upload_and_download(
     assert storage_clock.time() >= 120
 
 
+def broken_transfer():
+    """A connection that closes while a download's bytes arrive, as `requests`
+    reports it through google-cloud-storage."""
+    from requests.exceptions import ChunkedEncodingError
+    from urllib3.exceptions import ProtocolError
+
+    cause = ProtocolError("Connection broken: IncompleteRead(4 bytes read, 16 more expected)")
+    error = ChunkedEncodingError(cause)
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        broken_transfer,
+        lambda: __import__("urllib3").exceptions.ProtocolError("Connection broken"),
+    ],
+    ids=["requests", "urllib3"],
+)
+def test_a_batch_file_download_broken_mid_transfer_is_tried_again(
+    gcs_stores, cloud, storage_clock, error
+):
+    with gcs_stores() as store:
+        entry = store.write_blob("input-fixture", [b"synthetic batch file"])
+        cloud.fail("download", error=error)
+        assert store.blob_path(entry).read_bytes() == b"synthetic batch file"
+    assert len(storage_clock.waits) == 1
+
+
 def test_a_missing_object_found_while_reconciling_costs_no_wait(gcs_stores, cloud, storage_clock):
     with gcs_stores() as store:
         cloud.fail("before")

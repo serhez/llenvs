@@ -40,17 +40,20 @@ class Cloud:
             503: exceptions.ServiceUnavailable,
         }[code]("Synthetic storage failure")
 
-    def fail(self, when, *, predicate=lambda name: True, persistent=False):
-        self.fault = (when, predicate, persistent)
+    def fail(self, when, *, predicate=lambda name: True, persistent=False, error=None):
+        """Fail operations of phase ``when`` with ``error()``, or with HTTP 503
+        when no error is given; the phase "download" fails a blob's bytes after
+        its metadata was read."""
+        self.fault = (when, predicate, persistent, error)
 
     def maybe_fail(self, when, name):
         if self.fault is None:
             return
-        phase, predicate, persistent = self.fault
+        phase, predicate, persistent, error = self.fault
         if phase == when and predicate(name):
             if not persistent:
                 self.fault = None
-            raise self.error(503)
+            raise error() if error is not None else self.error(503)
 
     def read(self, key, generation=None):
         with self.mutex:
@@ -181,6 +184,7 @@ class Blob:
             raise
 
     def download_as_bytes(self, *, if_generation_match=None, **kwargs):
+        self.cloud.maybe_fail("download", self.name)
         result = self.cloud.read(self.key, self.generation)
         if if_generation_match is not None and result.generation != int(if_generation_match):
             raise self.cloud.error(412)

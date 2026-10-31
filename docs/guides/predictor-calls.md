@@ -333,7 +333,8 @@ and refuses a different owner. This does not provide fencing for a paused
 worker. Recovery still requires confirmed termination.
 
 Writes use generation preconditions. A storage request that fails for a passing
-reason (a lost connection, a timeout, or HTTP 408, 429, 500, 502, 503 or 504) is
+reason (a lost connection, a connection broken while a response or a
+download's bytes arrive, a timeout, or HTTP 408, 429, 500, 502, 503 or 504) is
 tried again after a random wait whose bound starts at one second and doubles up
 to a minute, for up to two minutes per operation: Cloud Storage's truncated
 exponential backoff with its client libraries' defaults. A longer outage fails
