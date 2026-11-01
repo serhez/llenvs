@@ -48,8 +48,52 @@ def test_luna_none_permits_decoding_controls():
 
 
 def test_luna_max_is_rejected_before_dispatch():
-    with pytest.raises(ValueError, match="Unsupported Luna reasoning_effort"):
+    with pytest.raises(ValueError, match="Unsupported gpt-6-luna reasoning_effort"):
         request(SamplingParams(reasoning_effort="max", temperature=None, top_p=None))
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", None])
+def test_sol_effort_and_completion_budget(effort):
+    body = request(
+        SamplingParams(reasoning_effort=effort, temperature=None, top_p=None), "gpt-6.1-sol"
+    )
+    assert body["model"] == "gpt-6.1-sol"
+    assert body["max_completion_tokens"] == 2048
+    assert "max_tokens" not in body
+    assert "temperature" not in body and "top_p" not in body
+    if effort is None:
+        assert "reasoning_effort" not in body
+    else:
+        assert body["reasoning_effort"] == effort
+
+
+@pytest.mark.parametrize("effort", ["none", "max"])
+def test_sol_efforts_outside_its_mapping_are_rejected_before_dispatch(effort):
+    """Sol always reasons, so it takes no "none"."""
+    with pytest.raises(ValueError, match="Unsupported gpt-6.1-sol reasoning_effort"):
+        request(
+            SamplingParams(reasoning_effort=effort, temperature=None, top_p=None), "gpt-6.1-sol"
+        )
+
+
+@pytest.mark.parametrize("control", [{"temperature": 0}, {"top_p": 1}, {"logprobs": True}])
+@pytest.mark.parametrize("effort", [None, "low", "high"])
+def test_sol_reasoning_requires_explicit_omission(control, effort):
+    with pytest.raises(ValueError):
+        request(
+            SamplingParams(
+                **({"temperature": None, "top_p": None, "reasoning_effort": effort} | control)
+            ),
+            "gpt-6.1-sol",
+        )
+
+
+@pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6.1-sol"])
+def test_openai_reasoning_models_answer_a_schema_after_reasoning(model):
+    result = backend(model)
+    result._max_concurrency = None
+    assert result.capabilities.supports_response_schema
+    assert result.capabilities.supports_schema_after_reasoning
 
 
 @pytest.mark.parametrize("model,effort", [("gpt-6-luna", "bogus"), ("unknown", "medium")])

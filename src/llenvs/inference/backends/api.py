@@ -40,6 +40,12 @@ from llenvs.inference.sampling import sampling_metadata, validate_sampling
 # Callers that persist normalized OpenRouter responses should include this in
 # checkpoint identity. Bump it when response acceptance semantics change.
 OPENROUTER_RESPONSE_PROTOCOL_VERSION = "require-termination-v1"
+# The reasoning efforts that OpenAI's reasoning models take through Chat Completions.
+# Sol always reasons, so it takes no "none".
+OPENAI_REASONING_EFFORTS = {
+    "gpt-6-luna": frozenset({"none", "low", "medium", "high", "xhigh"}),
+    "gpt-6.1-sol": frozenset({"low", "medium", "high", "xhigh"}),
+}
 
 
 def _check_read_timeout(read):
@@ -908,8 +914,9 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             supports_function_calling=True,
             supports_vision=True,
             supports_response_schema=self._api_flavor == "vllm"
-            or self._model.startswith(("gpt-4o", "gpt-4.1", "gpt-5", "gpt-6-luna")),
-            supports_schema_after_reasoning=self._model == "gpt-6-luna"
+            or self._model.startswith(("gpt-4o", "gpt-4.1", "gpt-5"))
+            or self._model in OPENAI_REASONING_EFFORTS,
+            supports_schema_after_reasoning=self._model in OPENAI_REASONING_EFFORTS
             or (self._api_flavor == "vllm" and self._reasoning_family == "qwen3.8"),
             supports_request_progress=True,
             max_batch_size=None,
@@ -952,25 +959,21 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             raise ValueError(
                 "thinking_budget requires local token generation or controlled insertion"
             )
-        luna = self._api_flavor == "openai" and self._model == "gpt-6-luna"
+        efforts = (
+            OPENAI_REASONING_EFFORTS.get(self._model) if self._api_flavor == "openai" else None
+        )
         if self._api_flavor == "openai":
-            if params.reasoning_effort is not None and not luna:
+            if params.reasoning_effort is not None and efforts is None:
                 raise ValueError("reasoning_effort needs a known model capability mapping")
-            if luna:
-                if params.reasoning_effort not in {
-                    None,
-                    "none",
-                    "low",
-                    "medium",
-                    "high",
-                    "xhigh",
-                }:
-                    raise ValueError("Unsupported Luna reasoning_effort")
+            if efforts is not None:
+                if params.reasoning_effort is not None and params.reasoning_effort not in efforts:
+                    raise ValueError(f"Unsupported {self._model} reasoning_effort")
                 if params.reasoning_effort != "none" and (
                     params.temperature is not None or params.top_p is not None or params.logprobs
                 ):
                     raise ValueError(
-                        "Luna reasoning requires temperature=None, top_p=None and logprobs=False"
+                        f"{self._model} reasoning requires temperature=None, top_p=None"
+                        " and logprobs=False"
                     )
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -983,7 +986,7 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             value = getattr(params, name)
             if value is not None:
                 kwargs[name] = value
-        if luna and "max_tokens" in kwargs:
+        if efforts is not None and "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         if params.reasoning_effort is not None and self._api_flavor == "openai":
             kwargs["reasoning_effort"] = params.reasoning_effort
