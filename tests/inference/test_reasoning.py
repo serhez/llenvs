@@ -88,7 +88,46 @@ def test_sol_reasoning_requires_explicit_omission(control, effort):
         )
 
 
-@pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6.1-sol"])
+@pytest.mark.parametrize("effort", ["none", "low", "medium", "high", "xhigh", "max", None])
+def test_terra_effort_and_completion_budget(effort):
+    body = request(
+        SamplingParams(reasoning_effort=effort, temperature=None, top_p=None), "gpt-6.1-terra"
+    )
+    assert body["model"] == "gpt-6.1-terra"
+    assert body["max_completion_tokens"] == 2048
+    assert "max_tokens" not in body
+    assert "temperature" not in body and "top_p" not in body
+    if effort is None:
+        assert "reasoning_effort" not in body
+    else:
+        assert body["reasoning_effort"] == effort
+
+
+def test_terra_none_permits_decoding_controls():
+    assert request(SamplingParams(reasoning_effort="none"), "gpt-6.1-terra")["temperature"] == 0
+
+
+def test_terra_efforts_outside_its_mapping_are_rejected_before_dispatch():
+    with pytest.raises(ValueError, match="Unsupported gpt-6.1-terra reasoning_effort"):
+        request(
+            SamplingParams(reasoning_effort="minimal", temperature=None, top_p=None),
+            "gpt-6.1-terra",
+        )
+
+
+@pytest.mark.parametrize("control", [{"temperature": 0}, {"top_p": 1}, {"logprobs": True}])
+@pytest.mark.parametrize("effort", [None, "low", "max"])
+def test_terra_reasoning_requires_explicit_omission(control, effort):
+    with pytest.raises(ValueError):
+        request(
+            SamplingParams(
+                **({"temperature": None, "top_p": None, "reasoning_effort": effort} | control)
+            ),
+            "gpt-6.1-terra",
+        )
+
+
+@pytest.mark.parametrize("model", ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"])
 def test_openai_reasoning_models_answer_a_schema_after_reasoning(model):
     result = backend(model)
     result._max_concurrency = None

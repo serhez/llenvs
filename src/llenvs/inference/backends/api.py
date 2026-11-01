@@ -45,6 +45,7 @@ OPENROUTER_RESPONSE_PROTOCOL_VERSION = "require-termination-v1"
 OPENAI_REASONING_EFFORTS = {
     "gpt-6-luna": frozenset({"none", "low", "medium", "high", "xhigh"}),
     "gpt-6.1-sol": frozenset({"low", "medium", "high", "xhigh"}),
+    "gpt-6.1-terra": frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
 }
 
 
