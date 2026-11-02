@@ -118,6 +118,89 @@ the actual second context and supplied spans. These calls are not append-only
 sampled trajectories. Training consumers must use the separate contexts and
 token provenance.
 
+## Continuing a conversation through the Responses API
+
+`OpenAIBackend(api="responses")` sends requests through OpenAI's Responses API
+instead of Chat Completions, the default. It returns a reasoning model's
+encrypted reasoning, which a later turn sends back, so that the model's earlier
+reasoning stays in its context:
+
+```python
+params = SamplingParams(max_tokens=4096, reasoning_effort="low", temperature=None, top_p=None)
+with OpenAIBackend(
+    model="gpt-6-luna", api="responses", reasoning_context="all_turns", max_retries=0
+) as backend:
+    conversation = [ChatMessage("user", "Write the program.")]
+    result = backend.generate_chat(conversation, params)
+    conversation += [
+        ChatMessage(
+            "assistant", result.text, reasoning_details=tuple(result.metadata["reasoning_details"])
+        ),
+        ChatMessage("user", "A new finding: ..."),
+    ]
+    result = backend.generate_chat(conversation, params)
+```
+
+Requests are stateless: `store=False` and `include=["reasoning.encrypted_content"]`,
+so every request sends the whole conversation. `reasoning_context` sets
+`reasoning.context` to `"auto"`, `"current_turn"` or `"all_turns"`; `None` leaves
+it to the model's default, which can change. Both options enter the backend's
+identity, and so every call's key; the Chat Completions identity does not carry
+them.
+
+Efforts and their sampling rules are those of Chat Completions. `max_tokens`
+becomes `max_output_tokens`, covering reasoning and answer, and `response_schema`
+becomes `text.format`. The path sends text messages only: tools, images, stop
+sequences, logprobs, non-neutral penalties and `ChatMessage.reasoning` raise
+before dispatch. So do extras that would make a request stateful or replace its
+input or controls (`store`, `include`, `previous_response_id`, `conversation`,
+`instructions`, `truncation`, `context_management`, `text`, ...). Other extras,
+such as `prompt_cache_key`, pass through.
+
+`metadata["reasoning_details"]` holds every output item, reasoning and message,
+as JSON mappings without null fields; treat them as opaque. An assistant message
+carrying them is sent as exactly those items, and its `content` must be `None` or
+their text. Pass them as a tuple: they survive a JSON round trip, and stored keys
+depend on their exact value. `metadata["reasoning_context"]` holds the mode the
+response reported, or `None`.
+
+`GenerationResult.text` is the text of the output messages, `""` when there is
+none. `finish_reason` is `END_OF_TEXT` for a completed response and `MAX_TOKENS`
+for one cut at `max_output_tokens`, with any partial text. Usage fills the five
+usage fields. HTTP errors, timeouts, rate limits, quota and prompts too long map
+as on Chat Completions. A refusal, an incomplete response for `content_filter`,
+or a failed response with a policy code raises `RefusedByPolicyError`. Any other
+failed response raises `MalformedResponseError`, transient for `server_error`
+(status 500) and `rate_limit_exceeded` (status 429).
+
+### Compaction
+
+`compact_chat` replaces a conversation with a shorter window through the
+Responses API's compaction call; it takes no sampling settings:
+
+```python
+window = backend.compact_chat(conversation)
+result = backend.generate_chat([*window.messages, ChatMessage("user", "...")], params)
+```
+
+It returns a `CompactionResult`: `messages`, the window; the five usage fields;
+and `metadata` with `attempts`, `request`, `raw_usage` and `id`. Each kept text
+message is a plain `ChatMessage(role, text)`, with the role the API returned,
+which can be `"developer"`. Each run of other items, such as the encrypted
+compacted turns, is one assistant message whose `reasoning_details` are those
+items and whose `content` is their text, or `None`. The Responses path sends the
+window back unchanged. `compact_chat_batch` compacts several conversations
+concurrently, in order. An empty window raises `MalformedResponseError`; other
+errors map as for generation.
+
+`PersistentBackend.compact_chat(messages, *, repeat_id=None)` and
+`compact_chat_batch(messages_batch, *, repeat_ids=None)` keep and replay
+compactions as they do answers. The store keys every request by its whole input,
+returned items included, so a continued conversation replays after a restart;
+returned items do not change, so neither do the keys. OpenAI Batch submission
+sends Chat Completions requests only: `OpenAIBatchBackend` refuses a Responses
+backend.
+
 ## Records and usage
 
 Every result has a detached, sanitized `metadata["request"]`, a `requests` list,
@@ -371,8 +454,8 @@ platform restart behavior.
 
 ### Call identity and reuse
 
-Persisted generation, decision and scoring results, and individual call errors,
-carry `metadata["persistence"]`:
+Persisted generation, compaction, decision and scoring results, and individual
+call errors, carry `metadata["persistence"]`:
 
 ```python
 {

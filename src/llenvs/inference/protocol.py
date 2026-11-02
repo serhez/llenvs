@@ -746,6 +746,28 @@ class ChatMessage:
 
 
 @dataclass(frozen=True)
+class CompactionResult:
+    """A conversation's compacted window, sent in place of the conversation.
+
+    Attributes:
+        messages: The window: kept text messages, and each run of compacted items
+            as an assistant message whose ``reasoning_details`` are those opaque
+            items, sent back unchanged.
+        prompt_tokens: Number of input tokens.
+        completion_tokens: Number of generated tokens.
+        metadata: Backend records and optional persistence provenance.
+    """
+
+    messages: tuple[ChatMessage, ...] = ()
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cached_prompt_tokens: int | None = None
+    cache_write_prompt_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class BackendCapabilities:
     """Capabilities supported by a backend.
 

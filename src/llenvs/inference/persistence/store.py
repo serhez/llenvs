@@ -1108,6 +1108,20 @@ class PersistentBackend:
             ),
         )
 
+    def compact_chat(self, messages, *, repeat_id=None):
+        return self.compact_chat_batch([messages], repeat_ids=[repeat_id])[0]
+
+    def compact_chat_batch(self, messages_batch, *, repeat_ids=None):
+        return self._batch(
+            "compaction",
+            messages_batch,
+            {},
+            repeat_ids,
+            lambda batch, observer: self._backend.compact_chat_batch(
+                batch, **({"observer": observer} if observer else {})
+            ),
+        )
+
     def decide_batch(self, requests, *, repeat_ids=None):
         return self._batch(
             "decision",

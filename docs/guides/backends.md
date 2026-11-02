@@ -371,6 +371,11 @@ backend. The caller must choose a backend/provider that accepts them and budget
 space for the retained reasoning as well as the continuation. Retaining a payload
 does not itself enable another reasoning phase or guarantee the provider uses it.
 
+OpenAI's Chat Completions API returns no reasoning to send back. For OpenAI
+models, `OpenAIBackend(api="responses")` returns encrypted reasoning items in
+`metadata["reasoning_details"]` and sends them back the same way; see
+[Persistent predictor calls](predictor-calls.md#continuing-a-conversation-through-the-responses-api).
+
 ## LiteLLM
 
 Routes requests through the [litellm](https://docs.litellm.ai) SDK,

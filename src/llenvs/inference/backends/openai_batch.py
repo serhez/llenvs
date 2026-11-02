@@ -93,6 +93,8 @@ class OpenAIBatchBackend:
     ):
         if backend._api_flavor != "openai" or backend._client.max_retries != 0:
             raise ValueError("Batch requires native OpenAI and SDK max_retries=0")
+        if backend._openai_api != "chat_completions":
+            raise ValueError("Batch sends Chat Completions requests only")
         if poll_timeout is not None and (
             isinstance(poll_timeout, bool)
             or not isinstance(poll_timeout, (int, float))

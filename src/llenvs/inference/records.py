@@ -73,7 +73,9 @@ def credential_free(value: Any) -> Any:
 def plain(value: Any) -> Any:
     """Detach provider data without retaining SDK response objects."""
     if hasattr(value, "model_dump"):
-        dumped = value.model_dump(mode="json")
+        # SDK types can lag the data, e.g. OpenAI's compaction types its kept user
+        # messages as output items; the dump keeps the data and the warning adds nothing.
+        dumped = value.model_dump(mode="json", warnings=False)
         if isinstance(dumped, dict):
             return dumped
     if isinstance(value, Mapping):

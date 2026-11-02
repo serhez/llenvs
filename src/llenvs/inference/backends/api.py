@@ -20,6 +20,7 @@ from llenvs.core.tools import ToolCall, ToolDefinition
 from llenvs.inference.protocol import (
     BackendCapabilities,
     ChatMessage,
+    CompactionResult,
     GenerationResult,
     LogprobsNotReturnedError,
     MalformedResponseError,
@@ -35,7 +36,7 @@ from llenvs.inference.protocol import (
 )
 from llenvs.inference.reasoning import local_chat_messages
 from llenvs.inference.records import dependency_versions, normalize_usage, plain
-from llenvs.inference.sampling import sampling_metadata, validate_sampling
+from llenvs.inference.sampling import sampling_metadata, validate_extra, validate_sampling
 
 # Callers that persist normalized OpenRouter responses should include this in
 # checkpoint identity. Bump it when response acceptance semantics change.
@@ -47,6 +48,26 @@ OPENAI_REASONING_EFFORTS = {
     "gpt-6.1-sol": frozenset({"low", "medium", "high", "xhigh"}),
     "gpt-6.1-terra": frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
 }
+# The modes of the Responses API's ``reasoning.context``: whether a request's
+# reasoning sees the reasoning of earlier turns sent back as items.
+OPENAI_REASONING_CONTEXTS = frozenset({"auto", "current_turn", "all_turns"})
+# Extras that would make a Responses request stateful, change its input, or replace
+# a control the backend sets.
+_RESPONSES_OWNED = (
+    "store",
+    "include",
+    "max_output_tokens",
+    "text",
+    "previous_response_id",
+    "conversation",
+    "background",
+    "context_management",
+    "instructions",
+    "truncation",
+)
+# A failed response's error codes whose failure Chat Completions reports with an
+# HTTP status: a server error, and a rate limit retried like a 429.
+_RESPONSES_ERROR_STATUS = {"server_error": 500, "rate_limit_exceeded": 429}
 
 
 def _check_read_timeout(read):
@@ -357,6 +378,69 @@ def _reasoning_metadata(message: Any) -> dict[str, Any]:
     return metadata
 
 
+def _without_nulls(value: Any) -> Any:
+    """Plain data without null fields, as the SDK's ``exclude_none`` dumps it."""
+    if isinstance(value, dict):
+        return {key: _without_nulls(item) for key, item in value.items() if item is not None}
+    if isinstance(value, list):
+        return [_without_nulls(item) for item in value]
+    return value
+
+
+def _items_text(items: Any) -> str:
+    """The answer text of Responses items, joined as the SDK's ``output_text`` is."""
+    return "".join(
+        part.get("text", "")
+        for item in items
+        if item.get("type") == "message"
+        for part in item.get("content") or ()
+        if isinstance(part, dict) and part.get("type") == "output_text"
+    )
+
+
+def _kept_text(item: dict[str, Any]) -> str | None:
+    """A compacted window's kept text message's text, or ``None`` for an opaque item."""
+    if item.get("type") != "message" or item.get("role") not in {"system", "developer", "user"}:
+        return None
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list) or not all(
+        isinstance(part, dict) and part.get("type") == "input_text" for part in content
+    ):
+        return None
+    return "".join(part.get("text", "") for part in content)
+
+
+def _responses_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
+    """Responses input: text messages as they are, and a turn with items as exactly
+    those items."""
+    entries: list[dict[str, Any]] = []
+    for message in messages:
+        if (
+            message.role not in {"system", "developer", "user", "assistant"}
+            or message.tool_calls
+            or message.tool_call_id is not None
+            or message.name is not None
+            or message.images
+            or message.content_blocks
+            or message.reasoning
+        ):
+            raise ValueError("The Responses path sends text messages and returned items only")
+        if message.reasoning_details:
+            items = [deepcopy(dict(item)) for item in message.reasoning_details]
+            if message.role != "assistant" or (
+                message.content is not None and message.content != _items_text(items)
+            ):
+                raise ValueError("Returned items belong to an assistant message with their text")
+            entries.extend(items)
+        elif message.content is None:
+            raise ValueError("A message needs text or returned items")
+        else:
+            entries.append({"role": message.role, "content": message.content})
+    return entries
+
+
 def _normalize_provider_error(error: BaseException, *, model_name: str) -> BaseException:
     status = _error_status_code(error)
     if status == 429:
@@ -555,14 +639,15 @@ class _APIRequests:
 
     _model: str
     _api_flavor: str
+    _openai_api = "chat_completions"
     _client: Any
     _async_client: Any
     _rate_limit_wait: float
     _rate_limit_max_retries: int
 
     def _parse_response(
-        self, response: Any, params: SamplingParams, metadata: dict[str, Any]
-    ) -> GenerationResult:
+        self, response: Any, params: SamplingParams | None, metadata: dict[str, Any]
+    ) -> GenerationResult | CompactionResult:
         raise NotImplementedError
 
     def descriptor(self):
@@ -588,6 +673,8 @@ class _APIRequests:
         resource = (
             self._client.messages
             if self._api_flavor == "anthropic"
+            else self._client.responses
+            if self._openai_api == "responses"
             else self._client.chat.completions
         )
         return resource.create(**kwargs)
@@ -596,6 +683,8 @@ class _APIRequests:
         resource = (
             self._async_client.messages
             if self._api_flavor == "anthropic"
+            else self._async_client.responses
+            if self._openai_api == "responses"
             else self._async_client.chat.completions
         )
         return await resource.create(**kwargs)
@@ -624,10 +713,22 @@ class _APIRequests:
             raise ValueError("Request body must contain finite JSON values") from exc
         return body
 
-    def _request_metadata(self, kwargs: dict[str, Any], params: SamplingParams) -> dict[str, Any]:
+    def _request_metadata(
+        self, kwargs: dict[str, Any], params: SamplingParams | None
+    ) -> dict[str, Any]:
+        """Record the serialized body; a call without sampling, such as compaction,
+        records only its body."""
         body = self._serialized_body(kwargs)
+        if params is None:
+            from llenvs.inference.sampling import _record_value
+
+            record = _record_value(body)
+            return {"request": record, "requests": [record], "request_capture": "serialized_body"}
         omitted = {
-            "openai": ("top_k", "min_p", "repetition_penalty"),
+            "openai": ("top_k", "min_p", "repetition_penalty")
+            + (
+                ("presence_penalty", "frequency_penalty") if self._openai_api == "responses" else ()
+            ),
             "anthropic": ("min_p", "repetition_penalty", "presence_penalty", "frequency_penalty"),
         }.get(self._api_flavor, ())
         return sampling_metadata(params, body, omitted=omitted, capture="serialized_body")
@@ -705,12 +806,12 @@ class _APIRequests:
     def _completed_request(
         self,
         response: Any,
-        params: SamplingParams,
+        params: SamplingParams | None,
         metadata: dict[str, Any],
         attempts: list[dict[str, Any]],
         started: float,
         call_started: float,
-    ) -> GenerationResult:
+    ) -> GenerationResult | CompactionResult:
         attempts.append(
             {
                 "status_code": 200,
@@ -731,14 +832,15 @@ class _APIRequests:
                 raise
             raise normalized from exc
 
-    def _request(self, kwargs: dict[str, Any], params: SamplingParams) -> GenerationResult:
+    def _request(self, kwargs: dict[str, Any], params: SamplingParams | None, send=None) -> Any:
+        """Send one request, by ``send`` if given, recording every attempt."""
         metadata = self._request_metadata(kwargs, params)
         attempts: list[dict[str, Any]] = []
         call_started = time.monotonic()
         while True:
             started = time.monotonic()
             try:
-                response = self._dispatch(kwargs)
+                response = (send or self._dispatch)(kwargs)
             except Exception as exc:
                 time.sleep(self._failed_attempt(exc, started, attempts, call_started))
             else:
@@ -753,8 +855,14 @@ class _APIRequests:
                     time.sleep(self._failed_attempt(exc, started, attempts, call_started))
 
     async def _request_async(
-        self, kwargs: dict[str, Any], params: SamplingParams, *, observer=None, index=0
-    ) -> GenerationResult:
+        self,
+        kwargs: dict[str, Any],
+        params: SamplingParams | None,
+        *,
+        observer=None,
+        index=0,
+        send=None,
+    ) -> Any:
         metadata = self._request_metadata(kwargs, params)
         attempts: list[dict[str, Any]] = []
         call_started = time.monotonic()
@@ -762,7 +870,7 @@ class _APIRequests:
             await _notify(observer, "started", index, len(attempts))
             started = time.monotonic()
             try:
-                response = await self._dispatch_async(kwargs)
+                response = await (send or self._dispatch_async)(kwargs)
             except Exception as exc:
                 await asyncio.sleep(
                     await self._failed_attempt_async(
@@ -820,6 +928,8 @@ class OpenAIBackend(_APIRequests, ModelBackend):
         timeout: float | None = None,
         max_retries: int | None = None,
         api_flavor: str = "openai",
+        api: str = "chat_completions",
+        reasoning_context: str | None = None,
         reasoning_family: str | None = None,
         chat_template_kwargs: dict[str, Any] | None = None,
         rate_limit_wait: float = 0.0,
@@ -843,6 +953,11 @@ class OpenAIBackend(_APIRequests, ModelBackend):
                 defaults unless backend rate-limit retries are enabled.
                 Use 0 to prevent hidden retries and ambiguous resubmissions.
             api_flavor: Explicit endpoint dialect, "openai" or "vllm".
+            api: OpenAI's API, "chat_completions" or "responses". The Responses
+                path is stateless: it asks for encrypted reasoning and sends an
+                earlier turn back as the items it returned.
+            reasoning_context: The Responses API's ``reasoning.context``, one of
+                ``OPENAI_REASONING_CONTEXTS``; ``None`` leaves it to the model.
             rate_limit_wait: Initial rate-limit retry delay in seconds;
                 0 disables backend retries. Enabling it disables SDK retries.
             rate_limit_max_retries: Maximum number of backend rate-limit retries.
@@ -874,6 +989,19 @@ class OpenAIBackend(_APIRequests, ModelBackend):
                 raise ValueError("backend rate-limit retries require SDK max_retries=0")
             max_retries = 0
         self._api_flavor = api_flavor
+        if api not in {"chat_completions", "responses"}:
+            raise ValueError("api must be 'chat_completions' or 'responses'")
+        if api == "responses" and api_flavor != "openai":
+            raise ValueError("The Responses API is OpenAI's own")
+        if reasoning_context is not None and (
+            api != "responses" or reasoning_context not in OPENAI_REASONING_CONTEXTS
+        ):
+            raise ValueError(
+                f"reasoning_context is one of {sorted(OPENAI_REASONING_CONTEXTS)}"
+                " and needs api='responses'"
+            )
+        self._openai_api = api
+        self._reasoning_context = reasoning_context
         if reasoning_family is not None and api_flavor != "vllm":
             raise ValueError("reasoning_family is a local vLLM template mapping")
         self._reasoning_family = reasoning_family
@@ -904,16 +1032,17 @@ class OpenAIBackend(_APIRequests, ModelBackend):
 
     @property
     def capabilities(self) -> BackendCapabilities:
-        """OpenAI capabilities."""
+        """OpenAI capabilities; the Responses path sends text without tools."""
+        chat = self._openai_api == "chat_completions"
         return BackendCapabilities(
             supports_explicit_sampling=True,
-            supports_logprobs=True,
+            supports_logprobs=chat,
             supports_prefix_continuation=False,
             supports_batching=True,
             supports_streaming=True,
             supports_chat=True,
-            supports_function_calling=True,
-            supports_vision=True,
+            supports_function_calling=chat,
+            supports_vision=chat,
             supports_response_schema=self._api_flavor == "vllm"
             or self._model.startswith(("gpt-4o", "gpt-4.1", "gpt-5"))
             or self._model in OPENAI_REASONING_EFFORTS,
@@ -941,6 +1070,31 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             [[ChatMessage("user", prompt)] for prompt in prompts], params, observer=observer
         )
 
+    def _checked_efforts(self, params: SamplingParams) -> frozenset[str] | None:
+        """Check the controls OpenAI's models share; return the model's efforts."""
+        if params.after_reasoning_text is not None:
+            raise ValueError("after_reasoning_text requires a configured local token boundary")
+        if params.thinking_budget is not None:
+            raise ValueError(
+                "thinking_budget requires local token generation or controlled insertion"
+            )
+        if self._api_flavor != "openai":
+            return None
+        efforts = OPENAI_REASONING_EFFORTS.get(self._model)
+        if params.reasoning_effort is not None and efforts is None:
+            raise ValueError("reasoning_effort needs a known model capability mapping")
+        if efforts is not None:
+            if params.reasoning_effort is not None and params.reasoning_effort not in efforts:
+                raise ValueError(f"Unsupported {self._model} reasoning_effort")
+            if params.reasoning_effort != "none" and (
+                params.temperature is not None or params.top_p is not None or params.logprobs
+            ):
+                raise ValueError(
+                    f"{self._model} reasoning requires temperature=None, top_p=None"
+                    " and logprobs=False"
+                )
+        return efforts
+
     def _request_kwargs(
         self,
         messages: list[ChatMessage],
@@ -948,34 +1102,17 @@ class OpenAIBackend(_APIRequests, ModelBackend):
         tools: list[ToolDefinition] | None = None,
         tool_choice: str = "auto",
     ) -> dict[str, Any]:
+        if self._openai_api == "responses":
+            if tools is not None:
+                raise ValueError("The Responses path sends no tools")
+            return self._responses_kwargs(messages, params)
         unsupported = (
             {"top_k": 0, "min_p": 0.0, "repetition_penalty": 1.0}
             if self._api_flavor == "openai"
             else {}
         )
         validate_sampling(params, unsupported=unsupported)
-        if params.after_reasoning_text is not None:
-            raise ValueError("after_reasoning_text requires a configured local token boundary")
-        if params.thinking_budget is not None:
-            raise ValueError(
-                "thinking_budget requires local token generation or controlled insertion"
-            )
-        efforts = (
-            OPENAI_REASONING_EFFORTS.get(self._model) if self._api_flavor == "openai" else None
-        )
-        if self._api_flavor == "openai":
-            if params.reasoning_effort is not None and efforts is None:
-                raise ValueError("reasoning_effort needs a known model capability mapping")
-            if efforts is not None:
-                if params.reasoning_effort is not None and params.reasoning_effort not in efforts:
-                    raise ValueError(f"Unsupported {self._model} reasoning_effort")
-                if params.reasoning_effort != "none" and (
-                    params.temperature is not None or params.top_p is not None or params.logprobs
-                ):
-                    raise ValueError(
-                        f"{self._model} reasoning requires temperature=None, top_p=None"
-                        " and logprobs=False"
-                    )
+        efforts = self._checked_efforts(params)
         kwargs: dict[str, Any] = {
             "model": self._model,
             "messages": local_chat_messages(messages, getattr(self, "_reasoning_family", None))
@@ -1037,20 +1174,183 @@ class OpenAIBackend(_APIRequests, ModelBackend):
                 body["skip_special_tokens"] = False
         return kwargs
 
-    def reparse_receipt(self, receipt: dict[str, Any], params: SamplingParams) -> GenerationResult:
+    def _responses_kwargs(
+        self, messages: list[ChatMessage], params: SamplingParams
+    ) -> dict[str, Any]:
+        """A stateless Responses request; building is separate from sending."""
+        validate_sampling(
+            params,
+            unsupported={
+                "top_k": 0,
+                "min_p": 0.0,
+                "repetition_penalty": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0,
+            },
+        )
+        validate_extra(params.extra, owned=_RESPONSES_OWNED)
+        if params.stop_sequences or params.logprobs:
+            raise ValueError("The Responses path takes no stop sequences or logprobs")
+        self._checked_efforts(params)
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "input": _responses_input(messages),
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+        }
+        reasoning = {}
+        if params.reasoning_effort is not None:
+            reasoning["effort"] = params.reasoning_effort
+        if self._reasoning_context is not None:
+            reasoning["context"] = self._reasoning_context
+        if reasoning:
+            kwargs["reasoning"] = reasoning
+        if params.max_tokens is not None:
+            kwargs["max_output_tokens"] = params.max_tokens
+        for name in ("temperature", "top_p"):
+            if (value := getattr(params, name)) is not None:
+                kwargs[name] = value
+        if params.response_schema is not None:
+            spec = params.response_schema
+            kwargs["text"] = {
+                "format": {
+                    "type": "json_schema",
+                    "name": spec.name,
+                    "schema": deepcopy(spec.schema),
+                    "strict": spec.strict,
+                }
+            }
+        kwargs.update(deepcopy(params.extra))
+        return kwargs
+
+    def _compaction_kwargs(self, messages: list[ChatMessage]) -> dict[str, Any]:
+        if self._openai_api != "responses":
+            raise ValueError("Compaction needs api='responses'")
+        if not messages:
+            raise ValueError("Compaction needs a conversation")
+        return {"model": self._model, "input": _responses_input(messages)}
+
+    def reparse_receipt(
+        self, receipt: dict[str, Any], params: SamplingParams | None = None
+    ) -> GenerationResult | CompactionResult:
         """Normalize a durable response locally without another provider call."""
+        if self._openai_api == "responses":
+            return self._parse_response(receipt["response"], params, deepcopy(receipt["metadata"]))
         from openai.types.chat import ChatCompletion
 
         return self._parse_response(
             ChatCompletion.construct(**receipt["response"]), params, deepcopy(receipt["metadata"])
         )
 
+    def _responses_result(
+        self, data: dict[str, Any], request_id: str | None, metadata: dict[str, Any]
+    ) -> GenerationResult:
+        status = data.get("status")
+        items = [_without_nulls(item) for item in data.get("output") or ()]
+        reason = (data.get("incomplete_details") or {}).get("reason")
+        if status == "failed":
+            error = data.get("error") or {}
+            code = str(error.get("code") or "")
+            message = f"OpenAI returned a failed response: {code}: {error.get('message')}"
+            if "policy" in code:
+                raise RefusedByPolicyError(message)
+            failure = MalformedResponseError(
+                message, backend_name="OpenAIBackend", model_name=self._model, provider_error=error
+            )
+            failure.status_code = _RESPONSES_ERROR_STATUS.get(code)
+            raise failure
+        refusals = [
+            part.get("refusal")
+            for item in items
+            if item.get("type") == "message"
+            for part in item.get("content") or ()
+            if isinstance(part, dict) and part.get("type") == "refusal"
+        ]
+        if refusals or reason == "content_filter":
+            raise RefusedByPolicyError(" ".join(filter(None, refusals)) or "Content filtered")
+        if status not in {"completed", "incomplete"}:
+            raise MalformedResponseError(
+                f"OpenAI returned a response with status {status!r}",
+                backend_name="OpenAIBackend",
+                model_name=self._model,
+            )
+        return GenerationResult(
+            text=_items_text(items),
+            finish_reason=StopReason.END_OF_TEXT
+            if status == "completed"
+            else StopReason.MAX_TOKENS
+            if reason == "max_output_tokens"
+            else StopReason.UNKNOWN,
+            **normalize_usage(data.get("usage")),
+            metadata={
+                "model": data.get("model"),
+                "id": data.get("id"),
+                "status": status,
+                "incomplete_reason": reason,
+                "raw_usage": data.get("usage"),
+                "service_tier": data.get("service_tier"),
+                "request_id": request_id,
+                "reasoning_details": items,
+                "reasoning_context": (data.get("reasoning") or {}).get("context"),
+                **metadata,
+            },
+        )
+
+    def _compaction_result(
+        self, data: dict[str, Any], request_id: str | None, metadata: dict[str, Any]
+    ) -> CompactionResult:
+        items = [_without_nulls(item) for item in data.get("output") or ()]
+        if not items:
+            raise MalformedResponseError(
+                "OpenAI returned an empty compacted window",
+                backend_name="OpenAIBackend",
+                model_name=self._model,
+            )
+        messages: list[ChatMessage] = []
+        run: list[dict[str, Any]] = []
+        for item in [*items, None]:
+            text = None if item is None else _kept_text(item)
+            if item is not None and text is None:
+                run.append(item)
+                continue
+            if run:
+                spoken = any(entry.get("type") == "message" for entry in run)
+                messages.append(
+                    ChatMessage(
+                        "assistant",
+                        _items_text(run) if spoken else None,
+                        reasoning_details=tuple(run),
+                    )
+                )
+                run = []
+            if item is not None:
+                messages.append(ChatMessage(item["role"], text))
+        return CompactionResult(
+            messages=tuple(messages),
+            **normalize_usage(data.get("usage")),
+            metadata={
+                "id": data.get("id"),
+                "raw_usage": data.get("usage"),
+                "request_id": request_id,
+                **metadata,
+            },
+        )
+
     def _parse_response(
         self,
         response: Any,
-        params: SamplingParams,
+        params: SamplingParams | None,
         metadata: dict[str, Any],
-    ) -> GenerationResult:
+    ) -> GenerationResult | CompactionResult:
+        if self._openai_api == "responses":
+            # Parse plain data, so that a fresh response and its receipt parse alike.
+            data = plain(response)
+            request_id = getattr(response, "_request_id", None)
+            if data.get("object") == "response.compaction":
+                return self._compaction_result(data, request_id, metadata)
+            return self._responses_result(data, request_id, metadata)
+        if params is None:
+            raise ValueError("A Chat Completions response is parsed with its sampling settings")
         if not response.choices:
             raise MalformedResponseError(
                 _format_no_choices_message(getattr(response, "error", None)),
@@ -1166,6 +1466,12 @@ class OpenAIBackend(_APIRequests, ModelBackend):
                 "rate_limit_wait": self._rate_limit_wait,
                 "rate_limit_max_retries": self._rate_limit_max_retries,
                 "sdk_max_retries": self._client.max_retries,
+                # The Chat Completions identity, which keys stored calls, is unchanged.
+                **(
+                    {"api": "responses", "reasoning_context": self._reasoning_context}
+                    if self._openai_api == "responses"
+                    else {}
+                ),
             },
             "provenance": {},
         }
@@ -1228,6 +1534,33 @@ class OpenAIBackend(_APIRequests, ModelBackend):
         ]
         return _run_concurrent(
             lambda item: self._request_async(item[1], params, observer=observer, index=item[0]),
+            list(enumerate(requests)),
+            self._max_concurrency,
+            return_partial=True,
+            runner=self._async_runner,
+        )
+
+    def compact_chat(self, messages: list[ChatMessage]) -> CompactionResult:
+        """Compact a conversation into a window to send in its place, through the
+        Responses API's compaction call."""
+        return self._request(
+            self._compaction_kwargs(messages),
+            None,
+            send=lambda kwargs: self._client.responses.compact(**kwargs),
+        )
+
+    def compact_chat_batch(
+        self, messages_batch: list[list[ChatMessage]], *, observer=None
+    ) -> list[CompactionResult]:
+        requests = [self._compaction_kwargs(messages) for messages in messages_batch]
+        return _run_concurrent(
+            lambda item: self._request_async(
+                item[1],
+                None,
+                observer=observer,
+                index=item[0],
+                send=lambda kwargs: self._async_client.responses.compact(**kwargs),
+            ),
             list(enumerate(requests)),
             self._max_concurrency,
             return_partial=True,
