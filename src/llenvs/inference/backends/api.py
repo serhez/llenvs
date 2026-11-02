@@ -378,19 +378,10 @@ def _reasoning_metadata(message: Any) -> dict[str, Any]:
     return metadata
 
 
-def _without_nulls(value: Any) -> Any:
-    """Plain data without null fields, as the SDK's ``exclude_none`` dumps it."""
-    if isinstance(value, dict):
-        return {key: _without_nulls(item) for key, item in value.items() if item is not None}
-    if isinstance(value, list):
-        return [_without_nulls(item) for item in value]
-    return value
-
-
 def _items_text(items: Any) -> str:
     """The answer text of Responses items, joined as the SDK's ``output_text`` is."""
     return "".join(
-        part.get("text", "")
+        part.get("text") or ""
         for item in items
         if item.get("type") == "message"
         for part in item.get("content") or ()
@@ -409,7 +400,7 @@ def _kept_text(item: dict[str, Any]) -> str | None:
         isinstance(part, dict) and part.get("type") == "input_text" for part in content
     ):
         return None
-    return "".join(part.get("text", "") for part in content)
+    return "".join(part.get("text") or "" for part in content)
 
 
 def _responses_input(messages: list[ChatMessage]) -> list[dict[str, Any]]:
@@ -689,6 +680,10 @@ class _APIRequests:
         )
         return await resource.create(**kwargs)
 
+    def _response_data(self, response: Any) -> Any:
+        """A response as the plain data its receipt keeps."""
+        return plain(response)
+
     @staticmethod
     def _serialized_body(kwargs: dict[str, Any]) -> dict[str, Any]:
         body = {
@@ -879,7 +874,7 @@ class _APIRequests:
                 )
             else:
                 receipt = {
-                    "response": plain(response),
+                    "response": self._response_data(response),
                     "metadata": {
                         **metadata,
                         "attempts": [
@@ -1174,6 +1169,13 @@ class OpenAIBackend(_APIRequests, ModelBackend):
                 body["skip_special_tokens"] = False
         return kwargs
 
+    def _response_data(self, response: Any) -> Any:
+        # Responses items go back as the SDK sends ``response.output``: the fields the
+        # API returned, its nulls included, without the nulls the SDK's models add.
+        if self._openai_api == "responses" and hasattr(response, "model_dump"):
+            return response.model_dump(mode="json", exclude_unset=True, warnings=False)
+        return super()._response_data(response)
+
     def _responses_kwargs(
         self, messages: list[ChatMessage], params: SamplingParams
     ) -> dict[str, Any]:
@@ -1246,7 +1248,7 @@ class OpenAIBackend(_APIRequests, ModelBackend):
         self, data: dict[str, Any], request_id: str | None, metadata: dict[str, Any]
     ) -> GenerationResult:
         status = data.get("status")
-        items = [_without_nulls(item) for item in data.get("output") or ()]
+        items = list(data.get("output") or ())
         reason = (data.get("incomplete_details") or {}).get("reason")
         if status == "failed":
             error = data.get("error") or {}
@@ -1299,7 +1301,7 @@ class OpenAIBackend(_APIRequests, ModelBackend):
     def _compaction_result(
         self, data: dict[str, Any], request_id: str | None, metadata: dict[str, Any]
     ) -> CompactionResult:
-        items = [_without_nulls(item) for item in data.get("output") or ()]
+        items = list(data.get("output") or ())
         if not items:
             raise MalformedResponseError(
                 "OpenAI returned an empty compacted window",
@@ -1344,7 +1346,7 @@ class OpenAIBackend(_APIRequests, ModelBackend):
     ) -> GenerationResult | CompactionResult:
         if self._openai_api == "responses":
             # Parse plain data, so that a fresh response and its receipt parse alike.
-            data = plain(response)
+            data = self._response_data(response)
             request_id = getattr(response, "_request_id", None)
             if data.get("object") == "response.compaction":
                 return self._compaction_result(data, request_id, metadata)

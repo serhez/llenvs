@@ -41,12 +41,12 @@ USAGE = {
 
 
 def _reasoning_item(n=1):
-    # As the probe received it: an explicit null status and no summary.
+    # As the API can return it: an explicit null status, and no content field, which
+    # the SDK's model defaults to null.
     return {
         "id": f"rs_{n}",
         "type": "reasoning",
         "summary": [],
-        "content": [],
         "encrypted_content": f"gAAAA-encrypted-{n}",
         "status": None,
     }
@@ -59,15 +59,10 @@ def _message_item(text, n=1):
         "role": "assistant",
         "status": "completed",
         "phase": "final_answer",
-        # A field this SDK may not know must survive the round trip too.
-        "future_field": {"kept": True},
+        # A field this SDK does not know, with a null inside, must survive too.
+        "future_field": {"kept": True, "nullable": None},
         "content": [{"type": "output_text", "text": text, "annotations": [], "logprobs": []}],
     }
-
-
-def _without_nulls(item):
-    """An item as it is sent back: the probe's replay left out null fields."""
-    return {key: value for key, value in item.items() if value is not None}
 
 
 def _response(body, *, output=None, status="completed", incomplete=None, error=None):
@@ -486,7 +481,7 @@ def test_an_earlier_turn_is_sent_back_as_exactly_its_items(transport, operation)
     assert transport.requests[1]["input"] == [
         {"role": "system", "content": SYSTEM.content},
         {"role": "user", "content": FIRST.content},
-        *[_without_nulls(item) for item in served],
+        *served,
         {"role": "user", "content": SECOND.content},
     ]
 
@@ -522,7 +517,7 @@ def test_an_assistant_message_without_items_is_sent_as_its_text(transport):
         ChatMessage(
             "assistant",
             "another answer",
-            reasoning_details=(_reasoning_item(), _without_nulls(_message_item("answer"))),
+            reasoning_details=(_reasoning_item(), _message_item("answer")),
         ),
         ChatMessage(
             "assistant",
@@ -574,7 +569,7 @@ def test_results_carry_the_text_usage_items_and_reported_context(transport, oper
         result.completion_tokens,
         result.reasoning_tokens,
     ) == (3348, 1024, 2300, 49, 42)
-    assert result.metadata["reasoning_details"] == [_without_nulls(item) for item in served]
+    assert result.metadata["reasoning_details"] == served
     assert (
         json.loads(json.dumps(result.metadata["reasoning_details"]))
         == (result.metadata["reasoning_details"])
@@ -635,7 +630,7 @@ def test_an_answer_cut_at_its_token_limit_is_truncated(transport, operation, out
 
     assert result.finish_reason == StopReason.MAX_TOKENS
     assert result.text == text
-    assert result.metadata["reasoning_details"] == [_without_nulls(item) for item in output]
+    assert result.metadata["reasoning_details"] == output
 
 
 def _refusal_item():
@@ -807,7 +802,8 @@ def test_compaction_sends_the_conversation_to_the_compaction_endpoint(transport)
         "input": [
             {"role": "system", "content": SYSTEM.content},
             {"role": "user", "content": FIRST.content},
-            *[_without_nulls(item) for item in (_reasoning_item(), _message_item("answer"))],
+            _reasoning_item(),
+            _message_item("answer"),
             {"role": "user", "content": SECOND.content},
         ],
     }
@@ -829,7 +825,12 @@ def test_compaction_keeps_messages_and_returns_compacted_turns_as_opaque_items(t
             "assistant",
             None,
             reasoning_details=(
-                {"id": "cmp_1", "type": "compaction", "encrypted_content": "gAAAA-compacted"},
+                {
+                    "id": "cmp_1",
+                    "type": "compaction",
+                    "encrypted_content": "gAAAA-compacted",
+                    "created_by": None,
+                },
             ),
         ),
     )
@@ -892,8 +893,8 @@ def test_a_compacted_window_is_sent_back_unchanged(transport):
         served[2],
         {"role": "user", "content": "Task two."},
         served[4],
-        _without_nulls(served[5]),
-        _without_nulls(served[6]),
+        served[5],
+        served[6],
         {"role": "user", "content": SECOND.content},
     ]
 
@@ -905,6 +906,27 @@ def test_compaction_batch_keeps_the_order_of_its_conversations(transport):
     windows = backend.compact_chat_batch([[SYSTEM, FIRST], [SYSTEM, other]])
 
     assert [w.messages[1].content for w in windows] == [FIRST.content, other.content]
+
+
+def test_a_compaction_batch_keeps_its_windows_when_one_fails(transport):
+    backend = transport.responses()
+    other = ChatMessage("user", "Another state's program.")
+
+    def reply(body):
+        failing = any(entry.get("content") == other.content for entry in body["input"])
+        return _compaction(body, output=[] if failing else None)
+
+    transport.replies[:] = [(200, reply)] * 3
+
+    with pytest.raises(PartialBatchError) as caught:
+        backend.compact_chat_batch([[SYSTEM, FIRST], [SYSTEM, other], [SYSTEM, SECOND]])
+
+    assert list(caught.value.failures) == [1]
+    assert isinstance(caught.value.failures[1], MalformedResponseError)
+    assert [caught.value.results[i].messages[1].content for i in (0, 2)] == [
+        FIRST.content,
+        SECOND.content,
+    ]
 
 
 def test_an_empty_compaction_is_malformed(transport):
@@ -979,14 +1001,12 @@ def test_other_replayed_items_make_another_call(transport, tmp_path):
     from llenvs.inference import PersistentBackend
 
     backend = transport.responses()
-    other = dict(_without_nulls(_reasoning_item()), encrypted_content="gAAAA-other")
+    other = dict(_reasoning_item(), encrypted_content="gAAAA-other")
     with _store(tmp_path) as store:
         persistent = PersistentBackend(backend, store)
-        for reasoning in (_without_nulls(_reasoning_item()), other):
+        for reasoning in (_reasoning_item(), other):
             turn = ChatMessage(
-                "assistant",
-                "answer",
-                reasoning_details=(reasoning, _without_nulls(_message_item("answer"))),
+                "assistant", "answer", reasoning_details=(reasoning, _message_item("answer"))
             )
             persistent.generate_chat([FIRST, turn, SECOND], PARAMS, repeat_id="r0")
 
@@ -1058,6 +1078,58 @@ def test_a_receipt_is_parsed_again_without_another_call(transport, tmp_path, cal
         assert reparsed.metadata["reasoning_details"] == fresh.metadata["reasoning_details"]
         assert reparsed.metadata["reasoning_context"] == fresh.metadata["reasoning_context"]
     assert reparsed.prompt_tokens == fresh.prompt_tokens
+
+
+@pytest.mark.parametrize("source", ["backend", "receipt"])
+@pytest.mark.parametrize("call", ["response", "compaction"])
+def test_items_go_back_with_the_nulls_the_api_sent_and_no_others(transport, tmp_path, call, source):
+    """As the SDK sends ``response.output`` back: the nulls the API sent, nested ones
+    included, are kept, and the fields it left out, which the SDK's models default to
+    null, stay out. A result parsed from a kept receipt is no different."""
+    from llenvs.inference import PersistentBackend
+
+    served = [_reasoning_item(), _message_item("answer")]
+    if call == "compaction":
+        served.insert(
+            0,
+            {
+                "id": "cmp_1",
+                "type": "compaction",
+                "encrypted_content": "gAAAA-compacted",
+                "created_by": None,
+            },
+        )
+        transport.replies[:] = [(200, lambda body: _compaction(body, output=served))]
+    assert "content" not in served[-2] and served[-2]["status"] is None
+    assert served[-1]["future_field"]["nullable"] is None
+
+    def send(persistent):
+        if call == "compaction":
+            return persistent.compact_chat([SYSTEM, FIRST], repeat_id="r0")
+        return persistent.generate_chat([SYSTEM, FIRST], PARAMS, repeat_id="r0")
+
+    backend = transport.responses()
+    if source == "receipt":
+        parse = backend._parse_response
+        backend._parse_response = lambda *a: (_ for _ in ()).throw(ValueError("interrupted"))
+        with _store(tmp_path) as store:
+            with pytest.raises(PartialBatchError):
+                send(PersistentBackend(backend, store))
+        backend._parse_response = parse
+    with _store(tmp_path) as store:
+        result = send(PersistentBackend(backend, store))
+    assert result.metadata["persistence"]["source"] == source
+
+    if call == "compaction":
+        [turn] = result.messages
+        assert turn.reasoning_details == tuple(served)
+        backend.generate_chat([turn, SECOND], PARAMS)
+    else:
+        assert result.metadata["reasoning_details"] == served
+        backend.generate_chat([SYSTEM, FIRST, _turn(result), SECOND], PARAMS)
+
+    sent = transport.requests[-1]["input"]
+    assert sent[-1 - len(served) : -1] == served
 
 
 def test_a_refusal_is_kept_and_replayed_without_another_call(transport, tmp_path):

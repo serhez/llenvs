@@ -159,7 +159,9 @@ input or controls (`store`, `include`, `previous_response_id`, `conversation`,
 such as `prompt_cache_key`, pass through.
 
 `metadata["reasoning_details"]` holds every output item, reasoning and message,
-as JSON mappings without null fields; treat them as opaque. An assistant message
+as JSON mappings; treat them as opaque. Each holds the fields the API returned,
+its nulls included, and no field the SDK's models add, as the SDK itself sends
+`response.output` back; a receipt keeps them the same way. An assistant message
 carrying them is sent as exactly those items, and its `content` must be `None` or
 their text. Pass them as a tuple: they survive a JSON round trip, and stored keys
 depend on their exact value. `metadata["reasoning_context"]` holds the mode the
