@@ -8,7 +8,8 @@ Both interfaces can use `CallStore` and `PersistentBackend`.
 ## Qualification
 
 Small live probes cover Luna reasoning/schema requests, Decisions distributions,
-prefix-cache usage and OpenAI Batch submission/collection. These do not establish
+prefix-cache usage, OpenAI Batch submission/collection, and a Luna conversation
+through the Responses API that sends reasoning back, is compacted and continues. These do not establish
 application-scale quotas, production cache savings or reconciled billing.
 
 Qwen/vLLM and native d3 need GPU qualification for the exact model, runtime,
