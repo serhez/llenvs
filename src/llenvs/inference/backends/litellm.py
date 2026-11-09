@@ -88,7 +88,9 @@ class LiteLLMBackend(_APIRequests, ModelBackend):
             num_retries: litellm's in-SDK retries for transient errors.
                 ``None`` (the default) disables them — the evaluation
                 runner already retries transient failures per slot, and
-                stacking both obscures failure accounting.
+                stacking both obscures failure accounting. With 0, the backend
+                tries again, up to twice, a request whose connection never
+                opened, since it was never sent.
             drop_params: Drop provider-unsupported request params instead
                 of erroring (passed per-call, never via the global
                 ``litellm.drop_params``). Logprobs keep a hard guarantee:
@@ -163,6 +165,9 @@ class LiteLLMBackend(_APIRequests, ModelBackend):
     def model_name(self) -> str:
         """Get the model name."""
         return self._model
+
+    def _sdk_retries(self) -> int | None:
+        return self._num_retries
 
     def close(self) -> None:
         """Mark the backend closed.

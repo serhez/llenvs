@@ -899,7 +899,25 @@ class _Observer:
             status = getattr(error, "status_code", None) or getattr(
                 getattr(error, "response", None), "status_code", None
             )
-            if isinstance(status, int):
+            if record["state"] == "started" and getattr(error, "dispatched", None) is False:
+                # The request never left, so nothing was paid: the call is
+                # reserved again, with the attempt in its history, and the next
+                # request sends it without a recovery decision.
+                self.store.update(
+                    key,
+                    "reserved",
+                    attempts=record["attempts"]
+                    + [
+                        {
+                            "state": "started",
+                            "attempt": record.get("attempt"),
+                            "error": _failure(error),
+                            "dispatched": False,
+                        }
+                    ],
+                    error=None,
+                )
+            elif isinstance(status, int):
                 self.store.update(key, "failed", error=_failure(error))
             elif record["state"] == "started":
                 self.store.update(key, "started", error=_failure(error), outcome_unknown=True)

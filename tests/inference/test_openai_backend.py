@@ -11,6 +11,7 @@ import pytest
 
 from llenvs.core.tools import ToolDefinition
 from llenvs.inference.backends.api import OpenAIBackend
+from llenvs.inference.persistence import UnknownOutcomeError
 from llenvs.inference.protocol import (
     ChatMessage,
     PartialBatchError,
@@ -76,8 +77,7 @@ def transport_backend(monkeypatch):
             model="gpt-4o",
             api_key="offline-test-key",
             base_url="https://offline.invalid/v1",
-            max_retries=0,
-            **kwargs,
+            **({"max_retries": 0} | kwargs),
         )
         backends.append(backend)
         return backend
@@ -412,6 +412,125 @@ def test_ambiguous_read_timeout_is_not_automatically_resubmitted(
 
     assert len(transport_backend.requests) == 1
     assert transport_backend.waits == []
+
+
+# Connections that never opened, which an HTTP client raises before it writes
+# any byte of the request: the TLS handshake refused the provider's certificate,
+# or the connection timed out while opening.
+NEVER_OPENED = {
+    "certificate": lambda: httpx.ConnectError(
+        "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"
+    ),
+    "connect-timeout": lambda: httpx.ConnectTimeout("offline timeout while connecting"),
+}
+# Connections lost once the request may have been sent.
+LOST_AFTER_SENDING = {
+    "read-error": lambda: httpx.ReadError("offline connection lost after dispatch"),
+    "disconnected": lambda: httpx.RemoteProtocolError("offline server disconnected"),
+}
+
+
+@pytest.mark.parametrize("failure", NEVER_OPENED.values(), ids=NEVER_OPENED)
+def test_a_connection_that_never_opened_is_tried_again_with_each_attempt_recorded(
+    transport_backend, operation, no_wait, failure
+):
+    backend = transport_backend.create()
+    transport_backend.replies[:] = [failure(), failure()]
+
+    result = _invoke(backend, operation, SamplingParams())
+
+    assert len(transport_backend.requests) == 3
+    assert len(transport_backend.waits) == 2
+    attempts = result.metadata["attempts"]
+    assert [attempt["status_code"] for attempt in attempts] == [None, None, 200]
+    assert [attempt.get("dispatched") for attempt in attempts] == [False, False, None]
+
+
+@pytest.mark.parametrize("failure", NEVER_OPENED.values(), ids=NEVER_OPENED)
+def test_a_connection_that_never_opens_is_tried_three_times_in_all(
+    transport_backend, operation, no_wait, failure
+):
+    sdk = pytest.importorskip("openai")
+    backend = transport_backend.create()
+    transport_backend.replies[:] = [failure() for _ in range(4)]
+
+    error = _invoke_error(backend, operation, SamplingParams(), sdk.APIConnectionError)
+
+    assert len(transport_backend.requests) == 3
+    assert len(transport_backend.waits) == 2
+    assert error.dispatched is False
+    assert [attempt["dispatched"] for attempt in error.attempts] == [False] * 3
+
+
+@pytest.mark.parametrize("failure", LOST_AFTER_SENDING.values(), ids=LOST_AFTER_SENDING)
+def test_a_connection_lost_after_sending_is_not_tried_again(
+    transport_backend, operation, no_wait, failure
+):
+    sdk = pytest.importorskip("openai")
+    backend = transport_backend.create()
+    transport_backend.replies[:] = [failure()]
+
+    error = _invoke_error(backend, operation, SamplingParams(), sdk.APIConnectionError)
+
+    assert len(transport_backend.requests) == 1
+    assert transport_backend.waits == []
+    assert getattr(error, "dispatched", None) is None
+
+
+def test_the_sdks_own_retries_keep_trying_a_connection_alone(transport_backend, no_wait):
+    """With the SDK's retries on, the SDK tries a connection again as it does
+    natively, and the backend adds no attempts of its own."""
+    sdk = pytest.importorskip("openai")
+    backend = transport_backend.create(max_retries=2)
+    transport_backend.replies[:] = [NEVER_OPENED["certificate"]() for _ in range(9)]
+
+    _invoke_error(backend, "chat", SamplingParams(), sdk.APIConnectionError)
+
+    assert len(transport_backend.requests) == 3
+
+
+def test_persistence_sends_again_a_call_whose_connection_never_opened(
+    transport_backend, tmp_path, no_wait
+):
+    """No byte of the request left, so nothing was paid: the call stays eligible,
+    and the next request sends it without a recovery decision."""
+    from llenvs.inference.persistence import CallStore, PersistentBackend
+
+    sdk = pytest.importorskip("openai")
+    backend = transport_backend.create()
+    transport_backend.replies[:] = [NEVER_OPENED["certificate"]() for _ in range(3)]
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        with pytest.raises(PartialBatchError) as caught:
+            PersistentBackend(backend, store).generate_chat(
+                MESSAGES, SamplingParams(), repeat_id="draw"
+            )
+        assert isinstance(caught.value.failures[0], sdk.APIConnectionError)
+        assert not isinstance(caught.value.failures[0], UnknownOutcomeError)
+    with CallStore.open(tmp_path, run_descriptor={}) as store:
+        result = PersistentBackend(backend, store).generate_chat(
+            MESSAGES, SamplingParams(), repeat_id="draw"
+        )
+    assert result.text == "answer"
+    assert result.metadata["persistence"]["source"] == "backend"
+    assert result.metadata["persistence"]["previous_attempts"] == 3
+    assert len(transport_backend.requests) == 4
+
+
+@pytest.mark.parametrize("failure", LOST_AFTER_SENDING.values(), ids=LOST_AFTER_SENDING)
+def test_persistence_keeps_a_call_lost_after_sending_unknown(
+    transport_backend, tmp_path, no_wait, failure
+):
+    from llenvs.inference.persistence import CallStore, PersistentBackend
+
+    backend = transport_backend.create()
+    transport_backend.replies[:] = [failure()]
+    for _ in range(2):
+        with CallStore.open(tmp_path, run_descriptor={}) as store:
+            with pytest.raises(UnknownOutcomeError):
+                PersistentBackend(backend, store).generate_chat(
+                    MESSAGES, SamplingParams(), repeat_id="draw"
+                )
+    assert len(transport_backend.requests) == 1
 
 
 def test_persistence_replays_a_receipt_without_another_http_call(transport_backend, tmp_path):

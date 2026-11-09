@@ -574,7 +574,14 @@ A completed result replays. A durable receipt is reparsed locally. A definite
 failure replays its saved error classification until an explicit recovery
 decision; a legitimate model answer that downstream code cannot parse remains a
 completed paid outcome. An attempt started without a durable receipt raises
-`UnknownOutcomeError` and is not automatically resubmitted.
+`UnknownOutcomeError` and is not automatically resubmitted. The exception is an
+attempt whose connection never opened: DNS, TCP or the TLS handshake failed or
+timed out, a failed certificate check among them. The HTTP client raises these
+before it writes any byte of the request, so nothing was paid. The backend tries
+such a request again, up to three attempts in all, and each attempt is recorded
+with `dispatched: False`. If the last attempt fails too, the error is raised,
+and the call returns to the reserved state with those attempts in its history.
+The next request sends it without a recovery decision.
 
 After investigating an uncertain outcome, a caller can explicitly accept possible
 duplicate expenditure:
@@ -590,9 +597,10 @@ store.acknowledge_resubmission(
 The decision and prior diagnostics remain recorded. This is not exactly-once
 remote execution: a process can die after remote execution and before durable
 receipt. SDK retries must be disabled (`max_retries=0`, or LiteLLM
-`num_retries=0`); the backend owns bounded, recorded rate-limit retries. Ambiguous
-network failures are not silently retried. Quota exhaustion is not a transient
-rate limit.
+`num_retries=0`); the backend owns bounded, recorded retries of rate limits and
+of connections that never opened. Other network failures, such as a connection
+lost after the request was written, are not silently retried. Quota exhaustion
+is not a transient rate limit.
 
 `mark_complete()` retains everything. Explicit `mark_complete(delete=True)` is
 allowed only when requests are completed or definitely failed; unresolved

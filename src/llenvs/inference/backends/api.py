@@ -4,6 +4,8 @@ Each backend wraps the respective API client with the ModelBackend interface.
 """
 
 import asyncio
+import functools
+import importlib
 import inspect
 import json
 import math
@@ -247,6 +249,43 @@ def _is_rate_limit_text(text: str) -> bool:
             "request limit",
         )
     )
+
+
+# Attempts at a connection that never opened, after the first, when the SDK's
+# own retries are off; the SDK's default number and backoff (seconds).
+CONNECT_RETRIES = 2
+CONNECT_WAIT = 0.5
+CONNECT_MAX_WAIT = 8.0
+
+
+@functools.cache
+def _connect_errors() -> tuple[type[BaseException], ...]:
+    """httpx's errors for a connection that never opened, from each of the
+    packages the provider SDKs use, ``httpx`` and ``httpx2``."""
+    found: list[type[BaseException]] = []
+    for name in ("httpx", "httpx2"):
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        found += [module.ConnectError, module.ConnectTimeout]
+    return tuple(found)
+
+
+def _never_sent(error: BaseException) -> bool:
+    """Whether an error proves that its request was never sent: the connection
+    to the provider never opened, because DNS, TCP or the TLS handshake failed,
+    a certificate's verification among them, or timed out. HTTP clients raise
+    these before they write any byte of the request; a connection lost later
+    proves nothing."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, _connect_errors()):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _is_rate_limit_malformed(exc: BaseException) -> bool:
@@ -641,6 +680,10 @@ class _APIRequests:
     ) -> GenerationResult | CompactionResult:
         raise NotImplementedError
 
+    def _sdk_retries(self) -> int | None:
+        """The SDK's own retries of a failed request; ``None`` for its default."""
+        return self._client.max_retries
+
     def descriptor(self):
         from llenvs.inference.sampling import _record_value
 
@@ -748,9 +791,22 @@ class _APIRequests:
         if getattr(exc, "reported_attempt", None) is not None:
             attempt.update(getattr(exc, "reported_attempt"))
             attempt["error_type"] = type(normalized).__name__
+        never_sent = _never_sent(exc)
+        if never_sent:
+            # A persistent store keeps such a call eligible instead of unknown.
+            attempt["dispatched"] = False
+            for error in (exc, normalized):
+                setattr(error, "dispatched", False)
         attempts.append(attempt)
         delay = None
-        if (
+        unsent = sum(item.get("dispatched") is False for item in attempts)
+        if never_sent and self._sdk_retries() == 0 and unsent <= CONNECT_RETRIES:
+            # The SDK's own retries are off, as a persistent store requires, so
+            # the backend takes their place for a request that never left.
+            delay = min(CONNECT_MAX_WAIT, CONNECT_WAIT * 2 ** (unsent - 1)) * (
+                1 - 0.25 * random.random()
+            )
+        elif (
             normalized is exc
             and (_error_status_code(exc) == 429 or _is_rate_limit_malformed(exc))
             and self._rate_limit_wait > 0
@@ -946,7 +1002,9 @@ class OpenAIBackend(_APIRequests, ModelBackend):
             max_retries: Maximum SDK-level retries for transient errors
                 (timeouts, connection errors, 5xx).  ``None`` uses SDK
                 defaults unless backend rate-limit retries are enabled.
-                Use 0 to prevent hidden retries and ambiguous resubmissions.
+                Use 0 to prevent hidden retries and ambiguous resubmissions;
+                the backend then tries again, up to twice, a request whose
+                connection never opened, since it was never sent.
             api_flavor: Explicit endpoint dialect, "openai" or "vllm".
             api: OpenAI's API, "chat_completions" or "responses". The Responses
                 path is stateless: it asks for encrypted reasoning and sends an

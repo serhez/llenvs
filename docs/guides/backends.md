@@ -248,8 +248,17 @@ result = backend.generate_chat(
 HTTP 429 responses at most twice. It uses capped exponential backoff with jitter
 and honors numeric or HTTP-date `Retry-After` values. A server delay above 300
 seconds stops the attempt loop rather than retrying early. A zero wait disables
-backend retries. Quota exhaustion raises `QuotaExhaustedError`; invalid requests,
-authentication failures and ambiguous network errors are not retried by this loop.
+backend retries of rate limits. Quota exhaustion raises `QuotaExhaustedError`;
+invalid requests, authentication failures and ambiguous network errors are not
+retried by this loop.
+
+A connection that never opened, because DNS, TCP or the TLS handshake failed or
+timed out, proves that the request was never sent. When SDK retries are off
+(`max_retries=0`, or LiteLLM `num_retries=0`), the backend takes their place for
+these errors alone: it tries the request again up to twice, after waits of about
+0.5 and 1 second, the SDK's own number and backoff. Each such attempt is recorded
+with `dispatched: False`, and the error raised after the last carries
+`dispatched = False`.
 
 Enabling backend retries disables SDK retries. With backend retries disabled,
 `max_retries=None` preserves SDK defaults; set `max_retries=0` for explicit attempt

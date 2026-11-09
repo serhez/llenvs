@@ -841,3 +841,49 @@ class TestVision:
             "type": "image_url",
             "image_url": {"url": "data:image/png;base64,aGk="},
         }
+
+
+class TestConnectionNeverOpened:
+    """A connection that never opened proves that the request was never sent,
+    so the backend tries it again when LiteLLM's own retries are off, as a
+    persistent store requires."""
+
+    @staticmethod
+    def _failing(monkeypatch, times):
+        import time
+
+        import httpx
+
+        calls = []
+
+        def completion(**kwargs):
+            calls.append(kwargs)
+            if len(calls) <= times:
+                try:
+                    raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED]")
+                except httpx.ConnectError as error:
+                    raise litellm.APIConnectionError(
+                        message="Connection error.",
+                        llm_provider="gemini",
+                        model="gemini-2.5-flash",
+                    ) from error
+            return _completion_response()
+
+        monkeypatch.setattr(litellm, "completion", completion)
+        monkeypatch.setattr(time, "sleep", lambda delay: None)
+        return calls
+
+    def test_tried_again_when_litellms_retries_are_off(self, monkeypatch):
+        calls = self._failing(monkeypatch, 2)
+        result = _backend(num_retries=0).generate_chat(
+            [ChatMessage(role="user", content="go")], SamplingParams()
+        )
+        assert len(calls) == 3
+        assert result.text == "hi"
+        assert [a.get("dispatched") for a in result.metadata["attempts"]] == [False, False, None]
+
+    def test_not_tried_again_unless_litellms_retries_are_zero(self, monkeypatch):
+        calls = self._failing(monkeypatch, 1)
+        with pytest.raises(Exception, match="Connection error"):
+            _backend().generate_chat([ChatMessage(role="user", content="go")], SamplingParams())
+        assert len(calls) == 1
